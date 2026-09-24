@@ -1387,3 +1387,68 @@ test "FFI: zdedupe_hash_file agrees with the scan and refuses what the scan refu
     try testing.expectEqual(@as(c_int, -1), lib.zdedupe_hash_file(null, false, &digest));
     try testing.expectEqual(@as(c_int, -1), lib.zdedupe_hash_file(vector_path.ptr, false, null));
 }
+
+test "empty and unique-size files are never read; the counts say what was hashed" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "candidates");
+    defer scratch.deinit();
+
+    // Three empty files, two unique sizes, one small pair, one large pair
+    // (beyond the 4 KiB prefix) and a large file that only shares a size.
+    try scratch.writeFile("e1", "");
+    try scratch.writeFile("e2", "");
+    try scratch.writeFile("e3", "");
+    try scratch.writeFile("u1", "a");
+    try scratch.writeFile("u2", "abcdefghijk");
+    try scratch.writeFile("s1", "same");
+    try scratch.writeFile("s2", "same");
+    const big = try allocator.alloc(u8, 8192);
+    defer allocator.free(big);
+    @memset(big, 'x');
+    try scratch.writeFile("b1", big);
+    try scratch.writeFile("b2", big);
+    big[0] = 'y';
+    try scratch.writeFile("b3", big);
+
+    // Both apps pass a minimum size of 0, which lets empty files into the walk.
+    var finder = dedupe.DupeFinder.init(allocator, .{ .min_size = 0 });
+    defer finder.deinit();
+    try finder.scan(&.{scratch.path});
+    const s = finder.getSummary();
+
+    try testing.expectEqual(@as(u64, 10), s.files_scanned);
+    try testing.expectEqual(@as(u64, 3), s.empty_files);
+    try testing.expectEqual(@as(u64, 2), s.unique_size_files);
+    try testing.expectEqual(@as(u64, 2), s.size_groups);
+    try testing.expectEqual(@as(u64, 5), s.candidate_files);
+    try testing.expectEqual(@as(u64, 3), s.quick_hash_jobs);
+    // The small pair, plus the two large files whose prefixes matched; b3
+    // differs in its first byte and is never read in full.
+    try testing.expectEqual(@as(u64, 4), s.full_hash_jobs);
+
+    // Empty files are not offered as duplicates.
+    try testing.expectEqual(@as(usize, 2), finder.getGroups().len);
+    for (finder.getGroups()) |g| try testing.expect(g.size > 0);
+}
+
+test "folder analysis gives empty files the empty-content hash without reading them" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "empty-dirs");
+    defer scratch.deinit();
+    try scratch.makeDir("a");
+    try scratch.makeDir("b");
+    try scratch.writeFile("a/empty", "");
+    try scratch.writeFile("a/data", "payload");
+    try scratch.writeFile("b/empty", "");
+    try scratch.writeFile("b/data", "payload");
+
+    var finder = dedupe.DupeFinder.init(allocator, .{ .analyze_dirs = true });
+    defer finder.deinit();
+    try finder.scan(&.{scratch.path});
+
+    // a and b are still recognised as the same folder: the empty files carry
+    // the hash of no content.
+    const analysis = finder.getDirAnalysis().?;
+    try testing.expect(setWith(analysis, &scratch, "a") != null);
+    try testing.expect(setHas(setWith(analysis, &scratch, "a").?, &scratch, "b"));
+}

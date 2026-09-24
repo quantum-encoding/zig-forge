@@ -17,6 +17,23 @@ const HashJob = struct {
     quick_hash_size: usize,
 };
 
+/// Consecutive jobs `[start, end)` whose files share a parent directory: a
+/// worker opens that directory once and each file relative to it.
+const Run = struct {
+    start: usize,
+    end: usize,
+};
+
+/// A run is cut after this many files or bytes, so one huge directory - or a
+/// few huge files - still spreads over every worker.
+const run_max_files = 64;
+const run_max_bytes: u64 = 64 * 1024 * 1024;
+
+fn parentOf(path: []const u8) ?[]const u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return null;
+    return if (slash == 0) path[0..1] else path[0..slash];
+}
+
 /// Parallel hasher using a thread pool
 pub const ParallelHasher = struct {
     allocator: std.mem.Allocator,
@@ -24,7 +41,9 @@ pub const ParallelHasher = struct {
     files: []types.FileEntry,
     /// Work queue
     jobs: std.ArrayListUnmanaged(HashJob),
-    /// Current job index (atomic for work stealing)
+    /// Jobs grouped by directory; workers take whole runs.
+    runs: std.ArrayListUnmanaged(Run) = .empty,
+    /// Next run to take (atomic for work stealing)
     job_index: std.atomic.Value(usize),
     /// Number of completed jobs (for progress)
     completed: std.atomic.Value(usize),
@@ -70,6 +89,7 @@ pub const ParallelHasher = struct {
 
     pub fn deinit(self: *ParallelHasher) void {
         self.jobs.deinit(self.allocator);
+        self.runs.deinit(self.allocator);
         if (self.threads.len > 0) {
             self.allocator.free(self.threads);
         }
@@ -110,12 +130,14 @@ pub const ParallelHasher = struct {
         self.progress.files_total = self.jobs.items.len;
         self.progress.files_processed = 0;
 
-        // Determine actual thread count (don't spawn more threads than jobs)
-        const actual_threads = @min(self.thread_count, @as(u32, @intCast(self.jobs.items.len)));
+        try self.buildRuns();
+
+        // Determine actual thread count (don't spawn more threads than runs)
+        const actual_threads = @min(self.thread_count, @as(u32, @intCast(self.runs.items.len)));
 
         if (actual_threads <= 1) {
             // Single-threaded fallback
-            self.workerLoop();
+            self.workerLoop(0);
             return;
         }
 
@@ -123,13 +145,16 @@ pub const ParallelHasher = struct {
         self.threads = try self.allocator.alloc(std.Thread, actual_threads);
         errdefer self.allocator.free(self.threads);
 
-        // Spawn worker threads
-        for (self.threads) |*t| {
-            t.* = try std.Thread.spawn(.{}, workerThreadFn, .{self});
+        // Fewer threads than asked for is slower, not wrong; every thread
+        // that did start is joined before the handles are freed.
+        var started: usize = 0;
+        for (self.threads, 0..) |*t, index| {
+            t.* = std.Thread.spawn(.{}, workerThreadFn, .{ self, index }) catch break;
+            started += 1;
         }
+        if (started == 0) self.workerLoop(0);
 
-        // Wait for all threads to complete
-        for (self.threads) |t| {
+        for (self.threads[0..started]) |t| {
             t.join();
         }
 
@@ -139,53 +164,118 @@ pub const ParallelHasher = struct {
     }
 
     /// Worker thread function
-    fn workerThreadFn(self: *ParallelHasher) void {
-        self.workerLoop();
+    fn workerThreadFn(self: *ParallelHasher, index: usize) void {
+        self.workerLoop(index);
     }
 
     /// Main worker loop - atomically grab and process jobs
-    fn workerLoop(self: *ParallelHasher) void {
+    /// Split the jobs, in the order given, into runs of one directory each.
+    /// Callers queue jobs in walk order, which keeps a directory's files
+    /// together; any order is correct, only slower.
+    fn buildRuns(self: *ParallelHasher) !void {
+        self.runs.clearRetainingCapacity();
+        var start: usize = 0;
+        var bytes: u64 = 0;
+        for (self.jobs.items, 0..) |job, i| {
+            const entry = &self.files[job.file_idx];
+            if (i > start) {
+                const first = &self.files[self.jobs.items[start].file_idx];
+                const same_dir = if (parentOf(first.path)) |a|
+                    if (parentOf(entry.path)) |b| std.mem.eql(u8, a, b) else false
+                else
+                    false;
+                if (!same_dir or i - start >= run_max_files or bytes >= run_max_bytes) {
+                    try self.runs.append(self.allocator, .{ .start = start, .end = i });
+                    start = i;
+                    bytes = 0;
+                }
+            }
+            bytes += if (job.quick_hash) @min(entry.size, job.quick_hash_size) else entry.size;
+        }
+        try self.runs.append(self.allocator, .{ .start = start, .end = self.jobs.items.len });
+    }
+
+    /// `index` names this worker's Monitor slot.
+    fn workerLoop(self: *ParallelHasher, index: usize) void {
         var file_hasher = hasher.FileHasher.init(self.algorithm);
         file_hasher.monitor = self.monitor;
+        var name_buf: [4096]u8 = undefined;
 
         while (true) {
-            // A cancelled scan stops taking work; the file being read right
-            // now bails out between reads (see hasher.hashFileWith).
-            if (self.monitor) |m| {
-                if (m.cancelled()) break;
-            }
+            const run_idx = self.job_index.fetchAdd(1, .acquire);
+            if (run_idx >= self.runs.items.len) break;
+            const run_jobs = self.jobs.items[self.runs.items[run_idx].start..self.runs.items[run_idx].end];
 
-            // Atomically grab next job index
-            const idx = self.job_index.fetchAdd(1, .acquire);
-            if (idx >= self.jobs.items.len) break;
+            // One directory open per run; if it cannot be opened, each file
+            // is tried by its full path instead (and fails the same way the
+            // old path did, or succeeds if the directory was the only issue).
+            const dir_fd: c_int = blk: {
+                const parent = parentOf(self.files[run_jobs[0].file_idx].path) orelse break :blk -1;
+                if (parent.len >= name_buf.len) break :blk -1;
+                @memcpy(name_buf[0..parent.len], parent);
+                name_buf[parent.len] = 0;
+                break :blk std.c.open(@ptrCast(&name_buf), .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, @as(std.c.mode_t, 0));
+            };
+            defer if (dir_fd >= 0) {
+                _ = std.c.close(dir_fd);
+            };
 
-            const job = self.jobs.items[idx];
-            const entry = &self.files[job.file_idx];
+            for (run_jobs) |job| {
+                // A cancelled scan stops taking work; the file being read right
+                // now bails out between reads (see hasher.hashFd).
+                if (self.monitor) |m| {
+                    if (m.cancelled()) return;
+                }
+                const entry = &self.files[job.file_idx];
+                if (self.monitor) |m| m.begin(index, entry.path);
 
-            // Perform hashing
-            if (job.quick_hash) {
-                entry.quick_hash = file_hasher.hashFileQuick(
-                    entry.path,
-                    job.quick_hash_size,
-                ) catch null;
-            } else {
-                entry.hash = file_hasher.hashFile(entry.path) catch null;
-            }
+                const result = self.hashOne(&file_hasher, dir_fd, entry, job, &name_buf);
+                if (job.quick_hash) entry.quick_hash = result else entry.hash = result;
 
-            // Update completed count
-            const completed = self.completed.fetchAdd(1, .release) + 1;
-            if (self.monitor) |m| m.done.store(completed, .release);
+                if (self.monitor) |m| m.end(index);
 
-            // The callback path shares one non-atomic Progress struct between
-            // workers, so it is only driven when a callback is installed (the
-            // CLI); GUI hosts read the Monitor instead.
-            if (self.progress_callback) |cb| {
-                if (completed % 100 == 0 or completed == self.jobs.items.len) {
-                    self.progress.files_processed = completed;
-                    cb(&self.progress);
+                const completed = self.completed.fetchAdd(1, .release) + 1;
+                if (self.monitor) |m| m.done.store(completed, .release);
+
+                // The callback path shares one non-atomic Progress struct between
+                // workers, so it is only driven when a callback is installed (the
+                // CLI); GUI hosts read the Monitor instead.
+                if (self.progress_callback) |cb| {
+                    if (completed % 100 == 0 or completed == self.jobs.items.len) {
+                        self.progress.files_processed = completed;
+                        cb(&self.progress);
+                    }
                 }
             }
         }
+    }
+
+    fn hashOne(
+        self: *const ParallelHasher,
+        file_hasher: *const hasher.FileHasher,
+        dir_fd: c_int,
+        entry: *const types.FileEntry,
+        job: HashJob,
+        name_buf: *[4096]u8,
+    ) ?hasher.Hash {
+        _ = self;
+        if (dir_fd >= 0) {
+            const slash = std.mem.lastIndexOfScalar(u8, entry.path, '/').?;
+            const name = entry.path[slash + 1 ..];
+            if (name.len < name_buf.len) {
+                @memcpy(name_buf[0..name.len], name);
+                name_buf[name.len] = 0;
+                const name_z: [*:0]const u8 = @ptrCast(name_buf);
+                return if (job.quick_hash)
+                    file_hasher.hashFileQuickAt(dir_fd, name_z, job.quick_hash_size) catch null
+                else
+                    file_hasher.hashFileAt(dir_fd, name_z) catch null;
+            }
+        }
+        return if (job.quick_hash)
+            file_hasher.hashFileQuick(entry.path, job.quick_hash_size) catch null
+        else
+            file_hasher.hashFile(entry.path) catch null;
     }
 
     /// Get number of completed jobs
