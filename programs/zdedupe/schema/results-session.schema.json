@@ -1,0 +1,637 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quantumencoding.io/schemas/zdedupe/results-session.json",
+  "title": "zdedupe results session — wire protocol",
+  "description": "The JSON contract between the Zig results session and every host that drives it (Rust/Tauri for Windows and Linux, Swift for macOS). This file is the source of truth: include/zdedupe.h documents the same shapes in prose, and a host's own type declarations are downstream of this, never alongside it. Validate a document against a specific entry, e.g. results-session.schema.json#/$defs/GroupPage. Two invariants hold everywhere unless a description says otherwise: byte counts and timestamps are JSON integers, and timestamps are epoch MILLISECONDS (the store holds seconds; the session converts). The export documents are the exception and say so.",
+  "$defs": {
+    "ByteCount": {
+      "description": "A size in bytes. Unsigned 64-bit in the core; hosts on a double-precision runtime lose exactness above 2^53, which is 8 PiB and not a case worth encoding.",
+      "type": "integer",
+      "minimum": 0
+    },
+
+    "EpochMillis": {
+      "description": "Epoch milliseconds. 0 means unknown, and hosts must not render 0 as 1970.",
+      "type": "integer",
+      "minimum": 0
+    },
+
+    "Sha256Hex": {
+      "description": "A content hash as 64 lower-case hex characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+
+    "Filters": {
+      "description": "How a list of findings is narrowed. Shared by the group list, the bulk rule, the folder lists and the facet counts, so one value narrows every list the same way. Every field is optional. The whole value is the cache key for a computed row order, so two Filters that mean the same thing must serialise the same way. under/name/ext must hold for the SAME member — 'a file called x under /a', never 'something under /a and, elsewhere, something called x'.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "description": "ASCII-case-insensitive substring of any member's path. Trimmed; non-ASCII bytes match exactly.",
+          "type": "string",
+          "default": ""
+        },
+        "min_bytes": {
+          "description": "Smallest finding to show. What 'size' means is per kind: a file's own size, a folder set's size per copy, an overlap's shared size.",
+          "$ref": "#/$defs/ByteCount",
+          "default": 0
+        },
+        "redundant_only": {
+          "description": "Overlaps only: hide pairs where each side still has something unique, keeping the ones where deleting a side loses nothing. Ignored by every other list.",
+          "type": "boolean",
+          "default": false
+        },
+        "under": {
+          "description": "Location facet: a member lies at or below this directory. Matches whole path components, so /a/proj-backup is not under /a/proj.",
+          "type": ["string", "null"],
+          "default": null
+        },
+        "name": {
+          "description": "Name facet: that member is called exactly this.",
+          "type": ["string", "null"],
+          "default": null
+        },
+        "ext": {
+          "description": "Type facet (files): that member's extension, lower-case with the dot ('.png'). The empty string means 'no extension', which is a real selection and not the same as null. A leading dot is a hidden file, not an extension: .gitignore has none, a.tar.gz has .gz.",
+          "type": ["string", "null"],
+          "default": null
+        }
+      }
+    },
+
+    "GroupSort": {
+      "description": "Row order for the group list. All three are descending and the sort is stable, so ties keep largest-savings-first. 'savings' is the store's own order until something has been deleted, and live savings after that.",
+      "type": "string",
+      "enum": ["savings", "size", "count"]
+    },
+
+    "FindingKind": {
+      "description": "Which list of findings a facet request counts.",
+      "type": "string",
+      "enum": ["groups", "sets", "overlaps"]
+    },
+
+    "FacetBy": {
+      "description": "What a facet request groups findings by — the 'group by' of the UI.",
+      "type": "string",
+      "enum": ["location", "name", "type"]
+    },
+
+    "GroupQuery": {
+      "description": "Request to zdedupe_results_groups.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["offset", "limit", "sort"],
+      "properties": {
+        "offset": { "type": "integer", "minimum": 0 },
+        "limit": {
+          "description": "Clamped to 200 by the session; asking for more yields what there is, never an error.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "sort": { "$ref": "#/$defs/GroupSort" },
+        "filters": { "$ref": "#/$defs/Filters" },
+        "bulk": {
+          "description": "The 'select all duplicates' rule in force, if any. Rows it covers come back marked, so a host shows them selected without ever holding the selection as a list.",
+          "oneOf": [
+            { "$ref": "#/$defs/Filters" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+
+    "FolderQuery": {
+      "description": "Request to zdedupe_results_identical_sets or _overlaps. No sort: the store already holds both in order (largest reclaimable first, largest shared size first).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["offset", "limit"],
+      "properties": {
+        "offset": { "type": "integer", "minimum": 0 },
+        "limit": {
+          "description": "Clamped to 200.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "filters": { "$ref": "#/$defs/Filters" }
+      }
+    },
+
+    "FacetQuery": {
+      "description": "Request to zdedupe_results_facets.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "by", "limit"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/FindingKind" },
+        "by": { "$ref": "#/$defs/FacetBy" },
+        "filters": { "$ref": "#/$defs/Filters" },
+        "limit": {
+          "description": "Clamped to 100 — narrower than the row lists, because facets are a navigation aid.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+
+    "GroupRow": {
+      "description": "One set of identical files. files[0] is the copy the UI proposes to KEEP (the oldest alive); every later index is a deletion candidate. A group with fewer than two alive copies is not a row at all.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hash", "count", "size", "savings", "files", "mtimes", "bulk"],
+      "properties": {
+        "hash": { "$ref": "#/$defs/Sha256Hex" },
+        "count": {
+          "description": "Copies still ALIVE (the removed overlay applied). At least 2 for any row.",
+          "type": "integer",
+          "minimum": 2
+        },
+        "size": {
+          "description": "The size of ONE file in the group.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "savings": {
+          "description": "size * (count - 1) over the alive copies: what deleting every copy but the keeper reclaims.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "files": {
+          "description": "Paths, oldest first, so index 0 is the keeper. At most 50 — a group can have thousands of copies, and count is the exact total. A host must not infer the copy count from this array's length.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 50,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "mtimes": {
+          "description": "Modification times aligned index-for-index with files, so mtimes.length always equals files.length. 0 where unknown.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 50,
+          "items": { "$ref": "#/$defs/EpochMillis" }
+        },
+        "bulk": {
+          "description": "True when the query carried a bulk rule and this row is covered by it: alive >= 2 and the rule matches. Absent rule means false, never omitted.",
+          "type": "boolean"
+        }
+      }
+    },
+
+    "GroupPage": {
+      "description": "Response of zdedupe_results_groups.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rows", "total", "offset"],
+      "properties": {
+        "rows": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/GroupRow" }
+        },
+        "total": {
+          "description": "Rows matching the query in total, not the number returned. An offset past the end yields empty rows and the same total.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "offset": {
+          "description": "Echoed from the query, so a host can tell a late answer to an old query from the current one.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+
+    "IdenticalDir": {
+      "description": "One member folder of an identical set.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "newest_mtime", "skipped_entries"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "newest_mtime": { "$ref": "#/$defs/EpochMillis" },
+        "skipped_entries": {
+          "description": "Entries beneath this folder ignored on purpose (excludes, cache dirs, hidden files when off). A non-zero value must be surfaced next to any 'identical' claim — the verdict rests on what was actually read.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+
+    "SetRow": {
+      "description": "A group of folders whose entire subtrees match — names, file content, symlink targets. Only the top-most folder of each copied tree is listed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "digest", "count", "common_parent", "file_count", "bytes", "reclaimable", "dirs"],
+      "properties": {
+        "index": {
+          "description": "Handle for zdedupe_results_set_members, the one unpaged call in the API.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "digest": { "$ref": "#/$defs/Sha256Hex" },
+        "count": {
+          "description": "Copies still ALIVE. At least 2 for any row.",
+          "type": "integer",
+          "minimum": 2
+        },
+        "common_parent": {
+          "description": "The deepest folder holding every alive copy.",
+          "type": "string",
+          "minLength": 1
+        },
+        "file_count": { "type": "integer", "minimum": 0 },
+        "bytes": {
+          "description": "Size of ONE copy.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "reclaimable": {
+          "description": "bytes * (count - 1) over the alive copies. An UPPER BOUND: copies that are hard links of one another take no extra space to begin with.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "dirs": {
+          "description": "At most 8 members, because a set can have hundreds (879 in one real scan). The rest come from zdedupe_results_set_members keyed by index. A host must not present this array as the whole set.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/IdenticalDir" }
+        }
+      }
+    },
+
+    "SetPage": {
+      "description": "Response of zdedupe_results_identical_sets, largest reclaimable first.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rows", "total", "offset"],
+      "properties": {
+        "rows": { "type": "array", "items": { "$ref": "#/$defs/SetRow" } },
+        "total": { "type": "integer", "minimum": 0 },
+        "offset": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "SetMembers": {
+      "description": "Response of zdedupe_results_set_members: a BARE array, not a page — the one call in the API that is not paged, bounded by a single set.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/IdenticalDir" }
+    },
+
+    "OverlapRelation": {
+      "description": "How two folders relate. 'overlap' is the honest verdict when neither side is contained, OR when the side that looks contained is not complete.",
+      "type": "string",
+      "enum": ["same_content", "a_in_b", "b_in_a", "overlap"]
+    },
+
+    "OverlapSide": {
+      "description": "One folder of an overlapping pair.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "files", "bytes", "newest_mtime", "skipped_entries", "complete", "identical_copies", "shared_files", "shared_bytes", "only_count", "only"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "files": { "type": "integer", "minimum": 0 },
+        "bytes": { "$ref": "#/$defs/ByteCount" },
+        "newest_mtime": { "$ref": "#/$defs/EpochMillis" },
+        "skipped_entries": { "type": "integer", "minimum": 0 },
+        "complete": {
+          "description": "False means something beneath could not be read. Such a folder is never in an identical set and never the contained side — an unreadable subtree must not turn into a 'safe to delete' verdict.",
+          "type": "boolean"
+        },
+        "identical_copies": {
+          "description": "Above 1, this side is the first path of an identical set and the pair stands for every member of it, reported once rather than per copy.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "shared_files": { "type": "integer", "minimum": 0 },
+        "shared_bytes": { "$ref": "#/$defs/ByteCount" },
+        "only_count": {
+          "description": "Files whose content exists nowhere on the other side: exactly what deleting this side loses. This count is EXACT even though 'only' is truncated.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "only": {
+          "description": "Those paths, sorted, at most 100. Use only_count for arithmetic and this array for examples.",
+          "type": "array",
+          "maxItems": 100,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+
+    "OverlapRow": {
+      "description": "A pair of folders sharing at least half of one side's files — what catches 'this backup is last year's copy of that project, plus three files'. A pair with either side deleted is not a row: it says nothing once one of the two folders is gone.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relation", "a", "b"],
+      "properties": {
+        "relation": { "$ref": "#/$defs/OverlapRelation" },
+        "a": { "$ref": "#/$defs/OverlapSide" },
+        "b": { "$ref": "#/$defs/OverlapSide" }
+      }
+    },
+
+    "OverlapPage": {
+      "description": "Response of zdedupe_results_overlaps, largest shared size first.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rows", "total", "offset"],
+      "properties": {
+        "rows": { "type": "array", "items": { "$ref": "#/$defs/OverlapRow" } },
+        "total": { "type": "integer", "minimum": 0 },
+        "offset": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "Facet": {
+      "description": "One value of a grouping. A finding contributes once to each DISTINCT facet it touches, however many of its members share that facet, so counts can add up to more than the total — that is intended, not a bug to reconcile.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "count", "bytes"],
+      "properties": {
+        "key": {
+          "description": "The value to put in Filters.under / .name / .ext to select this facet. For a type facet it is an extension with the dot, or the empty string for 'no extension'.",
+          "type": "string"
+        },
+        "count": { "type": "integer", "minimum": 0 },
+        "bytes": { "$ref": "#/$defs/ByteCount" }
+      }
+    },
+
+    "FacetPage": {
+      "description": "Response of zdedupe_results_facets. Ordered largest bytes first, then count, then key, so the same scan always lists its facets the same way.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base", "facets", "total"],
+      "properties": {
+        "base": {
+          "description": "Location facets only: the folder being drilled into — Filters.under, or the single scan root when nothing is chosen yet, else null. The keys are its children, so a location facet drills one level at a time. Null for name and type facets.",
+          "type": ["string", "null"]
+        },
+        "facets": { "type": "array", "items": { "$ref": "#/$defs/Facet" } },
+        "total": {
+          "description": "Distinct facets before the limit cut, which can exceed facets.length.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+
+    "ScanOverview": {
+      "description": "Response of zdedupe_results_overview: the scan's own counters plus what the folder sections add up to. These counters are the SCAN's and do NOT change as files are deleted — a host must say so beside them rather than let them read as live. Every field is always present; hosts should not treat any as optional.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["roots", "generated_at", "files_scanned", "bytes_scanned", "duplicate_groups", "duplicate_files", "space_savings", "scan_time_ns", "excluded_entries", "overlapping_roots", "failed_paths", "has_directories", "dirs_analyzed", "dirs_incomplete", "identical_sets", "overlaps", "redundant_pairs", "reclaimable"],
+      "properties": {
+        "roots": {
+          "description": "The folders that were scanned. Empty if not recorded; on reopening, taken from the sidecar or inferred as the deepest directory containing every result.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "generated_at": { "$ref": "#/$defs/EpochMillis" },
+        "files_scanned": { "type": "integer", "minimum": 0 },
+        "bytes_scanned": { "$ref": "#/$defs/ByteCount" },
+        "duplicate_groups": { "type": "integer", "minimum": 0 },
+        "duplicate_files": {
+          "description": "The REDUNDANT copies, not every file in a group: a group of 4 contributes 3.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "space_savings": { "$ref": "#/$defs/ByteCount" },
+        "scan_time_ns": { "type": "integer", "minimum": 0 },
+        "excluded_entries": {
+          "description": "Entries pruned by excludes or tagged cache directories.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "overlapping_roots": {
+          "description": "Scan roots dropped because another root already covers them.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed_paths": {
+          "description": "Selected folders that could not be read at all. Non-zero means the results are incomplete and the user should be told which.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "has_directories": {
+          "description": "True when the scan ran with folder analysis. Without it the folder counters are all zero and the folder lists page empty.",
+          "type": "boolean"
+        },
+        "dirs_analyzed": { "type": "integer", "minimum": 0 },
+        "dirs_incomplete": {
+          "description": "Folders that could not be fully read. These are never called redundant; a non-zero value qualifies every folder verdict.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "identical_sets": { "type": "integer", "minimum": 0 },
+        "overlaps": { "type": "integer", "minimum": 0 },
+        "redundant_pairs": {
+          "description": "Overlap pairs where at least one side has nothing unique — the ones where deleting that side loses nothing.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "reclaimable": {
+          "description": "Sum of bytes * (copies - 1) over identical folder sets. An upper bound, as in SetRow.",
+          "$ref": "#/$defs/ByteCount"
+        }
+      }
+    },
+
+    "BulkSummary": {
+      "description": "Response of zdedupe_results_bulk_summary: what the select-all rule covers, as three numbers — every copy but the oldest of each matching group. It never sees the unticked list; the host subtracts that.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["groups", "files", "bytes"],
+      "properties": {
+        "groups": { "type": "integer", "minimum": 0 },
+        "files": { "type": "integer", "minimum": 0 },
+        "bytes": { "$ref": "#/$defs/ByteCount" }
+      }
+    },
+
+    "BulkSelection": {
+      "description": "'Select all duplicates' as a RULE, not a list: every copy but the oldest in the groups matching filters, except the paths in excluded. On a real scan the list was about a million paths and materialising it froze the window; the rule is a few bytes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filters", "excluded"],
+      "properties": {
+        "filters": { "$ref": "#/$defs/Filters" },
+        "excluded": {
+          "description": "Paths the user unticked from the rule.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+
+    "DeleteSelection": {
+      "description": "Request to zdedupe_results_delete: what a rule covers, plus what was ticked by hand.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule", "extra"],
+      "properties": {
+        "rule": {
+          "oneOf": [
+            { "$ref": "#/$defs/BulkSelection" },
+            { "type": "null" }
+          ]
+        },
+        "extra": {
+          "description": "Hand-picked paths. One that is in no group of these results fails with 'not a duplicate in the current results' and is never touched.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+
+    "FolderDeleteItem": {
+      "description": "One element of the items_json array passed to zdedupe_results_delete_folders.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "keepers", "bytes"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "keepers": {
+          "description": "Folders holding the same content that are NOT being removed. A keeper that is itself in the list — or that contains, or sits inside, something in it — vouches for nothing. Permanent deletion refuses a folder with no keeper named.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "bytes": {
+          "description": "The size the UI showed, used for freed_bytes in the report.",
+          "$ref": "#/$defs/ByteCount"
+        }
+      }
+    },
+
+    "FolderDeleteItems": {
+      "description": "The items_json document passed to zdedupe_results_delete_folders: a BARE array, not a page. A keeper that is itself in this list — or that contains, or sits inside, something in it — vouches for nothing, and permanent deletion refuses the folder outright.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/FolderDeleteItem" }
+    },
+
+    "DeleteReport": {
+      "description": "Response of zdedupe_results_delete and _delete_folders — the same shape for both. Nothing is deleted on the strength of a stale hash: every target is re-verified at delete time, and whatever fails is skipped and counted rather than forced.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deleted", "freed_bytes", "skipped_changed", "failed_count", "failed", "cancelled", "needs_rescan"],
+      "properties": {
+        "deleted": { "type": "integer", "minimum": 0 },
+        "freed_bytes": { "$ref": "#/$defs/ByteCount" },
+        "skipped_changed": {
+          "description": "Skipped because the file, or the copy being kept, changed since the scan — or because no copy would have been left. A host should report this rather than let it read as a silent success.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed_count": { "type": "integer", "minimum": 0 },
+        "failed": {
+          "description": "The first few failures as [path, reason] pairs, at most 20. failed_count is the exact total and can exceed this array's length.",
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "prefixItems": [
+              { "type": "string" },
+              { "type": "string" }
+            ]
+          }
+        },
+        "cancelled": {
+          "description": "True when the delete was asked to stop. What already went stays gone, so deleted can be non-zero alongside this.",
+          "type": "boolean"
+        },
+        "needs_rescan": {
+          "description": "Too much went at once to correct the results in place. Past 100,000 tracked paths the removed overlay overflows and this stays true from then on, a reopen included.",
+          "type": "boolean"
+        }
+      }
+    },
+
+    "DeleteProgress": {
+      "description": "Snapshot of a running delete, from the thread-safe zdedupe_results_delete_progress. total is the whole plan and is set before anything is deleted; done advances per group.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["running", "done", "total"],
+      "properties": {
+        "running": { "type": "boolean" },
+        "done": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "RemovedStatus": {
+      "description": "Response of zdedupe_results_removed_status: how much has been deleted since the results were scanned, and whether they can still be corrected in place. With nothing open, nothing has gone.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "needs_rescan"],
+      "properties": {
+        "count": {
+          "description": "Paths in the removed overlay. The overlay covers a path itself or any ancestor, so a deleted folder takes everything the results list inside it.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "needs_rescan": { "type": "boolean" }
+      }
+    },
+
+    "ExportDocument": {
+      "description": "The JSON form written by zdedupe_results_export. THE EXCEPTION TO THE TIMESTAMP RULE: timestamps here are ISO-8601 UTC strings, not epoch milliseconds, because these are documents for a person rather than answers for a UI. Streams group by group, so a scan with millions of duplicates never exists as one document in memory.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["report_type", "generated_at", "summary", "groups"],
+      "properties": {
+        "report_type": { "type": "string" },
+        "generated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "summary": {
+          "description": "The scan's own summary counters.",
+          "type": "object"
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hash", "size", "count", "savings", "files"],
+            "properties": {
+              "hash": { "$ref": "#/$defs/Sha256Hex" },
+              "size": { "$ref": "#/$defs/ByteCount" },
+              "count": { "type": "integer", "minimum": 0 },
+              "savings": { "$ref": "#/$defs/ByteCount" },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["path", "mtime"],
+                  "properties": {
+                    "path": { "type": "string", "minLength": 1 },
+                    "mtime": {
+                      "description": "ISO-8601 UTC string here, unlike every other timestamp in this protocol.",
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "ScanProgress": {
+      "description": "Not part of the results session — zdedupe_get_progress fills a C struct during a scan, and the host serialises it. Included because a host's progress type drifts just as easily. phase: 0 idle, 1 finding files, 2 grouping by size, 3 comparing file beginnings, 4 comparing full contents, 5 analysing folders, 6 saving results, 7 done. Only phases 3 and 4 know how much work there is, so total is 0 elsewhere and a host must not render a percentage from it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "files_found", "done", "total"],
+      "properties": {
+        "phase": { "type": "integer", "minimum": 0, "maximum": 7 },
+        "files_found": { "type": "integer", "minimum": 0 },
+        "done": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
