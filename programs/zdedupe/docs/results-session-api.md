@@ -36,6 +36,15 @@ for edge cases. Port behaviour, not structure.
 
 ## Conventions
 
+- **`schema/results-session.schema.json` is the machine-readable form of this
+  document, and the authority when the two disagree.** This file explains why
+  the shapes are what they are; the schema is what a host validates against.
+  Every `$defs` entry is one document the session sends or receives, so a
+  caller points at the entry it means — `#/$defs/GroupPage`, `#/$defs/Filters`.
+  A host should test its own serialised queries against it too, not only the
+  answers: `zdedupe-app` does both in `src-tauri/src/commands/conformance.rs`,
+  which is how the macOS app shipping without `under`/`name`/`ext`/
+  `redundant_only` stops being a silent failure.
 - Every call on a session happens on one thread at a time, except
   `zdedupe_results_delete_progress` and `zdedupe_results_cancel_delete`,
   which touch only atomics and may be called from any thread while a delete
