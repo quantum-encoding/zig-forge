@@ -60,6 +60,13 @@
       }
     },
 
+    "SetSort": {
+      "description": "Order of identical folder sets, all descending and stable: what deleting all but one copy frees (the store's own order until something is deleted, then live), the size of one copy, or the number of copies.",
+      "type": "string",
+      "enum": ["reclaim", "size", "count"],
+      "default": "reclaim"
+    },
+
     "GroupSort": {
       "description": "Row order for the group list. All three are descending and the sort is stable, so ties keep largest-savings-first. 'savings' is the store's own order until something has been deleted, and live savings after that.",
       "type": "string",
@@ -107,7 +114,7 @@
     },
 
     "FolderQuery": {
-      "description": "Request to zdedupe_results_identical_sets or _overlaps. No sort: the store already holds both in order (largest reclaimable first, largest shared size first).",
+      "description": "Request to zdedupe_results_identical_sets or _overlaps. Identical sets take a sort; overlaps keep the store's order, largest shared size first.",
       "type": "object",
       "additionalProperties": false,
       "required": ["offset", "limit"],
@@ -118,7 +125,8 @@
           "type": "integer",
           "minimum": 1
         },
-        "filters": { "$ref": "#/$defs/Filters" }
+        "filters": { "$ref": "#/$defs/Filters" },
+        "sort": { "$ref": "#/$defs/SetSort" }
       }
     },
 

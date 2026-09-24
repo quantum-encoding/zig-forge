@@ -121,7 +121,13 @@ const FolderQuery = struct {
     offset: usize = 0,
     limit: usize = 50,
     filters: Filters = .{},
+    /// Identical sets only; overlaps keep the store's largest-shared-first order.
+    sort: SetSort = .reclaim,
 };
+
+/// How identical folder sets are ordered: by what deleting all but one copy
+/// frees (the store's own order), by the size of one copy, or by copies.
+const SetSort = enum { reclaim, size, count };
 
 const FindingKind = enum { groups, sets, overlaps };
 const FacetBy = enum { location, name, type };
@@ -1212,6 +1218,34 @@ pub const Session = struct {
         return .{ .indices = indices.items, .total = total };
     }
 
+    /// The matching sets in `query.sort` order, largest first; ties keep the
+    /// store's order. Every matching set is visited, as a sort must.
+    fn sortedSetWindow(self: *Session, arena: Allocator, query: FolderQuery, cursor: Cursor) !Window {
+        const Row = struct { index: usize, key: u64 };
+        var rows: std.ArrayListUnmanaged(Row) = .empty;
+        for (0..self.reader.setCount()) |i| {
+            if (!try cursor.set(i)) continue;
+            const s = try self.reader.set(i);
+            const alive = (try self.aliveDirs(&s)).len;
+            try rows.append(arena, .{ .index = i, .key = switch (query.sort) {
+                .reclaim => liveSavings(s.bytes, alive),
+                .size => s.bytes,
+                .count => alive,
+            } });
+        }
+        std.mem.sort(Row, rows.items, {}, struct {
+            fn desc(_: void, a: Row, b: Row) bool {
+                return a.key > b.key;
+            }
+        }.desc);
+        const limit = @min(query.limit, max_page);
+        const first = @min(query.offset, rows.items.len);
+        const last = @min(first +| limit, rows.items.len);
+        const indices = try arena.alloc(usize, last - first);
+        for (rows.items[first..last], indices) |row, *slot| slot.* = row.index;
+        return .{ .indices = indices, .total = rows.items.len };
+    }
+
     /// What `windowOf` asks about each finding, for the two folder lists.
     const Cursor = struct {
         session: *Session,
@@ -1241,8 +1275,12 @@ pub const Session = struct {
         const matcher = Matcher.init(arena, query.filters) catch return self.outOfMemory();
         const cursor: Cursor = .{ .session = self, .matcher = &matcher };
 
-        const window = windowOf(arena, self.reader.setCount(), query, cursor, Cursor.set) catch |err|
-            return self.callFailed(err);
+        // The store holds sets largest-reclaim-first as scanned; any other
+        // order, or reclaim once a delete has changed what sets free, is sorted.
+        const window = (if (query.sort == .reclaim and self.removed.isEmpty())
+            windowOf(arena, self.reader.setCount(), query, cursor, Cursor.set)
+        else
+            self.sortedSetWindow(arena, query, cursor)) catch |err| return self.callFailed(err);
 
         var out: std.Io.Writer.Allocating = .init(arena);
         var json: std.json.Stringify = .{ .writer = &out.writer };

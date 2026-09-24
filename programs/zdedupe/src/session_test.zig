@@ -2146,3 +2146,36 @@ test "a host can say where home is, and only home moves" {
     try testing.expect(field(listed, "system").array.items.len > 0);
     try testing.expect(!s.setHome("relative"));
 }
+
+test "identical sets sort by reclaim, by size or by copies" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Small folder in three copies (frees 2 x 100), big one in two (frees 500).
+    const tree = [_]File{
+        .{ .path = "small1/f.bin", .byte = 's', .size = 100 },
+        .{ .path = "small2/f.bin", .byte = 's', .size = 100 },
+        .{ .path = "small3/f.bin", .byte = 's', .size = 100 },
+        .{ .path = "big1/g.bin", .byte = 'b', .size = 500 },
+        .{ .path = "big2/g.bin", .byte = 'b', .size = 500 },
+    };
+    var fixture = try Fixture.initDirs(gpa, "session-set-sort", &tree);
+    defer fixture.deinit();
+    var s = try fixture.open(null);
+    defer s.close();
+
+    const Case = struct { sort: []const u8, counts: [2]i64 };
+    for ([_]Case{
+        .{ .sort = "reclaim", .counts = .{ 2, 3 } },
+        .{ .sort = "size", .counts = .{ 2, 3 } },
+        .{ .sort = "count", .counts = .{ 3, 2 } },
+    }) |c| {
+        const page = try parse(a, s.identicalSets(try query(a, "{{\"offset\":0,\"limit\":10,\"sort\":\"{s}\"}}", .{c.sort})));
+        const rows = field(page, "rows").array.items;
+        try testing.expectEqual(@as(usize, 2), rows.len);
+        try testing.expectEqual(c.counts[0], int(rows[0], "count"));
+        try testing.expectEqual(c.counts[1], int(rows[1], "count"));
+    }
+}
