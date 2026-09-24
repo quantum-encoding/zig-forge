@@ -285,6 +285,14 @@ pub const Config = struct {
         ".s3cfg",
         ".env",
         ".envrc",
+        // AI agents keep API keys and OAuth tokens beside their session logs.
+        ".codex",
+        ".claude",
+        ".claude.json",
+        ".gemini",
+        // Shell history holds whatever secrets were ever typed on a command line.
+        ".zsh_history",
+        ".bash_history",
     };
 
     pub const HashAlgorithm = enum {

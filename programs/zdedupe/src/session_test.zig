@@ -2020,3 +2020,49 @@ test "a folder that is, or holds, a protected location is not deleted" {
     try testing.expectEqual(@as(i64, 2), int(report, "failed_count"));
     try testing.expect(fixture.exists("vault/master.wav"));
 }
+
+test "credential stores and shell history are never read" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Each secret is duplicated, so reading it would put it in a group.
+    const tree = [_]File{
+        .{ .path = "u1/.codex/auth.json", .byte = 'c', .size = 100 },
+        .{ .path = "u2/.codex/auth.json", .byte = 'c', .size = 100 },
+        .{ .path = "u1/.claude/.credentials.json", .byte = 'k', .size = 100 },
+        .{ .path = "u2/.claude/.credentials.json", .byte = 'k', .size = 100 },
+        .{ .path = "u1/.claude.json", .byte = 'j', .size = 100 },
+        .{ .path = "u2/.claude.json", .byte = 'j', .size = 100 },
+        .{ .path = "u1/.gemini/oauth_creds.json", .byte = 'g', .size = 100 },
+        .{ .path = "u2/.gemini/oauth_creds.json", .byte = 'g', .size = 100 },
+        .{ .path = "u1/.zsh_history", .byte = 'z', .size = 100 },
+        .{ .path = "u2/.zsh_history", .byte = 'z', .size = 100 },
+        .{ .path = "u1/.bash_history", .byte = 'b', .size = 100 },
+        .{ .path = "u2/.bash_history", .byte = 'b', .size = 100 },
+        .{ .path = "u1/notes.txt", .byte = 'n', .size = 100 },
+        .{ .path = "u2/notes.txt", .byte = 'n', .size = 100 },
+    };
+    var fixture = try Fixture.init(gpa, "session-credentials", &tree);
+    defer fixture.deinit();
+
+    // Rescan the same tree the way a desktop host does with the toggle on.
+    const ctx = lib.zdedupe_init() orelse return error.ScannerInitFailed;
+    defer lib.zdedupe_free(ctx);
+    lib.zdedupe_set_mode(ctx, 0);
+    lib.zdedupe_set_include_hidden(ctx, true);
+    lib.zdedupe_use_credential_excludes(ctx, true);
+    const root = try a.dupeZ(u8, fixture.tree.path);
+    try testing.expectEqual(@as(c_int, 0), lib.zdedupe_add_path(ctx, root.ptr));
+    try testing.expectEqual(@as(c_int, 0), lib.zdedupe_run_to_file(ctx, fixture.store_path.ptr));
+
+    var s = try fixture.open(null);
+    defer s.close();
+    const rows = field(try parse(a, s.groups("{}")), "rows").array.items;
+    // Only notes.txt is left to find.
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    for (field(rows[0], "files").array.items) |f| {
+        try testing.expect(std.mem.endsWith(u8, f.string, "/notes.txt"));
+    }
+}
