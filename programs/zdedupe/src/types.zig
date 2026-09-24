@@ -23,6 +23,9 @@ pub const FileEntry = struct {
     /// by directory analysis, which has to know that a directory *contains*
     /// the file; the file-level pipeline never groups or hashes such entries.
     link_of: ?usize = null,
+    /// Hard-link count from the walk (0 = unknown); decides which entries can
+    /// share an inode.
+    nlink: u32 = 0,
 
     pub fn deinit(self: *FileEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
@@ -234,8 +237,6 @@ pub const Config = struct {
     /// `~/.ssh` and `~/.aws` looks exactly like one exfiltrating them. Skipping
     /// them costs a user nothing — nobody reclaims space by deduplicating a
     /// private key — and keeps the scan off every such tool's radar.
-    ///
-    /// Exact path components, matched like any other exclude.
     /// Package extensions `skip_app_libraries` prunes.
     pub const app_library_suffixes = [_][]const u8{
         ".photoslibrary",
@@ -246,6 +247,22 @@ pub const Config = struct {
         ".tvlibrary",
     };
 
+    /// Directories `skip_app_libraries` prunes by where they sit: a game
+    /// launcher's install and its game libraries. Steam checks game files
+    /// against its manifests, so a "duplicate" deleted there is downloaded
+    /// again or breaks the game, and Proton prefixes hold files games expect
+    /// at those exact paths. Matched as the end of a directory's path on
+    /// whole components; `steamapps` is every Steam library folder, on any
+    /// drive.
+    pub const app_library_dirs = [_][]const u8{
+        "/steamapps",
+        "/.local/share/Steam",
+        "/.steam",
+        "/.var/app/com.valvesoftware.Steam",
+        "/Library/Application Support/Steam",
+    };
+
+    /// Exact path components, matched like any other exclude.
     pub const credential_excludes = [_][]const u8{
         ".ssh",
         ".gnupg",
@@ -337,6 +354,14 @@ pub const Monitor = struct {
     done: std.atomic.Value(u64) = .init(0),
     total: std.atomic.Value(u64) = .init(0),
     cancel_requested: std.atomic.Value(bool) = .init(false),
+    /// What each worker is on right now (a directory being read, a file
+    /// being hashed), indexed by worker; see `longestRunning`.
+    slots: [slot_count]PathSlot = @splat(.{}),
+    /// Orders the items in `slots` by when they began.
+    next_ticket: std.atomic.Value(u64) = .init(1),
+
+    /// Workers with an index at or past this are not shown.
+    pub const slot_count = 64;
 
     /// Stable numbering: part of the C ABI (`zdedupe_progress.phase`).
     pub const Phase = enum(u32) {
@@ -358,6 +383,50 @@ pub const Monitor = struct {
         self.cancel_requested.store(false, .release);
     }
 
+    /// Worker `worker` starts on `path`. Only that worker writes its slot.
+    pub fn begin(self: *Monitor, worker: usize, path: []const u8) void {
+        if (worker >= slot_count) return;
+        const ticket = self.next_ticket.fetchAdd(1, .monotonic);
+        self.slots[worker].set(ticket, path);
+    }
+
+    /// Worker `worker` is done with its item.
+    pub fn end(self: *Monitor, worker: usize) void {
+        if (worker >= slot_count) return;
+        self.slots[worker].set(0, "");
+    }
+
+    pub const Current = struct {
+        /// Bytes written to `out`.
+        written: usize,
+        /// The path was longer than what was written; `out` holds its tail.
+        truncated: bool,
+    };
+
+    /// Copy the path of the item that has been in progress longest: while a
+    /// scan flows it changes constantly, and when one directory or file holds
+    /// the scan up it is the one shown. written = 0 when nothing is in flight
+    /// (or every attempt raced a writer, which a poller simply retries).
+    pub fn longestRunning(self: *const Monitor, out: []u8) Current {
+        var attempt: u8 = 0;
+        while (attempt < 8) : (attempt += 1) {
+            var best: ?usize = null;
+            var best_ticket: u64 = std.math.maxInt(u64);
+            var best_seq: u64 = 0;
+            for (&self.slots, 0..) |*slot, i| {
+                const seen = slot.peek() orelse continue;
+                if (seen.ticket < best_ticket) {
+                    best = i;
+                    best_ticket = seen.ticket;
+                    best_seq = seen.seq;
+                }
+            }
+            const index = best orelse return .{ .written = 0, .truncated = false };
+            if (self.slots[index].copy(best_seq, out)) |current| return current;
+        }
+        return .{ .written = 0, .truncated = false };
+    }
+
     pub fn enter(self: *Monitor, phase: Phase, total: u64) void {
         self.done.store(0, .release);
         self.total.store(total, .release);
@@ -372,6 +441,140 @@ pub const Monitor = struct {
         return self.cancel_requested.load(.acquire);
     }
 };
+
+/// The path one worker is on, written by that worker alone and read by a
+/// poller on another thread, using only atomics (a seqlock over u64 words).
+/// Paths longer than `capacity` keep their tail, the part naming the file.
+pub const PathSlot = struct {
+    pub const capacity = 1024;
+    const words = capacity / 8;
+
+    /// Odd while the owner is writing.
+    seq: std.atomic.Value(u64) = .init(0),
+    /// When the current item began, as a Monitor ticket; 0 = idle.
+    ticket: std.atomic.Value(u64) = .init(0),
+    /// Full length of the path; at most `capacity` bytes are kept.
+    len: std.atomic.Value(u64) = .init(0),
+    buf: [words]std.atomic.Value(u64) = @splat(.init(0)),
+
+    fn set(self: *PathSlot, ticket: u64, path: []const u8) void {
+        // Acquire on the RMW keeps the stores below after the odd count.
+        const s = self.seq.fetchAdd(1, .acquire);
+        const tail = path[path.len - @min(path.len, capacity) ..];
+        var i: usize = 0;
+        while (i < tail.len) : (i += 8) {
+            var word: [8]u8 = @splat(0);
+            const n = @min(8, tail.len - i);
+            @memcpy(word[0..n], tail[i..][0..n]);
+            self.buf[i / 8].store(std.mem.readInt(u64, &word, .little), .monotonic);
+        }
+        self.len.store(path.len, .monotonic);
+        self.ticket.store(ticket, .monotonic);
+        self.seq.store(s + 2, .release);
+    }
+
+    /// The slot's ticket if it holds an item and is not mid-write.
+    fn peek(self: *const PathSlot) ?struct { seq: u64, ticket: u64 } {
+        const s = self.seq.load(.acquire);
+        if (s & 1 != 0) return null;
+        const t = self.ticket.load(.acquire);
+        if (self.seq.load(.acquire) != s or t == 0) return null;
+        return .{ .seq = s, .ticket = t };
+    }
+
+    /// Copy the path if the slot still holds the write seen as `seq`.
+    fn copy(self: *const PathSlot, seq: u64, out: []u8) ?Monitor.Current {
+        const full: usize = @intCast(self.len.load(.acquire));
+        const stored = @min(full, capacity);
+        const n = @min(stored, out.len);
+        const start = stored - n;
+        var i: usize = 0;
+        while (i < n) {
+            const pos = start + i;
+            var word: [8]u8 = undefined;
+            std.mem.writeInt(u64, &word, self.buf[pos / 8].load(.acquire), .little);
+            const off = pos % 8;
+            const take = @min(8 - off, n - i);
+            @memcpy(out[i..][0..take], word[off..][0..take]);
+            i += take;
+        }
+        if (self.seq.load(.acquire) != seq) return null;
+        return .{ .written = n, .truncated = n < full };
+    }
+};
+
+test "Monitor reports the longest-running item and keeps a long path's tail" {
+    var m: Monitor = .{};
+    var out: [PathSlot.capacity]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), m.longestRunning(&out).written);
+
+    m.begin(3, "/Users/a/old.txt");
+    m.begin(0, "/Users/a/new.txt");
+    const first = m.longestRunning(&out);
+    try std.testing.expectEqualStrings("/Users/a/old.txt", out[0..first.written]);
+    try std.testing.expect(!first.truncated);
+
+    var small: [7]u8 = undefined;
+    const clipped = m.longestRunning(&small);
+    try std.testing.expectEqualStrings("old.txt", small[0..clipped.written]);
+    try std.testing.expect(clipped.truncated);
+
+    m.end(3);
+    const next = m.longestRunning(&out);
+    try std.testing.expectEqualStrings("/Users/a/new.txt", out[0..next.written]);
+
+    var long: [PathSlot.capacity + 100]u8 = undefined;
+    for (&long, 0..) |*b, i| b.* = 'a' + @as(u8, @intCast(i % 26));
+    m.end(0);
+    m.begin(5, &long);
+    const tail = m.longestRunning(&out);
+    try std.testing.expectEqual(@as(usize, PathSlot.capacity), tail.written);
+    try std.testing.expect(tail.truncated);
+    try std.testing.expectEqualSlices(u8, long[100..], out[0..tail.written]);
+
+    // A worker beyond the slots is simply not shown.
+    m.end(5);
+    m.begin(Monitor.slot_count + 1, "/ignored");
+    try std.testing.expectEqual(@as(usize, 0), m.longestRunning(&out).written);
+}
+
+test "Monitor never shows a torn path while workers race" {
+    // Each worker publishes a path of one repeated letter whose length
+    // depends on the letter, so a read mixing two writes is detectable.
+    const Ctx = struct {
+        monitor: Monitor = .{},
+        stop: std.atomic.Value(bool) = .init(false),
+
+        fn work(self: *@This(), worker: usize) void {
+            const letter: u8 = 'a' + @as(u8, @intCast(worker));
+            var buf: [PathSlot.capacity]u8 = undefined;
+            const len = 17 + @as(usize, letter - 'a') * 37;
+            @memset(buf[0..len], letter);
+            while (!self.stop.load(.acquire)) {
+                self.monitor.begin(worker, buf[0..len]);
+                self.monitor.end(worker);
+            }
+        }
+    };
+    var ctx: Ctx = .{};
+    var threads: [4]std.Thread = undefined;
+    for (&threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, Ctx.work, .{ &ctx, i });
+    defer for (threads) |t| t.join();
+    defer ctx.stop.store(true, .release);
+
+    var out: [PathSlot.capacity]u8 = undefined;
+    var reads: usize = 0;
+    var i: usize = 0;
+    while (i < 200_000) : (i += 1) {
+        const snap = ctx.monitor.longestRunning(&out);
+        if (snap.written == 0) continue;
+        reads += 1;
+        const letter = out[0];
+        try std.testing.expectEqual(17 + @as(usize, letter - 'a') * 37, snap.written);
+        for (out[0..snap.written]) |b| try std.testing.expectEqual(letter, b);
+    }
+    try std.testing.expect(reads > 0);
+}
 
 /// Progress callback function type
 pub const ProgressCallback = *const fn (*const Progress) void;
@@ -412,6 +615,19 @@ pub const DuplicateSummary = struct {
     excluded_entries: u64 = 0,
     /// Scan roots dropped because another root already covers them.
     overlapping_roots: u64 = 0,
+    /// Zero-byte files: identical by definition, never read or reported.
+    empty_files: u64 = 0,
+    /// Files dropped before any hashing because no other file has their size.
+    unique_size_files: u64 = 0,
+    /// Sizes shared by two or more files; only their files are read.
+    size_groups: u64 = 0,
+    /// Files in those groups.
+    candidate_files: u64 = 0,
+    /// Candidates larger than the quick-hash prefix, read for their prefix.
+    quick_hash_jobs: u64 = 0,
+    /// Files read in full: small candidates, and larger ones whose prefix
+    /// matched another's.
+    full_hash_jobs: u64 = 0,
 
     pub fn spaceSavingsHuman(self: *const DuplicateSummary, buf: []u8) []const u8 {
         return formatBytes(self.space_savings, buf);

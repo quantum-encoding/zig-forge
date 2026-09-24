@@ -230,6 +230,8 @@ const DT_OTHER: u8 = 255; // Anything else, once classified by stat
 /// One thread's private state.
 const Worker = struct {
     shared: *Shared,
+    /// Position among the walk's workers; names its Monitor slot.
+    index: usize = 0,
     arena: std.heap.ArenaAllocator,
     files: std.ArrayListUnmanaged(FastFileEntry) = .empty,
     dirs: std.ArrayListUnmanaged(DirRecord) = .empty,
@@ -267,12 +269,20 @@ const Worker = struct {
         const w = self.shared.walker;
         if (w.monitor) |m| {
             if (m.cancelled()) return error.Cancelled;
+            m.begin(self.index, dir_path);
         }
+        defer if (w.monitor) |m| m.end(self.index);
 
         // The checks that need the directory itself happen here, in whichever
         // worker picked it up; what they find is reported to the parent's
         // record by path (see ParentMark). Scan roots have no parent record.
         if (w.exclude_paths.len > 0 and !w.isRoot(dir_path) and w.isExcludedPath(dir_path)) {
+            self.stats.excluded += 1;
+            try self.markParent(dir_path, .skipped);
+            return;
+        }
+
+        if (w.skip_app_libraries and !w.isRoot(dir_path) and isAppLibraryDir(dir_path)) {
             self.stats.excluded += 1;
             try self.markParent(dir_path, .skipped);
             return;
@@ -329,8 +339,20 @@ const Worker = struct {
         self.stats.dirs_traversed += 1;
         var record: DirRecord = .{ .path = dir_path };
         var found_here: u64 = 0;
+        // A directory can hold millions of entries: report and honour cancel
+        // as it is read, not only once it is finished.
+        var unreported: u64 = 0;
+        var entries_seen: u32 = 0;
 
         while (libc.readdir(dir)) |entry| {
+            entries_seen +%= 1;
+            if (entries_seen % 4096 == 0) {
+                if (w.monitor) |m| {
+                    if (m.cancelled()) return error.Cancelled;
+                    _ = m.files_found.fetchAdd(found_here - unreported, .monotonic);
+                    unreported = found_here;
+                }
+            }
             const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
 
             // Quick skip for . and ..
@@ -393,7 +415,7 @@ const Worker = struct {
         }
 
         if (w.record_tree) try self.dirs.append(self.scratch(), record);
-        if (w.monitor) |m| _ = m.files_found.fetchAdd(found_here, .monotonic);
+        if (w.monitor) |m| _ = m.files_found.fetchAdd(found_here - unreported, .monotonic);
     }
 
     fn join(self: *Worker, dir_path: []const u8, name: []const u8) ![]const u8 {
@@ -519,6 +541,13 @@ const Worker = struct {
     }
 };
 
+fn isAppLibraryDir(dir_path: []const u8) bool {
+    for (types.Config.app_library_dirs) |suffix| {
+        if (std.mem.endsWith(u8, dir_path, suffix)) return true;
+    }
+    return false;
+}
+
 /// High-performance directory walker
 pub const FastWalker = struct {
     allocator: std.mem.Allocator,
@@ -548,7 +577,9 @@ pub const FastWalker = struct {
     thread_count: u32 = 0,
 
     // Results. `files` is final (hard links resolved) only after `finish()`.
-    files: std.ArrayListUnmanaged(FastFileEntry) = .empty,
+    /// Every file found, in walk order: a worker's records are appended as
+    /// it is absorbed, so one directory's files stay together.
+    files: std.ArrayListUnmanaged(types.FileEntry) = .empty,
     dirs: std.ArrayListUnmanaged(DirRecord) = .empty,
     links: std.ArrayListUnmanaged(LinkRecord) = .empty,
     stats: WalkStats = .{},
@@ -713,8 +744,8 @@ pub const FastWalker = struct {
         const threads = try self.allocator.alloc(std.Thread, extra);
         defer self.allocator.free(threads);
 
-        for (workers) |*worker| {
-            worker.* = .{ .shared = &shared, .arena = std.heap.ArenaAllocator.init(self.allocator) };
+        for (workers, 1..) |*worker, index| {
+            worker.* = .{ .shared = &shared, .index = index, .arena = std.heap.ArenaAllocator.init(self.allocator) };
         }
         var started: usize = 0;
         for (threads, workers) |*thread, *worker| {
@@ -758,7 +789,22 @@ pub const FastWalker = struct {
             return err;
         };
         self.stats.add(worker.stats);
-        try self.files.appendSlice(self.allocator, worker.files.items);
+        // Converted here, one worker's batch at a time, so the walk's own
+        // records and the final list are never both whole in memory.
+        try self.files.ensureUnusedCapacity(self.allocator, worker.files.items.len);
+        for (worker.files.items) |fast| {
+            self.files.appendAssumeCapacity(.{
+                .path = fast.path,
+                .size = fast.size,
+                .inode = fast.ino,
+                .dev = fast.dev,
+                .mtime = fast.mtime,
+                .hash = null,
+                .quick_hash = null,
+                .nlink = fast.nlink,
+            });
+        }
+        worker.files.clearAndFree(self.allocator);
         try self.dirs.appendSlice(self.allocator, worker.dirs.items);
         try self.links.appendSlice(self.allocator, worker.links.items);
         try self.marks.appendSlice(self.allocator, worker.marks.items);
@@ -793,7 +839,7 @@ pub const FastWalker = struct {
         // a file out without touching the map; 0 means "not reported".
         for (self.files.items, 0..) |entry, i| {
             if (self.cannotBeAliased(entry)) continue;
-            const gop = try primary.getOrPut(self.allocator, .{ .dev = entry.dev, .ino = entry.ino });
+            const gop = try primary.getOrPut(self.allocator, .{ .dev = entry.dev, .ino = entry.inode });
             if (!gop.found_existing or
                 std.mem.order(u8, entry.path, self.files.items[gop.value_ptr.*].path) == .lt)
             {
@@ -806,7 +852,7 @@ pub const FastWalker = struct {
             // Extra links stay, pointed at their primary.
             for (self.files.items, 0..) |*entry, i| {
                 if (self.cannotBeAliased(entry.*)) continue;
-                const first = primary.get(.{ .dev = entry.dev, .ino = entry.ino }).?;
+                const first = primary.get(.{ .dev = entry.dev, .ino = entry.inode }).?;
                 if (first != i) {
                     entry.link_of = first;
                     self.stats.hard_links_skipped += 1;
@@ -823,7 +869,7 @@ pub const FastWalker = struct {
         defer is_extra.deinit(self.allocator);
         for (self.files.items, 0..) |entry, i| {
             if (self.cannotBeAliased(entry)) continue;
-            if (primary.get(.{ .dev = entry.dev, .ino = entry.ino }).? != i) is_extra.set(i);
+            if (primary.get(.{ .dev = entry.dev, .ino = entry.inode }).? != i) is_extra.set(i);
         }
         var kept: usize = 0;
         for (self.files.items, 0..) |entry, i| {
@@ -842,7 +888,7 @@ pub const FastWalker = struct {
     /// symlink to a file — or a symlinked directory above it — gives the same
     /// inode a second path without being a hard link, and missing that would
     /// report a file as a duplicate of itself.
-    fn cannotBeAliased(self: *const FastWalker, entry: FastFileEntry) bool {
+    fn cannotBeAliased(self: *const FastWalker, entry: types.FileEntry) bool {
         return entry.nlink == 1 and !self.follow_symlinks;
     }
 
@@ -904,7 +950,7 @@ pub const FastWalker = struct {
     /// owns the storage and must `deinit` it. The walker's lists stay valid for
     /// as long as that storage lives.
     ///
-    /// Together with `toFileEntriesBorrowed` this is how a scan keeps ONE copy
+    /// Together with `takeFiles` this is how a scan keeps ONE copy
     /// of each path instead of two: measured on 642k files, the second copy
     /// (one small heap allocation per file) was a quarter of peak memory.
     pub fn takeStrings(self: *FastWalker) StringStorage {
@@ -914,28 +960,15 @@ pub const FastWalker = struct {
         return storage;
     }
 
-    /// The files as `types.FileEntry`, pointing at the walker's own path
-    /// strings. Only valid while the storage from `takeStrings` (or the walker)
-    /// is alive; the entries must NOT be passed to `FileEntry.deinit`.
-    pub fn toFileEntriesBorrowed(self: *FastWalker, allocator: std.mem.Allocator) !std.ArrayListUnmanaged(types.FileEntry) {
+    /// Hand the file list to the caller, who then owns it. The entries point
+    /// at the walker's path strings: they are only valid while the storage
+    /// from `takeStrings` (or the walker) is alive, and must NOT be passed to
+    /// `FileEntry.deinit`. Indices (`link_of`) are unchanged.
+    pub fn takeFiles(self: *FastWalker) std.ArrayListUnmanaged(types.FileEntry) {
         std.debug.assert(self.finished);
-        var entries: std.ArrayListUnmanaged(types.FileEntry) = .empty;
-        errdefer entries.deinit(allocator);
-        try entries.ensureTotalCapacityPrecise(allocator, self.files.items.len);
-
-        for (self.files.items) |fast_entry| {
-            entries.appendAssumeCapacity(.{
-                .path = fast_entry.path,
-                .size = fast_entry.size,
-                .inode = fast_entry.ino,
-                .dev = fast_entry.dev,
-                .mtime = fast_entry.mtime,
-                .hash = null,
-                .quick_hash = null,
-                .link_of = fast_entry.link_of,
-            });
-        }
-        return entries;
+        const files = self.files;
+        self.files = .empty;
+        return files;
     }
 };
 
@@ -1017,6 +1050,43 @@ test "another app's library package is skipped by its extension" {
     try fw.finish();
     try std.testing.expectEqual(@as(usize, 1), fw.files.items.len);
     try std.testing.expectEqual(@as(u64, 1), fw.stats.excluded);
+}
+
+test "Steam's install and game libraries are skipped, unless picked as the root" {
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    var scratch = try Scratch.init(std.testing.allocator, "steam");
+    defer scratch.deinit();
+    try scratch.makeDir(".local");
+    try scratch.makeDir(".local/share");
+    try scratch.makeDir(".local/share/Steam");
+    try scratch.writeFile(".local/share/Steam/steam.sh", "x");
+    try scratch.makeDir("Games");
+    try scratch.makeDir("Games/steamapps");
+    try scratch.makeDir("Games/steamapps/common");
+    try scratch.writeFile("Games/steamapps/common/game.pak", "x");
+    // Only whole components count.
+    try scratch.makeDir("notsteamapps");
+    try scratch.writeFile("notsteamapps/kept.txt", "x");
+    try scratch.writeFile("kept.txt", "x");
+
+    var fw = FastWalker.init(std.testing.allocator);
+    defer fw.deinit();
+    fw.setIncludeHidden(true);
+    fw.setSkipAppLibraries(true);
+    try fw.walk(scratch.path);
+    try fw.finish();
+    try std.testing.expectEqual(@as(usize, 2), fw.files.items.len);
+    try std.testing.expectEqual(@as(u64, 2), fw.stats.excluded);
+
+    // A library the user picks is scanned: they asked for it by name.
+    const lib = try scratch.join("Games/steamapps");
+    defer std.testing.allocator.free(lib);
+    var picked = FastWalker.init(std.testing.allocator);
+    defer picked.deinit();
+    picked.setSkipAppLibraries(true);
+    try picked.walk(lib);
+    try picked.finish();
+    try std.testing.expectEqual(@as(usize, 1), picked.files.items.len);
 }
 
 test "an excluded path skips that folder with its contents, or that one file" {

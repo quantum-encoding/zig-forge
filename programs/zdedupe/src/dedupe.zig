@@ -162,11 +162,8 @@ pub const DupeFinder = struct {
         // link records point into the same storage and stay valid below.
         std.debug.assert(self.files.items.len == 0 and self.path_storage.arenas.items.len == 0);
         self.files.deinit(self.allocator);
-        self.files = try fw.toFileEntriesBorrowed(self.allocator);
+        self.files = fw.takeFiles();
         self.path_storage = fw.takeStrings();
-        // The walker's own per-file records are dead weight from here on
-        // (its directory and link records are still needed for analysis).
-        fw.files.clearAndFree(self.allocator);
 
         self.summary.excluded_entries = fw.stats.excluded;
         self.summary.bytes_scanned = fw.stats.total_size;
@@ -188,14 +185,15 @@ pub const DupeFinder = struct {
             size_groups.deinit();
         }
 
+        self.summary.size_groups = size_groups.count();
+        self.summary.candidate_files = self.countCandidates(&size_groups);
+
         // Phase 3: Quick hash candidates
-        self.updateProgress(.quick_hashing, 0, self.countCandidates(&size_groups), null);
         try self.quickHashGroups(&size_groups);
 
         try self.checkCancelled();
 
         // Phase 4: Full hash remaining candidates
-        self.updateProgress(.full_hashing, 0, self.countCandidates(&size_groups), null);
         try self.fullHashGroups(&size_groups);
         // Hashes missing because the scan was stopped must not be read as
         // "these files are unique": never build results from a cancelled run.
@@ -326,9 +324,19 @@ pub const DupeFinder = struct {
             groups.deinit();
         }
 
-        for (self.files.items, 0..) |entry, idx| {
+        // Every empty file holds the same (no) content, so none is read: a
+        // duplicate scan does not report them, and folder analysis gets the
+        // empty-content hash directly.
+        const empty_hash = hasher.FileHasher.init(self.config.hash_algorithm).hashBytes(&.{});
+
+        for (self.files.items, 0..) |*entry, idx| {
             // An extra hard link is the same file, not a copy of it.
             if (entry.link_of != null) continue;
+            if (entry.size == 0) {
+                self.summary.empty_files += 1;
+                if (self.config.analyze_dirs) entry.hash = empty_hash;
+                continue;
+            }
 
             const gop = try groups.getOrPut(entry.size);
             if (!gop.found_existing) {
@@ -347,6 +355,7 @@ pub const DupeFinder = struct {
         var iter = groups.iterator();
         while (iter.next()) |kv| {
             if (kv.value_ptr.indices.items.len < 2) {
+                self.summary.unique_size_files += kv.value_ptr.indices.items.len;
                 kv.value_ptr.deinit();
                 try to_remove.append(self.allocator, kv.key_ptr.*);
             }
@@ -369,6 +378,15 @@ pub const DupeFinder = struct {
         return count;
     }
 
+    /// Files are indexed in the order the walk found them, which keeps a
+    /// directory's files together. Hashing in that order, rather than the
+    /// size map's, opens neighbouring files one after another, so the
+    /// filesystem's directory and metadata caches stay warm instead of every
+    /// open landing somewhere random on the disk.
+    fn sortWalkOrder(indices: []usize) void {
+        std.mem.sort(usize, indices, {}, std.sort.asc(usize));
+    }
+
     fn quickHashGroups(self: *DupeFinder, size_groups: *std.AutoHashMap(u64, SizeGroup)) !void {
         // Collect all file indices that need quick hashing
         var indices_to_hash: std.ArrayListUnmanaged(usize) = .empty;
@@ -387,7 +405,10 @@ pub const DupeFinder = struct {
             }
         }
 
+        self.summary.quick_hash_jobs = indices_to_hash.items.len;
+        self.updateProgress(.quick_hashing, 0, indices_to_hash.items.len, null);
         if (indices_to_hash.items.len == 0) return;
+        sortWalkOrder(indices_to_hash.items);
 
         // Hash in parallel
         const thread_count = self.config.getThreadCount();
@@ -443,7 +464,10 @@ pub const DupeFinder = struct {
             }
         }
 
+        self.summary.full_hash_jobs = indices_to_hash.items.len;
+        self.updateProgress(.full_hashing, 0, indices_to_hash.items.len, null);
         if (indices_to_hash.items.len == 0) return;
+        sortWalkOrder(indices_to_hash.items);
 
         // Hash in parallel
         const thread_count = self.config.getThreadCount();

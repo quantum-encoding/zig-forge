@@ -147,7 +147,12 @@ void zdedupe_set_one_filesystem(zdedupe_ctx* ctx, bool one);
  * Skip library packages another app owns, by extension (default: true):
  * .photoslibrary, .migratedphotolibrary, .photolibrary, .aplibrary,
  * .musiclibrary, .tvlibrary. Their contents are the app's database, and
- * opening a Photos library makes macOS ask for photo-library access. Applies
+ * opening a Photos library makes macOS ask for photo-library access.
+ * The same switch skips Steam: every `steamapps` library folder, and the
+ * client's own install (~/.local/share/Steam, ~/.steam, the Flatpak's
+ * ~/.var/app/com.valvesoftware.Steam, ~/Library/Application Support/Steam).
+ * Steam checks game files against its manifests, so deleting a "duplicate"
+ * there re-downloads or breaks a game. A scan root is never skipped. Applies
  * to duplicate scans; a folder comparison compares everything it is given.
  */
 void zdedupe_set_skip_app_libraries(zdedupe_ctx* ctx, bool skip);
@@ -221,12 +226,27 @@ typedef struct {
 /**
  * Read the progress of the run currently executing on `ctx`.
  *
- * THREAD-SAFE: this and zdedupe_cancel() are the only functions that may be
- * called from another thread while zdedupe_run_sync()/zdedupe_run_to_file()
- * is running on the same context. They touch nothing but atomics, so a host
+ * THREAD-SAFE: this, zdedupe_get_current_path() and zdedupe_cancel() are the
+ * only functions that may be called from another thread while
+ * zdedupe_run_sync()/zdedupe_run_to_file() is running on the same context. They touch nothing but atomics, so a host
  * can poll from a UI timer - no callback re-enters the host.
  */
 void zdedupe_get_progress(const zdedupe_ctx* ctx, zdedupe_progress* out);
+
+/**
+ * Copy the path the running scan has been working on LONGEST - of the
+ * directories being read (walk) or files being read (hashing) right now -
+ * into `buf` (not NUL-terminated). While a scan flows it changes constantly;
+ * when one directory or file holds the scan up, it is the one shown, so a
+ * path that stays put names what is slow.
+ * A path longer than `cap` (or than the core's 1024-byte slot) is given as
+ * its TAIL, with *truncated set. Returns bytes written; 0 when there is no
+ * current path (between phases, idle) or the slot was busy - poll again.
+ * Bytes are the raw path spelling; decode lossily.
+ *
+ * THREAD-SAFE: same contract as zdedupe_get_progress().
+ */
+size_t zdedupe_get_current_path(const zdedupe_ctx* ctx, char* buf, size_t cap, bool* truncated);
 
 /**
  * Ask the run on `ctx` to stop. The walk stops at the next directory, hashing
