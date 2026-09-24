@@ -504,18 +504,39 @@ const char* zdedupe_results_overview(zdedupe_results* r);
  * One page of duplicate groups.
  *
  * Query: { "offset": 0, "limit": 50, "sort": "savings"|"size"|"count",
- *          "filters": {...}, "bulk": {...} | null }
- * "limit" is clamped to 200. "bulk" is the select-all rule in force: the
+ *          "filters": {...}, "bulk": {...} | null, "keep": KeepSpec }
+ * "limit" is clamped to 200. "bulk" is the select-all rule's filters: the
  * rows it covers come back marked, so a UI shows them selected without ever
- * holding the selection as a list.
+ * holding the selection as a list. "keep" decides which copy of each group
+ * stays (see KeepSpec below); omitted, the oldest does.
  *
  * Page: { "rows": [GroupRow], "total": N, "offset": 0 }, where a GroupRow is
  * { "hash": "64 hex", "count": 3, "size": 1048576, "savings": 2097152,
- *   "files": ["/oldest", ...], "mtimes": [ms, ...], "bulk": false }
+ *   "files": ["/oldest", ...], "mtimes": [ms, ...], "keeper": "/path",
+ *   "locked": [bool, ...], "targets": [bool, ...], "bulk": false }
  *
  * "count" and "savings" are over the copies that are still ALIVE (the
- * removed overlay applied), "files" lists at most 50 of them oldest first -
- * index 0 is the keeper - and "bulk" is (alive >= 2 && the rule matches).
+ * removed overlay applied), "files" lists at most 50 of them oldest first,
+ * and "bulk" is (alive >= 2 && the rule matches). "keeper" is the copy
+ * "keep" leaves in place, which may lie past the listed 50. "locked" and
+ * "targets" run parallel to "files": a locked copy is in a protected
+ * location and is never deleted; a target is one the rule would delete.
+ *
+ * KeepSpec (every field optional):
+ *   { "prefer_under": ["/dir", ...],   kept: first copy under the earliest
+ *     "avoid_under": ["/dir", ...],    kept only if nothing else is left
+ *     "fallback": "oldest"|"newest"|"shortest_path",
+ *     "by_type": [{ "ext": ".jpg", "prefer_under": [...],
+ *                   "avoid_under": [...], "fallback": "..." }],
+ *     "pins": [{ "hash": "64 hex", "path": "/the/copy/to/keep" }],
+ *     "delete_only_under": ["/dir", ...] }
+ * Per group: a pinned copy is kept; else the first copy under the earliest
+ * prefer_under; else, with delete_only_under set, a copy outside those
+ * folders survives and every copy inside them is a target; else one
+ * unprotected copy is kept by fallback, outside avoid_under while possible.
+ * "by_type" replaces prefer_under/avoid_under/fallback for groups whose
+ * oldest copy has that extension. Protected copies are always kept; only
+ * under delete_only_under do they stand in for the survivor.
  * A group with fewer than two alive copies is not a row at all. Order:
  * "savings" is the store's own order until something has been deleted and
  * live savings after that; "size" and "count" descending. The sort is
@@ -527,9 +548,54 @@ const char* zdedupe_results_groups(zdedupe_results* r, const char* query_json);
  * What the select-all rule covers, as three numbers:
  * { "groups": N, "files": M, "bytes": B } - every copy but the oldest of
  * each matching group. This never sees the unticked list; subtract it in the
- * UI. Takes a bare filters object.
+ * UI. Takes a bare filters object. Protected copies are not counted.
  */
 const char* zdedupe_results_bulk_summary(zdedupe_results* r, const char* filters_json);
+
+/**
+ * What a delete carrying this rule would do, for review before it runs.
+ *
+ * Query: { "filters": {...}, "excluded": ["/unticked", ...],
+ *          "keep": KeepSpec, "under": "/dir" | null, "limit": 20 }
+ * "filters" is required. "under" is where the location breakdown starts;
+ * null starts at the scan root (or the roots, when there are several).
+ *
+ * Answer: { "groups": N, "files": M, "bytes": B, "locked": L,
+ *           "untouched": U, "from": FacetPage }
+ * "groups" lose at least one copy; "untouched" match but lose nothing;
+ * "locked" counts protected copies in the matching groups, all of which
+ * stay; "from" buckets the deleted copies by location, as
+ * zdedupe_results_facets does ("count" is copies, "bytes" their size).
+ */
+const char* zdedupe_results_bulk_plan(zdedupe_results* r, const char* query_json);
+
+/**
+ * Protected locations: nothing in them is deleted - not by a rule, not by a
+ * hand-ticked path, not as part of a folder. Built in, and not optional:
+ * operating-system roots (/System, /Applications, /usr, /etc, ...), per-user
+ * application data (~/Library, flatpak), repository stores (.git and the
+ * like, anywhere in a path), packages (.app, .framework, photo libraries -
+ * any directory so named above a file) and game launcher libraries.
+ *
+ * set_protected replaces the host's own additions with a JSON array of
+ * absolute folders; 0 ok, -1 invalid (see last_error). A folder delete is
+ * also refused when the folder holds a protected root.
+ *
+ * protected returns { "system": [...], "home": [...], "stores": [...],
+ * "packages": [...], "user": [...] } for a UI to show.
+ */
+int zdedupe_results_set_protected(zdedupe_results* r, const char* paths_json);
+
+/**
+ * The home directory whose Library (and other per-user roots) is protected.
+ * Defaults to the user database's entry, not $HOME: inside the macOS App
+ * Sandbox $HOME is the app's container. For a host that knows better, such
+ * as a test harness whose temporary files live in that container; the system
+ * roots, stores and packages stay protected whatever it says. 0 ok, -1 not
+ * an absolute path.
+ */
+int zdedupe_results_set_home(zdedupe_results* r, const char* path);
+const char* zdedupe_results_protected(zdedupe_results* r);
 
 /** Snapshot of a running delete. */
 typedef struct {
@@ -561,7 +627,8 @@ typedef int (*zdedupe_trash_fn)(void* user, const char* const* paths, size_t cou
  * thread and stop it with zdedupe_results_cancel_delete.
  *
  * selection_json:
- *   { "rule": { "filters": {...}, "excluded": ["/path", ...] } | null,
+ *   { "rule": { "filters": {...}, "excluded": ["/path", ...],
+ *               "keep": KeepSpec } | null,
  *     "extra": ["/hand/picked", ...] }
  *
  * use_trash = false deletes PERMANENTLY (unlink) and verifies by content;
@@ -578,11 +645,14 @@ typedef int (*zdedupe_trash_fn)(void* user, const char* const* paths, size_t cou
  * first, so ticking every copy of a group - the easiest mistake to make -
  * deletes none of them. Whatever fails is skipped and counted.
  *
- * Plan: for each group in the rule's order, the targets are every alive copy
- * after the oldest alive one, minus "excluded"; hand-picks merge into the
- * same group's targets before any judgement. A hand-picked path that is in
- * no group of these results fails with "not a duplicate in the current
- * results" and is never touched.
+ * Plan: for each group in the rule's order, the targets are the alive copies
+ * its KeepSpec does not keep (see zdedupe_results_groups; omitted, every
+ * copy but the oldest), minus "excluded"; hand-picks merge into the same
+ * group's targets before any judgement. A hand-picked path that is in no
+ * group of these results fails with "not a duplicate in the current
+ * results" and is never touched. A target in a protected location (see
+ * zdedupe_results_set_protected) fails with "is in a protected location",
+ * whether a rule or a hand put it there.
  *
  * Report: { "deleted": N, "freed_bytes": B, "skipped_changed": N,
  *           "failed_count": N, "failed": [["/path","reason"], ...] (<= 20),
@@ -640,15 +710,18 @@ const char* zdedupe_results_removed_status(zdedupe_results* r);
 /**
  * One page of identical sets, largest reclaimable first.
  *
- * Query: { "offset": 0, "limit": 50, "filters": {...} } - no sort, because
- * the store already holds them in that order; "limit" is clamped to 200. For
- * a set, filters' "min_bytes" is the size of ONE copy.
+ * Query: { "offset": 0, "limit": 50, "filters": {...},
+ *          "sort": "reclaim"|"size"|"count" } - descending and stable;
+ * "reclaim" (the default) is the store's own order until something is
+ * deleted, and live after that. "limit" is clamped to 200. For a set,
+ * filters' "min_bytes" is the size of ONE copy.
  *
  * Page: { "rows": [SetRow], "total": N, "offset": 0 }, where a SetRow is
  * { "index": 0, "digest": "64 hex", "count": 3, "common_parent": "/a",
  *   "file_count": 261, "bytes": 2086912, "reclaimable": 4173824,
  *   "dirs": [{ "path": "/a/proj", "newest_mtime": ms,
- *              "skipped_entries": 0 }, ...] }
+ *              "skipped_entries": 0, "locked": false }, ...] }
+ * ("locked": the folder is, or holds, a protected location.)
  *
  * "count" is the copies still ALIVE and "reclaimable" is bytes * (count - 1)
  * over those - an upper bound, since copies that are hard links of one

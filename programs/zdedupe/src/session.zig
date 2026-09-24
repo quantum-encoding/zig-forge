@@ -45,6 +45,8 @@ const compare = @import("compare.zig");
 const report_mod = @import("report.zig");
 const filters_mod = @import("filters.zig");
 const removed_mod = @import("removed.zig");
+const keep_mod = @import("keep.zig");
+const protect_mod = @import("protect.zig");
 
 const Allocator = std.mem.Allocator;
 const Filters = filters_mod.Filters;
@@ -109,6 +111,8 @@ const GroupQuery = struct {
     /// back marked, so a UI can show them selected without ever holding the
     /// selection as a list.
     bulk: ?Filters = null,
+    /// Which copy each row keeps, and so which it marks as targets.
+    keep: keep_mod.Spec = .{},
 };
 
 /// Identical sets and overlap pairs page the same way: no sort, because the
@@ -117,7 +121,13 @@ const FolderQuery = struct {
     offset: usize = 0,
     limit: usize = 50,
     filters: Filters = .{},
+    /// Identical sets only; overlaps keep the store's largest-shared-first order.
+    sort: SetSort = .reclaim,
 };
+
+/// How identical folder sets are ordered: by what deleting all but one copy
+/// frees (the store's own order), by the size of one copy, or by copies.
+const SetSort = enum { reclaim, size, count };
 
 const FindingKind = enum { groups, sets, overlaps };
 const FacetBy = enum { location, name, type };
@@ -137,7 +147,23 @@ const Selection = struct {
         filters: Filters = .{},
         /// Files the user unticked, in their lossy spelling.
         excluded: []const []const u8 = &.{},
+        /// Which copy of each group stays. The default keeps the oldest.
+        keep: keep_mod.Spec = .{},
     };
+};
+
+/// Request to `bulkPlan`: the rule a delete would carry, answered with what
+/// it would do and where the deleted copies are.
+const PlanQuery = struct {
+    /// Required, so a bare `Filters` sent by mistake fails to parse instead
+    /// of reading as "every group".
+    filters: Filters,
+    excluded: []const []const u8 = &.{},
+    keep: keep_mod.Spec = .{},
+    /// Where to break the deleted copies down by location from; null starts
+    /// at the scan root (or the roots, when there are several).
+    under: ?[]const u8 = null,
+    limit: usize = 20,
 };
 
 /// One folder a caller asks to have removed, with the copies it says will
@@ -270,6 +296,21 @@ fn pathZ(buf: *[4096]u8, path: []const u8) ?[*:0]const u8 {
     return @ptrCast(buf);
 }
 
+/// The user's real home directory, for the protected `~/Library` and the like.
+/// From the user database first: inside the macOS App Sandbox `$HOME` is the
+/// app's container, and protecting the container's `Library` would leave the
+/// real one unprotected. `$HOME` is the fallback where the database has none.
+fn userHome() ?[]const u8 {
+    if (libc.getpwuid(libc.getuid())) |pw| {
+        if (pw.dir) |dir| {
+            const home = std.mem.span(dir);
+            if (home.len > 0) return home;
+        }
+    }
+    const env = libc.getenv("HOME") orelse return null;
+    return std.mem.span(env);
+}
+
 // ===========================================================================
 // Session
 // ===========================================================================
@@ -328,6 +369,14 @@ pub const Session = struct {
     alive: std.ArrayListUnmanaged(AliveFile) = .empty,
     /// The same, for the member folders of an identical set.
     alive_dirs: std.ArrayListUnmanaged(AliveDir) = .empty,
+    /// The user's home directory, owned; null when HOME is unset.
+    home: ?[]u8 = null,
+    /// Protected roots the host added, owned.
+    user_protected: [][]u8 = &.{},
+    /// Reused by `planGroup`, one entry per surviving copy.
+    plan_members: std.ArrayListUnmanaged(keep_mod.Member) = .empty,
+    plan_kept: std.ArrayListUnmanaged(bool) = .empty,
+    plan_targets: std.ArrayListUnmanaged(bool) = .empty,
 
     pub const OpenError = error{
         CannotOpenStore,
@@ -394,6 +443,10 @@ pub const Session = struct {
             if (self.roots.len == 0) self.roots = try self.deriveRoots();
         }
         self.removed.attach(self.store_path, fresh) catch {};
+        if (userHome()) |home| {
+            const trimmed = std.mem.trimEnd(u8, home, "/");
+            if (trimmed.len > 0) self.home = gpa.dupe(u8, trimmed) catch null;
+        }
         return self;
     }
 
@@ -402,6 +455,11 @@ pub const Session = struct {
         self.clearOrder();
         self.alive.deinit(gpa);
         self.alive_dirs.deinit(gpa);
+        self.plan_members.deinit(gpa);
+        self.plan_kept.deinit(gpa);
+        self.plan_targets.deinit(gpa);
+        if (self.home) |home| gpa.free(home);
+        self.freeUserProtected();
         self.removed.deinit();
         for (self.roots) |root| gpa.free(root);
         gpa.free(self.roots);
@@ -511,6 +569,164 @@ pub const Session = struct {
         errdefer self.gpa.free(list);
         list[0] = try self.gpa.dupe(u8, root);
         return list;
+    }
+
+    // --- protection -------------------------------------------------------
+
+    fn protection(self: *const Session) protect_mod.Protection {
+        return .{ .home = self.home, .user = self.user_protected };
+    }
+
+    fn freeUserProtected(self: *Session) void {
+        for (self.user_protected) |root| self.gpa.free(root);
+        self.gpa.free(self.user_protected);
+        self.user_protected = &.{};
+    }
+
+    /// Replace the roots the host added to the built-in protected locations.
+    /// `json` is an array of absolute paths. The built-in list stays whatever
+    /// this is given.
+    pub fn setProtected(self: *Session, json: []const u8) bool {
+        const arena = self.beginCall();
+        const paths = std.json.parseFromSliceLeaky([]const []const u8, arena, json, .{}) catch {
+            self.fail("protected locations are not a JSON array of paths", .{});
+            return false;
+        };
+        for (paths) |path| {
+            if (path.len == 0 or path[0] != '/') {
+                self.fail("protected location \"{s}\" is not an absolute path", .{path});
+                return false;
+            }
+        }
+        const owned = self.gpa.alloc([]u8, paths.len) catch {
+            self.fail("out of memory", .{});
+            return false;
+        };
+        var filled: usize = 0;
+        for (paths, owned) |path, *slot| {
+            const trimmed = std.mem.trimEnd(u8, path, "/");
+            slot.* = self.gpa.dupe(u8, if (trimmed.len == 0) "/" else trimmed) catch {
+                for (owned[0..filled]) |p| self.gpa.free(p);
+                self.gpa.free(owned);
+                self.fail("out of memory", .{});
+                return false;
+            };
+            filled += 1;
+        }
+        self.freeUserProtected();
+        self.user_protected = owned;
+        return true;
+    }
+
+    /// Point the home-relative protected roots (`~/Library` and the like) at
+    /// `path` instead of the user database's home. For a host that knows
+    /// better — a test harness running inside a sandbox container, whose own
+    /// temporary files sit in the real `~/Library` — never a way to switch
+    /// protection off: the system roots, stores and packages stay in force.
+    pub fn setHome(self: *Session, path: []const u8) bool {
+        _ = self.beginCall();
+        const trimmed = std.mem.trimEnd(u8, path, "/");
+        if (trimmed.len == 0 or trimmed[0] != '/') {
+            self.fail("home \"{s}\" is not an absolute path", .{path});
+            return false;
+        }
+        const owned = self.gpa.dupe(u8, trimmed) catch {
+            self.fail("out of memory", .{});
+            return false;
+        };
+        if (self.home) |old| self.gpa.free(old);
+        self.home = owned;
+        return true;
+    }
+
+    /// Every protected location in force, for a UI to show: the built-in
+    /// roots, the home directory's, the component rules, and the host's own.
+    pub fn protectedJson(self: *Session) ?[:0]const u8 {
+        const arena = self.beginCall();
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        self.writeProtected(&json, arena) catch return self.outOfMemory();
+        return self.finishJson(&out);
+    }
+
+    fn writeProtected(self: *Session, json: *std.json.Stringify, arena: Allocator) !void {
+        try json.beginObject();
+        try json.objectField("system");
+        try json.write(protect_mod.system_roots);
+        try json.objectField("home");
+        try json.beginArray();
+        if (self.home) |home| {
+            for (protect_mod.home_roots) |rel| {
+                try json.write(try std.fmt.allocPrint(arena, "{s}/{s}", .{ try lossy(arena, home), rel }));
+            }
+        }
+        try json.endArray();
+        try json.objectField("stores");
+        try json.write(protect_mod.component_names);
+        try json.objectField("packages");
+        try json.write(protect_mod.package_suffixes);
+        try json.objectField("user");
+        try json.beginArray();
+        for (self.user_protected) |root| try json.write(try lossy(arena, root));
+        try json.endArray();
+        try json.endObject();
+    }
+
+    /// How `spec` decides one group. The slices are reused buffers, valid
+    /// until the next call; indices are into `alive`.
+    const GroupPlan = struct {
+        primary: ?usize,
+        /// Per copy: its path and whether it is protected.
+        members: []const keep_mod.Member,
+        kept: []const bool,
+        targets: []const bool,
+    };
+
+    fn planGroup(
+        self: *Session,
+        arena: Allocator,
+        spec: *const keep_mod.Spec,
+        group: *const store.Group,
+        alive: []const AliveFile,
+    ) !GroupPlan {
+        const guard = self.protection();
+        self.plan_members.clearRetainingCapacity();
+        try self.plan_members.ensureTotalCapacity(self.gpa, alive.len);
+        for (alive) |file| self.plan_members.appendAssumeCapacity(.{
+            .path = file.path,
+            .mtime = file.mtime,
+            .protected = guard.protects(file.path),
+        });
+        try self.plan_kept.resize(self.gpa, alive.len);
+        try self.plan_targets.resize(self.gpa, alive.len);
+
+        const pinned = try pinnedIndex(arena, spec, group, alive);
+        const primary = keep_mod.plan(spec, self.plan_members.items, pinned, self.plan_kept.items, self.plan_targets.items);
+        return .{
+            .primary = primary,
+            .members = self.plan_members.items,
+            .kept = self.plan_kept.items,
+            .targets = self.plan_targets.items,
+        };
+    }
+
+    /// The pinned copy of this group, if the spec pins one that still exists.
+    fn pinnedIndex(
+        arena: Allocator,
+        spec: *const keep_mod.Spec,
+        group: *const store.Group,
+        alive: []const AliveFile,
+    ) !?usize {
+        if (spec.pins.len == 0) return null;
+        var hex: [64]u8 = undefined;
+        const hash = hasher.hashToHex(&group.hash, &hex);
+        for (spec.pins) |pin| {
+            if (!std.ascii.eqlIgnoreCase(pin.hash, hash)) continue;
+            for (alive, 0..) |file, i| {
+                if (std.mem.eql(u8, try lossy(arena, file.path), pin.path)) return i;
+            }
+        }
+        return null;
     }
 
     // --- group order ------------------------------------------------------
@@ -760,6 +976,7 @@ pub const Session = struct {
                 alive.len >= 2 and matcher.matches(group.size, alive)
             else
                 false;
+            const decided = try self.planGroup(arena, &query.keep, &group, alive);
 
             try json.beginObject();
             var hex: [64]u8 = undefined;
@@ -781,6 +998,18 @@ pub const Session = struct {
             try json.beginArray();
             for (listed) |file| try json.write(millis(file.mtime));
             try json.endArray();
+            // The copy `keep` leaves in place, which may be past the listed
+            // ones; `locked` and `targets` run parallel to `files`.
+            try json.objectField("keeper");
+            if (decided.primary) |p| try json.write(try lossy(arena, alive[p].path)) else try json.write(null);
+            try json.objectField("locked");
+            try json.beginArray();
+            for (decided.members[0..listed.len]) |member| try json.write(member.protected);
+            try json.endArray();
+            try json.objectField("targets");
+            try json.beginArray();
+            for (decided.targets[0..listed.len]) |target| try json.write(target);
+            try json.endArray();
             try json.objectField("bulk");
             try json.write(covered);
             try json.endObject();
@@ -795,8 +1024,9 @@ pub const Session = struct {
 
     // --- bulk summary -----------------------------------------------------
 
-    /// Every copy but the oldest in the matching groups, as three numbers.
-    /// Never sees the unticked list; the UI subtracts it.
+    /// Every copy but the oldest in the matching groups, as three numbers,
+    /// protected copies left out. Never sees the unticked list; the UI
+    /// subtracts it. `bulkPlan` answers the same for any keep rule.
     pub fn bulkSummary(self: *Session, filters_json: []const u8) ?[:0]const u8 {
         const arena = self.beginCall();
         const filters = std.json.parseFromSliceLeaky(Filters, arena, filters_json, .{
@@ -809,13 +1039,15 @@ pub const Session = struct {
         const order = self.cachedGroupOrder(.savings, filters) catch |err|
             return self.callFailed(err);
 
+        const spec: keep_mod.Spec = .{};
         var files: u64 = 0;
         var bytes: u64 = 0;
         for (order) |index| {
             const group = self.reader.group(index) catch |err| return self.readFailed(err);
             const alive = self.aliveFiles(&group) catch |err| return self.callFailed(err);
-            // Every copy that still exists, but one.
-            const extra: u64 = @as(u64, alive.len) -| 1;
+            const decided = self.planGroup(arena, &spec, &group, alive) catch |err| return self.callFailed(err);
+            var extra: u64 = 0;
+            for (decided.targets) |t| extra += @intFromBool(t);
             files +|= extra;
             bytes +|= group.size *| extra;
         }
@@ -824,6 +1056,108 @@ pub const Session = struct {
         var json: std.json.Stringify = .{ .writer = &out.writer };
         writeSummary(&json, order.len, files, bytes) catch return self.outOfMemory();
         return self.finishJson(&out);
+    }
+
+    /// What a delete carrying this rule would do: how many copies go, how
+    /// many protected copies stay regardless, how many matching groups lose
+    /// nothing, and where the deleted copies are, by location. This is what a
+    /// UI shows for review before it deletes anything.
+    pub fn bulkPlan(self: *Session, query_json: []const u8) ?[:0]const u8 {
+        const arena = self.beginCall();
+        const query = std.json.parseFromSliceLeaky(PlanQuery, arena, query_json, .{
+            .ignore_unknown_fields = true,
+        }) catch {
+            self.fail("plan query is not valid JSON (it needs \"filters\")", .{});
+            return null;
+        };
+        const order = self.cachedGroupOrder(.savings, query.filters) catch |err|
+            return self.callFailed(err);
+        const roots = self.normalizedRoots(arena) catch return self.outOfMemory();
+        const base: ?[]const u8 = query.under orelse (if (roots.len == 1) roots[0] else null);
+
+        var unticked: std.StringHashMapUnmanaged(void) = .empty;
+        for (query.excluded) |path| unticked.put(arena, path, {}) catch return self.outOfMemory();
+
+        var tally: PlanTally = .{};
+        var counter: FacetCounter = .init(arena);
+        for (order) |index| {
+            self.tallyGroup(arena, &tally, &counter, &query.keep, &unticked, index, base, roots) catch |err|
+                return self.callFailed(err);
+        }
+
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        writePlan(&json, arena, &tally, &counter, base, @min(query.limit, max_facets)) catch |err|
+            return self.callFailed(err);
+        return self.finishJson(&out);
+    }
+
+    const PlanTally = struct {
+        groups: usize = 0,
+        files: u64 = 0,
+        bytes: u64 = 0,
+        /// Protected copies in the matching groups, all of which stay.
+        locked: u64 = 0,
+        /// Matching groups the rule deletes nothing from.
+        untouched: usize = 0,
+    };
+
+    fn tallyGroup(
+        self: *Session,
+        arena: Allocator,
+        tally: *PlanTally,
+        counter: *FacetCounter,
+        spec: *const keep_mod.Spec,
+        unticked: *const std.StringHashMapUnmanaged(void),
+        index: u32,
+        base: ?[]const u8,
+        roots: []const []const u8,
+    ) !void {
+        const group = try self.reader.group(index);
+        const alive = try self.aliveFiles(&group);
+        const decided = try self.planGroup(arena, spec, &group, alive);
+        var taken: u64 = 0;
+        for (decided.members, decided.targets) |member, target| {
+            tally.locked += @intFromBool(member.protected);
+            if (!target) continue;
+            if (unticked.count() > 0 and unticked.contains(try lossy(arena, member.path))) continue;
+            taken += 1;
+            // A file is somewhere by its folder: one directly in `base` counts
+            // as "here", never as a location of its own.
+            const key = try facetKey(arena, .location, parentOf(member.path), base, roots) orelse continue;
+            try counter.add(arena, group.size, &.{key});
+        }
+        if (taken == 0) {
+            tally.untouched += 1;
+            return;
+        }
+        tally.groups += 1;
+        tally.files +|= taken;
+        tally.bytes +|= group.size *| taken;
+    }
+
+    fn writePlan(
+        json: *std.json.Stringify,
+        arena: Allocator,
+        tally: *const PlanTally,
+        counter: *FacetCounter,
+        base: ?[]const u8,
+        limit: usize,
+    ) !void {
+        try json.beginObject();
+        try json.objectField("groups");
+        try json.write(tally.groups);
+        try json.objectField("files");
+        try json.write(tally.files);
+        try json.objectField("bytes");
+        try json.write(tally.bytes);
+        try json.objectField("locked");
+        try json.write(tally.locked);
+        try json.objectField("untouched");
+        try json.write(tally.untouched);
+        try json.objectField("from");
+        try counter.write(json, arena, base, limit);
+        try json.endObject();
     }
 
     fn writeSummary(json: *std.json.Stringify, group_count: usize, files: u64, bytes: u64) !void {
@@ -886,6 +1220,34 @@ pub const Session = struct {
         return .{ .indices = indices.items, .total = total };
     }
 
+    /// The matching sets in `query.sort` order, largest first; ties keep the
+    /// store's order. Every matching set is visited, as a sort must.
+    fn sortedSetWindow(self: *Session, arena: Allocator, query: FolderQuery, cursor: Cursor) !Window {
+        const Row = struct { index: usize, key: u64 };
+        var rows: std.ArrayListUnmanaged(Row) = .empty;
+        for (0..self.reader.setCount()) |i| {
+            if (!try cursor.set(i)) continue;
+            const s = try self.reader.set(i);
+            const alive = (try self.aliveDirs(&s)).len;
+            try rows.append(arena, .{ .index = i, .key = switch (query.sort) {
+                .reclaim => liveSavings(s.bytes, alive),
+                .size => s.bytes,
+                .count => alive,
+            } });
+        }
+        std.mem.sort(Row, rows.items, {}, struct {
+            fn desc(_: void, a: Row, b: Row) bool {
+                return a.key > b.key;
+            }
+        }.desc);
+        const limit = @min(query.limit, max_page);
+        const first = @min(query.offset, rows.items.len);
+        const last = @min(first +| limit, rows.items.len);
+        const indices = try arena.alloc(usize, last - first);
+        for (rows.items[first..last], indices) |row, *slot| slot.* = row.index;
+        return .{ .indices = indices, .total = rows.items.len };
+    }
+
     /// What `windowOf` asks about each finding, for the two folder lists.
     const Cursor = struct {
         session: *Session,
@@ -915,8 +1277,12 @@ pub const Session = struct {
         const matcher = Matcher.init(arena, query.filters) catch return self.outOfMemory();
         const cursor: Cursor = .{ .session = self, .matcher = &matcher };
 
-        const window = windowOf(arena, self.reader.setCount(), query, cursor, Cursor.set) catch |err|
-            return self.callFailed(err);
+        // The store holds sets largest-reclaim-first as scanned; any other
+        // order, or reclaim once a delete has changed what sets free, is sorted.
+        const window = (if (query.sort == .reclaim and self.removed.isEmpty())
+            windowOf(arena, self.reader.setCount(), query, cursor, Cursor.set)
+        else
+            self.sortedSetWindow(arena, query, cursor)) catch |err| return self.callFailed(err);
 
         var out: std.Io.Writer.Allocating = .init(arena);
         var json: std.json.Stringify = .{ .writer = &out.writer };
@@ -958,7 +1324,7 @@ pub const Session = struct {
             try json.objectField("reclaimable");
             try json.write(liveSavings(set.bytes, dirs.len));
             try json.objectField("dirs");
-            try writeDirRows(json, arena, dirs[0..@min(dirs.len, set_members_in_row)]);
+            try writeDirRows(json, arena, dirs[0..@min(dirs.len, set_members_in_row)], self.protection());
             try json.endObject();
         }
         try json.endArray();
@@ -969,7 +1335,14 @@ pub const Session = struct {
         try json.endObject();
     }
 
-    fn writeDirRows(json: *std.json.Stringify, arena: Allocator, dirs: []const AliveDir) !void {
+    /// `locked` is what a folder delete would say of the folder: it is, or
+    /// holds, a protected location, so it is never deleted.
+    fn writeDirRows(
+        json: *std.json.Stringify,
+        arena: Allocator,
+        dirs: []const AliveDir,
+        guard: protect_mod.Protection,
+    ) !void {
         try json.beginArray();
         for (dirs) |dir| {
             try json.beginObject();
@@ -979,6 +1352,8 @@ pub const Session = struct {
             try json.write(millis(dir.newest_mtime));
             try json.objectField("skipped_entries");
             try json.write(dir.skipped_entries);
+            try json.objectField("locked");
+            try json.write(guard.guardsFolder(dir.path));
             try json.endObject();
         }
         try json.endArray();
@@ -993,7 +1368,7 @@ pub const Session = struct {
 
         var out: std.Io.Writer.Allocating = .init(arena);
         var json: std.json.Stringify = .{ .writer = &out.writer };
-        writeDirRows(&json, arena, dirs) catch |err| return self.callFailed(err);
+        writeDirRows(&json, arena, dirs, self.protection()) catch |err| return self.callFailed(err);
         return self.finishJson(&out);
     }
 
@@ -1054,9 +1429,12 @@ pub const Session = struct {
         arena: Allocator,
         side: *const store.Side,
     ) !void {
+        const path = try self.reader.sidePath(side);
         try json.beginObject();
         try json.objectField("path");
-        try json.write(try lossy(arena, try self.reader.sidePath(side)));
+        try json.write(try lossy(arena, path));
+        try json.objectField("locked");
+        try json.write(self.protection().guardsFolder(path));
         inline for (.{
             .{ "files", side.files },
             .{ "bytes", side.bytes },
@@ -1146,7 +1524,7 @@ pub const Session = struct {
                 if (alive.len < 2 or !matcher.matches(group.size, alive)) continue;
                 paths.clearRetainingCapacity();
                 for (alive) |file| try paths.append(arena, file.path);
-                try collectKeys(arena, &keys, paths.items, query.by, matcher, base, roots);
+                try collectKeys(arena, &keys, paths.items, query.by, matcher, base, roots, .files);
                 try counter.add(arena, liveSavings(group.size, alive.len), keys.items);
             },
             .sets => for (0..self.reader.setCount()) |i| {
@@ -1155,7 +1533,7 @@ pub const Session = struct {
                 if (dirs.len < 2 or !matcher.matches(set.bytes, dirs)) continue;
                 paths.clearRetainingCapacity();
                 for (dirs) |dir| try paths.append(arena, dir.path);
-                try collectKeys(arena, &keys, paths.items, query.by, matcher, base, roots);
+                try collectKeys(arena, &keys, paths.items, query.by, matcher, base, roots, .folders);
                 try counter.add(arena, liveSavings(set.bytes, dirs.len), keys.items);
             },
             .overlaps => for (0..self.reader.overlapCount()) |i| {
@@ -1165,7 +1543,7 @@ pub const Session = struct {
                     try self.reader.sidePath(&pair.a),
                     try self.reader.sidePath(&pair.b),
                 };
-                try collectKeys(arena, &keys, &sides, query.by, matcher, base, roots);
+                try collectKeys(arena, &keys, &sides, query.by, matcher, base, roots, .folders);
                 try counter.add(arena, overlapBytes(&pair), keys.items);
             },
         }
@@ -1231,6 +1609,7 @@ pub const Session = struct {
         user: ?*anyopaque,
     ) void {
         self.del.total.store(items.len, .release);
+        const guard = self.protection();
 
         for (items) |item| {
             if (self.del.cancel.load(.acquire)) {
@@ -1244,6 +1623,10 @@ pub const Session = struct {
                 report.fail(arena, item.path, "path is too long");
                 continue;
             };
+            if (guard.guardsFolder(item.path)) {
+                report.fail(arena, item.path, "is, or holds, a protected location");
+                continue;
+            }
 
             if (use_trash) {
                 // Recoverable, so the UI's selection rules are the safeguard.
@@ -1386,26 +1769,28 @@ pub const Session = struct {
         var located: usize = 0;
         try self.locate(arena, selection.extra, &by_hand, &located);
 
-        // Targets per group: the rule's (every alive copy but the oldest, minus
-        // what was unticked) merged with the hand-ticked ones, so "keep at
-        // least one copy" is judged once per group over everything that is
-        // about to go.
+        // Targets per group: the rule's (every alive copy its keep spec does not
+        // keep, minus what was unticked) merged with the hand-ticked ones, so
+        // "keep at least one copy" is judged once per group over everything
+        // that is about to go.
         const Entry = struct { group: u32, targets: []const u32 };
         var plan: std.ArrayListUnmanaged(Entry) = .empty;
         var planned: std.AutoHashMapUnmanaged(u32, void) = .empty;
 
         if (order) |rows| {
-            const excluded = selection.rule.?.excluded;
+            const rule = &selection.rule.?;
             var unticked: std.StringHashMapUnmanaged(void) = .empty;
-            for (excluded) |path| try unticked.put(arena, path, {});
+            for (rule.excluded) |path| try unticked.put(arena, path, {});
 
             for (rows) |g| {
                 const group = try self.reader.group(g);
                 var targets: std.ArrayListUnmanaged(u32) = .empty;
-                // Of the copies that still exist the oldest stays; an earlier
-                // delete may already have taken the group's original first file.
+                // Decided over the copies that still exist: an earlier delete
+                // may already have taken the group's original keeper.
                 const alive = try self.aliveFiles(&group);
-                for (alive[@min(1, alive.len)..]) |file| {
+                const decided = try self.planGroup(arena, &rule.keep, &group, alive);
+                for (alive, decided.targets) |file, target| {
+                    if (!target) continue;
                     if (unticked.count() > 0) {
                         // The UI only ever saw the lossy spelling of a path, so
                         // that is what comes back unticked.
@@ -1425,7 +1810,8 @@ pub const Session = struct {
             }
         }
         // Hand-picks in groups the rule did not cover, in group order so a
-        // report reads the same way twice.
+        // report reads the same way twice. A protected one among them is
+        // refused by `deletable`, like any protected target.
         {
             var leftovers: std.ArrayListUnmanaged(u32) = .empty;
             var it = by_hand.iterator();
@@ -1531,6 +1917,7 @@ pub const Session = struct {
         out: *std.ArrayListUnmanaged([]const u8),
     ) !void {
         if (targets.len == 0) return;
+        const guard = self.protection();
 
         var has_survivor = false;
         for (0..group.file_count) |f| {
@@ -1548,6 +1935,12 @@ pub const Session = struct {
 
         for (targets) |f| {
             const file = try self.reader.groupFile(group, f);
+            // Whatever put it here — a hand-ticked file, a rule — a protected
+            // copy is never deleted.
+            if (guard.protects(file.path)) {
+                report.fail(arena, file.path, "is in a protected location");
+                continue;
+            }
             if (stillACopy(file.path, group.size, file.mtime, &group.hash, verify)) {
                 try out.append(arena, file.path);
             } else {
@@ -1884,13 +2277,27 @@ fn collectKeys(
     matcher: *const Matcher,
     base: ?[]const u8,
     roots: []const []const u8,
+    kind: MemberKind,
 ) !void {
     out.clearRetainingCapacity();
     for (members) |path| {
         if (!matcher.memberSelected(path)) continue;
-        const key = try facetKey(arena, by, path, base, roots) orelse continue;
+        // A file's location is its folder, so a file directly in `base` counts
+        // as "here" rather than showing up as a location of its own.
+        const where = if (by == .location and kind == .files) parentOf(path) else path;
+        const key = try facetKey(arena, by, where, base, roots) orelse continue;
         try out.append(arena, key);
     }
+}
+
+/// What a finding's members are: files are located by their folder.
+const MemberKind = enum { files, folders };
+
+/// The folder holding `path`: everything before its last slash ("/" for a
+/// file at the top).
+fn parentOf(path: []const u8) []const u8 {
+    const i = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
+    return if (i == 0) "/" else path[0..i];
 }
 
 /// Counts findings per facet. A finding contributes once to each distinct

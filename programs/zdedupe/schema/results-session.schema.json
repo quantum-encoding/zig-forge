@@ -60,6 +60,13 @@
       }
     },
 
+    "SetSort": {
+      "description": "Order of identical folder sets, all descending and stable: what deleting all but one copy frees (the store's own order until something is deleted, then live), the size of one copy, or the number of copies.",
+      "type": "string",
+      "enum": ["reclaim", "size", "count"],
+      "default": "reclaim"
+    },
+
     "GroupSort": {
       "description": "Row order for the group list. All three are descending and the sort is stable, so ties keep largest-savings-first. 'savings' is the store's own order until something has been deleted, and live savings after that.",
       "type": "string",
@@ -98,12 +105,16 @@
             { "$ref": "#/$defs/Filters" },
             { "type": "null" }
           ]
+        },
+        "keep": {
+          "description": "Which copy of each group stays; decides each row's keeper and targets. Omitted, the oldest does.",
+          "$ref": "#/$defs/KeepSpec"
         }
       }
     },
 
     "FolderQuery": {
-      "description": "Request to zdedupe_results_identical_sets or _overlaps. No sort: the store already holds both in order (largest reclaimable first, largest shared size first).",
+      "description": "Request to zdedupe_results_identical_sets or _overlaps. Identical sets take a sort; overlaps keep the store's order, largest shared size first.",
       "type": "object",
       "additionalProperties": false,
       "required": ["offset", "limit"],
@@ -114,7 +125,8 @@
           "type": "integer",
           "minimum": 1
         },
-        "filters": { "$ref": "#/$defs/Filters" }
+        "filters": { "$ref": "#/$defs/Filters" },
+        "sort": { "$ref": "#/$defs/SetSort" }
       }
     },
 
@@ -136,10 +148,10 @@
     },
 
     "GroupRow": {
-      "description": "One set of identical files. files[0] is the copy the UI proposes to KEEP (the oldest alive); every later index is a deletion candidate. A group with fewer than two alive copies is not a row at all.",
+      "description": "One set of identical files. Which copy stays is the query's KeepSpec decision, reported in keeper, locked and targets — not the position in files. A group with fewer than two alive copies is not a row at all.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["hash", "count", "size", "savings", "files", "mtimes", "bulk"],
+      "required": ["hash", "count", "size", "savings", "files", "mtimes", "keeper", "locked", "targets", "bulk"],
       "properties": {
         "hash": { "$ref": "#/$defs/Sha256Hex" },
         "count": {
@@ -168,6 +180,24 @@
           "minItems": 2,
           "maxItems": 50,
           "items": { "$ref": "#/$defs/EpochMillis" }
+        },
+        "keeper": {
+          "description": "The copy the query's KeepSpec leaves in place. It may lie past the 50 listed in files. Null only for a group with no alive copy, which is never a row.",
+          "type": ["string", "null"]
+        },
+        "locked": {
+          "description": "Aligned with files: true where that copy is in a protected location. A locked copy is never deleted, by a rule or by hand.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 50,
+          "items": { "type": "boolean" }
+        },
+        "targets": {
+          "description": "Aligned with files: true where the query's KeepSpec would delete that copy. Whether the bulk rule covers the row at all is bulk; what the user unticked is not applied here.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 50,
+          "items": { "type": "boolean" }
         },
         "bulk": {
           "description": "True when the query carried a bulk rule and this row is covered by it: alive >= 2 and the rule matches. Absent rule means false, never omitted.",
@@ -203,9 +233,13 @@
       "description": "One member folder of an identical set.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "newest_mtime", "skipped_entries"],
+      "required": ["path", "newest_mtime", "skipped_entries", "locked"],
       "properties": {
         "path": { "type": "string", "minLength": 1 },
+        "locked": {
+          "description": "The folder is, or holds, a protected location: a folder delete refuses it.",
+          "type": "boolean"
+        },
         "newest_mtime": { "$ref": "#/$defs/EpochMillis" },
         "skipped_entries": {
           "description": "Entries beneath this folder ignored on purpose (excludes, cache dirs, hidden files when off). A non-zero value must be surfaced next to any 'identical' claim — the verdict rests on what was actually read.",
@@ -284,9 +318,13 @@
       "description": "One folder of an overlapping pair.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "files", "bytes", "newest_mtime", "skipped_entries", "complete", "identical_copies", "shared_files", "shared_bytes", "only_count", "only"],
+      "required": ["path", "locked", "files", "bytes", "newest_mtime", "skipped_entries", "complete", "identical_copies", "shared_files", "shared_bytes", "only_count", "only"],
       "properties": {
         "path": { "type": "string", "minLength": 1 },
+        "locked": {
+          "description": "The folder is, or holds, a protected location: a folder delete refuses it.",
+          "type": "boolean"
+        },
         "files": { "type": "integer", "minimum": 0 },
         "bytes": { "$ref": "#/$defs/ByteCount" },
         "newest_mtime": { "$ref": "#/$defs/EpochMillis" },
@@ -436,7 +474,7 @@
     },
 
     "BulkSummary": {
-      "description": "Response of zdedupe_results_bulk_summary: what the select-all rule covers, as three numbers — every copy but the oldest of each matching group. It never sees the unticked list; the host subtracts that.",
+      "description": "Response of zdedupe_results_bulk_summary: what the select-all rule covers, as three numbers — every unprotected copy but the oldest of each matching group. It never sees the unticked list; the host subtracts that. BulkPlan answers the same question for any KeepSpec.",
       "type": "object",
       "additionalProperties": false,
       "required": ["groups", "files", "bytes"],
@@ -448,7 +486,7 @@
     },
 
     "BulkSelection": {
-      "description": "'Select all duplicates' as a RULE, not a list: every copy but the oldest in the groups matching filters, except the paths in excluded. On a real scan the list was about a million paths and materialising it froze the window; the rule is a few bytes.",
+      "description": "'Select all duplicates' as a RULE, not a list: in the groups matching filters, every copy keep does not keep, except the paths in excluded. On a real scan the list was about a million paths and materialising it froze the window; the rule is a few bytes.",
       "type": "object",
       "additionalProperties": false,
       "required": ["filters", "excluded"],
@@ -458,6 +496,165 @@
           "description": "Paths the user unticked from the rule.",
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
+        },
+        "keep": {
+          "description": "Which copy of each group stays. Omitted, the oldest does.",
+          "$ref": "#/$defs/KeepSpec"
+        }
+      }
+    },
+
+    "KeepSpec": {
+      "description": "Which copy of each duplicate group stays. Per group: a pinned copy is kept; else the first copy under the earliest prefer_under; else, with delete_only_under set, a copy outside those folders survives and every copy inside them is deleted; else one unprotected copy is kept by fallback, outside avoid_under while any other copy exists. Protected copies are always kept, but only under delete_only_under do they stand in for the survivor: elsewhere a system copy does not make an ordinary copy expendable. Every field is optional; the empty spec keeps the oldest.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prefer_under": {
+          "description": "Folders, most preferred first. The first copy under the earliest one that holds a copy is kept.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "avoid_under": {
+          "description": "Folders a fallback keeper is chosen outside of while any other unprotected copy exists (Downloads, Desktop, temp).",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "fallback": { "$ref": "#/$defs/KeepFallback" },
+        "by_type": {
+          "description": "Per extension, replaces prefer_under, avoid_under and fallback for groups whose OLDEST copy has that extension. The first entry that matches wins.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/KeepTypeRule" }
+        },
+        "pins": {
+          "description": "Copies the user chose to keep, one per group. A pin whose copy no longer exists is ignored and the group is decided by the rest of the spec.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/KeepPin" }
+        },
+        "delete_only_under": {
+          "description": "Empty: a copy anywhere may go. Otherwise only copies under these folders are deleted, and only while a copy outside them survives.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+
+    "KeepFallback": {
+      "description": "How the keeper is chosen when nothing else decides. Ties go to the older copy.",
+      "enum": ["oldest", "newest", "shortest_path"],
+      "default": "oldest"
+    },
+
+    "KeepTypeRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ext"],
+      "properties": {
+        "ext": {
+          "description": "Lower-case with the dot ('.jpg'); the empty string is 'no extension'. Matched ASCII-case-insensitively.",
+          "type": "string"
+        },
+        "prefer_under": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "avoid_under": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "fallback": { "$ref": "#/$defs/KeepFallback" }
+      }
+    },
+
+    "KeepPin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hash", "path"],
+      "properties": {
+        "hash": { "$ref": "#/$defs/Sha256Hex" },
+        "path": {
+          "description": "The copy to keep, spelled as the rows spell it.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+
+    "PlanQuery": {
+      "description": "Request to zdedupe_results_bulk_plan: the rule a delete would carry. filters is required, so a bare Filters object sent by mistake fails instead of reading as 'every group'.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filters"],
+      "properties": {
+        "filters": { "$ref": "#/$defs/Filters" },
+        "excluded": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "keep": { "$ref": "#/$defs/KeepSpec" },
+        "under": {
+          "description": "Where the location breakdown starts. Null starts at the single scan root, or lists the roots when there are several.",
+          "type": ["string", "null"]
+        },
+        "limit": {
+          "description": "Locations listed, clamped to 100.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 20
+        }
+      }
+    },
+
+    "BulkPlan": {
+      "description": "Response of zdedupe_results_bulk_plan: what a delete carrying the rule would do, with the unticked paths applied. For review before anything is deleted.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["groups", "files", "bytes", "locked", "untouched", "from"],
+      "properties": {
+        "groups": {
+          "description": "Matching groups that lose at least one copy.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "files": { "type": "integer", "minimum": 0 },
+        "bytes": { "$ref": "#/$defs/ByteCount" },
+        "locked": {
+          "description": "Protected copies in the matching groups. All of them stay.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "untouched": {
+          "description": "Matching groups the rule deletes nothing from.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "from": {
+          "description": "The deleted copies by location. A facet's count is copies there and its bytes their total size.",
+          "$ref": "#/$defs/FacetPage"
+        }
+      }
+    },
+
+    "ProtectedLocations": {
+      "description": "Response of zdedupe_results_protected: every location nothing is deleted from. Built in and not optional, except user, which zdedupe_results_set_protected replaces.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["system", "home", "stores", "packages", "user"],
+      "properties": {
+        "system": {
+          "description": "Operating-system and application roots, absolute.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "home": {
+          "description": "Per-user application data, absolute. Empty when the home directory is unknown.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "stores": {
+          "description": "Repository store names (.git and the like), protected wherever they appear in a path.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "packages": {
+          "description": "Package directory suffixes (.app, .framework, photo libraries); a file inside such a directory is protected.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "user": {
+          "description": "Folders the host added.",
+          "type": "array",
+          "items": { "type": "string" }
         }
       }
     },
