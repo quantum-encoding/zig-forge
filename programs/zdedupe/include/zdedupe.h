@@ -710,15 +710,18 @@ const char* zdedupe_results_removed_status(zdedupe_results* r);
 /**
  * One page of identical sets, largest reclaimable first.
  *
- * Query: { "offset": 0, "limit": 50, "filters": {...} } - no sort, because
- * the store already holds them in that order; "limit" is clamped to 200. For
- * a set, filters' "min_bytes" is the size of ONE copy.
+ * Query: { "offset": 0, "limit": 50, "filters": {...},
+ *          "sort": "reclaim"|"size"|"count" } - descending and stable;
+ * "reclaim" (the default) is the store's own order until something is
+ * deleted, and live after that. "limit" is clamped to 200. For a set,
+ * filters' "min_bytes" is the size of ONE copy.
  *
  * Page: { "rows": [SetRow], "total": N, "offset": 0 }, where a SetRow is
  * { "index": 0, "digest": "64 hex", "count": 3, "common_parent": "/a",
  *   "file_count": 261, "bytes": 2086912, "reclaimable": 4173824,
  *   "dirs": [{ "path": "/a/proj", "newest_mtime": ms,
- *              "skipped_entries": 0 }, ...] }
+ *              "skipped_entries": 0, "locked": false }, ...] }
+ * ("locked": the folder is, or holds, a protected location.)
  *
  * "count" is the copies still ALIVE and "reclaimable" is bytes * (count - 1)
  * over those - an upper bound, since copies that are hard links of one
