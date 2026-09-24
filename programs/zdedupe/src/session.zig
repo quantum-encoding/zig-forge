@@ -612,6 +612,27 @@ pub const Session = struct {
         return true;
     }
 
+    /// Point the home-relative protected roots (`~/Library` and the like) at
+    /// `path` instead of the user database's home. For a host that knows
+    /// better — a test harness running inside a sandbox container, whose own
+    /// temporary files sit in the real `~/Library` — never a way to switch
+    /// protection off: the system roots, stores and packages stay in force.
+    pub fn setHome(self: *Session, path: []const u8) bool {
+        _ = self.beginCall();
+        const trimmed = std.mem.trimEnd(u8, path, "/");
+        if (trimmed.len == 0 or trimmed[0] != '/') {
+            self.fail("home \"{s}\" is not an absolute path", .{path});
+            return false;
+        }
+        const owned = self.gpa.dupe(u8, trimmed) catch {
+            self.fail("out of memory", .{});
+            return false;
+        };
+        if (self.home) |old| self.gpa.free(old);
+        self.home = owned;
+        return true;
+    }
+
     /// Every protected location in force, for a UI to show: the built-in
     /// roots, the home directory's, the component rules, and the host's own.
     pub fn protectedJson(self: *Session) ?[:0]const u8 {

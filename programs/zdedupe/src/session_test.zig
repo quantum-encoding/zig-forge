@@ -2128,3 +2128,21 @@ test "the protected home is the user's real one, not $HOME" {
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "a host can say where home is, and only home moves" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture = try Fixture.init(gpa, "session-set-home", &keep_tree);
+    defer fixture.deinit();
+    var s = try fixture.open(null);
+    defer s.close();
+
+    try testing.expect(s.setHome("/somewhere/else/"));
+    const listed = try parse(a, s.protectedJson());
+    try testing.expectEqualStrings("/somewhere/else/Library", field(listed, "home").array.items[0].string);
+    try testing.expect(field(listed, "system").array.items.len > 0);
+    try testing.expect(!s.setHome("relative"));
+}

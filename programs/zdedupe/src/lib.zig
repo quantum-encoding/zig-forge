@@ -553,6 +553,12 @@ pub export fn zdedupe_results_set_protected(r: ?*ZDedupeResults, paths_json: ?[*
     return if (s.setProtected(std.mem.span(paths))) 0 else -1;
 }
 
+pub export fn zdedupe_results_set_home(r: ?*ZDedupeResults, path: ?[*:0]const u8) c_int {
+    const s = asSession(r) orelse return -1;
+    const home = path orelse return -1;
+    return if (s.setHome(std.mem.span(home))) 0 else -1;
+}
+
 pub export fn zdedupe_results_protected(r: ?*ZDedupeResults) ?[*:0]const u8 {
     const s = asSession(r) orelse return null;
     return (s.protectedJson() orelse return null).ptr;

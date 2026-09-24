@@ -585,6 +585,16 @@ const char* zdedupe_results_bulk_plan(zdedupe_results* r, const char* query_json
  * "packages": [...], "user": [...] } for a UI to show.
  */
 int zdedupe_results_set_protected(zdedupe_results* r, const char* paths_json);
+
+/**
+ * The home directory whose Library (and other per-user roots) is protected.
+ * Defaults to the user database's entry, not $HOME: inside the macOS App
+ * Sandbox $HOME is the app's container. For a host that knows better, such
+ * as a test harness whose temporary files live in that container; the system
+ * roots, stores and packages stay protected whatever it says. 0 ok, -1 not
+ * an absolute path.
+ */
+int zdedupe_results_set_home(zdedupe_results* r, const char* path);
 const char* zdedupe_results_protected(zdedupe_results* r);
 
 /** Snapshot of a running delete. */
