@@ -29,6 +29,7 @@ const TemplateMode = enum {
     health_report,
     legend_letter,
     legend_describe,
+    legend_docx,
 };
 
 /// Company / legal document sub-types selected via `--certificate <type>`.
@@ -98,6 +99,17 @@ pub fn main(init: std.process.Init) !void {
 
     // The `extract` verb is the inverse of generation: PDF in → MDX out. It is
     // dispatched before the template-flag parser so the two paths never tangle.
+    // Word verbs: `docx-letter` (DOCX → letter PDF) and `docx-template`
+    // (DOCX → zig_legend template JSON).
+    if (args.len >= 2 and (std.mem.eql(u8, args[1], "docx-letter") or std.mem.eql(u8, args[1], "docx-template"))) {
+        runDocx(allocator, args[1], args[2..], stdout, stderr) catch |err| {
+            stderr.print("Error: {s} failed: {s}\n", .{ args[1], @errorName(err) }) catch {};
+            stderr.flush() catch {};
+            std.process.exit(1);
+        };
+        return;
+    }
+
     if (args.len >= 2 and std.mem.eql(u8, args[1], "extract")) {
         runExtract(allocator, args[2..], stdout, stderr) catch |err| {
             stderr.print("Error: extraction failed: {s}\n", .{@errorName(err)}) catch {};
@@ -119,6 +131,7 @@ pub fn main(init: std.process.Init) !void {
     var opt_health_report = false;
     var opt_legend_letter = false;
     var opt_legend_describe = false;
+    var opt_legend_docx = false;
     var cert_type: ?CertType = null;
 
     var input_path: ?[]const u8 = null;
@@ -156,6 +169,8 @@ pub fn main(init: std.process.Init) !void {
             opt_legend_letter = true;
         } else if (std.mem.eql(u8, arg, "--legend-describe")) {
             opt_legend_describe = true;
+        } else if (std.mem.eql(u8, arg, "--legend-letter-docx")) {
+            opt_legend_docx = true;
         } else if (std.mem.eql(u8, arg, "--certificate")) {
             opt_certificate = true;
             // Consume the next token as the document <type>. The loop's
@@ -204,7 +219,7 @@ pub fn main(init: std.process.Init) !void {
     const beacon_report_val: usize = if (opt_beacon_report) 1 else 0;
     const health_report_val: usize = if (opt_health_report) 1 else 0;
     const letter_md_val: usize = if (opt_letter_md) 1 else 0;
-    const legend_val: usize = (if (opt_legend_letter) @as(usize, 1) else 0) + (if (opt_legend_describe) @as(usize, 1) else 0);
+    const legend_val: usize = (if (opt_legend_letter) @as(usize, 1) else 0) + (if (opt_legend_describe) @as(usize, 1) else 0) + (if (opt_legend_docx) @as(usize, 1) else 0);
 
     const total_flags = basic_val + minimalist_val + letter_val + letter_md_val + presentation_val + proposal_val + certificate_val + beacon_report_val + health_report_val + legend_val;
     if (total_flags > 1) {
@@ -234,6 +249,8 @@ pub fn main(init: std.process.Init) !void {
         .legend_letter
     else if (opt_legend_describe)
         .legend_describe
+    else if (opt_legend_docx)
+        .legend_docx
     else
         .basic;
 
@@ -247,7 +264,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Legend letters report zig_legend's own diagnostic (which variable,
     // which value, which template line) rather than a bare error name.
-    if (mode == .legend_letter or mode == .legend_describe) {
+    if (mode == .legend_letter or mode == .legend_describe or mode == .legend_docx) {
         const out = runLegend(allocator, mode, json_data, input_path, stderr) catch |err| {
             stderr.print("Error: --{s}: {s}\n", .{ @tagName(mode), @errorName(err) }) catch {};
             stderr.flush() catch {};
@@ -417,6 +434,7 @@ fn printUsage(stderr: *std.Io.Writer) void {
         \\  --legend-letter      Letter whose body is a zig_legend template rendered
         \\                       from a typed legend (see "Legend letters" below)
         \\  --legend-describe    Print a legend's variables and scenarios as JSON
+        \\  --legend-letter-docx Legend letter as an editable Word .docx
         \\
         \\Certificate Types (used as: --certificate <type>):
         \\  contract               share-certificate      dividend-voucher
@@ -428,6 +446,14 @@ fn printUsage(stderr: *std.Io.Writer) void {
         \\  On the command line, legend_file / template_file / letter_file may
         \\  name files (relative to the input JSON's directory) instead of
         \\  inlining legend_toml / template / letter.
+        \\
+        \\Word documents:
+        \\  pdf-gen docx-letter <in.docx> [frame.json] [-o out.pdf]
+        \\      Lay out a Word document's body as a letter; frame.json holds the
+        \\      letterhead fields (--letter-md's fields without body_markdown).
+        \\  pdf-gen docx-template <in.docx> [-o out.json]
+        \\      Turn a Word letter with {PLACEHOLDERS} into a zig_legend template,
+        \\      its placeholder names, a draft legend and its images (JSON).
         \\
         \\Other Flags:
         \\  -h, --help        Show this help message and exit
@@ -494,7 +520,7 @@ fn generatePdfBytes(allocator: std.mem.Allocator, mode: TemplateMode, cert_type:
             // baton-audit SiteHealthReport JSON -> paginating branded audit PDF.
             return try lib.generateWebsiteHealthReportFromJson(allocator, json_data);
         },
-        .legend_letter, .legend_describe => unreachable, // handled by runLegend
+        .legend_letter, .legend_describe, .legend_docx => unreachable, // handled by runLegend
         .certificate => {
             // cert_type is always set when mode == .certificate (the arg parser
             // resolves it before selecting this mode), but assert defensively.
@@ -573,6 +599,9 @@ fn runLegend(
     const expanded = try expandLegendFiles(allocator, json_data, input_path, stderr);
     defer allocator.free(expanded);
     var diag = lib.legend_letter.Diagnostic{};
+    if (mode == .legend_docx) {
+        return lib.docx_bridge.legendLetterToDocx(allocator, expanded, &diag) catch |err| return reportDocx(err, &diag, stderr);
+    }
     const result = switch (mode) {
         .legend_letter => lib.legend_letter.generate(allocator, expanded, &diag),
         .legend_describe => lib.legend_letter.describe(allocator, expanded, &diag),
@@ -584,6 +613,51 @@ fn runLegend(
         try stderr.flush();
         return null;
     };
+}
+
+fn reportDocx(err: anyerror, diag: *const lib.docx_bridge.Diagnostic, stderr: *std.Io.Writer) !?[]u8 {
+    const detail = if (diag.len > 0) diag.text() else @errorName(err);
+    try stderr.print("Error: DOCX: {s}\n", .{detail});
+    try stderr.flush();
+    return null;
+}
+
+/// `docx-letter <in.docx> [frame.json] [-o out.pdf]` and
+/// `docx-template <in.docx> [-o out.json]`. Output goes to stdout without -o.
+fn runDocx(allocator: std.mem.Allocator, verb: []const u8, args: []const []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    var pos: [2]?[]const u8 = .{ null, null };
+    var npos: usize = 0;
+    var output_path: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "-o")) {
+            i += 1;
+            if (i >= args.len) return error.MissingOutputPath;
+            output_path = args[i];
+        } else if (npos < 2) {
+            pos[npos] = args[i];
+            npos += 1;
+        } else return error.TooManyArguments;
+    }
+    const docx_path = pos[0] orelse {
+        try stderr.print("Usage: pdf-gen {s} <in.docx> {s}[-o out]\n", .{ verb, if (std.mem.eql(u8, verb, "docx-letter")) "[frame.json] " else "" });
+        try stderr.flush();
+        return error.MissingInput;
+    };
+    const docx_bytes = try readInputData(allocator, docx_path, stderr);
+    defer allocator.free(docx_bytes);
+    var diag = lib.docx_bridge.Diagnostic{};
+    const out = if (std.mem.eql(u8, verb, "docx-letter")) blk: {
+        const frame = if (pos[1]) |fp| try readInputData(allocator, fp, stderr) else try allocator.dupe(u8, "");
+        defer allocator.free(frame);
+        break :blk lib.docx_bridge.docxToLetter(allocator, docx_bytes, frame, &diag);
+    } else lib.docx_bridge.docxToLegendTemplateJson(allocator, docx_bytes, &diag);
+    const bytes = out catch |err| {
+        _ = try reportDocx(err, &diag, stderr);
+        std.process.exit(1);
+    };
+    defer allocator.free(bytes);
+    try writeOutputData(output_path, bytes, stdout, stderr);
 }
 
 /// CLI convenience: replace `legend_file`, `template_file` and `letter_file`

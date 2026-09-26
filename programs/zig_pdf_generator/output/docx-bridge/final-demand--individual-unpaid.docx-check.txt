@@ -1,0 +1,57 @@
+== unzip -t
+Archive:  /Users/director/work/poly-repo/zig-forge/.worktrees/pdf-legend-letters/programs/zig_pdf_generator/output/docx-bridge/final-demand--individual-unpaid.docx
+    testing: [Content_Types].xml      OK
+    testing: _rels/.rels              OK
+    testing: word/document.xml        OK
+    testing: word/styles.xml          OK
+    testing: word/_rels/document.xml.rels   OK
+    testing: word/numbering.xml       OK
+    testing: word/media/image1.png    OK
+    testing: word/header1.xml         OK
+    testing: word/_rels/header1.xml.rels   OK
+    testing: docProps/core.xml        OK
+No errors detected in compressed data of /Users/director/work/poly-repo/zig-forge/.worktrees/pdf-legend-letters/programs/zig_pdf_generator/output/docx-bridge/final-demand--individual-unpaid.docx.
+== xmllint (every XML part)
+ok [Content_Types].xml
+ok _rels/.rels
+ok docProps/core.xml
+ok word/_rels/document.xml.rels
+ok word/_rels/header1.xml.rels
+ok word/document.xml
+ok word/header1.xml
+ok word/numbering.xml
+ok word/styles.xml
+== textutil -convert txt
+15 September 2026
+Ref: HJ-DR-0421
+Ms Alex Morgan
+9 Linden Road
+Southgate Vale
+ZZ7 1GH
+Re: Letter of Claim: invoice INV-1043
+Dear Ms Morgan,
+This is a Letter of Claim under the Pre-Action Protocol for Debt Claims. Please read it, and the enclosed Information Sheet, carefully.
+The debt. You owe Harbourlight Joinery Ltd £960.00 for the supply and fitting of fitted wardrobes at your home. We invoiced you on 1 July 2026 (invoice INV-1043), and payment was due by 31 July 2026.
+Item
+Amount
+Invoice INV-1043
+£960.00
+Amount of the debt
+£960.00
+Interest and charges. No interest or other charges are being added to this debt. An up-to-date statement of account for the debt, showing any interest and charges added, is enclosed.
+The agreement. The debt arises from a written agreement dated 2 June 2026 between Harbourlight Joinery Ltd and Ms Alex Morgan: our written quotation Q-2310, which you signed. You can ask us for a copy of the agreement.
+How to pay. You can pay by bank transfer to:
+	•	Account name: Harbourlight Joinery Ltd
+	•	Sort code: 00-00-00
+	•	Account number: 00000000
+	•	Payment reference: MORGAN-1043
+If you would like to discuss how to pay, including paying by instalments, please contact Sam Hollis on 07700 900123 or at accounts@harbourlight.example.
+What you need to do. Please complete the enclosed Reply Form and send it to us at Unit 4, Example Trading Estate, Anytown, ZZ9 9ZZ. If you do not reply within 30 days of the date at the top of this letter, we may start court proceedings against you.
+If you return the Reply Form, we will not start court proceedings until at least 30 days after we receive it, or 30 days after we send you any documents you ask for, whichever is later. If you tell us on the Reply Form that you are seeking debt advice, we will allow you a reasonable period to obtain it. Free, impartial debt advice is available from the organisations listed in the Information Sheet.
+Enclosures
+	•	Up-to-date statement of account
+	•	Information Sheet and Reply Form (Annex 1 to the Pre-Action Protocol for Debt Claims)
+	•	Financial Statement form (Annex 2 to the Protocol)
+Yours sincerely,
+Sam Hollis
+Director, Harbourlight Joinery Ltd

@@ -1,0 +1,29 @@
+{
+  "legend_toml": "# Drafted from the 8 placeholder(s) in a Word template. Check each type,\n# add descriptions and defaults, and add [[scenario]] tables as needed.\n\n[[var]]\nname = \"CLIENT_NAME\"\ntype = \"string\"\nrequired = true\n\n[[var]]\nname = \"PROJECT\"\ntype = \"string\"\nrequired = true\n\n[[var]]\nname = \"STATEMENT_DATE\"\ntype = \"date\"\nrequired = true\n\n[[var]]\nname = \"INVOICE_NO\"\ntype = \"string\"\nrequired = true\n\n[[var]]\nname = \"DUE_DATE\"\ntype = \"date\"\nrequired = true\n\n[[var]]\nname = \"BALANCE\"\ntype = \"money\"\ncurrency = \"GBP\"\nrequired = true\n\n[[var]]\nname = \"STATUS\"\ntype = \"enum\"\nvalues = [\"paid\", \"unpaid\"]\nrequired = true\n\n[[var]]\nname = \"PAY_BY\"\ntype = \"date\"\nrequired = true\n",
+  "template": "**Account statement**\n\nDear {CLIENT_NAME},\n\nThank you for choosing Harbourlight Joinery for {PROJECT}. This letter summarises your account as at {STATEMENT_DATE|long}.\n\nInvoice {INVOICE_NO} was due on {DUE_DATE|long}. Balance: £{BALANCE|plain}.\n\n{?STATUS=\"paid\"}\n\nYour account is fully paid. **Thank you** for settling it promptly.\n\n{:}\n\nA balance of **£{BALANCE|plain}** remains. Please pay by {PAY_BY|long}, quoting reference {INVOICE_NO}.\n\n{/}\n\nIf you have any questions, please call us on 07700 900123.\n\n",
+  "letter": {
+    "company_name": "Harbourlight Joinery Ltd",
+    "company_address": "Unit 4, Example Trading Estate|Anytown|ZZ9 9ZZ",
+    "sender_contact": "accounts@harbourlight.example · 07700 900123",
+    "date": "15 September 2026",
+    "reference": "HJ-ST-0421",
+    "recipient_name": "{CLIENT_NAME}",
+    "recipient_address": "9 Linden Road|Southgate Vale|ZZ7 1GH",
+    "subject": "Account statement: invoice {INVOICE_NO}",
+    "closing": "Yours sincerely,",
+    "signature_name": "Sam Hollis",
+    "signature_title": "Director, Harbourlight Joinery Ltd",
+    "accent_hex": "#1f4e79",
+    "images": []
+  },
+  "bindings": {
+    "CLIENT_NAME": "Ms Alex Morgan",
+    "PROJECT": "your fitted wardrobes",
+    "STATEMENT_DATE": "2026-09-15",
+    "INVOICE_NO": "INV-1043",
+    "DUE_DATE": "2026-07-31",
+    "BALANCE": "960.00",
+    "STATUS": "unpaid",
+    "PAY_BY": "2026-09-29"
+  }
+}

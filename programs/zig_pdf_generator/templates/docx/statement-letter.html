@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Account statement letter</title></head>
+<body>
+<h1>Account statement</h1>
+<p>Dear {CLIENT_NAME},</p>
+<p>Thank you for choosing Harbourlight Joinery for {PROJECT}. This letter summarises your account as at {STATEMENT_DATE|long}.</p>
+<p>Invoice {INVOICE_NO} was due on {DUE_DATE|long}. Balance: £{BALANCE|plain}.</p>
+<p>{?STATUS="paid"}</p>
+<p>Your account is fully paid. <b>Thank you</b> for settling it promptly.</p>
+<p>{:}</p>
+<p>A balance of <b>£{BALANCE|plain}</b> remains. Please pay by {PAY_BY|long}, quoting reference {INVOICE_NO}.</p>
+<p>{/}</p>
+<p>If you have any questions, please call us on 07700 900123.</p>
+</body></html>

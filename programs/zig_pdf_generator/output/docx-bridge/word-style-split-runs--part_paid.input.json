@@ -1,0 +1,31 @@
+{
+  "legend_toml": "# Drafted from the 5 placeholder(s) in a Word template. Check each type,\n# add descriptions and defaults, and add [[scenario]] tables as needed.\n\n[[var]]\nname = \"CLIENT_NAME\"\ntype = \"string\"\nrequired = true\n\n[[var]]\nname = \"INVOICE_NO\"\ntype = \"string\"\nrequired = true\n\n[[var]]\nname = \"STATUS\"\ntype = \"enum\"\nvalues = [\"part_paid\"]\nrequired = true\n\n[[var]]\nname = \"BALANCE\"\ntype = \"money\"\ncurrency = \"GBP\"\nrequired = true\n\n[[var]]\nname = \"PAY_BY\"\ntype = \"date\"\nrequired = true\n",
+  "template": "![Image 1](1-image1.png)\n\n# Account statement\n\nDear {CLIENT_NAME},\n\nInvoice {INVOICE_NO} for the joinery at your home is **overdue**.\n\n{?STATUS=\"part_paid\"}\n\nThank you for your part payment. The balance now due is {BALANCE|plain} pounds.\n\n{:}\n\nPlease pay the full amount by {PAY_BY|long}.\n\n{/}\n\n| **Item** | **Amount** |\n|---|---|\n| Invoice {INVOICE_NO} | {BALANCE} |\n\nIf anything here looks wrong, call us on 07700 900123.\n\n",
+  "letter": {
+    "company_name": "Harbourlight Joinery Ltd",
+    "company_address": "Unit 4, Example Trading Estate|Anytown|ZZ9 9ZZ",
+    "sender_contact": "accounts@harbourlight.example · 07700 900123",
+    "date": "15 September 2026",
+    "reference": "HJ-ST-0421",
+    "recipient_name": "Ms Alex Morgan",
+    "recipient_address": "9 Linden Road|Southgate Vale|ZZ7 1GH",
+    "subject": "Invoice {INVOICE_NO}",
+    "closing": "Yours sincerely,",
+    "signature_name": "Sam Hollis",
+    "signature_title": "Director, Harbourlight Joinery Ltd",
+    "accent_hex": "#1f4e79",
+    "images": [
+      {
+        "name": "1-image1.png",
+        "data": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAWgAAABgCAYAAAAwwegMAAABsElEQVR42u3csREAEAxAUZvYyDxsaKswglNxecUrNc79SlIiogDwHpcAINAACDSAQAMg0AACDYBAA3Af6NpGcM8jAwRaoAGBRqABgRZoQKAFWqABgRZoAIEWaECgEWhAoAUaEGiBFmhAoAUaQKAFGhBoBBoQaIEGBBqBBgRaoAGBFmiBBgRaoAEEWqABgUagAYHOEeh9ZgI5CLRAAwKNQAMCLdCAQAu0QAMCLdACDQIt0AINCDQCDQi0QAMCjUADAi3QgEALtEADAi3QAJYlCTQg0Ag0INACDQi0QAs0INACDSDQAg0INAINCLRAAwKNQAMCLdAAAi3QgEAL9OGypA7kINACDQg0Ag0ItEADAi3QAg0ItEALNAi0QAs0INAINCDQBlUAgyoINCDQAg0ItEALNCDQAg0g0AINCDQCDQi0QAMCLdAGVQCDKgIt0CDQAi3QgEAj0IBACzQg0Ag0INC+2QEItEADAi3QAAIt0IBAI9CAQAs0INACLdCAQAs0gEALNCDQCDQg0AINCDQCDQi0QAMItEADfwcaAIEGQKABBBoAgQYQaAAEGkCgAXjMAl3aWmcNidIYAAAAAElFTkSuQmCC"
+      }
+    ]
+  },
+  "bindings": {
+    "CLIENT_NAME": "Ms Morgan",
+    "INVOICE_NO": "INV-1043",
+    "STATUS": "part_paid",
+    "BALANCE": "480.00",
+    "PAY_BY": "2026-09-29"
+  }
+}

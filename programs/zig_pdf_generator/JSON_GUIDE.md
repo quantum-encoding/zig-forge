@@ -1272,6 +1272,33 @@ Values are type-checked. Any problem — an unknown scenario, a missing required
 
 On the command line only, `legend_file`, `template_file` and `letter_file` may name files (relative to the input JSON) instead of inlining `legend_toml`, `template` and `letter`.
 
+## Word Documents
+
+libzigpdf also carries zig_docx's C API (declared in `zig_docx.h`) and three bridges between Word and letters. Full detail: `ZIG_PDF_SCHEMA.md`, "Word documents".
+
+**Write a letter template in Word.** Type the letter with placeholders in braces — `{CLIENT_NAME}`, `{BALANCE|plain}`, `{PAY_BY|long}`, and outcome blocks `{?STATUS="paid"}` … `{:}` … `{/}` each on their own line — and save as `.docx`. Then:
+
+```sh
+pdf-gen docx-template statement.docx -o statement.template.json
+```
+
+or `zigpdf_docx_to_legend_template(docx, len, &out_len)`, which returns:
+
+```json
+{"template": "Dear {CLIENT_NAME},\n\n…",
+ "placeholders": ["CLIENT_NAME", "BALANCE", "STATUS", "PAY_BY"],
+ "legend_toml": "[[var]]\nname = \"CLIENT_NAME\"\ntype = \"string\"\nrequired = true\n…",
+ "images": [{"name": "1-image1.png", "data": "data:image/png;base64,…"}]}
+```
+
+Placeholders survive Word splitting them across runs, bolding half of one, and autocorrecting their quotes. Review `legend_toml` (it is typed from how each placeholder is used), then render with the Legend Letter schema above, passing `template`, the legend, your `bindings`, and `images` inside `letter`.
+
+**Lay out a Word document as a letter.** `pdf-gen docx-letter body.docx frame.json -o letter.pdf`, or `zigpdf_docx_to_letter(docx, len, frame_json_or_NULL, &out_len)`. The frame is the Letter Schema without `body_markdown`; the Word document's text, tables and pictures become the body.
+
+**Send a legend letter as Word.** `pdf-gen --legend-letter-docx input.json letter.docx`, or `zigpdf_legend_letter_to_docx(json, &out_len)`, with the Legend Letter input. Add `"letterhead_image": "data:image/png;base64,…"` to `letter` for a picture letterhead.
+
+Anything that is not a Word document is refused: the call returns NULL and `zigpdf_get_error()` says why, e.g. `DOCX: input is not a DOCX file (no ZIP signature)`.
+
 ## AI Prompt Template
 
 ### For Invoices

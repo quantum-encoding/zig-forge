@@ -118,7 +118,8 @@ const Converter = struct {
         for (p.runs) |run| {
             if (run.image_rel_id != null) continue;
             const link: ?[]const u8 = if (run.hyperlink_url) |u| (if (zdocx.mdx.isSafeLinkUrl(u)) u else null) else null;
-            for (run.text) |ch| {
+            const visible = try dropInvisible(self.arena, run.text);
+            for (visible) |ch| {
                 try text.append(self.arena, ch);
                 try fmts.append(self.arena, .{ .bold = run.bold, .italic = run.italic });
                 try links.append(self.arena, link);
@@ -161,7 +162,7 @@ const Converter = struct {
                     var links: std.ArrayList(?[]const u8) = .empty;
                     for (cp.runs) |run| {
                         if (run.image_rel_id != null) continue;
-                        for (run.text) |ch| {
+                        for (try dropInvisible(self.arena, run.text)) |ch| {
                             try text.append(self.arena, if (ch == '\n' or ch == '\t') ' ' else ch);
                             try fmts.append(self.arena, .{ .bold = run.bold, .italic = run.italic });
                             try links.append(self.arena, null);
@@ -245,6 +246,28 @@ const Converter = struct {
         try self.out.print(self.arena, "![Image {d}]({s})\n\n", .{ self.images.items.len, name });
     }
 };
+
+/// Text without zero-width characters (U+200B-U+200D, U+2060, U+FEFF),
+/// which Word inserts invisibly and the PDF fonts cannot draw.
+fn dropInvisible(a: std.mem.Allocator, text: []const u8) ![]const u8 {
+    const marks = [_][]const u8{ "\u{200B}", "\u{200C}", "\u{200D}", "\u{2060}", "\u{FEFF}" };
+    var needs = false;
+    for (marks) |m| if (std.mem.indexOf(u8, text, m) != null) {
+        needs = true;
+    };
+    if (!needs) return text;
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    outer: while (i < text.len) {
+        for (marks) |m| if (std.mem.startsWith(u8, text[i..], m)) {
+            i += m.len;
+            continue :outer;
+        };
+        try out.append(a, text[i]);
+        i += 1;
+    }
+    return out.items;
+}
 
 fn eqlLink(a: ?[]const u8, b: ?[]const u8) bool {
     if (a == null and b == null) return true;

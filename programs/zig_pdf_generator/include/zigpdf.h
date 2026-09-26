@@ -606,6 +606,51 @@ uint8_t* zigpdf_legend_render_text(const char* json_input, size_t* output_len);
 uint8_t* zigpdf_legend_describe(const char* json_input, size_t* output_len);
 
 /* ============================================================================
+ * Word documents
+ *
+ * This library also exports zig_docx's C API (zig_docx_md_to_docx,
+ * zig_docx_to_markdown, zig_docx_xlsx_to_csv, zig_docx_info, ...). Those are
+ * declared in zig_docx.h (programs/zig_docx/include/zig_docx.h), which is
+ * not included here; include it alongside this header to call them. Free
+ * their results with the zig_docx_free* functions, not zigpdf_free.
+ * ============================================================================ */
+
+/**
+ * @brief Lay out a Word document's body as a letter PDF
+ *
+ * @param docx_bytes  The .docx file contents
+ * @param letter_json Letter frame (zigpdf_generate_letter's fields without
+ *                    body_markdown), or NULL for none
+ * @return PDF bytes, or NULL with "DOCX: <reason>" in zigpdf_get_error()
+ *         (e.g. the input is not a Word document)
+ * @note Caller must free the returned buffer with zigpdf_free()
+ */
+uint8_t* zigpdf_docx_to_letter(const uint8_t* docx_bytes, size_t docx_len, const char* letter_json, size_t* output_len);
+
+/**
+ * @brief Turn a Word letter with {PLACEHOLDERS} into a zig_legend template
+ *
+ * Returns UTF-8 JSON (not NUL-terminated):
+ * {"template": "...", "placeholders": ["CLIENT_NAME", ...],
+ *  "legend_toml": "<draft legend>", "images": [{"name", "data"}]}
+ * Placeholders split across Word runs, half-formatted, or with autocorrected
+ * quotes are repaired.
+ *
+ * @note Caller must free the returned buffer with zigpdf_free()
+ */
+uint8_t* zigpdf_docx_to_legend_template(const uint8_t* docx_bytes, size_t docx_len, size_t* output_len);
+
+/**
+ * @brief Render a legend letter as an editable Word .docx
+ *
+ * Same input as zigpdf_generate_legend_letter; letter.letterhead_image
+ * (PNG/JPEG, base64 or data: URL) becomes the Word letterhead.
+ *
+ * @note Caller must free the returned buffer with zigpdf_free()
+ */
+uint8_t* zigpdf_legend_letter_to_docx(const char* json_input, size_t* output_len);
+
+/* ============================================================================
  * QR Code Modes for Invoices
  * ============================================================================ */
 

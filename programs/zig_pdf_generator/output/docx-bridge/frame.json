@@ -1,0 +1,14 @@
+{
+  "company_name": "Harbourlight Joinery Ltd",
+  "company_address": "Unit 4, Example Trading Estate|Anytown|ZZ9 9ZZ",
+  "sender_contact": "accounts@harbourlight.example · 07700 900123",
+  "date": "15 September 2026",
+  "reference": "HJ-ST-0421",
+  "recipient_name": "Ms Alex Morgan",
+  "recipient_address": "9 Linden Road|Southgate Vale|ZZ7 1GH",
+  "subject": "Your account",
+  "closing": "Yours sincerely,",
+  "signature_name": "Sam Hollis",
+  "signature_title": "Director, Harbourlight Joinery Ltd",
+  "accent_hex": "#1f4e79"
+}

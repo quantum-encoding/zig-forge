@@ -941,12 +941,13 @@ fn addKeyValueTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnmana
 
 // ─── Image File Reader ─────────────────────────────────────────────
 //
-// Photo-evidence images are loaded from disk via libc fopen/fread. The
-// freestanding wasm32 module (src/wasm.zig, embedded by the website) has
-// no libc and no filesystem, so the extern decls and the reader are gated
-// out for that target — section `images` filenames are simply skipped and
-// the rest of the FRA renders normally. Native + WASI builds are unchanged.
-const can_read_image_files = @import("builtin").target.os.tag != .freestanding;
+// Photo-evidence images are loaded from disk via libc fopen/fread, so the
+// reader exists only where libc is linked and there is a filesystem. The
+// freestanding wasm32 module (src/wasm.zig) and hosts that compile this file
+// without libc (zig_pdf_generator's WASM and Android CLI builds) skip
+// section `images` filenames; the rest of the FRA renders normally.
+const can_read_image_files = @import("builtin").link_libc and
+    @import("builtin").target.os.tag != .freestanding;
 
 const image_reader = if (can_read_image_files) struct {
     extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*std.c.FILE;
