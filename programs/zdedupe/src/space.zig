@@ -1530,14 +1530,20 @@ pub const View = struct {
         return agg;
     }
 
-    /// The folder a query names, or null for every root. `error.NotFound`
+    /// The folder a query names; with neither id nor path, the scan root, or
+    /// null (every root together) when the scan had several. `error.NotFound`
     /// when it names something that is not an alive folder in these results.
     pub fn resolve(self: *const View, node: ?u32, path: ?[]const u8) !?u32 {
         if (node) |d| {
             if (d >= self.r.dirCount() or self.removed.dirRemoved(d)) return error.NotFound;
             return d;
         }
-        const p = path orelse return null;
+        const p = path orelse {
+            const n = self.r.dirCount();
+            if (n == 0) return null;
+            const first = try self.r.dir(0);
+            return if (first.subtree_end == n) 0 else null;
+        };
         const trimmed = if (p.len > 1) std.mem.trimEnd(u8, p, "/") else p;
         const found = (try self.r.locate(trimmed)) orelse (try self.locateLossy(trimmed)) orelse return error.NotFound;
         return switch (found) {
@@ -2315,4 +2321,62 @@ fn writeHistory(arena: Allocator, path: [:0]const u8, file: HistoryFile) !void {
         _ = libc.unlink(partial.ptr);
         return error.RenameFailed;
     }
+}
+
+// ===========================================================================
+// Tests (end to end: space_test.zig)
+// ===========================================================================
+
+test "file names map to categories by extension, case-insensitively" {
+    try std.testing.expectEqual(Category.media, categoryOfName("Clip.MOV"));
+    try std.testing.expectEqual(Category.documents, categoryOfName("report.pdf"));
+    try std.testing.expectEqual(Category.archives, categoryOfName("a.tar.gz"));
+    try std.testing.expectEqual(Category.applications, categoryOfName("Setup.dmg"));
+    try std.testing.expectEqual(Category.system, categoryOfName("libz.dylib"));
+    try std.testing.expectEqual(Category.other, categoryOfName(".bashrc"));
+    try std.testing.expectEqual(Category.other, categoryOfName("README"));
+    try std.testing.expectEqual(Category.other, categoryOfName("x.averyveryverylongextension"));
+}
+
+test "a folder decides for everything inside it; the outermost wins" {
+    try std.testing.expectEqual(Context.applications, contextOf(.none, "/Applications/X.app", "X.app", "Applications"));
+    try std.testing.expectEqual(Context.code, contextOf(.none, "/p/node_modules", "node_modules", "p"));
+    try std.testing.expectEqual(Context.code, contextOf(.code, "/p/node_modules/x.app", "x.app", "node_modules"));
+    try std.testing.expectEqual(Context.system, contextOf(.none, "/Users/u/Library/Caches", "Caches", "Library"));
+    try std.testing.expectEqual(Context.system, contextOf(.none, "/usr/local", "local", "usr"));
+    try std.testing.expectEqual(Context.none, contextOf(.none, "/Users/u/Movies", "Movies", "u"));
+}
+
+test "sorting paths with the separator lowest yields a preorder" {
+    var paths = [_][]const u8{ "/a-z", "/a/b/c", "/a", "/a.b", "/a/b", "/" };
+    std.sort.pdq([]const u8, &paths, {}, preorderLess);
+    const want = [_][]const u8{ "/", "/a", "/a/b", "/a/b/c", "/a-z", "/a.b" };
+    for (want, paths) |w, p| try std.testing.expectEqualStrings(w, p);
+}
+
+test "TopK keeps the largest, first offered on a tie" {
+    var buf: [3]TopK.Entry = undefined;
+    var heap: TopK = .{ .items = &buf };
+    for ([_]u64{ 5, 1, 9, 5, 7, 5, 2 }, 0..) |key, id| heap.offer(key, id);
+    const out = heap.sorted();
+    try std.testing.expectEqual(@as(usize, 3), out.len);
+    try std.testing.expectEqual(@as(u64, 9), out[0].key);
+    try std.testing.expectEqual(@as(u64, 7), out[1].key);
+    try std.testing.expectEqual(@as(u64, 5), out[2].key);
+    try std.testing.expectEqual(@as(u64, 0), out[2].id);
+}
+
+test "alive files skip removed runs" {
+    var index: RemovedIndex = .{};
+    defer index.deinit(std.testing.allocator);
+    try index.file_runs.append(std.testing.allocator, .{ .start = 2, .end = 4 });
+    try index.file_runs.append(std.testing.allocator, .{ .start = 6, .end = 7 });
+    var it = index.aliveFiles(1, 9);
+    var got: [8]u64 = undefined;
+    var n: usize = 0;
+    while (it.next()) |f| : (n += 1) got[n] = f;
+    try std.testing.expectEqualSlices(u64, &.{ 1, 4, 5, 7, 8 }, got[0..n]);
+    try std.testing.expectEqual(@as(u64, 3), index.removedFilesIn(0, 9));
+    try std.testing.expect(index.fileRemoved(3));
+    try std.testing.expect(!index.fileRemoved(4));
 }

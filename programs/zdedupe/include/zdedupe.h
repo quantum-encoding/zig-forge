@@ -32,7 +32,10 @@ typedef struct zdedupe_ctx zdedupe_ctx;
  */
 typedef enum {
     ZDEDUPE_MODE_FIND_DUPLICATES = 0,
-    ZDEDUPE_MODE_COMPARE_FOLDERS = 1
+    ZDEDUPE_MODE_COMPARE_FOLDERS = 1,
+    /* Where the disk went: walk and size every folder, hash nothing. Result
+     * store only (zdedupe_run_to_file); see "Disk space" below. */
+    ZDEDUPE_MODE_DISK_SPACE = 2
 } zdedupe_mode;
 
 /* === Context Management === */
@@ -69,7 +72,8 @@ int zdedupe_add_path(zdedupe_ctx* ctx, const char* path);
  * Set operation mode
  *
  * @param ctx  Context handle
- * @param mode ZDEDUPE_MODE_FIND_DUPLICATES or ZDEDUPE_MODE_COMPARE_FOLDERS
+ * @param mode ZDEDUPE_MODE_FIND_DUPLICATES, ZDEDUPE_MODE_COMPARE_FOLDERS or
+ *             ZDEDUPE_MODE_DISK_SPACE. Any other value leaves the mode as it was.
  */
 void zdedupe_set_mode(zdedupe_ctx* ctx, zdedupe_mode mode);
 
@@ -270,6 +274,18 @@ void zdedupe_cancel(zdedupe_ctx* ctx);
  *
  * The file is created with mode 0600, written to "<path>.partial" and renamed
  * into place, so an existing store at `path` survives any failure.
+ *
+ * In ZDEDUPE_MODE_DISK_SPACE the store holds the scanned folder tree instead
+ * of duplicate groups (read it with the zdedupe_results_space_* calls). The
+ * walk keeps the duplicate scan's scoping - same volume, app libraries and
+ * Steam skipped, credential excludes and added excludes honoured, hidden
+ * files as set - but ignores zdedupe_use_default_excludes: build output and
+ * dependency folders are exactly what a disk-space view has to show. It opens
+ * no file, never follows a symlink, and on macOS never makes the system
+ * download an iCloud placeholder (a folder that is only in the cloud is
+ * reported unreadable). Scanning "/" on macOS also covers the Data volume
+ * behind the firmlinks (/Users, /Applications, ...), counted once. Progress
+ * phases: scanning, analyzing (building the tree), writing, done.
  *
  * @return 0 ok, 1 failed, 2 cancelled, 3 unsupported (compare-folders mode)
  */
@@ -844,6 +860,91 @@ const char* zdedupe_results_delete_folders(zdedupe_results* r, const char* items
  * a person, not answers for a UI.
  */
 int zdedupe_results_export(zdedupe_results* r, const char* format, const char* path);
+
+/* === Disk space ===
+ *
+ * Over a store written in ZDEDUPE_MODE_DISK_SPACE. Every folder carries what
+ * its whole subtree adds up to; a host asks for one level at a time and gets
+ * the top N of it plus one "everything else" remainder, so a folder holding a
+ * million files costs the UI a few hundred rows. Shapes are in
+ * schema/results-session.schema.json ($defs/Space*); the calls fail (NULL, with
+ * last_error "these results are not a disk-space scan") on a duplicate store.
+ *
+ * Sizes: "bytes" is space on disk (allocated blocks) - a cloud placeholder
+ * counts ~0, a sparse file what it occupies; "logical" is the apparent size.
+ * Every inode counts once (of several hard links, the lexicographically
+ * smallest path holds the bytes). APFS clones are counted in full.
+ *
+ * Types: media, documents, code, archives, applications, system, other. The
+ * extension decides, except inside a folder that decides for everything it
+ * holds: an app bundle is applications, node_modules/.git/DerivedData and the
+ * like are code, OS trees and ~/Library/Caches|Logs are system.
+ *
+ * Folder and file ids are stable for the life of the store. Everything the
+ * removed overlay holds (see zdedupe_results_space_trash) is left out of every
+ * answer, and folder totals are corrected for it.
+ */
+
+/**
+ * The scan as a whole -> SpaceOverview: roots, volume (mount, total, free,
+ * available - as scanned; on macOS the APFS container's figures), totals
+ * (files, dirs, bytes, logical, cloud-only files, hard links, excluded
+ * entries, errors, unreadable folders), bytes and files per type.
+ */
+const char* zdedupe_results_space_overview(zdedupe_results* r);
+
+/**
+ * One folder's contents -> SpaceChildren. Query (SpaceChildrenQuery):
+ *   { "node": id | null, "path": "/abs" | null,
+ *     "by": "folder" | "type" | "size", "limit": 150, "per_group": 40 }
+ * No node and no path means the scan root (every root, as a node of kind
+ * "all", when there were several). "folder": one group, the folder's
+ * subfolders and files merged largest first, `limit` of them (<= 500).
+ * "type": every file below the folder grouped by type, largest group first;
+ * "size": grouped by size band (over_1g, 100m_1g, 10m_100m, 1m_10m,
+ * under_1m); each group lists its `per_group` (<= 200) largest files. Every
+ * group carries a "rest" {count, bytes} for what it did not list. "trail"
+ * leads from the root to the folder, for a breadcrumb. Fails when the folder
+ * is not in these results or was removed.
+ */
+const char* zdedupe_results_space_children(zdedupe_results* r, const char* query_json);
+
+/**
+ * Largest items below a folder -> SpaceLargest. Query (SpaceLargestQuery):
+ *   { "node"|"path" as above, "kind": "files" | "folders",
+ *     "type": "media" ... | null, "limit": 100 (<= 200) }
+ * Folders rank by their whole size and leave out wrappers: a folder whose
+ * largest subfolder holds 90% or more of it is represented by that subfolder.
+ */
+const char* zdedupe_results_space_largest(zdedupe_results* r, const char* query_json);
+
+/**
+ * Record this scan in its volume's history, kept as one JSON file per volume
+ * in `history_dir` (a folder the host owns; created files are 0600), and
+ * describe that history -> SpaceHistory: every recorded scan's totals, oldest
+ * first (at most 30), and - against the latest earlier scan of the same roots
+ * - the folders (down to three levels below a root) that grew most and
+ * shrank most. Idempotent: a scan is recorded once however often this is
+ * called. Uses the figures as scanned, not corrected for later removals.
+ */
+const char* zdedupe_results_space_history(zdedupe_results* r, const char* history_dir);
+
+/**
+ * Move folders and files to the Trash through `trash_fn` (the same host
+ * callback zdedupe_results_delete uses). There is no permanent delete here.
+ * items_json (SpaceTrashItems): { "items": [{"kind":"dir"|"file","id":N}, ...] }
+ * (at most 10,000). Each is checked first: a file must still be a regular
+ * file with the scanned size and modification time (else skipped_changed); a
+ * folder must still be a folder, not a link; nothing that is, or holds, a
+ * protected location goes (zdedupe_results_protected), and a scan root never
+ * goes whole. Anything inside a folder that goes is left to it. Blocks until
+ * done; progress and cancel as for zdedupe_results_delete. Returns a
+ * DeleteReport; freed_bytes counts space on disk, and 0 for a file with other
+ * hard links (they keep its blocks). What went joins the removed overlay, so
+ * every space answer corrects itself without a rescan.
+ */
+const char* zdedupe_results_space_trash(zdedupe_results* r, const char* items_json,
+                                        zdedupe_trash_fn trash_fn, void* user);
 
 /* === Utilities === */
 

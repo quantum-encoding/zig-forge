@@ -2185,28 +2185,62 @@ pub const Session = struct {
         const guard = self.protection();
         self.del.total.store(items.len, .release);
 
-        // Folders asked for, so that anything inside one of them is left to it.
-        var folders: std.ArrayListUnmanaged(space_mod.RemovedIndex.Run) = .empty;
+        // Folders first: only one that passes its checks goes, and only a
+        // folder that goes takes what is inside it along.
+        const Accepted = struct { run: space_mod.RemovedIndex.Run, target: Target };
+        var accepted: std.ArrayListUnmanaged(Accepted) = .empty;
+        var seen_dirs: std.AutoHashMapUnmanaged(u64, void) = .empty;
         for (items) |item| {
-            if (item.kind != .dir or item.id >= r.dirCount()) continue;
-            const rec = try r.dir(item.id);
-            try folders.append(arena, .{ .start = item.id, .end = rec.subtree_end });
+            if (item.kind != .dir) continue;
+            if (item.id >= r.dirCount()) {
+                report.fail(arena, "(unknown folder)", "not in these results");
+                continue;
+            }
+            if ((try seen_dirs.fetchPut(arena, item.id, {})) != null) continue;
+            const d: u32 = @intCast(item.id);
+            const rec = try r.dir(d);
+            const path = try r.dirPath(arena, d);
+            if (view.removed.dirRemoved(d)) {
+                report.fail(arena, path, "already removed");
+                continue;
+            }
+            if (rec.parent == space_mod.no_parent) {
+                report.fail(arena, path, "is a scanned folder; remove what is inside it instead");
+                continue;
+            }
+            if (guard.guardsFolder(path)) {
+                report.fail(arena, path, "is, or holds, a protected location");
+                continue;
+            }
+            var path_buf: [4096]u8 = undefined;
+            const path_z = pathZ(&path_buf, path) orelse {
+                report.fail(arena, path, "path is too long");
+                continue;
+            };
+            if (folderKind(path_z)) |reason| {
+                report.skipped_changed += 1;
+                report.fail(arena, path, reason);
+                continue;
+            }
+            try accepted.append(arena, .{
+                .run = .{ .start = d, .end = rec.subtree_end },
+                .target = .{ .path = path, .size = view.dirAgg(d, &rec).bytes },
+            });
         }
         const Cover = struct {
-            fn strictly(runs: []const space_mod.RemovedIndex.Run, d: u64) bool {
-                for (runs) |run| if (run.start < d and d < run.end) return true;
-                return false;
-            }
-            fn holds(runs: []const space_mod.RemovedIndex.Run, d: u64) bool {
-                for (runs) |run| if (run.start <= d and d < run.end) return true;
+            fn holds(list: []const Accepted, d: u64, strictly: bool) bool {
+                for (list) |a| {
+                    const inside = if (strictly) a.run.start < d else a.run.start <= d;
+                    if (inside and d < a.run.end) return true;
+                }
                 return false;
             }
         };
 
-        var seen_dirs: std.AutoHashMapUnmanaged(u64, void) = .empty;
         var seen_files: std.AutoHashMapUnmanaged(u64, void) = .empty;
         var batch: std.ArrayListUnmanaged(Target) = .empty;
         try batch.ensureTotalCapacity(arena, trash_batch);
+        var next_dir: usize = 0;
 
         for (items) |item| {
             if (self.del.cancel.load(.acquire)) {
@@ -2215,42 +2249,16 @@ pub const Session = struct {
             }
             _ = self.del.done.fetchAdd(1, .release);
 
-            var path: []const u8 = undefined;
-            var bytes: u64 = 0;
+            var target: Target = undefined;
             switch (item.kind) {
                 .dir => {
-                    if (item.id >= r.dirCount()) {
-                        report.fail(arena, "(unknown folder)", "not in these results");
-                        continue;
-                    }
-                    const d: u32 = @intCast(item.id);
-                    if ((try seen_dirs.fetchPut(arena, d, {})) != null) continue;
-                    if (Cover.strictly(folders.items, d)) continue;
-                    const rec = try r.dir(d);
-                    path = try r.dirPath(arena, d);
-                    if (view.removed.dirRemoved(d)) {
-                        report.fail(arena, path, "already removed");
-                        continue;
-                    }
-                    if (rec.parent == space_mod.no_parent) {
-                        report.fail(arena, path, "is a scanned folder; remove what is inside it instead");
-                        continue;
-                    }
-                    if (guard.guardsFolder(path)) {
-                        report.fail(arena, path, "is, or holds, a protected location");
-                        continue;
-                    }
-                    var path_buf: [4096]u8 = undefined;
-                    const path_z = pathZ(&path_buf, path) orelse {
-                        report.fail(arena, path, "path is too long");
-                        continue;
-                    };
-                    if (folderKind(path_z)) |reason| {
-                        report.skipped_changed += 1;
-                        report.fail(arena, path, reason);
-                        continue;
-                    }
-                    bytes = view.dirAgg(d, &rec).bytes;
+                    // `accepted` is in item order; this item is the next one
+                    // there, or it was refused (and reported) above.
+                    if (next_dir >= accepted.items.len or accepted.items[next_dir].run.start != item.id) continue;
+                    const a = accepted.items[next_dir];
+                    next_dir += 1;
+                    if (Cover.holds(accepted.items, a.run.start, true)) continue;
+                    target = a.target;
                 },
                 .file => {
                     if (item.id >= r.fileCount()) {
@@ -2259,8 +2267,8 @@ pub const Session = struct {
                     }
                     if ((try seen_files.fetchPut(arena, item.id, {})) != null) continue;
                     const rec = try r.file(item.id);
-                    if (Cover.holds(folders.items, rec.dir)) continue;
-                    path = try r.filePath(arena, item.id);
+                    if (Cover.holds(accepted.items, rec.dir, false)) continue;
+                    const path = try r.filePath(arena, item.id);
                     if (view.removed.fileRemoved(item.id)) {
                         report.fail(arena, path, "already removed");
                         continue;
@@ -2285,10 +2293,11 @@ pub const Session = struct {
                         continue;
                     }
                     // Another link keeps the inode, and its blocks, alive.
-                    bytes = if (rec.flags & space_mod.file_flag_hard_linked != 0) 0 else rec.bytes;
+                    const bytes = if (rec.flags & space_mod.file_flag_hard_linked != 0) 0 else rec.bytes;
+                    target = .{ .path = path, .size = bytes };
                 },
             }
-            batch.appendAssumeCapacity(.{ .path = path, .size = bytes });
+            batch.appendAssumeCapacity(target);
             if (batch.items.len == trash_batch) {
                 self.removeBatch(arena, batch.items, true, trash_fn, user, report);
                 batch.clearRetainingCapacity();
