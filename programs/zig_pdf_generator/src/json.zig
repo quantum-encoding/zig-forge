@@ -52,6 +52,9 @@ pub const JsonError = error{
 /// ~25 pages of invoice — far past any real document.
 pub const MAX_LINE_ITEMS: usize = 500;
 
+/// Hard cap on `adjustments`, bounded for the same reason as `items`.
+pub const MAX_ADJUSTMENTS: usize = 50;
+
 /// The defaults a `preset` expands to. Every field is optional: null means the
 /// preset says nothing about it, so the field keeps its ordinary default. A
 /// preset only ever supplies a *default* — an explicit key of the same name in
@@ -62,20 +65,42 @@ const PresetDefaults = struct {
     show_branding: ?bool = null,
     theme: ?invoice.Theme = null,
     table_style: ?invoice.TableStyle = null,
+    show_bank_details: ?bool = null,
 };
 
 /// Valid values of the `preset` key, in the order they are documented.
-pub const preset_names = "receipt, squircle, glass, minimal";
+pub const preset_names = "quote, invoice, receipt, custom, classic, squircle, glass, minimal, letterhead";
 
 /// Resolve a `preset` value to its defaults. Null for an unrecognised name —
 /// the caller turns that into `error.UnknownPreset` rather than silently
 /// rendering the house default, so a typo is visible at the call site.
 fn presetDefaults(name: []const u8) ?PresetDefaults {
+    // Document presets: what the document says.
+    if (std.mem.eql(u8, name, "quote")) return .{
+        .document_type = "quote",
+        .show_bank_details = false,
+    };
+    if (std.mem.eql(u8, name, "invoice")) return .{
+        .document_type = "invoice",
+        .show_bank_details = true,
+    };
     if (std.mem.eql(u8, name, "receipt")) return .{
         .document_type = "receipt",
         .show_tax = false,
         .show_branding = false,
+        .show_bank_details = false,
+    };
+    if (std.mem.eql(u8, name, "custom")) return .{
+        .document_type = "custom",
+    };
+    // Style presets: how it looks. "minimal" predates the minimal theme and
+    // keeps its meaning (classic layout, rule-only table, no branding); the
+    // Minimal theme itself is `style`/`theme: "minimal"`.
+    if (std.mem.eql(u8, name, "classic")) return .{
         .theme = .classic,
+    };
+    if (std.mem.eql(u8, name, "letterhead")) return .{
+        .theme = .letterhead,
     };
     if (std.mem.eql(u8, name, "squircle")) return .{
         .theme = .squircle,
@@ -98,6 +123,7 @@ pub fn describeInvoiceError(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.UnknownPreset => "unknown \"preset\" (valid: " ++ preset_names ++ ")",
         error.TooManyLineItems => std.fmt.comptimePrint("too many \"items\" (max {d})", .{MAX_LINE_ITEMS}),
+        error.TooManyAdjustments => std.fmt.comptimePrint("too many \"adjustments\" (max {d})", .{MAX_ADJUSTMENTS}),
         else => null,
     };
 }
@@ -135,6 +161,11 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     if (obj.get("items")) |items_val| {
         if (items_val == .array and items_val.array.items.len > MAX_LINE_ITEMS) {
             return error.TooManyLineItems;
+        }
+    }
+    if (obj.get("adjustments")) |adj_val| {
+        if (adj_val == .array and adj_val.array.items.len > MAX_ADJUSTMENTS) {
+            return error.TooManyAdjustments;
         }
     }
 
@@ -247,16 +278,12 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
         }
     }
 
-    // Parse whole-document theme (classic | squircle | glass)
+    // Whole-document theme (classic | squircle | glass | minimal |
+    // letterhead). `style` is a synonym and wins when both are present; an
+    // unrecognised value renders classic.
     if (preset.theme) |th| data.theme = th;
-    if (getJsonString(obj, "theme")) |theme| {
-        if (std.mem.eql(u8, theme, "squircle")) {
-            data.theme = .squircle;
-        } else if (std.mem.eql(u8, theme, "glass")) {
-            data.theme = .glass;
-        } else {
-            data.theme = .classic;
-        }
+    if (getJsonString(obj, "style") orelse getJsonString(obj, "theme")) |theme| {
+        data.theme = parseTheme(theme);
     }
 
     // IRPF retention (Spanish freelancer invoices)
@@ -390,13 +417,21 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
             var items = try allocator.alloc(invoice.LineItem, items_array.items.len);
 
             for (items_array.items, 0..) |item_val, i| {
+                // A non-object entry becomes an empty row (never left undefined:
+                // freeInvoiceData walks every element).
+                items[i] = .{ .description = "", .quantity = 0, .unit_price = 0, .total = 0 };
                 if (item_val == .object) {
                     const item_obj = item_val.object;
+                    const quantity = getJsonFloat(item_obj, "quantity") orelse 0;
+                    const unit_price = getJsonFloat(item_obj, "unit_price") orelse 0;
+                    const discount = getJsonFloat(item_obj, "discount") orelse 0;
                     items[i] = invoice.LineItem{
                         .description = try dupeJsonString(allocator, item_obj, "description") orelse "",
-                        .quantity = getJsonFloat(item_obj, "quantity") orelse 0,
-                        .unit_price = getJsonFloat(item_obj, "unit_price") orelse 0,
-                        .total = getJsonFloat(item_obj, "total") orelse 0,
+                        .quantity = quantity,
+                        .unit_price = unit_price,
+                        .total = getJsonFloat(item_obj, "total") orelse invoice.lineTotal(quantity, unit_price, discount),
+                        .unit = try dupeJsonString(allocator, item_obj, "unit") orelse "",
+                        .discount = discount,
                     };
                 }
             }
@@ -405,7 +440,83 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
         }
     }
 
+    // Adjustment rows: [{ "label", "amount" }]. Labels always heap-allocated.
+    if (obj.get("adjustments")) |adj_val| {
+        if (adj_val == .array and adj_val.array.items.len > 0) {
+            const arr = adj_val.array;
+            const adjs = try allocator.alloc(invoice.Adjustment, arr.items.len);
+            for (arr.items, 0..) |av, i| {
+                const has_obj = av == .object;
+                const label = if (has_obj) try dupeJsonString(allocator, av.object, "label") else null;
+                adjs[i] = .{
+                    .label = label orelse try allocator.dupe(u8, ""),
+                    .amount = if (has_obj) getJsonFloat(av.object, "amount") orelse 0 else 0,
+                };
+            }
+            data.adjustments = adjs;
+        }
+    }
+
+    // Totals the payload leaves out are derived; a key that is present —
+    // even an explicit 0 — is drawn verbatim. `subtotal` = sum of the line
+    // totals (each already net of its discount); `tax_amount` = tax_rate x
+    // (subtotal + adjustments), 0 when tax is not shown; `total` = subtotal +
+    // adjustments + tax - IRPF. Derived figures build on supplied ones.
+    {
+        const derived = invoice.computeTotals(data.items, data.adjustments, data.tax_rate, data.show_tax, data.irpf_amount);
+        if (obj.get("subtotal") == null) data.subtotal = derived.subtotal;
+        const base = data.subtotal + derived.adjustments;
+        if (obj.get("tax_amount") == null) data.tax_amount = if (data.show_tax) invoice.roundCents(base * data.tax_rate) else 0;
+        if (obj.get("total") == null) {
+            const tax = if (data.show_tax) data.tax_amount else 0;
+            data.total = invoice.roundCents(base + tax - @abs(data.irpf_amount));
+        }
+    }
+
+    // ---- Block toggles and document-system fields --------------------------
+    data.show_client = getJsonBool(obj, "show_client") orelse true;
+    data.show_qty_columns = getJsonBool(obj, "show_qty_columns") orelse true;
+    data.due_date_label = try dupeJsonString(allocator, obj, "due_date_label");
+    data.subject = try dupeJsonString(allocator, obj, "subject") orelse try allocator.dupe(u8, "");
+
+    data.amount_paid = getJsonFloat(obj, "amount_paid");
+    data.payment_date = try dupeJsonString(allocator, obj, "payment_date") orelse try allocator.dupe(u8, "");
+    data.payment_method = try dupeJsonString(allocator, obj, "payment_method") orelse try allocator.dupe(u8, "");
+    data.paid_stamp = getJsonBool(obj, "paid_stamp");
+
+    {
+        const bd_obj: ?std.json.ObjectMap = if (obj.get("bank_details")) |bv|
+            (if (bv == .object) bv.object else null)
+        else
+            null;
+        inline for (@typeInfo(invoice.BankDetails).@"struct".fields) |f| {
+            const key = f.name;
+            @field(data.bank_details, key) = if (bd_obj) |bo|
+                try dupeJsonString(allocator, bo, key) orelse
+                    (if (comptime std.mem.eql(u8, key, "bic")) try dupeJsonString(allocator, bo, "swift") else null) orelse
+                    try allocator.dupe(u8, "")
+            else
+                try allocator.dupe(u8, "");
+        }
+    }
+    const is_quote = std.mem.eql(u8, data.document_type, "quote");
+    const is_receipt = std.mem.eql(u8, data.document_type, "receipt");
+    data.show_bank_details = getJsonBool(obj, "show_bank_details") orelse
+        preset.show_bank_details orelse !(is_quote or is_receipt);
+
+    data.show_signature = getJsonBool(obj, "show_signature") orelse false;
+    data.signature_name = try dupeJsonString(allocator, obj, "signature_name") orelse try allocator.dupe(u8, "");
+    data.signature_title = try dupeJsonString(allocator, obj, "signature_title") orelse try allocator.dupe(u8, "");
+    data.signature_image_base64 = try dupeJsonString(allocator, obj, "signature_image_base64");
+
     return data;
+}
+
+fn parseTheme(name: []const u8) invoice.Theme {
+    inline for (@typeInfo(invoice.Theme).@"enum".fields) |f| {
+        if (std.mem.eql(u8, name, f.name)) return @enumFromInt(f.value);
+    }
+    return .classic;
 }
 
 /// Get string value from JSON object
@@ -507,9 +618,23 @@ pub fn freeInvoiceData(allocator: std.mem.Allocator, data: *const invoice.Invoic
     if (data.items.len > 0) {
         for (data.items) |item| {
             if (item.description.len > 0) allocator.free(item.description);
+            if (item.unit.len > 0) allocator.free(item.unit);
         }
         allocator.free(data.items);
     }
+
+    for (data.adjustments) |a| allocator.free(a.label);
+    if (data.adjustments.len > 0) allocator.free(data.adjustments);
+    if (data.due_date_label) |s| allocator.free(s);
+    allocator.free(data.subject);
+    allocator.free(data.payment_date);
+    allocator.free(data.payment_method);
+    inline for (@typeInfo(invoice.BankDetails).@"struct".fields) |f| {
+        allocator.free(@field(data.bank_details, f.name));
+    }
+    allocator.free(data.signature_name);
+    allocator.free(data.signature_title);
+    if (data.signature_image_base64) |s| allocator.free(s);
 }
 
 // =============================================================================
@@ -935,4 +1060,191 @@ test "parse crypto receipt missing required field" {
 
     const result = parseCryptoReceiptJson(allocator, json);
     try std.testing.expectError(error.MissingField, result);
+}
+
+test "absent totals are derived from the items; explicit zeros are kept" {
+    const allocator = std.testing.allocator;
+
+    // No subtotal / tax_amount / total keys: all three derived.
+    const derived = try parseInvoiceJson(allocator,
+        \\{"preset": "glass", "tax_rate": 0.2, "items": [
+        \\  {"description": "A", "quantity": 2, "unit_price": 450, "total": 900},
+        \\  {"description": "B", "quantity": 1, "unit_price": 320, "total": 320}]}
+    );
+    defer freeInvoiceData(allocator, &derived);
+    try std.testing.expectApproxEqAbs(@as(f64, 1220), derived.subtotal, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 244), derived.tax_amount, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 1464), derived.total, 0.001);
+
+    // Present keys win, even as 0.
+    const explicit = try parseInvoiceJson(allocator,
+        \\{"subtotal": 0, "tax_amount": 0, "total": 0,
+        \\ "items": [{"description": "A", "quantity": 1, "unit_price": 10, "total": 10}]}
+    );
+    defer freeInvoiceData(allocator, &explicit);
+    try std.testing.expectEqual(@as(f64, 0), explicit.subtotal);
+    try std.testing.expectEqual(@as(f64, 0), explicit.tax_amount);
+    try std.testing.expectEqual(@as(f64, 0), explicit.total);
+
+    // Only the absent figure is derived, building on the supplied ones.
+    const partial = try parseInvoiceJson(allocator,
+        \\{"subtotal": 100, "tax_rate": 0.1,
+        \\ "items": [{"description": "A", "quantity": 1, "unit_price": 10, "total": 10}]}
+    );
+    defer freeInvoiceData(allocator, &partial);
+    try std.testing.expectApproxEqAbs(@as(f64, 10), partial.tax_amount, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 110), partial.total, 0.001);
+}
+
+test "line discount, adjustments and receipts feed the derived totals" {
+    const allocator = std.testing.allocator;
+
+    const data = try parseInvoiceJson(allocator,
+        \\{"tax_rate": 0.2,
+        \\ "items": [
+        \\  {"description": "Hours", "quantity": 10, "unit": "hrs", "unit_price": 80, "discount": 10},
+        \\  {"description": "Fixed", "quantity": 1, "unit_price": 300}],
+        \\ "adjustments": [{"label": "Shipping", "amount": 50}, {"label": "Credit", "amount": -150}],
+        \\ "amount_paid": 500, "payment_date": "2026-09-03", "payment_method": "Card"}
+    );
+    defer freeInvoiceData(allocator, &data);
+
+    // 10 x 80 less 10% = 720; + 300 = 1020 subtotal.
+    try std.testing.expectApproxEqAbs(@as(f64, 720), data.items[0].total, 0.001);
+    try std.testing.expectEqualStrings("hrs", data.items[0].unit);
+    try std.testing.expectApproxEqAbs(@as(f64, 10), data.items[0].discount, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 1020), data.subtotal, 0.001);
+    // Taxable base 1020 + 50 - 150 = 920 -> tax 184 -> total 1104.
+    try std.testing.expectEqual(@as(usize, 2), data.adjustments.len);
+    try std.testing.expectEqualStrings("Shipping", data.adjustments[0].label);
+    try std.testing.expectApproxEqAbs(@as(f64, 184), data.tax_amount, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 1104), data.total, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 604), invoice.balanceDue(data.total, data.amount_paid.?), 0.001);
+    try std.testing.expectEqualStrings("Card", data.payment_method);
+
+    // A receipt (tax hidden by default) derives an untaxed total.
+    const rct = try parseInvoiceJson(allocator,
+        \\{"preset": "receipt", "items": [{"description": "X", "quantity": 3, "unit_price": 20}],
+        \\ "adjustments": [{"label": "Delivery", "amount": 5}], "amount_paid": 65}
+    );
+    defer freeInvoiceData(allocator, &rct);
+    try std.testing.expectEqual(@as(f64, 0), rct.tax_amount);
+    try std.testing.expectApproxEqAbs(@as(f64, 65), rct.total, 0.001);
+    try std.testing.expectEqual(@as(f64, 0), invoice.balanceDue(rct.total, rct.amount_paid.?));
+}
+
+test "block toggles default from the document type and preset" {
+    const allocator = std.testing.allocator;
+
+    const bare = try parseInvoiceJson(allocator, "{\"company_name\": \"Co\"}");
+    defer freeInvoiceData(allocator, &bare);
+    try std.testing.expect(bare.show_client);
+    try std.testing.expect(bare.show_qty_columns);
+    try std.testing.expect(bare.show_bank_details);
+    try std.testing.expect(!bare.show_signature);
+    try std.testing.expect(bare.due_date_label == null);
+    try std.testing.expect(bare.amount_paid == null);
+    try std.testing.expect(bare.paid_stamp == null);
+    try std.testing.expect(bare.bank_details.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), bare.adjustments.len);
+
+    const quote = try parseInvoiceJson(allocator, "{\"preset\": \"quote\"}");
+    defer freeInvoiceData(allocator, &quote);
+    try std.testing.expectEqualStrings("quote", quote.document_type);
+    try std.testing.expect(!quote.show_bank_details);
+    try std.testing.expect(quote.show_tax);
+
+    const rct = try parseInvoiceJson(allocator, "{\"document_type\": \"receipt\"}");
+    defer freeInvoiceData(allocator, &rct);
+    try std.testing.expect(!rct.show_bank_details);
+
+    const inv = try parseInvoiceJson(allocator, "{\"preset\": \"invoice\", \"show_bank_details\": false, \"show_client\": false, \"show_qty_columns\": false, \"show_signature\": true}");
+    defer freeInvoiceData(allocator, &inv);
+    try std.testing.expectEqualStrings("invoice", inv.document_type);
+    try std.testing.expect(!inv.show_bank_details);
+    try std.testing.expect(!inv.show_client);
+    try std.testing.expect(!inv.show_qty_columns);
+    try std.testing.expect(inv.show_signature);
+
+    const custom = try parseInvoiceJson(allocator, "{\"preset\": \"custom\", \"title\": \"PURCHASE ORDER\", \"number_label\": \"PO #:\"}");
+    defer freeInvoiceData(allocator, &custom);
+    try std.testing.expectEqualStrings("custom", custom.document_type);
+    try std.testing.expectEqualStrings("PURCHASE ORDER", custom.custom_title.?);
+}
+
+test "style and theme select every visual style; receipt is not forced classic" {
+    const allocator = std.testing.allocator;
+
+    const names = [_][]const u8{ "classic", "squircle", "glass", "minimal", "letterhead" };
+    const themes = [_]invoice.Theme{ .classic, .squircle, .glass, .minimal, .letterhead };
+    for (names, themes) |n, t| {
+        var buf: [64]u8 = undefined;
+        const a = try parseInvoiceJson(allocator, try std.fmt.bufPrint(&buf, "{{\"style\": \"{s}\"}}", .{n}));
+        defer freeInvoiceData(allocator, &a);
+        try std.testing.expectEqual(t, a.theme);
+        const b = try parseInvoiceJson(allocator, try std.fmt.bufPrint(&buf, "{{\"theme\": \"{s}\"}}", .{n}));
+        defer freeInvoiceData(allocator, &b);
+        try std.testing.expectEqual(t, b.theme);
+    }
+
+    // `style` wins over `theme`; the letterhead preset sets the theme.
+    const both = try parseInvoiceJson(allocator, "{\"theme\": \"glass\", \"style\": \"minimal\"}");
+    defer freeInvoiceData(allocator, &both);
+    try std.testing.expectEqual(invoice.Theme.minimal, both.theme);
+    const lh = try parseInvoiceJson(allocator, "{\"preset\": \"letterhead\"}");
+    defer freeInvoiceData(allocator, &lh);
+    try std.testing.expectEqual(invoice.Theme.letterhead, lh.theme);
+
+    const rct = try parseInvoiceJson(allocator, "{\"preset\": \"receipt\", \"style\": \"glass\"}");
+    defer freeInvoiceData(allocator, &rct);
+    try std.testing.expectEqual(invoice.Theme.glass, rct.theme);
+    try std.testing.expectEqualStrings("receipt", rct.document_type);
+
+    // The legacy "minimal" preset keeps its meaning: classic theme, rule-only table.
+    const legacy = try parseInvoiceJson(allocator, "{\"preset\": \"minimal\"}");
+    defer freeInvoiceData(allocator, &legacy);
+    try std.testing.expectEqual(invoice.Theme.classic, legacy.theme);
+    try std.testing.expectEqual(invoice.TableStyle.minimal, legacy.table_style);
+}
+
+test "bank details, signature and labels parse" {
+    const allocator = std.testing.allocator;
+
+    const data = try parseInvoiceJson(allocator,
+        \\{"bank_details": {"account_name": "Example Ltd", "sort_code": "00-00-00",
+        \\  "account_number": "00000000", "swift": "XMPLGB2L", "reference": "INV-1"},
+        \\ "show_signature": true, "signature_name": "A. Person", "signature_title": "Director",
+        \\ "due_date_label": "Pay by:", "subject": "Phase 1",
+        \\ "labels": {"balance_due": "Saldo:"}}
+    );
+    defer freeInvoiceData(allocator, &data);
+    try std.testing.expectEqualStrings("Example Ltd", data.bank_details.account_name);
+    try std.testing.expectEqualStrings("XMPLGB2L", data.bank_details.bic);
+    try std.testing.expectEqualStrings("", data.bank_details.iban);
+    try std.testing.expect(!data.bank_details.isEmpty());
+    try std.testing.expectEqualStrings("A. Person", data.signature_name);
+    try std.testing.expectEqualStrings("Pay by:", data.due_date_label.?);
+    try std.testing.expectEqualStrings("Phase 1", data.subject);
+    try std.testing.expectEqualStrings("Saldo:", data.labels.balance_due);
+    try std.testing.expectEqualStrings("Amount Paid:", data.labels.amount_paid);
+}
+
+test "adjustments are capped and non-object items are safe" {
+    const allocator = std.testing.allocator;
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "{\"adjustments\":[");
+    for (0..MAX_ADJUSTMENTS + 1) |i| {
+        if (i > 0) try buf.append(allocator, ',');
+        try buf.appendSlice(allocator, "{\"label\":\"x\",\"amount\":1}");
+    }
+    try buf.appendSlice(allocator, "]}");
+    try std.testing.expectError(error.TooManyAdjustments, parseInvoiceJson(allocator, buf.items));
+
+    const odd = try parseInvoiceJson(allocator, "{\"items\": [1, \"x\", {\"description\": \"ok\", \"total\": 5}]}");
+    defer freeInvoiceData(allocator, &odd);
+    try std.testing.expectEqual(@as(usize, 3), odd.items.len);
+    try std.testing.expectEqualStrings("", odd.items[0].description);
+    try std.testing.expectApproxEqAbs(@as(f64, 5), odd.subtotal, 0.001);
 }

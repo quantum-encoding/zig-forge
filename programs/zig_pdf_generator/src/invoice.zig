@@ -27,7 +27,80 @@ pub const LineItem = struct {
     quantity: f64,
     unit_price: f64,
     total: f64,
+    /// Unit of measure printed after the quantity ("hrs", "m²", "days").
+    unit: []const u8 = "",
+    /// Line discount in percent (10 = 10% off). Shown in its own column when
+    /// any item has one; the JSON parser applies it when it derives `total`.
+    discount: f64 = 0,
 };
+
+/// One extra row between Subtotal and Tax (e.g. Shipping +12.50, Deposit
+/// -200.00). Part of the taxable base when the engine derives the totals.
+pub const Adjustment = struct {
+    label: []const u8 = "",
+    amount: f64 = 0,
+};
+
+/// Structured bank-transfer details, drawn as a text block. Independent of
+/// the image-only `qr_mode = bank_details` QR caption.
+pub const BankDetails = struct {
+    account_name: []const u8 = "",
+    bank_name: []const u8 = "",
+    sort_code: []const u8 = "",
+    account_number: []const u8 = "",
+    iban: []const u8 = "",
+    bic: []const u8 = "",
+    reference: []const u8 = "",
+
+    pub fn isEmpty(self: BankDetails) bool {
+        return self.account_name.len == 0 and self.bank_name.len == 0 and
+            self.sort_code.len == 0 and self.account_number.len == 0 and
+            self.iban.len == 0 and self.bic.len == 0 and self.reference.len == 0;
+    }
+};
+
+/// Round to whole cents (half away from zero).
+pub fn roundCents(x: f64) f64 {
+    return @round(x * 100.0) / 100.0;
+}
+
+/// Line total the engine derives when the caller omits one:
+/// quantity x unit_price, less `discount_pct` percent, rounded to cents.
+pub fn lineTotal(quantity: f64, unit_price: f64, discount_pct: f64) f64 {
+    const d = std.math.clamp(discount_pct, 0, 100);
+    return roundCents(quantity * unit_price * (1.0 - d / 100.0));
+}
+
+pub const Totals = struct {
+    subtotal: f64,
+    adjustments: f64,
+    tax: f64,
+    total: f64,
+};
+
+/// Derive document totals from the line items. The taxable base is the
+/// subtotal plus every adjustment; tax is `tax_rate` of that base (0 when tax
+/// is not shown); IRPF is withheld from the result.
+pub fn computeTotals(items: []const LineItem, adjustments: []const Adjustment, tax_rate: f64, show_tax: bool, irpf_amount: f64) Totals {
+    var subtotal: f64 = 0;
+    for (items) |it| subtotal += it.total;
+    var adj: f64 = 0;
+    for (adjustments) |a| adj += a.amount;
+    subtotal = roundCents(subtotal);
+    adj = roundCents(adj);
+    const tax = if (show_tax) roundCents((subtotal + adj) * tax_rate) else 0;
+    return .{
+        .subtotal = subtotal,
+        .adjustments = adj,
+        .tax = tax,
+        .total = roundCents(subtotal + adj + tax - @abs(irpf_amount)),
+    };
+}
+
+/// Amount still owed after `amount_paid`, never negative.
+pub fn balanceDue(total: f64, amount_paid: f64) f64 {
+    return @max(0, roundCents(total - amount_paid));
+}
 
 pub const DisplayMode = enum {
     itemized, // Show full item details
@@ -63,10 +136,19 @@ pub const TableStyle = enum {
 /// all of squircle's layout metrics and page-break machinery — only the
 /// materials differ. Panels are composited beneath the text on each page so the
 /// wash and sheens always sit behind the content.
+/// `minimal` is typography-led: no filled bands or cards, hairline rules,
+/// right-aligned figures, generous whitespace and a single accent taken from
+/// primary_color (title, TOTAL figure).
+/// `letterhead` opens like a formal business letter — letterhead block over a
+/// double rule, recipient address and date/reference block, the document
+/// title and an optional subject line — followed by a compact item table and
+/// a double-ruled total.
 pub const Theme = enum {
     classic,
     squircle,
     glass,
+    minimal,
+    letterhead,
 };
 
 /// One call-to-action payment button. Multiple can be shown side-by-stacked
@@ -126,6 +208,31 @@ pub const Labels = struct {
     footer_verify: []const u8 = "Scan to Verify Invoice",
     footer_verifactu: []const u8 = "VeriFactu Compliant Invoice",
     thank_you: []const u8 = "Thank you for your business",
+    // Due-date meta label used for quotes when `due_date_label` is unset
+    valid_until: []const u8 = "Valid Until:",
+    // Amount column header when the Qty/Unit Price columns are hidden
+    amount: []const u8 = "Amount",
+    // Line-discount column header
+    discount: []const u8 = "Disc.",
+    // Payment rows under the TOTAL
+    amount_paid: []const u8 = "Amount Paid:",
+    balance_due: []const u8 = "Balance Due:",
+    paid_in_full: []const u8 = "PAID IN FULL",
+    // Structured bank-details rows (the block heading is `bank_details`)
+    account_name: []const u8 = "Account name",
+    bank_name: []const u8 = "Bank",
+    sort_code: []const u8 = "Sort code",
+    account_number: []const u8 = "Account no.",
+    iban: []const u8 = "IBAN",
+    bic: []const u8 = "BIC / SWIFT",
+    payment_reference: []const u8 = "Reference",
+    // Signature block heading
+    signature: []const u8 = "Authorised signature",
+    // Letterhead subject prefix ("Re: <subject>")
+    subject_prefix: []const u8 = "Re:",
+    // Minimal/letterhead page footer: "Page 2 of 3"
+    page: []const u8 = "Page",
+    page_of: []const u8 = "of",
 };
 
 pub const InvoiceData = struct {
@@ -236,8 +343,8 @@ pub const InvoiceData = struct {
     // original alternating-row "bands" look, so existing invoices are unchanged.
     table_style: TableStyle = .bands,
 
-    // Whole-document theme (classic | squircle). Defaults to the original
-    // layout so every existing payload renders byte-identically.
+    // Whole-document theme (classic | squircle | glass | minimal |
+    // letterhead). Defaults to the original layout.
     theme: Theme = .classic,
 
     // IRPF retention (Spanish freelancer invoices): a percentage withheld and
@@ -267,6 +374,44 @@ pub const InvoiceData = struct {
     password: []const u8 = "",
     owner_password: []const u8 = "",
     seed: ?[32]u8 = null,
+
+    // ---- Block toggles and document-system fields --------------------------
+
+    // Buyer block. When false — or when client_name, client_address and
+    // client_vat are all empty — no Bill To block is drawn (the rounded
+    // themes' FROM card then spans the row).
+    show_client: bool = true,
+
+    // Due-date meta label. Null: "Valid Until:" (labels.valid_until) for a
+    // quote whose labels.due_date is untouched, otherwise labels.due_date.
+    due_date_label: ?[]const u8 = null,
+
+    // False: Description | Amount only (flat-rate / fixed-fee documents).
+    show_qty_columns: bool = true,
+
+    // Rows between Subtotal and Tax (Shipping, Deposit, ...).
+    adjustments: []const Adjustment = &[_]Adjustment{},
+
+    // Payment received. When set, "Amount Paid" and "Balance Due" rows follow
+    // the TOTAL; payment_date / payment_method annotate the paid row.
+    amount_paid: ?f64 = null,
+    payment_date: []const u8 = "",
+    payment_method: []const u8 = "",
+    // PAID IN FULL mark. Null: drawn on a receipt whose balance is 0.
+    paid_stamp: ?bool = null,
+
+    // Bank-transfer text block (drawn when non-empty and show_bank_details).
+    bank_details: BankDetails = .{},
+    show_bank_details: bool = true,
+
+    // Signature line block.
+    show_signature: bool = false,
+    signature_name: []const u8 = "",
+    signature_title: []const u8 = "",
+    signature_image_base64: ?[]const u8 = null,
+
+    // Subject line under the title (minimal and letterhead themes).
+    subject: []const u8 = "",
 };
 
 /// 32 bytes of random material for the encryption seed. Native: from the OS
@@ -287,6 +432,89 @@ fn addressDelimiter(addr: []const u8) []const u8 {
     return if (std.mem.indexOfScalar(u8, addr, '\n') != null) "\n" else ", ";
 }
 
+/// Quantity with up to two decimals, trailing zeros trimmed: 3 -> "3",
+/// 2.5 -> "2.5", 0.125 -> "0.13".
+pub fn fmtQty(buf: []u8, q: f64) []const u8 {
+    const s = std.fmt.bufPrint(buf, "{d:.2}", .{q}) catch return "0";
+    if (std.mem.indexOfScalar(u8, s, '.') == null) return s;
+    var end = s.len;
+    while (end > 0 and s[end - 1] == '0') end -= 1;
+    if (end > 0 and s[end - 1] == '.') end -= 1;
+    return s[0..end];
+}
+
+/// Money with the sign ahead of the currency symbol ("-£12.50").
+fn fmtMoney(buf: []u8, symbol: []const u8, amount: f64) []const u8 {
+    if (amount <= -0.005) return std.fmt.bufPrint(buf, "-{s}{d:.2}", .{ symbol, -amount }) catch "0.00";
+    return std.fmt.bufPrint(buf, "{s}{d:.2}", .{ symbol, @abs(amount) }) catch "0.00";
+}
+
+/// Wrap `text` to `max_width`, honouring explicit line breaks: each
+/// "\n"-separated paragraph wraps on its own and an empty paragraph yields a
+/// blank line. Text without a newline wraps exactly as `wrapText` does.
+fn wrapParagraphs(allocator: std.mem.Allocator, text: []const u8, font: document.Font, size: f32, max_width: f32) !document.WrappedText {
+    if (std.mem.indexOfScalar(u8, text, '\n') == null) return document.wrapText(allocator, text, font, size, max_width);
+    var lines: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer lines.deinit(allocator);
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |raw| {
+        const para = std.mem.trimEnd(u8, raw, "\r");
+        if (para.len == 0) {
+            try lines.append(allocator, "");
+            continue;
+        }
+        var w = try document.wrapText(allocator, para, font, size, max_width);
+        defer w.deinit();
+        try lines.appendSlice(allocator, w.lines);
+    }
+    return .{ .lines = try lines.toOwnedSlice(allocator), .allocator = allocator };
+}
+
+/// A drawn label reduced to small-caps form: trailing colon/space removed and
+/// ASCII upper-cased (non-ASCII bytes pass through), cut on a UTF-8 boundary.
+fn capsLabel(buf: []u8, text: []const u8) []const u8 {
+    const t = std.mem.trimEnd(u8, text, ": ");
+    var n = @min(t.len, buf.len);
+    while (n > 0 and n < t.len and (t[n] & 0xC0) == 0x80) n -= 1;
+    for (t[0..n], 0..) |c, i| buf[i] = std.ascii.toUpper(c);
+    return buf[0..n];
+}
+
+/// A drawn label with its trailing colon removed ("Subtotal:" -> "Subtotal").
+fn bareLabel(text: []const u8) []const u8 {
+    return std.mem.trimEnd(u8, text, ": ");
+}
+
+/// Item-table column geometry. Classic/squircle/glass use left-aligned
+/// columns at fixed offsets (the original grid when no discount column is
+/// needed); minimal/letterhead right-align every figure. Numeric columns hold
+/// a left x (left-aligned) or a right edge (right-aligned); null = hidden.
+const TableCols = struct {
+    desc_x: f32,
+    desc_w: f32,
+    qty: ?f32,
+    price: ?f32,
+    disc: ?f32,
+    total: f32,
+    right_aligned: bool,
+};
+
+/// Everything loaded before drawing starts: image resource ids and the
+/// resolved crypto/QR state.
+const Assets = struct {
+    logo_id: ?[]const u8 = null,
+    qr_id: ?[]const u8 = null,
+    sig_id: ?[]const u8 = null,
+    recipient_identicon_id: ?[]const u8 = null,
+    sender_identicon_id: ?[]const u8 = null,
+    effective_qr_mode: QrCodeMode = .none,
+    wallet: ?[]const u8 = null,
+    network: crypto_receipt.Network = .bitcoin,
+    sender: ?[]const u8 = null,
+    symbol: []const u8 = "",
+    amount_str: ?[]const u8 = null,
+};
+
 pub const InvoiceRenderer = struct {
     allocator: std.mem.Allocator,
     doc: document.PdfDocument,
@@ -295,8 +523,14 @@ pub const InvoiceRenderer = struct {
     // Decoded images (need to track for cleanup)
     logo_decoded: ?[]u8 = null,
     qr_decoded: ?[]u8 = null,
+    sig_decoded: ?[]u8 = null,
     logo_pixels: ?[]u8 = null,
     qr_pixels: ?[]u8 = null,
+    // Natural pixel sizes, for aspect-correct placement.
+    logo_px_w: u32 = 0,
+    logo_px_h: u32 = 0,
+    sig_px_w: u32 = 0,
+    sig_px_h: u32 = 0,
 
     // Crypto-generated images (native QR and identicons)
     crypto_qr_pixels: ?[]u8 = null,
@@ -313,6 +547,12 @@ pub const InvoiceRenderer = struct {
     /// each page flush so panels always sit behind text. Points at a stack local
     /// in `render`; null for non-glass themes (which never draw to it).
     bg: ?*document.ContentStream = null,
+    /// Minimal/letterhead: composed page streams held until the page count is
+    /// known, so every page footer can print "Page n of N".
+    pending_pages: std.ArrayListUnmanaged([]u8) = .empty,
+    /// Baseline of the first totals row, on the page the totals block is
+    /// drawn on — the bank-details block can sit beside it on the left.
+    totals_top: f32 = 0,
     margin_left: f32 = 40,
     margin_right: f32 = 40,
     margin_top: f32 = 40,
@@ -344,6 +584,14 @@ pub const InvoiceRenderer = struct {
             renderer.font_bold = renderer.doc.getFontId(.helvetica_bold);
         }
 
+        // The typographic themes breathe: wider margins all round.
+        if (data.theme == .minimal or data.theme == .letterhead) {
+            renderer.margin_left = 50;
+            renderer.margin_right = 50;
+            renderer.margin_top = 50;
+            renderer.margin_bottom = 64;
+        }
+
         renderer.current_y = renderer.page_height - renderer.margin_top;
 
         return renderer;
@@ -355,12 +603,16 @@ pub const InvoiceRenderer = struct {
         // So we only free decoded_bytes, never pixels (they're the same pointer for PNG)
         if (self.logo_decoded) |d| self.allocator.free(d);
         if (self.qr_decoded) |d| self.allocator.free(d);
+        if (self.sig_decoded) |d| self.allocator.free(d);
         // Note: logo_pixels and qr_pixels are NOT freed - they point to same memory as decoded
 
         // Free crypto-generated images (these are owned by us, not decoded from base64)
         if (self.crypto_qr_pixels) |p| self.allocator.free(p);
         if (self.recipient_identicon_pixels) |p| self.allocator.free(p);
         if (self.sender_identicon_pixels) |p| self.allocator.free(p);
+
+        for (self.pending_pages.items) |p| self.allocator.free(p);
+        self.pending_pages.deinit(self.allocator);
 
         self.doc.deinit();
     }
@@ -396,7 +648,7 @@ pub const InvoiceRenderer = struct {
     }
 
     // -------------------------------------------------------------------------
-    // Liquid Glass materials
+    // Document model helpers
     // -------------------------------------------------------------------------
 
     /// Themes that use squircle's rounded-card geometry (cards, rounded table
@@ -405,6 +657,98 @@ pub const InvoiceRenderer = struct {
     fn roundedLayout(self: *const InvoiceRenderer) bool {
         return self.data.theme == .squircle or self.data.theme == .glass;
     }
+
+    /// The typographic themes (minimal, letterhead): right-aligned figures,
+    /// hairline rules, per-page footers.
+    fn isModern(self: *const InvoiceRenderer) bool {
+        return self.data.theme == .minimal or self.data.theme == .letterhead;
+    }
+
+    fn isQuote(self: *const InvoiceRenderer) bool {
+        return std.mem.eql(u8, self.data.document_type, "quote");
+    }
+
+    fn isReceipt(self: *const InvoiceRenderer) bool {
+        return std.mem.eql(u8, self.data.document_type, "receipt");
+    }
+
+    fn isCustom(self: *const InvoiceRenderer) bool {
+        return std.mem.eql(u8, self.data.document_type, "custom");
+    }
+
+    /// True when a buyer block is drawn at all.
+    fn hasClient(self: *const InvoiceRenderer) bool {
+        return self.data.show_client and (self.data.client_name.len > 0 or
+            self.data.client_address.len > 0 or self.data.client_vat.len > 0);
+    }
+
+    fn docTitle(self: *const InvoiceRenderer) []const u8 {
+        return self.data.custom_title orelse
+            (if (self.isQuote()) "QUOTE" else if (self.isReceipt()) "RECEIPT" else if (self.isCustom()) "DOCUMENT" else "INVOICE");
+    }
+
+    fn numberLabel(self: *const InvoiceRenderer) []const u8 {
+        return self.data.number_label orelse
+            (if (self.isQuote()) "Quote #:" else if (self.isReceipt()) "Receipt #:" else if (self.isCustom()) "Reference:" else "Invoice #:");
+    }
+
+    fn dueLabel(self: *const InvoiceRenderer) []const u8 {
+        if (self.data.due_date_label) |l| return l;
+        if (self.isQuote() and std.mem.eql(u8, self.data.labels.due_date, "Due Date:")) return self.data.labels.valid_until;
+        return self.data.labels.due_date;
+    }
+
+    fn anyDiscount(self: *const InvoiceRenderer) bool {
+        if (self.data.display_mode != .itemized) return false;
+        for (self.data.items) |it| if (it.discount != 0) return true;
+        return false;
+    }
+
+    fn amountPaid(self: *const InvoiceRenderer) ?f64 {
+        return self.data.amount_paid;
+    }
+
+    fn showPaidStamp(self: *const InvoiceRenderer) bool {
+        if (self.data.paid_stamp) |p| return p;
+        const paid = self.data.amount_paid orelse return false;
+        return self.isReceipt() and balanceDue(self.data.total, paid) < 0.005;
+    }
+
+    fn showBank(self: *const InvoiceRenderer) bool {
+        return self.data.show_bank_details and !self.data.bank_details.isEmpty();
+    }
+
+    fn tableCols(self: *const InvoiceRenderer) TableCols {
+        const ml = self.margin_left;
+        const usable = self.page_width - self.margin_left - self.margin_right;
+        const disc = self.anyDiscount();
+        const qty = self.data.show_qty_columns;
+        if (!self.isModern()) {
+            if (qty and !disc) return .{ .desc_x = ml + 5, .desc_w = 265, .qty = ml + 280, .price = ml + 350, .disc = null, .total = ml + 450, .right_aligned = false };
+            if (qty) return .{ .desc_x = ml + 5, .desc_w = 225, .qty = ml + 240, .price = ml + 300, .disc = ml + 385, .total = ml + 450, .right_aligned = false };
+            if (disc) return .{ .desc_x = ml + 5, .desc_w = 370, .qty = null, .price = null, .disc = ml + 385, .total = ml + 450, .right_aligned = false };
+            return .{ .desc_x = ml + 5, .desc_w = 435, .qty = null, .price = null, .disc = null, .total = ml + 450, .right_aligned = false };
+        }
+        const r = ml + usable;
+        var left = r - 85; // total column
+        var c = TableCols{ .desc_x = ml, .desc_w = 0, .qty = null, .price = null, .disc = null, .total = r, .right_aligned = true };
+        if (disc) {
+            c.disc = left - 10;
+            left -= 55;
+        }
+        if (qty) {
+            c.price = left - 10;
+            left -= 85;
+            c.qty = left - 10;
+            left -= 70;
+        }
+        c.desc_w = left - ml - 14;
+        return c;
+    }
+
+    // -------------------------------------------------------------------------
+    // Liquid Glass materials
+    // -------------------------------------------------------------------------
 
     /// Linear blend from `a` to `b` by `t` in [0,1] (t=0 → a, t=1 → b).
     fn mixColor(a: document.Color, b: document.Color, t: f32) document.Color {
@@ -458,11 +802,8 @@ pub const InvoiceRenderer = struct {
         try bg.restoreState();
 
         // Top-edge sheen: white at the very top fading to `sheen_end`, clipped
-        // to the panel silhouette AND the top band so it reads as a highlight.
-        // Full-height fade: a band-clipped sheen left a hard tint seam where
-        // the band ended (field report: it sliced through the QUOTE wordmark
-        // and read as the panel's edge). Fading across the whole panel has no
-        // seam — the gradient's end IS the panel's bottom border.
+        // to the panel silhouette. The fade runs the full panel height, so
+        // there is no seam — the gradient's end IS the panel's bottom border.
         if (h > 1.0) {
             const sh = self.doc.getAxialShadingId(document.Color.white, sheen_end, x, y + h, x, y);
             try bg.saveState();
@@ -478,18 +819,59 @@ pub const InvoiceRenderer = struct {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Pages
+    // -------------------------------------------------------------------------
+
     /// Flush the current page: composite the background layer (wash + glass
     /// panels) beneath the foreground content, commit the page, and reset both
     /// buffers for the next page. For non-glass themes the background layer is
-    /// empty, so the composed bytes equal the content bytes exactly.
+    /// empty, so the composed bytes equal the content bytes exactly. The
+    /// typographic themes hold the composed page back (see pending_pages).
     fn flushPage(self: *InvoiceRenderer, content: *document.ContentStream) !void {
         const bg = self.bg.?;
         try bg.buffer.appendSlice(self.allocator, content.getContent());
-        try self.doc.addPage(bg);
+        var flushed: u32 = undefined;
+        if (self.isModern()) {
+            const bytes = try self.allocator.dupe(u8, bg.getContent());
+            errdefer self.allocator.free(bytes);
+            try self.pending_pages.append(self.allocator, bytes);
+            flushed = @intCast(self.pending_pages.items.len);
+        } else {
+            try self.doc.addPage(bg);
+            flushed = self.doc.page_count;
+        }
+        // Link annotations recorded from here on belong to the next page.
+        self.doc.setAnnotationPage(flushed);
         content.deinit();
         content.* = document.ContentStream.init(self.allocator);
         bg.deinit();
         bg.* = document.ContentStream.init(self.allocator);
+    }
+
+    /// Minimal/letterhead: add the held-back pages to the document, stamping
+    /// each with the page footer (hairline, company name, "Page n of N").
+    fn commitPendingPages(self: *InvoiceRenderer) !void {
+        const n = self.pending_pages.items.len;
+        const muted = document.Color.fromHex("#6B7280");
+        const hair = document.Color.fromHex("#E5E7EB");
+        const right = self.page_width - self.margin_right;
+        const fy = self.margin_bottom - 24;
+        for (self.pending_pages.items, 0..) |bytes, i| {
+            var cs = document.ContentStream.init(self.allocator);
+            defer cs.deinit();
+            try cs.buffer.appendSlice(self.allocator, bytes);
+            try cs.drawLine(self.margin_left, self.margin_bottom - 12, right, self.margin_bottom - 12, hair, 0.6);
+            if (self.data.company_name.len > 0) {
+                try cs.drawText(self.data.company_name, self.margin_left, fy, self.font_bold, 7.5, muted);
+            }
+            if (n > 1) {
+                var buf: [64]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "{s} {d} {s} {d}", .{ self.data.labels.page, i + 1, self.data.labels.page_of, n }) catch "";
+                try cs.drawTextRightAligned(s, right, fy, self.font_regular, self.fontEnumRegular(), 7.5, muted);
+            }
+            try self.doc.addPage(&cs);
+        }
     }
 
     /// Draw the items-table header (column titles + bar/rule per table_style) at
@@ -498,6 +880,7 @@ pub const InvoiceRenderer = struct {
     /// is a rounded accent band and the top of the rounded table container is
     /// recorded so the container can be closed when the rows end (per page).
     fn drawTableHeader(self: *InvoiceRenderer, content: *document.ContentStream) !void {
+        if (self.isModern()) return self.drawModernTableHeader(content);
         const primary = document.Color.fromHex(self.data.primary_color);
         const secondary = document.Color.fromHex(self.data.secondary_color);
         const usable_width = self.page_width - self.margin_left - self.margin_right;
@@ -505,7 +888,7 @@ pub const InvoiceRenderer = struct {
         const box_border = document.Color.fromHex("#d0d0d0");
         // Glass: the header band ends up WASHED (the white table container
         // composites over it), so white titles die — dark ink carries the
-        // contrast, same rule as the totals chip (field report).
+        // contrast, same rule as the totals chip.
         const header_text_color = if (self.data.theme == .glass)
             document.Color.fromHex(self.data.secondary_color)
         else if (table_style == .minimal and !self.roundedLayout()) primary else document.Color.white;
@@ -519,18 +902,55 @@ pub const InvoiceRenderer = struct {
             const header_border: ?document.Color = if (table_style == .boxes) box_border else null;
             try content.drawRect(self.margin_left, self.current_y - 5, usable_width, 22, primary, header_border);
         }
-        const col_desc = self.margin_left + 5;
-        const col_qty = self.margin_left + 280;
-        const col_price = self.margin_left + 350;
-        const col_total = self.margin_left + 450;
-        try content.drawText(self.data.labels.description, col_desc, self.current_y, self.font_bold, 10, header_text_color);
-        try content.drawText(self.data.labels.quantity, col_qty, self.current_y, self.font_bold, 10, header_text_color);
-        try content.drawText(self.data.labels.unit_price, col_price, self.current_y, self.font_bold, 10, header_text_color);
-        try content.drawText(self.data.labels.line_total, col_total, self.current_y, self.font_bold, 10, header_text_color);
+        const cols = self.tableCols();
+        const total_label = if (self.data.show_qty_columns) self.data.labels.line_total else self.data.labels.amount;
+        try content.drawText(self.data.labels.description, cols.desc_x, self.current_y, self.font_bold, 10, header_text_color);
+        if (cols.qty) |x| try content.drawText(self.data.labels.quantity, x, self.current_y, self.font_bold, 10, header_text_color);
+        if (cols.price) |x| try content.drawText(self.data.labels.unit_price, x, self.current_y, self.font_bold, 10, header_text_color);
+        if (cols.disc) |x| try content.drawText(self.data.labels.discount, x, self.current_y, self.font_bold, 10, header_text_color);
+        try content.drawText(total_label, cols.total, self.current_y, self.font_bold, 10, header_text_color);
         if (table_style == .minimal and !self.roundedLayout()) {
             try content.drawLine(self.margin_left, self.current_y - 6, self.margin_left + usable_width, self.current_y - 6, secondary, 0.75);
         }
         self.current_y -= 28;
+    }
+
+    /// Minimal: muted bold labels over a single hairline. Letterhead: labels
+    /// between an accent rule above and a fine accent rule below.
+    fn drawModernTableHeader(self: *InvoiceRenderer, content: *document.ContentStream) !void {
+        const primary = document.Color.fromHex(self.data.primary_color);
+        const secondary = document.Color.fromHex(self.data.secondary_color);
+        const left = self.margin_left;
+        const right = self.page_width - self.margin_right;
+        const cols = self.tableCols();
+        const bold = self.fontEnumBold();
+        const size: f32 = 8;
+        const color = if (self.data.theme == .minimal) document.Color.fromHex("#6B7280") else secondary;
+        const y = self.current_y;
+        if (self.data.theme == .letterhead) {
+            try content.drawLine(left, y + 12, right, y + 12, primary, 1.0);
+        }
+        var buf: [5][64]u8 = undefined;
+        const total_label = if (self.data.show_qty_columns) self.data.labels.line_total else self.data.labels.amount;
+        try content.drawTrackedText(capsLabel(&buf[0], self.data.labels.description), cols.desc_x, y, self.font_bold, size, 0.6, color);
+        const heads = [_]struct { x: ?f32, label: []const u8 }{
+            .{ .x = cols.qty, .label = self.data.labels.quantity },
+            .{ .x = cols.price, .label = self.data.labels.unit_price },
+            .{ .x = cols.disc, .label = self.data.labels.discount },
+            .{ .x = cols.total, .label = total_label },
+        };
+        for (heads, 1..) |h, i| {
+            const x = h.x orelse continue;
+            const t = capsLabel(&buf[i], h.label);
+            const w = bold.measureTracked(t, size, 0.6);
+            try content.drawTrackedText(t, x - w, y, self.font_bold, size, 0.6, color);
+        }
+        if (self.data.theme == .letterhead) {
+            try content.drawLine(left, y - 7, right, y - 7, primary, 0.4);
+        } else {
+            try content.drawLine(left, y - 7, right, y - 7, document.Color.fromHex("#D1D5DB"), 0.6);
+        }
+        self.current_y = y - 7 - 17;
     }
 
     /// Squircle theme: close the rounded container around the items table —
@@ -565,33 +985,85 @@ pub const InvoiceRenderer = struct {
         try self.flushPage(content);
         self.current_y = self.page_height - self.margin_top;
         if (self.data.theme == .glass) try self.drawGlassWash(self.bg.?);
+        if (self.isModern()) {
+            // Continuation pages carry the document's identity at the top.
+            var buf: [160]u8 = undefined;
+            const line = std.fmt.bufPrint(&buf, "{s}  {s}", .{ self.docTitle(), self.data.invoice_number }) catch self.docTitle();
+            try content.drawText(line, self.margin_left, self.current_y, self.font_bold, 8, document.Color.fromHex("#6B7280"));
+            self.current_y -= 30;
+        }
         if (redraw_header) try self.drawTableHeader(content);
     }
 
+    /// Start a new page (no table header) unless `needed` points still fit
+    /// above the bottom margin.
+    fn ensureSpace(self: *InvoiceRenderer, content: *document.ContentStream, needed: f32) !void {
+        if (self.current_y - needed < self.margin_bottom + 10) try self.startNewPage(content, false);
+    }
+
+    // -------------------------------------------------------------------------
+    // Render
+    // -------------------------------------------------------------------------
+
     /// Generate the complete invoice PDF
     pub fn render(self: *InvoiceRenderer) ![]const u8 {
-        // Resolve crypto payment block or legacy fields
-        const crypto_block = self.data.crypto_payment;
-        const wallet_val = if (crypto_block) |cb| (if (cb.to_address.len > 0) cb.to_address else null) else self.data.crypto_wallet;
-        const network_val = if (crypto_block) |cb| cb.getNetwork() else self.data.crypto_network;
-        const sender_val = if (crypto_block) |cb| (if (cb.from_address.len > 0) cb.from_address else null) else self.data.crypto_sender_wallet;
-        const symbol_val = if (crypto_block) |cb| (if (cb.currency.len > 0) cb.currency else cb.getNetwork().symbol()) else (self.data.crypto_custom_symbol orelse self.data.crypto_network.symbol());
-        const amount_str = if (crypto_block) |cb| (if (cb.amount.len > 0) cb.amount else null) else null;
-
         var content = document.ContentStream.init(self.allocator);
         defer content.deinit();
 
         // Glass theme: a background layer (wash + translucent panels + sheens)
         // composited beneath the foreground at every page flush. Empty for other
-        // themes, so their composed output is byte-identical to before.
+        // themes, so their composed output equals the content stream.
         var page_bg = document.ContentStream.init(self.allocator);
         defer page_bg.deinit();
         self.bg = &page_bg;
         if (self.data.theme == .glass) try self.drawGlassWash(&page_bg);
 
-        // Load images if provided
-        var logo_id: ?[]const u8 = null;
-        var qr_id: ?[]const u8 = null;
+        const assets = try self.loadAssets();
+
+        switch (self.data.theme) {
+            .minimal => try self.drawMinimalHeader(&content, assets),
+            .letterhead => try self.drawLetterheadHeader(&content, assets),
+            .classic, .squircle, .glass => try self.drawClassicHeader(&content, assets),
+        }
+
+        try self.drawItems(&content);
+        try self.drawTotals(&content);
+        try self.drawClosingBlocks(&content, assets);
+
+        if (self.isModern()) {
+            try self.drawModernFooter(&content, assets);
+        } else {
+            try self.drawClassicFooter(&content, assets);
+        }
+
+        // Add the last page — composite the glass background beneath the
+        // foreground (a no-op for other themes, whose bg layer is empty).
+        try self.flushPage(&content);
+        if (self.isModern()) try self.commitPendingPages();
+
+        // Password-protect the document (AES-256) when a password is set. Must
+        // be configured before build() so every stream/string is encrypted.
+        if (self.data.password.len > 0) {
+            const owner = if (self.data.owner_password.len > 0) self.data.owner_password else self.data.password;
+            try self.doc.enableEncryption(self.data.password, owner, document.DEFAULT_PERMS, self.data.seed orelse osSeed());
+        }
+
+        // Build and return PDF
+        return try self.doc.build();
+    }
+
+    /// Decode the logo, QR and signature images and build the native crypto QR
+    /// and identicons. Registration order fixes the image resource names.
+    fn loadAssets(self: *InvoiceRenderer) !Assets {
+        var a = Assets{};
+
+        // Resolve crypto payment block or legacy fields
+        const crypto_block = self.data.crypto_payment;
+        a.wallet = if (crypto_block) |cb| (if (cb.to_address.len > 0) cb.to_address else null) else self.data.crypto_wallet;
+        a.network = if (crypto_block) |cb| cb.getNetwork() else self.data.crypto_network;
+        a.sender = if (crypto_block) |cb| (if (cb.from_address.len > 0) cb.from_address else null) else self.data.crypto_sender_wallet;
+        a.symbol = if (crypto_block) |cb| (if (cb.currency.len > 0) cb.currency else cb.getNetwork().symbol()) else (self.data.crypto_custom_symbol orelse self.data.crypto_network.symbol());
+        a.amount_str = if (crypto_block) |cb| (if (cb.amount.len > 0) cb.amount else null) else null;
 
         if (self.data.company_logo_base64) |logo_b64| {
             if (logo_b64.len > 0) {
@@ -601,7 +1073,9 @@ pub const InvoiceRenderer = struct {
                     if (r.image.format != .jpeg) {
                         self.logo_pixels = @constCast(r.image.data);
                     }
-                    logo_id = self.doc.addImage(r.image) catch null;
+                    self.logo_px_w = r.image.width;
+                    self.logo_px_h = r.image.height;
+                    a.logo_id = self.doc.addImage(r.image) catch null;
                 }
             }
         }
@@ -609,44 +1083,37 @@ pub const InvoiceRenderer = struct {
         // Load QR code - check new field first, fall back to legacy verifactu field
         const qr_b64_data = self.data.qr_base64 orelse self.data.verifactu_qr_base64;
         // Determine effective QR mode
-        var effective_qr_mode = self.data.qr_mode;
-        if (effective_qr_mode == .none) {
+        a.effective_qr_mode = self.data.qr_mode;
+        if (a.effective_qr_mode == .none) {
             // Legacy field implies verifactu mode (only if non-empty)
             if (self.data.verifactu_qr_base64) |legacy_qr| {
                 if (legacy_qr.len > 0) {
-                    effective_qr_mode = .verifactu;
+                    a.effective_qr_mode = .verifactu;
                 }
             }
         }
 
         if (qr_b64_data) |qr_b64| {
-            if (qr_b64.len > 0 and effective_qr_mode != .none) {
+            if (qr_b64.len > 0 and a.effective_qr_mode != .none) {
                 const result = image.loadImageFlexible(self.allocator, qr_b64) catch null;
                 if (result) |r| {
                     self.qr_decoded = r.decoded_bytes;
                     if (r.image.format != .jpeg) {
                         self.qr_pixels = @constCast(r.image.data);
                     }
-                    qr_id = self.doc.addImage(r.image) catch null;
+                    a.qr_id = self.doc.addImage(r.image) catch null;
                 }
             }
         }
 
         // Native crypto QR generation (when crypto_wallet/crypto_payment is set and mode is crypto)
-        var crypto_qr_id: ?[]const u8 = null;
-        var recipient_identicon_id: ?[]const u8 = null;
-        var sender_identicon_id: ?[]const u8 = null;
+        if (a.wallet) |wallet| {
+            if (wallet.len > 0 and (a.effective_qr_mode == .crypto or self.data.qr_mode == .crypto)) {
+                a.effective_qr_mode = .crypto;
 
-        if (wallet_val) |wallet| {
-            if (wallet.len > 0 and (effective_qr_mode == .crypto or self.data.qr_mode == .crypto)) {
-                // Set effective mode to crypto if not already
-                effective_qr_mode = .crypto;
-
-                // Build crypto payment URI
-                const uri = try self.buildCryptoUri(wallet, network_val, symbol_val, amount_str);
+                const uri = try self.buildCryptoUri(wallet, a.network, a.symbol, a.amount_str);
                 defer self.allocator.free(uri);
 
-                // Generate native QR code
                 const qr_config = qrcode.QrConfig{
                     .ec_level = .M,
                     .min_version = 1,
@@ -661,14 +1128,11 @@ pub const InvoiceRenderer = struct {
                         .data = qr_img.pixels,
                         .format = .raw_rgb,
                     };
-                    crypto_qr_id = self.doc.addImage(img) catch null;
+                    const crypto_qr_id = self.doc.addImage(img) catch null;
                     // Use crypto QR if no base64 QR was provided
-                    if (qr_id == null) {
-                        qr_id = crypto_qr_id;
-                    }
+                    if (a.qr_id == null) a.qr_id = crypto_qr_id;
                 } else |_| {}
 
-                // Generate recipient identicon
                 if (self.data.show_crypto_identicons) {
                     if (identicon.generate(self.allocator, wallet, .{ .size = 8, .scale = 8 })) |icon| {
                         self.recipient_identicon_pixels = icon.pixels;
@@ -678,14 +1142,14 @@ pub const InvoiceRenderer = struct {
                             .data = icon.pixels,
                             .format = .raw_rgb,
                         };
-                        recipient_identicon_id = self.doc.addImage(img) catch null;
+                        a.recipient_identicon_id = self.doc.addImage(img) catch null;
                     } else |_| {}
                 }
             }
         }
 
         // Generate sender identicon if address provided and identicons enabled
-        if (sender_val) |sender| {
+        if (a.sender) |sender| {
             if (sender.len > 0 and self.data.show_crypto_identicons) {
                 if (identicon.generate(self.allocator, sender, .{ .size = 8, .scale = 8 })) |icon| {
                     self.sender_identicon_pixels = icon.pixels;
@@ -695,27 +1159,65 @@ pub const InvoiceRenderer = struct {
                         .data = icon.pixels,
                         .format = .raw_rgb,
                     };
-                    sender_identicon_id = self.doc.addImage(img) catch null;
+                    a.sender_identicon_id = self.doc.addImage(img) catch null;
                 } else |_| {}
             }
         }
 
+        if (self.data.show_signature) {
+            if (self.data.signature_image_base64) |sig_b64| {
+                if (sig_b64.len > 0) {
+                    const result = image.loadImageFlexible(self.allocator, sig_b64) catch null;
+                    if (result) |r| {
+                        self.sig_decoded = r.decoded_bytes;
+                        self.sig_px_w = r.image.width;
+                        self.sig_px_h = r.image.height;
+                        a.sig_id = self.doc.addImage(r.image) catch null;
+                    }
+                }
+            }
+        }
+
+        return a;
+    }
+
+    /// Fit an image of `px_w` x `px_h` pixels inside `max_w` x `max_h` points,
+    /// keeping its aspect. Falls back to the box itself when the size is unknown.
+    fn fitBox(px_w: u32, px_h: u32, max_w: f32, max_h: f32) [2]f32 {
+        if (px_w == 0 or px_h == 0) return .{ max_w, max_h };
+        const aspect = @as(f32, @floatFromInt(px_w)) / @as(f32, @floatFromInt(px_h));
+        var w = max_h * aspect;
+        var h = max_h;
+        if (w > max_w) {
+            w = max_w;
+            h = max_w / aspect;
+        }
+        return .{ w, h };
+    }
+
+    /// Draw the logo with its bottom-left at (x, y), plus its link.
+    fn drawLogoAt(self: *InvoiceRenderer, content: *document.ContentStream, id: []const u8, x: f32, y: f32, w: f32, h: f32) !void {
+        try content.drawImage(id, x, y, w, h);
+        if (self.data.logo_link_url) |u| {
+            if (u.len > 0) try self.doc.addLinkAnnotation(x, y, x + w, y + h, u);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Header — classic / squircle / glass
+    // -------------------------------------------------------------------------
+
+    fn drawClassicHeader(self: *InvoiceRenderer, content: *document.ContentStream, assets: Assets) !void {
+        const logo_id = assets.logo_id;
         const primary = document.Color.fromHex(self.data.primary_color);
-        const secondary = document.Color.fromHex(self.data.secondary_color);
         const title_color = document.Color.fromHex(self.data.title_color);
         const company_color = document.Color.fromHex(self.data.company_name_color);
-
-        // Usable width
         const usable_width = self.page_width - self.margin_left - self.margin_right;
 
         // Glass theme reusable material tokens (translucent white panels + a
         // faintly accent-tinted sheen and hairline border).
         const glass_panel_border = mixColor(document.Color.white, primary, 0.14);
         const glass_sheen_end = mixColor(document.Color.white, primary, 0.22);
-
-        // =====================================================================
-        // Header Section
-        // =====================================================================
 
         // Glass theme: a translucent panel behind the title / company / meta
         // block at the top of the page (the "masthead" pane), drawn into the bg
@@ -724,7 +1226,7 @@ pub const InvoiceRenderer = struct {
         if (self.data.theme == .glass) {
             const mh_bottom = self.page_height - self.margin_top - 88;
             const mh_top = self.page_height - self.margin_top + 18;
-            try self.drawGlassPanel(&page_bg, self.margin_left - 8, mh_bottom, usable_width + 16, mh_top - mh_bottom, 12, document.Color.white, 0.72, glass_sheen_end, 0.50, glass_panel_border, 1.0);
+            try self.drawGlassPanel(self.bg.?, self.margin_left - 8, mh_bottom, usable_width + 16, mh_top - mh_bottom, 12, document.Color.white, 0.72, glass_sheen_end, 0.50, glass_panel_border, 1.0);
         }
 
         // Logo (absolute-positioned). The inline-lockup variant is drawn beside
@@ -741,15 +1243,13 @@ pub const InvoiceRenderer = struct {
         // Document title (INVOICE / QUOTE / RECEIPT — or a custom override
         // like STATEMENT / CREDIT NOTE). Right-aligned by estimated width so
         // long titles don't run off the page; very long ones also shrink.
-        const is_quote = std.mem.eql(u8, self.data.document_type, "quote");
-        const is_receipt = std.mem.eql(u8, self.data.document_type, "receipt");
-        const doc_title = self.data.custom_title orelse (if (is_quote) "QUOTE" else if (is_receipt) "RECEIPT" else "INVOICE");
+        const doc_title = self.docTitle();
         const title_size: f32 = if (doc_title.len > 12) 20 else 28;
         const title_est_w = @as(f32, @floatFromInt(doc_title.len)) * title_size * 0.72;
         const title_inset: f32 = if (self.roundedLayout()) 10 else 0;
         const title_x = @max(self.page_width - self.margin_right - title_inset - title_est_w, self.margin_left + 180);
         // Glass: the wordmark lives INSIDE the masthead panel (its ascenders
-        // overflowed the rounded edge when drawn on the margin line).
+        // would overflow the rounded edge on the margin line).
         const title_y = if (self.data.theme == .glass)
             self.page_height - self.margin_top - 10
         else
@@ -774,7 +1274,6 @@ pub const InvoiceRenderer = struct {
                 }
                 self.current_y = by - 18;
             } else if (self.data.logo_inline) {
-                // Natural aspect — never squash a non-square mark into a box.
                 const lw = self.data.logo_width;
                 const lh = if (self.data.logo_height > 0) self.data.logo_height else self.data.logo_width;
                 // Top-align with the 16pt name (cap top ~12pt above baseline).
@@ -808,56 +1307,45 @@ pub const InvoiceRenderer = struct {
             self.current_y -= 18;
         }
 
-        // =====================================================================
-        // Invoice Details (right side)
-        // =====================================================================
+        // ---- Document meta (right side) ------------------------------------
 
         // Values are anchored to the right margin and grow leftward, so a long
-        // invoice number or date can never run off the right edge.
-        // Rounded themes inset the wordmark 10pt; the meta values share that
-        // right edge so QTE number/date align under the E (field report).
+        // invoice number or date can never run off the right edge. Rounded
+        // themes inset the wordmark 10pt; the meta values share that right edge.
         const details_right = self.page_width - self.margin_right - (if (self.roundedLayout()) @as(f32, 10) else 0);
         const reg = self.fontEnumRegular();
-        // The block is 180pt wide by default (64pt of label + the value), but a
-        // long document number — shop order refs run to 25+ characters — would
-        // be shrunk to fit. Widen the block leftward instead, up to 300pt, so
-        // the number stays at full size; the wordmark on the left has room.
+        // The block is 180pt wide by default (64pt of label + the value); a long
+        // document number widens it leftward, up to 300pt, instead of shrinking.
         const widest_value = @max(
             reg.measureText(self.data.invoice_number, 10),
             @max(reg.measureText(self.data.invoice_date, 10), reg.measureText(self.data.due_date, 10)),
         );
         const block_width = @min(@as(f32, 300), @max(@as(f32, 180), 64 + widest_value + 4));
         const details_x = details_right - block_width;
-        // Values fit within the space to the right of the (max-width) labels.
         const meta_value_width = details_right - (details_x + 64);
         var details_y = self.page_height - self.margin_top - 50;
 
-        // Document number (label tracks the document type)
-        const num_label = self.data.number_label orelse (if (is_quote) "Quote #:" else if (is_receipt) "Receipt #:" else "Invoice #:");
-        try content.drawText(num_label, details_x, details_y, self.font_bold, 10, document.Color.black);
-        try self.drawRightFit(&content, self.data.invoice_number, details_right, meta_value_width, details_y, self.font_regular, reg, 10, document.Color.black);
+        try content.drawText(self.numberLabel(), details_x, details_y, self.font_bold, 10, document.Color.black);
+        try self.drawRightFit(content, self.data.invoice_number, details_right, meta_value_width, details_y, self.font_regular, reg, 10, document.Color.black);
         details_y -= 15;
 
-        // Date
         try content.drawText(self.data.labels.date, details_x, details_y, self.font_bold, 10, document.Color.black);
-        try self.drawRightFit(&content, self.data.invoice_date, details_right, meta_value_width, details_y, self.font_regular, reg, 10, document.Color.black);
+        try self.drawRightFit(content, self.data.invoice_date, details_right, meta_value_width, details_y, self.font_regular, reg, 10, document.Color.black);
         details_y -= 15;
 
-        // Due date
         if (self.data.due_date.len > 0) {
-            try content.drawText(self.data.labels.due_date, details_x, details_y, self.font_bold, 10, document.Color.black);
-            try self.drawRightFit(&content, self.data.due_date, details_right, meta_value_width, details_y, self.font_regular, reg, 10, document.Color.black);
+            try content.drawText(self.dueLabel(), details_x, details_y, self.font_bold, 10, document.Color.black);
+            try self.drawRightFit(content, self.data.due_date, details_right, meta_value_width, details_y, self.font_regular, reg, 10, document.Color.black);
         }
 
-        // =====================================================================
-        // Client Section
-        // =====================================================================
+        // ---- Parties ---------------------------------------------------------
 
+        const has_client = self.hasClient();
         if (self.roundedLayout()) {
             // Rounded-card themes: From + Bill To as side-by-side cards; the
-            // client card carries an accent treatment — the emphasis from the
-            // HDM benchmark. Squircle uses bordered cards; glass uses
-            // translucent panels with a sheen over the wash.
+            // client card carries an accent treatment. Squircle uses bordered
+            // cards; glass uses translucent panels with a sheen over the wash.
+            // With no buyer the FROM card spans the whole row.
             const card_border = document.Color.fromHex("#E5E7EB");
             const muted = document.Color.fromHex("#6B7280");
             // Clear BOTH columns above: the company block (left, current_y)
@@ -865,11 +1353,10 @@ pub const InvoiceRenderer = struct {
             // Date baseline) — plus a full line of air before the cards.
             self.current_y = @min(self.current_y - 16, details_y - 26);
             const gap: f32 = 14;
-            // Cards share the table container's exact span (margin−8 … +8) —
-            // field report: edges a hair inside the table read as misaligned.
+            // Cards share the table container's exact span (margin−8 … +8).
             const row_x = self.margin_left - 8;
             const row_w = usable_width + 16;
-            const card_w = (row_w - gap) / 2;
+            const card_w = if (has_client) (row_w - gap) / 2 else row_w;
             const pad: f32 = 12;
 
             // Count lines to size both cards identically (label + name + lines).
@@ -885,7 +1372,7 @@ pub const InvoiceRenderer = struct {
                 while (it.next()) |_| to_lines += 1;
             }
             if (self.data.client_vat.len > 0) to_lines += 1;
-            const n_lines = @max(from_lines, to_lines);
+            const n_lines = if (has_client) @max(from_lines, to_lines) else from_lines;
             const card_h = 26 + n_lines * 13 + pad; // label row (+4 gap) + lines + padding
 
             const card_top = self.current_y;
@@ -893,19 +1380,19 @@ pub const InvoiceRenderer = struct {
             const to_x = row_x + card_w + gap;
             if (self.data.theme == .glass) {
                 // From: neutral translucent panel. Bill To: same glass with a
-                // SOFT accent — the faded material everywhere (field report:
-                // the saturated hairline/sheen read louder than the rest).
-                try self.drawGlassPanel(&page_bg, from_x, card_top - card_h, card_w, card_h, 10, document.Color.white, 0.72, glass_sheen_end, 0.50, glass_panel_border, 1.0);
-                const to_border = mixColor(document.Color.white, primary, 0.45);
-                try self.drawGlassPanel(&page_bg, to_x, card_top - card_h, card_w, card_h, 10, document.Color.white, 0.74, glass_sheen_end, 0.55, to_border, 1.1);
+                // soft accent border.
+                try self.drawGlassPanel(self.bg.?, from_x, card_top - card_h, card_w, card_h, 10, document.Color.white, 0.72, glass_sheen_end, 0.50, glass_panel_border, 1.0);
+                if (has_client) {
+                    const to_border = mixColor(document.Color.white, primary, 0.45);
+                    try self.drawGlassPanel(self.bg.?, to_x, card_top - card_h, card_w, card_h, 10, document.Color.white, 0.74, glass_sheen_end, 0.55, to_border, 1.1);
+                }
             } else {
                 try content.drawRoundedRectEx(from_x, card_top - card_h, card_w, card_h, 10, null, card_border, 1.0);
-                try content.drawRoundedRectEx(to_x, card_top - card_h, card_w, card_h, 10, null, primary, 1.5);
+                if (has_client) try content.drawRoundedRectEx(to_x, card_top - card_h, card_w, card_h, 10, null, primary, 1.5);
             }
 
             // From card content — label and name share the exact left edge;
-            // the extra 4pt under the label keeps them reading as two rows
-            // rather than a cramped lockup (field report).
+            // the extra 4pt under the label keeps them reading as two rows.
             var fy = card_top - pad - 6;
             try content.drawText(self.data.labels.from_card, from_x + pad, fy, self.font_bold, 8, muted);
             fy -= 19;
@@ -924,38 +1411,36 @@ pub const InvoiceRenderer = struct {
                 try content.drawText(vat_line, from_x + pad, fy, self.font_regular, 9, muted);
             }
 
-            // Bill To card content
-            var ty = card_top - pad - 6;
-            try content.drawText(self.data.labels.bill_to_card, to_x + pad, ty, self.font_bold, 8, primary);
-            ty -= 19;
-            try content.drawText(self.data.client_name, to_x + pad, ty, self.font_bold, 10, document.Color.black);
-            ty -= 13;
-            if (self.data.client_address.len > 0) {
-                var it = std.mem.splitSequence(u8, self.data.client_address, addressDelimiter(self.data.client_address));
-                while (it.next()) |line| {
-                    try content.drawText(line, to_x + pad, ty, self.font_regular, 9, document.Color.black);
-                    ty -= 13;
+            if (has_client) {
+                var ty = card_top - pad - 6;
+                try content.drawText(self.data.labels.bill_to_card, to_x + pad, ty, self.font_bold, 8, primary);
+                ty -= 19;
+                try content.drawText(self.data.client_name, to_x + pad, ty, self.font_bold, 10, document.Color.black);
+                ty -= 13;
+                if (self.data.client_address.len > 0) {
+                    var it = std.mem.splitSequence(u8, self.data.client_address, addressDelimiter(self.data.client_address));
+                    while (it.next()) |line| {
+                        try content.drawText(line, to_x + pad, ty, self.font_regular, 9, document.Color.black);
+                        ty -= 13;
+                    }
                 }
-            }
-            if (self.data.client_vat.len > 0) {
-                var cvat_buf: [128]u8 = undefined;
-                const cvat_line = std.fmt.bufPrint(&cvat_buf, "{s}: {s}", .{ self.data.labels.vat_prefix, self.data.client_vat }) catch self.data.client_vat;
-                try content.drawText(cvat_line, to_x + pad, ty, self.font_regular, 9, muted);
+                if (self.data.client_vat.len > 0) {
+                    var cvat_buf: [128]u8 = undefined;
+                    const cvat_line = std.fmt.bufPrint(&cvat_buf, "{s}: {s}", .{ self.data.labels.vat_prefix, self.data.client_vat }) catch self.data.client_vat;
+                    try content.drawText(cvat_line, to_x + pad, ty, self.font_regular, 9, muted);
+                }
             }
 
             self.current_y = card_top - card_h - 8;
-        } else {
+        } else if (has_client) {
             self.current_y -= 30;
 
-            // "Bill To" header
             try content.drawText(self.data.labels.bill_to, self.margin_left, self.current_y, self.font_bold, 12, primary);
             self.current_y -= 18;
 
-            // Client name
             try content.drawText(self.data.client_name, self.margin_left, self.current_y, self.font_bold, 11, document.Color.black);
             self.current_y -= 14;
 
-            // Client address
             if (self.data.client_address.len > 0) {
                 var addr_iter = std.mem.splitSequence(u8, self.data.client_address, addressDelimiter(self.data.client_address));
                 while (addr_iter.next()) |line| {
@@ -964,43 +1449,277 @@ pub const InvoiceRenderer = struct {
                 }
             }
 
-            // Client VAT
             if (self.data.client_vat.len > 0) {
                 var cvat_buf: [128]u8 = undefined;
                 const cvat_line = std.fmt.bufPrint(&cvat_buf, "{s}: {s}", .{ self.data.labels.vat_prefix, self.data.client_vat }) catch self.data.client_vat;
                 try content.drawText(cvat_line, self.margin_left, self.current_y, self.font_regular, 10, document.Color.black);
                 self.current_y -= 18;
             }
+        } else {
+            // No buyer: clear the meta column before the table starts.
+            self.current_y = @min(self.current_y, details_y) - 12;
         }
 
-        // =====================================================================
-        // Items Table
-        // =====================================================================
-
         self.current_y -= 20;
+    }
 
-        // Items table. The header is a helper so it can be redrawn at the top of
-        // each continuation page when a long item list paginates.
+    // -------------------------------------------------------------------------
+    // Header — minimal
+    // -------------------------------------------------------------------------
+
+    fn drawMinimalHeader(self: *InvoiceRenderer, content: *document.ContentStream, assets: Assets) !void {
+        const title_color = document.Color.fromHex(self.data.title_color);
+        const company_color = document.Color.fromHex(self.data.company_name_color);
+        const muted = document.Color.fromHex("#6B7280");
+        const ink = document.Color.fromHex("#111827");
+        const body = document.Color.fromHex("#374151");
+        const left = self.margin_left;
+        const right = self.page_width - self.margin_right;
+        const usable = right - left;
+        const reg = self.fontEnumRegular();
+        const top = self.page_height - self.margin_top;
+
+        // Identity column: logo, then name, address, VAT.
+        var ly = top;
+        var show_name = true;
+        if (assets.logo_id) |lid| {
+            const fit = fitBox(self.logo_px_w, self.logo_px_h, 150, 44);
+            try self.drawLogoAt(content, lid, left, top + 6 - fit[1], fit[0], fit[1]);
+            ly = top + 6 - fit[1] - 20;
+            if (self.data.logo_banner) show_name = false;
+        } else {
+            ly = top - 4;
+        }
+        if (show_name and self.data.company_name.len > 0) {
+            try content.drawText(self.data.company_name, left, ly, self.font_bold, 12, company_color);
+            ly -= 15;
+        }
+        if (self.data.company_address.len > 0) {
+            var it = std.mem.splitSequence(u8, self.data.company_address, addressDelimiter(self.data.company_address));
+            while (it.next()) |line| {
+                try content.drawText(line, left, ly, self.font_regular, 8.5, body);
+                ly -= 11.5;
+            }
+        }
+        if (self.data.company_vat.len > 0) {
+            var vat_buf: [128]u8 = undefined;
+            const vat_line = std.fmt.bufPrint(&vat_buf, "{s} {s}", .{ self.data.labels.vat_prefix, self.data.company_vat }) catch self.data.company_vat;
+            try content.drawText(vat_line, left, ly, self.font_regular, 8.5, muted);
+            ly -= 11.5;
+        }
+
+        // Title column: the document word, large and light, with its number.
+        const title = self.docTitle();
+        var tsize: f32 = 30;
+        const tw_max: f32 = 250;
+        if (reg.measureText(title, tsize) > tw_max) tsize = @max(14, tsize * tw_max / reg.measureText(title, tsize));
+        try content.drawTextRightAligned(title, right, top - 20, self.font_regular, reg, tsize, title_color);
+        var ry: f32 = top - 38;
+        if (self.data.invoice_number.len > 0) {
+            var nb: [192]u8 = undefined;
+            const num = std.fmt.bufPrint(&nb, "{s}  {s}", .{ bareLabel(self.numberLabel()), self.data.invoice_number }) catch self.data.invoice_number;
+            try self.drawRightFit(content, num, right, 250, ry, self.font_regular, reg, 9.5, muted);
+            ry -= 12;
+        }
+
+        const rule_y = @min(ly + 4, ry) - 14;
+        try content.drawLine(left, rule_y, right, rule_y, document.Color.fromHex("#E5E7EB"), 0.6);
+
+        // Info row: [BILL TO | PAYMENT] ........ DATE ... DUE
+        const label_y = rule_y - 20;
+        const value_y = label_y - 15;
+        var cb: [64]u8 = undefined;
+        var y_end = value_y;
+        const date_x = left + usable * 0.52;
+        const due_x = left + usable * 0.76;
+        if (self.hasClient()) {
+            try content.drawTrackedText(capsLabel(&cb, self.data.labels.bill_to_card), left, label_y, self.font_bold, 7, 0.8, muted);
+            var y = value_y;
+            if (self.data.client_name.len > 0) {
+                try content.drawText(self.data.client_name, left, y, self.font_bold, 10.5, ink);
+                y -= 13.5;
+            }
+            if (self.data.client_address.len > 0) {
+                var it = std.mem.splitSequence(u8, self.data.client_address, addressDelimiter(self.data.client_address));
+                while (it.next()) |line| {
+                    try content.drawText(line, left, y, self.font_regular, 9, body);
+                    y -= 12;
+                }
+            }
+            if (self.data.client_vat.len > 0) {
+                var vb: [128]u8 = undefined;
+                const v = std.fmt.bufPrint(&vb, "{s} {s}", .{ self.data.labels.vat_prefix, self.data.client_vat }) catch self.data.client_vat;
+                try content.drawText(v, left, y, self.font_regular, 8.5, muted);
+                y -= 12;
+            }
+            y_end = @min(y_end, y + 12);
+        } else if (self.data.amount_paid != null and (self.data.payment_method.len > 0 or self.data.payment_date.len > 0)) {
+            // A receipt without a buyer leads with how it was paid.
+            try content.drawTrackedText(capsLabel(&cb, self.data.labels.amount_paid), left, label_y, self.font_bold, 7, 0.8, muted);
+            var y = value_y;
+            if (self.data.payment_method.len > 0) {
+                try content.drawText(self.data.payment_method, left, y, self.font_bold, 10.5, ink);
+                y -= 13.5;
+            }
+            if (self.data.payment_date.len > 0) {
+                try content.drawText(self.data.payment_date, left, y, self.font_regular, 9, body);
+                y -= 12;
+            }
+            y_end = @min(y_end, y + 12);
+        }
+        if (self.data.invoice_date.len > 0) {
+            try content.drawTrackedText(capsLabel(&cb, self.data.labels.date), date_x, label_y, self.font_bold, 7, 0.8, muted);
+            try content.drawText(self.data.invoice_date, date_x, value_y, self.font_regular, 10, ink);
+        }
+        if (self.data.due_date.len > 0) {
+            try content.drawTrackedText(capsLabel(&cb, self.dueLabel()), due_x, label_y, self.font_bold, 7, 0.8, muted);
+            try content.drawText(self.data.due_date, due_x, value_y, self.font_regular, 10, ink);
+        }
+
+        var y = y_end - 26;
+        if (self.data.subject.len > 0) {
+            var wrapped = try wrapParagraphs(self.allocator, self.data.subject, self.fontEnumBold(), 11, usable);
+            defer wrapped.deinit();
+            for (wrapped.lines) |line| {
+                try content.drawText(line, left, y, self.font_bold, 11, ink);
+                y -= 14;
+            }
+            y -= 12;
+        }
+        self.current_y = y - 8;
+    }
+
+    // -------------------------------------------------------------------------
+    // Header — letterhead
+    // -------------------------------------------------------------------------
+
+    fn drawLetterheadHeader(self: *InvoiceRenderer, content: *document.ContentStream, assets: Assets) !void {
+        const primary = document.Color.fromHex(self.data.primary_color);
+        const title_color = document.Color.fromHex(self.data.title_color);
+        const company_color = document.Color.fromHex(self.data.company_name_color);
+        const muted = document.Color.fromHex("#6B7280");
+        const ink = document.Color.fromHex("#111827");
+        const body = document.Color.fromHex("#374151");
+        const left = self.margin_left;
+        const right = self.page_width - self.margin_right;
+        const usable = right - left;
+        const reg = self.fontEnumRegular();
+        const bold = self.fontEnumBold();
+        const top = self.page_height - self.margin_top;
+
+        // Letterhead: mark (or name) on the left, sender details on the right.
+        var left_bottom = top;
+        var name_on_right = false;
+        if (assets.logo_id) |lid| {
+            const fit = fitBox(self.logo_px_w, self.logo_px_h, 180, 54);
+            try self.drawLogoAt(content, lid, left, top + 8 - fit[1], fit[0], fit[1]);
+            left_bottom = top + 8 - fit[1];
+            name_on_right = !self.data.logo_banner;
+        } else if (self.data.company_name.len > 0) {
+            var size: f32 = 20;
+            const max_w = usable * 0.55;
+            const w = bold.measureText(self.data.company_name, size);
+            if (w > max_w) size = @max(11, size * max_w / w);
+            try content.drawText(self.data.company_name, left, top - 12, self.font_bold, size, company_color);
+            left_bottom = top - 18;
+        }
+        var ry: f32 = top;
+        if (name_on_right and self.data.company_name.len > 0) {
+            try self.drawRightFit(content, self.data.company_name, right, usable * 0.45, ry, self.font_bold, bold, 10.5, company_color);
+            ry -= 13;
+        }
+        if (self.data.company_address.len > 0) {
+            var it = std.mem.splitSequence(u8, self.data.company_address, addressDelimiter(self.data.company_address));
+            while (it.next()) |line| {
+                try content.drawTextRightAligned(line, right, ry, self.font_regular, reg, 8.5, body);
+                ry -= 11;
+            }
+        }
+        if (self.data.company_vat.len > 0) {
+            var vat_buf: [128]u8 = undefined;
+            const vat_line = std.fmt.bufPrint(&vat_buf, "{s} {s}", .{ self.data.labels.vat_prefix, self.data.company_vat }) catch self.data.company_vat;
+            try content.drawTextRightAligned(vat_line, right, ry, self.font_regular, reg, 8.5, muted);
+            ry -= 11;
+        }
+
+        // Double rule under the letterhead.
+        const rule_y = @min(left_bottom, ry + 4) - 12;
+        try content.drawLine(left, rule_y, right, rule_y, primary, 1.4);
+        try content.drawLine(left, rule_y - 3, right, rule_y - 3, primary, 0.4);
+
+        // Recipient address block (left) and date/reference block (right).
+        const block_top = rule_y - 34;
+        var y = block_top;
+        if (self.hasClient()) {
+            if (self.data.client_name.len > 0) {
+                try content.drawText(self.data.client_name, left, y, self.font_bold, 10.5, ink);
+                y -= 14;
+            }
+            if (self.data.client_address.len > 0) {
+                var it = std.mem.splitSequence(u8, self.data.client_address, addressDelimiter(self.data.client_address));
+                while (it.next()) |line| {
+                    try content.drawText(line, left, y, self.font_regular, 10, body);
+                    y -= 13;
+                }
+            }
+            if (self.data.client_vat.len > 0) {
+                var vb: [128]u8 = undefined;
+                const v = std.fmt.bufPrint(&vb, "{s} {s}", .{ self.data.labels.vat_prefix, self.data.client_vat }) catch self.data.client_vat;
+                try content.drawText(v, left, y, self.font_regular, 9, muted);
+                y -= 13;
+            }
+        }
+        const meta_x = right - 200;
+        var my = block_top;
+        const rows = [_]struct { label: []const u8, value: []const u8 }{
+            .{ .label = self.data.labels.date, .value = self.data.invoice_date },
+            .{ .label = self.numberLabel(), .value = self.data.invoice_number },
+            .{ .label = self.dueLabel(), .value = self.data.due_date },
+        };
+        for (rows) |row| {
+            if (row.value.len == 0) continue;
+            try content.drawText(bareLabel(row.label), meta_x, my, self.font_regular, 9, muted);
+            try self.drawRightFit(content, row.value, right, 120, my, self.font_bold, bold, 9.5, ink);
+            my -= 14;
+        }
+
+        // Document title and optional subject line.
+        var ty = @min(y, my) - 22;
+        try content.drawTrackedText(self.docTitle(), left, ty, self.font_bold, 15, 1.2, title_color);
+        ty -= 8;
+        if (self.data.subject.len > 0) {
+            ty -= 12;
+            var sb: [512]u8 = undefined;
+            const subj = std.fmt.bufPrint(&sb, "{s} {s}", .{ self.data.labels.subject_prefix, self.data.subject }) catch self.data.subject;
+            var wrapped = try wrapParagraphs(self.allocator, subj, bold, 10.5, usable);
+            defer wrapped.deinit();
+            for (wrapped.lines) |line| {
+                try content.drawText(line, left, ty, self.font_bold, 10.5, ink);
+                ty -= 13.5;
+            }
+        }
+        self.current_y = ty - 28;
+    }
+
+    // -------------------------------------------------------------------------
+    // Items table
+    // -------------------------------------------------------------------------
+
+    fn drawItems(self: *InvoiceRenderer, content: *document.ContentStream) !void {
+        try self.drawTableHeader(content);
+        if (self.isModern()) return self.drawModernRows(content);
+
+        const usable_width = self.page_width - self.margin_left - self.margin_right;
         const table_style = self.data.table_style;
         const box_border = document.Color.fromHex("#d0d0d0");
-        const col_desc = self.margin_left + 5;
-        const col_qty = self.margin_left + 280;
-        const col_price = self.margin_left + 350;
-        const col_total = self.margin_left + 450;
-
-        try self.drawTableHeader(&content);
-
-        // Table rows - with text wrapping for descriptions
-        const desc_col_width = col_qty - col_desc - 10; // Description column width with padding
+        const cols = self.tableCols();
+        const desc_col_width = cols.desc_w;
         const line_height: f32 = 12; // Height per line of text
         const row_padding: f32 = 6; // Padding above/below text in row
-
-        // Get font enum for text measurement
         const font_enum = self.fontEnumRegular();
 
         if (self.data.display_mode == .itemized) {
             for (self.data.items, 0..) |item, i| {
-                // Wrap description text to fit column width
                 var wrapped = try document.wrapText(self.allocator, item.description, font_enum, 9, desc_col_width);
                 defer wrapped.deinit();
 
@@ -1011,13 +1730,13 @@ pub const InvoiceRenderer = struct {
                 // container (squircle), then start a new page and redraw the
                 // table header before drawing it.
                 if (self.current_y - row_height < self.margin_bottom + 40) {
-                    try self.closeTableContainer(&content, self.current_y + 2);
-                    try self.startNewPage(&content, true);
+                    try self.closeTableContainer(content, self.current_y + 2);
+                    try self.startNewPage(content, true);
                 }
 
                 // Row background — squircle draws a hairline separator under
                 // each row; otherwise it depends on table_style:
-                //   bands   -> alternating #f5f5f5 fill on even rows (original)
+                //   bands   -> alternating #f5f5f5 fill on even rows
                 //   boxes   -> a light border around every row, no fill
                 //   minimal -> nothing (clean rows)
                 const row_y = self.current_y - row_height + line_height;
@@ -1034,25 +1753,32 @@ pub const InvoiceRenderer = struct {
                     .minimal => {},
                 }
 
-                // Draw wrapped description lines
                 var desc_y = self.current_y;
                 for (wrapped.lines) |line| {
-                    try content.drawText(line, col_desc, desc_y, self.font_regular, 9, document.Color.black);
+                    try content.drawText(line, cols.desc_x, desc_y, self.font_regular, 9, document.Color.black);
                     desc_y -= line_height;
                 }
 
-                // Draw qty/price/total on first line (aligned with top of description)
-                var qty_buf: [16]u8 = undefined;
-                const qty_str = std.fmt.bufPrint(&qty_buf, "{d:.0}", .{item.quantity}) catch "0";
-                try content.drawText(qty_str, col_qty, self.current_y, self.font_regular, 9, document.Color.black);
-
-                var price_buf: [24]u8 = undefined;
-                const price_str = std.fmt.bufPrint(&price_buf, "{s}{d:.2}", .{ self.data.currency_symbol, item.unit_price }) catch "0.00";
-                try content.drawText(price_str, col_price, self.current_y, self.font_regular, 9, document.Color.black);
-
-                var total_buf: [24]u8 = undefined;
+                // qty/price/discount/total on the first line
+                if (cols.qty) |x| {
+                    var qty_buf: [48]u8 = undefined;
+                    const qty_str = self.qtyText(&qty_buf, item);
+                    try content.drawText(qty_str, x, self.current_y, self.font_regular, 9, document.Color.black);
+                }
+                if (cols.price) |x| {
+                    var price_buf: [48]u8 = undefined;
+                    const price_str = std.fmt.bufPrint(&price_buf, "{s}{d:.2}", .{ self.data.currency_symbol, item.unit_price }) catch "0.00";
+                    try content.drawText(price_str, x, self.current_y, self.font_regular, 9, document.Color.black);
+                }
+                if (cols.disc) |x| {
+                    if (item.discount != 0) {
+                        var db: [40]u8 = undefined;
+                        try content.drawText(discText(&db, item.discount), x, self.current_y, self.font_regular, 9, document.Color.black);
+                    }
+                }
+                var total_buf: [48]u8 = undefined;
                 const total_str = std.fmt.bufPrint(&total_buf, "{s}{d:.2}", .{ self.data.currency_symbol, item.total }) catch "0.00";
-                try content.drawText(total_str, col_total, self.current_y, self.font_regular, 9, document.Color.black);
+                try content.drawText(total_str, cols.total, self.current_y, self.font_regular, 9, document.Color.black);
 
                 self.current_y -= row_height + 2; // Move down by row height plus small gap
             }
@@ -1073,34 +1799,130 @@ pub const InvoiceRenderer = struct {
                 .minimal => {},
             }
 
-            // Draw wrapped description lines
             var desc_y = self.current_y;
             for (wrapped.lines) |line| {
-                try content.drawText(line, col_desc, desc_y, self.font_regular, 9, document.Color.black);
+                try content.drawText(line, cols.desc_x, desc_y, self.font_regular, 9, document.Color.black);
                 desc_y -= line_height;
             }
 
-            var total_buf: [24]u8 = undefined;
+            var total_buf: [48]u8 = undefined;
             const total_str = std.fmt.bufPrint(&total_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.subtotal }) catch "0.00";
-            try content.drawText(total_str, col_total, self.current_y, self.font_regular, 9, document.Color.black);
+            try content.drawText(total_str, cols.total, self.current_y, self.font_regular, 9, document.Color.black);
 
             self.current_y -= row_height + 2;
         }
+    }
 
-        // =====================================================================
-        // Totals Section
-        // =====================================================================
+    /// "3", "2.5 hrs", "12 m²".
+    fn qtyText(self: *const InvoiceRenderer, buf: []u8, item: LineItem) []const u8 {
+        _ = self;
+        var qb: [32]u8 = undefined;
+        const q = fmtQty(&qb, item.quantity);
+        if (item.unit.len == 0) {
+            if (q.len > buf.len) return "0";
+            @memcpy(buf[0..q.len], q);
+            return buf[0..q.len];
+        }
+        return std.fmt.bufPrint(buf, "{s} {s}", .{ q, item.unit }) catch q;
+    }
+
+    /// "10%", "12.5%".
+    fn discText(buf: []u8, pct: f64) []const u8 {
+        var qb: [32]u8 = undefined;
+        return std.fmt.bufPrint(buf, "{s}%", .{fmtQty(&qb, pct)}) catch "";
+    }
+
+    /// Minimal/letterhead rows: right-aligned figures, hairline separators.
+    fn drawModernRows(self: *InvoiceRenderer, content: *document.ContentStream) !void {
+        const primary = document.Color.fromHex(self.data.primary_color);
+        const ink = document.Color.fromHex("#111827");
+        const sep = document.Color.fromHex("#ECEEF1");
+        const closing = if (self.data.theme == .letterhead) primary else document.Color.fromHex("#D1D5DB");
+        const left = self.margin_left;
+        const right = self.page_width - self.margin_right;
+        const cols = self.tableCols();
+        const reg = self.fontEnumRegular();
+        const size: f32 = 9.5;
+        const lh: f32 = 12.5;
+
+        const Row = struct { desc: []const u8, item: ?LineItem, amount: f64 };
+        const count: usize = if (self.data.display_mode == .itemized) self.data.items.len else 1;
+        for (0..count) |i| {
+            const row: Row = if (self.data.display_mode == .itemized)
+                .{ .desc = self.data.items[i].description, .item = self.data.items[i], .amount = self.data.items[i].total }
+            else
+                .{ .desc = self.data.blackbox_description, .item = null, .amount = self.data.subtotal };
+
+            var wrapped = try wrapParagraphs(self.allocator, row.desc, reg, size, cols.desc_w);
+            defer wrapped.deinit();
+            const n: f32 = @floatFromInt(@max(1, wrapped.lines.len));
+            const block = (n - 1) * lh;
+            if (self.current_y - block - 10 < self.margin_bottom + 30) {
+                try self.startNewPage(content, true);
+            }
+
+            var y = self.current_y;
+            for (wrapped.lines) |line| {
+                try content.drawText(line, cols.desc_x, y, self.font_regular, size, ink);
+                y -= lh;
+            }
+            if (row.item) |item| {
+                if (cols.qty) |x| {
+                    var qb: [48]u8 = undefined;
+                    try content.drawTextRightAligned(self.qtyText(&qb, item), x, self.current_y, self.font_regular, reg, size, ink);
+                }
+                if (cols.price) |x| {
+                    var pb: [48]u8 = undefined;
+                    try content.drawTextRightAligned(fmtMoney(&pb, self.data.currency_symbol, item.unit_price), x, self.current_y, self.font_regular, reg, size, ink);
+                }
+                if (cols.disc) |x| {
+                    if (item.discount != 0) {
+                        var db: [40]u8 = undefined;
+                        try content.drawTextRightAligned(discText(&db, item.discount), x, self.current_y, self.font_regular, reg, size, ink);
+                    }
+                }
+            }
+            var tb: [48]u8 = undefined;
+            try content.drawTextRightAligned(fmtMoney(&tb, self.data.currency_symbol, row.amount), cols.total, self.current_y, self.font_regular, reg, size, ink);
+
+            const sep_y = self.current_y - block - 8;
+            const last = i + 1 == count;
+            if (last) {
+                try content.drawLine(left, sep_y, right, sep_y, closing, 0.7);
+            } else {
+                try content.drawLine(left, sep_y, right, sep_y, sep, 0.5);
+            }
+            self.current_y = sep_y - 16;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Totals
+    // -------------------------------------------------------------------------
+
+    fn drawTotals(self: *InvoiceRenderer, content: *document.ContentStream) !void {
+        if (self.isModern()) return self.drawModernTotals(content);
+
+        const primary = document.Color.fromHex(self.data.primary_color);
+        const secondary = document.Color.fromHex(self.data.secondary_color);
+        const usable_width = self.page_width - self.margin_left - self.margin_right;
+        const col_price = self.margin_left + 350;
+        const adjustments = self.data.adjustments;
 
         // Squircle: the rows are done — close the rounded table container.
-        try self.closeTableContainer(&content, self.current_y + 2);
+        try self.closeTableContainer(content, self.current_y + 2);
 
         // Keep the whole totals block together: if it won't fit under the last
         // row, move it to a fresh page (no table header needed there).
-        if (self.current_y < self.margin_bottom + 160) {
-            try self.startNewPage(&content, false);
+        var extra_rows: f32 = @floatFromInt(adjustments.len);
+        if (!self.data.show_tax and adjustments.len > 0) extra_rows += 1;
+        if (self.data.amount_paid != null) extra_rows += 3;
+        if (self.current_y < self.margin_bottom + 160 + extra_rows * 16) {
+            try self.startNewPage(content, false);
         }
 
         self.current_y -= 20;
+        self.totals_top = self.current_y;
 
         // Separator line
         try content.drawLine(col_price - 20, self.current_y + 15, self.page_width - self.margin_right, self.current_y + 15, secondary, 0.5);
@@ -1112,41 +1934,47 @@ pub const InvoiceRenderer = struct {
         const amt_width = amt_right - (col_price + 70); // space right of the widest label
 
         // Subtotal + Tax — only when VAT/tax is being shown. For a non-tax
-        // receipt these rows are suppressed entirely (subtotal == total, and a
-        // "Tax (0%)" line would be misleading); only the TOTAL bar is rendered.
+        // receipt these rows are suppressed (subtotal == total, and a "Tax (0%)"
+        // line would be misleading) unless adjustments sit between them.
         if (self.data.show_tax) {
-            // Subtotal
+            var subtotal_buf: [48]u8 = undefined;
             try content.drawText(self.data.labels.subtotal, col_price, self.current_y, self.font_regular, 10, document.Color.black);
-            var subtotal_buf: [24]u8 = undefined;
             const subtotal_str = std.fmt.bufPrint(&subtotal_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.subtotal }) catch "0.00";
-            try self.drawRightFit(&content, subtotal_str, amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
+            try self.drawRightFit(content, subtotal_str, amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
             self.current_y -= 16;
 
-            // Tax
+            try self.drawClassicAdjustments(content, col_price, amt_right, amt_width);
+
             var tax_label_buf: [64]u8 = undefined;
             const tax_pct = self.data.tax_rate * 100;
             const tax_label = std.fmt.bufPrint(&tax_label_buf, "{s} ({d:.0}%):", .{ self.data.labels.tax_prefix, tax_pct }) catch self.data.labels.tax_prefix;
             try content.drawText(tax_label, col_price, self.current_y, self.font_regular, 10, document.Color.black);
-            var tax_buf: [24]u8 = undefined;
+            var tax_buf: [48]u8 = undefined;
             const tax_str = std.fmt.bufPrint(&tax_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.tax_amount }) catch "0.00";
-            try self.drawRightFit(&content, tax_str, amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
+            try self.drawRightFit(content, tax_str, amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
             self.current_y -= 16;
 
             // IRPF retention (Spanish freelancer invoices) — a negative row.
-            // Shown only when a rate or amount is set; otherwise the row is hidden.
             if (self.data.irpf_rate != 0 or self.data.irpf_amount != 0) {
                 var irpf_label_buf: [32]u8 = undefined;
                 const irpf_pct = self.data.irpf_rate * 100;
                 const irpf_label = std.fmt.bufPrint(&irpf_label_buf, "IRPF ({d:.0}%):", .{irpf_pct}) catch "IRPF:";
                 try content.drawText(irpf_label, col_price, self.current_y, self.font_regular, 10, document.Color.black);
-                var irpf_buf: [24]u8 = undefined;
+                var irpf_buf: [48]u8 = undefined;
                 const irpf_str = std.fmt.bufPrint(&irpf_buf, "-{s}{d:.2}", .{ self.data.currency_symbol, @abs(self.data.irpf_amount) }) catch "0.00";
-                try self.drawRightFit(&content, irpf_str, amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
+                try self.drawRightFit(content, irpf_str, amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
                 self.current_y -= 16;
             }
 
             self.current_y -= 12; // Extra spacing before TOTAL row
         } else {
+            if (adjustments.len > 0) {
+                var subtotal_buf: [48]u8 = undefined;
+                try content.drawText(self.data.labels.subtotal, col_price, self.current_y, self.font_regular, 10, document.Color.black);
+                try self.drawRightFit(content, fmtMoney(&subtotal_buf, self.data.currency_symbol, self.data.subtotal), amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
+                self.current_y -= 16;
+                try self.drawClassicAdjustments(content, col_price, amt_right, amt_width);
+            }
             self.current_y -= 12; // Modest gap between separator and TOTAL bar
         }
 
@@ -1155,11 +1983,12 @@ pub const InvoiceRenderer = struct {
         const table_right_edge = self.margin_left + usable_width;
         const total_bar_width = table_right_edge - total_bar_x;
         if (self.data.theme == .glass) {
-            // Emphasis chip in the SAME faded material as the (container-
-            // washed) header band — glass accents whisper, they don't shout
-            // (field report). Dark text carries the contrast instead.
+            // Emphasis chip in the same faded material as the header band —
+            // dark text carries the contrast.
+            const glass_panel_border = mixColor(document.Color.white, primary, 0.14);
+            const glass_sheen_end = mixColor(document.Color.white, primary, 0.22);
             const chip_fill = mixColor(document.Color.white, primary, 0.30);
-            try self.drawGlassPanel(&page_bg, total_bar_x, self.current_y - 5, total_bar_width, 22, 7, chip_fill, 0.85, glass_sheen_end, 0.50, glass_panel_border, 1.0);
+            try self.drawGlassPanel(self.bg.?, total_bar_x, self.current_y - 5, total_bar_width, 22, 7, chip_fill, 0.85, glass_sheen_end, 0.50, glass_panel_border, 1.0);
         } else if (self.data.theme == .squircle) {
             try content.drawRoundedRectEx(total_bar_x, self.current_y - 5, total_bar_width, 22, 7, primary, null, 1.0);
         } else {
@@ -1168,78 +1997,311 @@ pub const InvoiceRenderer = struct {
         // Faded glass chip needs dark ink; solid chips keep white.
         const total_text_color = if (self.data.theme == .glass) secondary else document.Color.white;
         try content.drawText(self.data.labels.total, col_price, self.current_y, self.font_bold, 12, total_text_color);
-        var grand_total_buf: [24]u8 = undefined;
+        var grand_total_buf: [48]u8 = undefined;
         const grand_total_str = std.fmt.bufPrint(&grand_total_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.total }) catch "0.00";
-        try self.drawRightFit(&content, grand_total_str, table_right_edge - 10, (table_right_edge - 10) - (col_price + 64), self.current_y, self.font_bold, self.fontEnumBold(), 12, total_text_color);
+        try self.drawRightFit(content, grand_total_str, table_right_edge - 10, (table_right_edge - 10) - (col_price + 64), self.current_y, self.font_bold, self.fontEnumBold(), 12, total_text_color);
 
-        // =====================================================================
-        // Footer Section - Notes/Payment Terms then QR Code below
-        // =====================================================================
+        const total_y = self.current_y;
 
-        self.current_y -= 30;
-
-        // Notes (full width with text wrapping)
-        const notes_max_width = usable_width - 10; // Full width minus small padding
-
-        if (self.data.notes.len > 0) {
-            try content.drawText(self.data.labels.notes, self.margin_left, self.current_y, self.font_bold, 10, secondary);
-            self.current_y -= 14;
-
-            // Wrap notes text
-            var notes_wrapped = try document.wrapText(self.allocator, self.data.notes, font_enum, 9, notes_max_width);
-            defer notes_wrapped.deinit();
-
-            for (notes_wrapped.lines) |line| {
-                try content.drawText(line, self.margin_left, self.current_y, self.font_regular, 9, document.Color.black);
-                self.current_y -= 12;
+        // Payment received and what is still owed.
+        if (self.data.amount_paid) |paid| {
+            self.current_y -= 26;
+            var pb: [48]u8 = undefined;
+            try content.drawText(self.data.labels.amount_paid, col_price, self.current_y, self.font_regular, 10, document.Color.black);
+            try self.drawRightFit(content, fmtMoney(&pb, self.data.currency_symbol, paid), amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
+            var mb: [160]u8 = undefined;
+            if (self.paymentMeta(&mb)) |meta| {
+                self.current_y -= 11;
+                try content.drawText(meta, col_price, self.current_y, self.font_regular, 8, document.Color.fromHex("#6B7280"));
             }
-            self.current_y -= 6; // Extra spacing after notes
+            self.current_y -= 17;
+            var bb: [48]u8 = undefined;
+            try content.drawText(self.data.labels.balance_due, col_price, self.current_y, self.font_bold, 10, document.Color.black);
+            try self.drawRightFit(content, fmtMoney(&bb, self.data.currency_symbol, balanceDue(self.data.total, paid)), amt_right, amt_width, self.current_y, self.font_bold, self.fontEnumBold(), 10, document.Color.black);
         }
 
-        // Payment terms (full width with text wrapping)
-        if (self.data.payment_terms.len > 0) {
-            try content.drawText(self.data.labels.payment_terms, self.margin_left, self.current_y, self.font_bold, 10, secondary);
-            self.current_y -= 14;
+        if (self.showPaidStamp()) try self.drawPaidStamp(content, self.margin_left, total_y + 6);
+    }
 
-            // Wrap payment terms text
-            var terms_wrapped = try document.wrapText(self.allocator, self.data.payment_terms, font_enum, 9, notes_max_width);
-            defer terms_wrapped.deinit();
+    fn drawClassicAdjustments(self: *InvoiceRenderer, content: *document.ContentStream, label_x: f32, amt_right: f32, amt_width: f32) !void {
+        for (self.data.adjustments) |adj| {
+            var ab: [48]u8 = undefined;
+            try content.drawText(adj.label, label_x, self.current_y, self.font_regular, 10, document.Color.black);
+            try self.drawRightFit(content, fmtMoney(&ab, self.data.currency_symbol, adj.amount), amt_right, amt_width, self.current_y, self.font_regular, self.fontEnumRegular(), 10, document.Color.black);
+            self.current_y -= 16;
+        }
+    }
 
-            for (terms_wrapped.lines) |line| {
-                try content.drawText(line, self.margin_left, self.current_y, self.font_regular, 9, document.Color.black);
-                self.current_y -= 12;
+    /// "2026-09-03 · Bank transfer" from payment_date / payment_method.
+    fn paymentMeta(self: *const InvoiceRenderer, buf: []u8) ?[]const u8 {
+        const d = self.data.payment_date;
+        const m = self.data.payment_method;
+        if (d.len == 0 and m.len == 0) return null;
+        if (d.len > 0 and m.len > 0) return std.fmt.bufPrint(buf, "{s} \xc2\xb7 {s}", .{ d, m }) catch d;
+        return if (d.len > 0) d else m;
+    }
+
+    /// PAID IN FULL mark: a double-ruled rounded frame with tracked caps in
+    /// the accent colour, vertically centred on `y_mid`.
+    fn drawPaidStamp(self: *InvoiceRenderer, content: *document.ContentStream, x: f32, y_mid: f32) !void {
+        const primary = document.Color.fromHex(self.data.primary_color);
+        const text = self.data.labels.paid_in_full;
+        const size: f32 = 11;
+        const track: f32 = 1.6;
+        const tw = self.fontEnumBold().measureTracked(text, size, track);
+        const w = tw + 28;
+        const h: f32 = 28;
+        try content.drawRoundedRectEx(x, y_mid - h / 2, w, h, 6, null, primary, 1.6);
+        try content.drawRoundedRectEx(x + 3, y_mid - h / 2 + 3, w - 6, h - 6, 4, null, primary, 0.5);
+        try content.drawTrackedText(text, x + 14, y_mid - 4, self.font_bold, size, track, primary);
+    }
+
+    fn drawModernTotals(self: *InvoiceRenderer, content: *document.ContentStream) !void {
+        const primary = document.Color.fromHex(self.data.primary_color);
+        const ink = document.Color.fromHex("#111827");
+        const body = document.Color.fromHex("#374151");
+        const muted = document.Color.fromHex("#6B7280");
+        const right = self.page_width - self.margin_right;
+        const lx = right - 230;
+        const reg = self.fontEnumRegular();
+        const bold = self.fontEnumBold();
+        const sym = self.data.currency_symbol;
+        const letter = self.data.theme == .letterhead;
+        const adjustments = self.data.adjustments;
+
+        var rows: f32 = @floatFromInt(adjustments.len);
+        if (self.data.show_tax) rows += 2;
+        if (self.data.irpf_rate != 0 or self.data.irpf_amount != 0) rows += 1;
+        if (self.data.amount_paid != null) rows += 3;
+        if (self.current_y - (rows * 17 + 50) < self.margin_bottom + 10) try self.startNewPage(content, false);
+
+        var y = self.current_y - 4;
+        self.totals_top = y;
+        const Line = struct { label: []const u8, amount: f64 };
+        var buf: [96]u8 = undefined;
+        var mb: [48]u8 = undefined;
+
+        if (self.data.show_tax or adjustments.len > 0) {
+            try content.drawText(bareLabel(self.data.labels.subtotal), lx, y, self.font_regular, 9.5, body);
+            try content.drawTextRightAligned(fmtMoney(&mb, sym, self.data.subtotal), right, y, self.font_regular, reg, 9.5, ink);
+            y -= 17;
+        }
+        for (adjustments) |adj| {
+            const l = Line{ .label = adj.label, .amount = adj.amount };
+            try content.drawText(l.label, lx, y, self.font_regular, 9.5, body);
+            try content.drawTextRightAligned(fmtMoney(&mb, sym, l.amount), right, y, self.font_regular, reg, 9.5, ink);
+            y -= 17;
+        }
+        if (self.data.show_tax) {
+            var qb: [32]u8 = undefined;
+            const tax_label = std.fmt.bufPrint(&buf, "{s} ({s}%)", .{ self.data.labels.tax_prefix, fmtQty(&qb, self.data.tax_rate * 100) }) catch self.data.labels.tax_prefix;
+            try content.drawText(tax_label, lx, y, self.font_regular, 9.5, body);
+            try content.drawTextRightAligned(fmtMoney(&mb, sym, self.data.tax_amount), right, y, self.font_regular, reg, 9.5, ink);
+            y -= 17;
+            if (self.data.irpf_rate != 0 or self.data.irpf_amount != 0) {
+                var ib: [32]u8 = undefined;
+                const irpf_label = std.fmt.bufPrint(&buf, "IRPF ({s}%)", .{fmtQty(&ib, self.data.irpf_rate * 100)}) catch "IRPF";
+                try content.drawText(irpf_label, lx, y, self.font_regular, 9.5, body);
+                try content.drawTextRightAligned(fmtMoney(&mb, sym, -@abs(self.data.irpf_amount)), right, y, self.font_regular, reg, 9.5, ink);
+                y -= 17;
             }
-            self.current_y -= 8; // Extra spacing after payment terms
         }
 
-        // =====================================================================
-        // Crypto Payment Section (with optional identicons)
-        // =====================================================================
-        if (wallet_val) |wallet| {
+        // TOTAL row
+        y -= 6;
+        if (letter) {
+            try content.drawLine(lx, y + 14, right, y + 14, ink, 0.6);
+        } else {
+            try content.drawLine(lx, y + 14, right, y + 14, primary, 1.0);
+        }
+        y -= 4;
+        const total_y = y;
+        try content.drawText(bareLabel(self.data.labels.total), lx, y, self.font_bold, 10.5, ink);
+        var tb: [48]u8 = undefined;
+        const total_str = fmtMoney(&tb, sym, self.data.total);
+        if (letter) {
+            try content.drawTextRightAligned(total_str, right, y, self.font_bold, bold, 12, ink);
+            const w = bold.measureText(total_str, 12);
+            try content.drawLine(right - w - 4, y - 5, right, y - 5, ink, 0.5);
+            try content.drawLine(right - w - 4, y - 7.5, right, y - 7.5, ink, 0.5);
+        } else {
+            try content.drawTextRightAligned(total_str, right, y - 1, self.font_bold, bold, 15, primary);
+        }
+        y -= 24;
+
+        if (self.data.amount_paid) |paid| {
+            try content.drawText(bareLabel(self.data.labels.amount_paid), lx, y, self.font_regular, 9.5, body);
+            try content.drawTextRightAligned(fmtMoney(&mb, sym, paid), right, y, self.font_regular, reg, 9.5, ink);
+            var pmb: [160]u8 = undefined;
+            if (self.paymentMeta(&pmb)) |meta| {
+                y -= 11;
+                try content.drawText(meta, lx, y, self.font_regular, 7.5, muted);
+            }
+            y -= 17;
+            const bal_color = if (letter) ink else primary;
+            try content.drawText(bareLabel(self.data.labels.balance_due), lx, y, self.font_bold, 10, ink);
+            try content.drawTextRightAligned(fmtMoney(&mb, sym, balanceDue(self.data.total, paid)), right, y, self.font_bold, bold, 10, bal_color);
+            y -= 17;
+        }
+
+        if (self.showPaidStamp()) try self.drawPaidStamp(content, self.margin_left, total_y + 4);
+        self.current_y = y;
+    }
+
+    // -------------------------------------------------------------------------
+    // Closing blocks: notes, terms, bank details, crypto, QR/buttons, signature
+    // -------------------------------------------------------------------------
+
+    /// Section heading: "Notes:" bold in the classic themes, tracked small
+    /// caps in minimal/letterhead.
+    fn drawSectionHeading(self: *InvoiceRenderer, content: *document.ContentStream, text: []const u8, x: f32) !void {
+        if (self.isModern()) {
+            var cb: [64]u8 = undefined;
+            try content.drawTrackedText(capsLabel(&cb, text), x, self.current_y, self.font_bold, 7, 0.8, document.Color.fromHex("#6B7280"));
+            self.current_y -= 14;
+        } else {
+            try content.drawText(text, x, self.current_y, self.font_bold, 10, document.Color.fromHex(self.data.secondary_color));
+            self.current_y -= 14;
+        }
+    }
+
+    /// A wrapped text section (notes / payment terms), paginating as needed.
+    fn drawTextSection(self: *InvoiceRenderer, content: *document.ContentStream, heading: []const u8, text: []const u8, after: f32) !void {
+        const usable_width = self.page_width - self.margin_left - self.margin_right;
+        const color = if (self.isModern()) document.Color.fromHex("#374151") else document.Color.black;
+        try self.ensureSpace(content, 40);
+        try self.drawSectionHeading(content, heading, self.margin_left);
+        var wrapped = try wrapParagraphs(self.allocator, text, self.fontEnumRegular(), 9, usable_width - 10);
+        defer wrapped.deinit();
+        for (wrapped.lines) |line| {
+            if (self.current_y < self.margin_bottom + 10) try self.startNewPage(content, false);
+            try content.drawText(line, self.margin_left, self.current_y, self.font_regular, 9, color);
+            self.current_y -= 12;
+        }
+        self.current_y -= after;
+    }
+
+    /// The structured bank-details block at `x`, starting at current_y.
+    fn drawBankBlock(self: *InvoiceRenderer, content: *document.ContentStream, x: f32) !void {
+        const bd = self.data.bank_details;
+        const l = self.data.labels;
+        const modern = self.isModern();
+        const label_color = if (modern) document.Color.fromHex("#6B7280") else document.Color.fromHex(self.data.secondary_color);
+        const value_color = if (modern) document.Color.fromHex("#111827") else document.Color.black;
+        try self.drawSectionHeading(content, l.bank_details, x);
+        const rows = [_][2][]const u8{
+            .{ l.account_name, bd.account_name },
+            .{ l.bank_name, bd.bank_name },
+            .{ l.sort_code, bd.sort_code },
+            .{ l.account_number, bd.account_number },
+            .{ l.iban, bd.iban },
+            .{ l.bic, bd.bic },
+            .{ l.payment_reference, bd.reference },
+        };
+        for (rows) |row| {
+            if (row[1].len == 0) continue;
+            try content.drawText(row[0], x, self.current_y, self.font_regular, 8.5, label_color);
+            try content.drawText(row[1], x + 82, self.current_y, self.font_bold, 9, value_color);
+            self.current_y -= 12.5;
+        }
+    }
+
+    fn bankBlockHeight(self: *const InvoiceRenderer) f32 {
+        const bd = self.data.bank_details;
+        var n: f32 = 0;
+        for ([_][]const u8{ bd.account_name, bd.bank_name, bd.sort_code, bd.account_number, bd.iban, bd.bic, bd.reference }) |v| {
+            if (v.len > 0) n += 1;
+        }
+        return 14 + n * 12.5;
+    }
+
+    /// Signature line block: heading, signature image (or blank space) over a
+    /// rule, then name and title beneath it.
+    fn drawSignatureBlock(self: *InvoiceRenderer, content: *document.ContentStream, sig_id: ?[]const u8) !void {
+        const secondary = document.Color.fromHex(self.data.secondary_color);
+        const muted = document.Color.fromHex("#6B7280");
+        const ink = if (self.isModern()) document.Color.fromHex("#111827") else document.Color.black;
+        try self.ensureSpace(content, 92);
+        self.current_y -= 10;
+        try self.drawSectionHeading(content, self.data.labels.signature, self.margin_left);
+        const line_y = self.current_y - 40;
+        const line_w: f32 = 210;
+        if (sig_id) |sid| {
+            const fit = fitBox(self.sig_px_w, self.sig_px_h, 170, 40);
+            try content.drawImage(sid, self.margin_left + 4, line_y + 2, fit[0], fit[1]);
+        }
+        try content.drawLine(self.margin_left, line_y, self.margin_left + line_w, line_y, secondary, 0.6);
+        var y = line_y - 13;
+        if (self.data.signature_name.len > 0) {
+            try content.drawText(self.data.signature_name, self.margin_left, y, self.font_bold, 9.5, ink);
+            y -= 12;
+        }
+        if (self.data.signature_title.len > 0) {
+            try content.drawText(self.data.signature_title, self.margin_left, y, self.font_regular, 8.5, muted);
+            y -= 12;
+        }
+        self.current_y = y - 8;
+    }
+
+    fn drawClosingBlocks(self: *InvoiceRenderer, content: *document.ContentStream, assets: Assets) !void {
+        const primary = document.Color.fromHex(self.data.primary_color);
+        const secondary = document.Color.fromHex(self.data.secondary_color);
+        const usable_width = self.page_width - self.margin_left - self.margin_right;
+        const table_right_edge = self.margin_left + usable_width;
+
+        // Bank details beside the totals, in the empty column on the left,
+        // when they fit there (and no PAID mark claims that space).
+        var bank_beside = false;
+        if (self.showBank() and !self.showPaidStamp() and self.totals_top - self.bankBlockHeight() > self.margin_bottom + 10) {
+            const after_totals = self.current_y;
+            self.current_y = self.totals_top;
+            try self.drawBankBlock(content, self.margin_left);
+            self.current_y = @min(after_totals, self.current_y + 4);
+            bank_beside = true;
+        }
+
+        self.current_y -= if (self.isModern()) 18 else 30;
+
+        if (self.data.notes.len > 0) try self.drawTextSection(content, self.data.labels.notes, self.data.notes, 6);
+        if (self.data.payment_terms.len > 0) try self.drawTextSection(content, self.data.labels.payment_terms, self.data.payment_terms, 8);
+
+        // Bank details sit on the left; the QR / pay buttons, when present,
+        // share their top edge on the right.
+        var side_top = self.current_y;
+        var bank_end: ?f32 = null;
+        if (self.showBank() and !bank_beside) {
+            const has_side = assets.qr_id != null;
+            try self.ensureSpace(content, @max(self.bankBlockHeight(), if (has_side) @as(f32, 125) else 0) + 10);
+            self.current_y -= 4;
+            side_top = self.current_y;
+            try self.drawBankBlock(content, self.margin_left);
+            bank_end = self.current_y - 6;
+            self.current_y = bank_end.?;
+        }
+
+        // ---- Crypto payment section (with optional identicons) --------------
+        if (assets.wallet) |wallet| {
             if (wallet.len > 0) {
                 self.current_y -= 10;
 
-                // Section header with network color
-                const network_color = document.Color.fromHex(network_val.color());
-                const network_name = network_val.displayName();
+                const network_color = document.Color.fromHex(assets.network.color());
+                const network_name = assets.network.displayName();
 
                 var header_buf: [64]u8 = undefined;
-                const header_text = std.fmt.bufPrint(&header_buf, "Pay with {s} ({s})", .{ network_name, symbol_val }) catch "Crypto Payment";
+                const header_text = std.fmt.bufPrint(&header_buf, "Pay with {s} ({s})", .{ network_name, assets.symbol }) catch "Crypto Payment";
                 try content.drawText(header_text, self.margin_left, self.current_y, self.font_bold, 11, network_color);
                 self.current_y -= 18;
 
-                // Recipient wallet address with optional identicon
                 const identicon_size: f32 = 24;
-                const addr_x = if (recipient_identicon_id != null) self.margin_left + identicon_size + 8 else self.margin_left;
+                const addr_x = if (assets.recipient_identicon_id != null) self.margin_left + identicon_size + 8 else self.margin_left;
 
-                if (recipient_identicon_id) |icon_id| {
+                if (assets.recipient_identicon_id) |icon_id| {
                     try content.drawImage(icon_id, self.margin_left, self.current_y - identicon_size + 10, identicon_size, identicon_size);
                 }
 
                 try content.drawText("To:", addr_x, self.current_y, self.font_bold, 9, secondary);
                 self.current_y -= 12;
 
-                // Show truncated address
                 const truncated = truncateAddress(wallet, 10, 8);
                 try content.drawText(&truncated, addr_x, self.current_y, self.font_regular, 9, document.Color.black);
                 self.current_y -= 14;
@@ -1248,12 +2310,11 @@ pub const InvoiceRenderer = struct {
                 try content.drawText(wallet, addr_x, self.current_y, self.font_regular, 7, document.Color.fromHex("#666666"));
                 self.current_y -= 16;
 
-                // Sender wallet (if provided) with optional identicon
-                if (sender_val) |sender| {
+                if (assets.sender) |sender| {
                     if (sender.len > 0) {
-                        const sender_x = if (sender_identicon_id != null) self.margin_left + identicon_size + 8 else self.margin_left;
+                        const sender_x = if (assets.sender_identicon_id != null) self.margin_left + identicon_size + 8 else self.margin_left;
 
-                        if (sender_identicon_id) |icon_id| {
+                        if (assets.sender_identicon_id) |icon_id| {
                             try content.drawImage(icon_id, self.margin_left, self.current_y - identicon_size + 10, identicon_size, identicon_size);
                         }
 
@@ -1266,17 +2327,16 @@ pub const InvoiceRenderer = struct {
                     }
                 }
 
-                // Crypto amount if specified
-                if (amount_str) |amt_s| {
+                if (assets.amount_str) |amt_s| {
                     if (amt_s.len > 0) {
                         var amount_buf: [128]u8 = undefined;
-                        const amount_text = std.fmt.bufPrint(&amount_buf, "Amount: {s} {s}", .{ amt_s, symbol_val }) catch "Amount: [error]";
+                        const amount_text = std.fmt.bufPrint(&amount_buf, "Amount: {s} {s}", .{ amt_s, assets.symbol }) catch "Amount: [error]";
                         try content.drawText(amount_text, self.margin_left, self.current_y, self.font_bold, 10, network_color);
                         self.current_y -= 20;
                     }
                 } else if (self.data.crypto_amount) |amount| {
                     var amount_buf: [64]u8 = undefined;
-                    const amount_text = std.fmt.bufPrint(&amount_buf, "Amount: {d:.8} {s}", .{ amount, symbol_val }) catch "Amount: [error]";
+                    const amount_text = std.fmt.bufPrint(&amount_buf, "Amount: {d:.8} {s}", .{ amount, assets.symbol }) catch "Amount: [error]";
                     try content.drawText(amount_text, self.margin_left, self.current_y, self.font_bold, 10, network_color);
                     self.current_y -= 20;
                 }
@@ -1285,7 +2345,7 @@ pub const InvoiceRenderer = struct {
 
         // Resolve the effective payment buttons: an explicit payment_buttons
         // array wins; otherwise synthesize a single button from the legacy
-        // payment_button_* fields so existing callers are unchanged.
+        // payment_button_* fields.
         var single_buf: [1]PaymentButton = undefined;
         const pay_btns: []const PaymentButton = blk: {
             if (self.data.payment_buttons.len > 0) break :blk self.data.payment_buttons;
@@ -1301,35 +2361,26 @@ pub const InvoiceRenderer = struct {
             break :blk &[_]PaymentButton{};
         };
 
+        // The QR / buttons column starts level with the bank block when there
+        // is one, otherwise below everything drawn so far.
+        const flow_y = self.current_y;
+        if (bank_end != null) self.current_y = side_top;
+
         // QR Code - positioned below notes, right-aligned with table
-        if (qr_id) |qid| {
+        if (assets.qr_id) |qid| {
             const qr_size: f32 = 80; // ~28mm for good scannability
             const qr_padding: f32 = 15;
 
-            // Right edge aligns with table right edge
             const qr_x = table_right_edge - qr_size;
             const qr_y = self.current_y - qr_size - qr_padding;
 
             try content.drawImage(qid, qr_x, qr_y, qr_size, qr_size);
 
-            // Label below QR code - use custom label if provided, otherwise default by mode
+            // Label below QR code - custom label if provided, otherwise by mode
             const qr_label: []const u8 = if (self.data.qr_label) |custom_label|
-                if (custom_label.len > 0) custom_label else switch (effective_qr_mode) {
-                    .verifactu => "VeriFactu",
-                    .payment_link => self.data.labels.scan_to_pay,
-                    .bank_details => self.data.labels.bank_details,
-                    .verification => self.data.labels.verify_invoice,
-                    .crypto => "Crypto Payment",
-                    .none => "",
-                }
-            else switch (effective_qr_mode) {
-                .verifactu => "VeriFactu",
-                .payment_link => self.data.labels.scan_to_pay,
-                .bank_details => self.data.labels.bank_details,
-                .verification => self.data.labels.verify_invoice,
-                .crypto => "Crypto Payment",
-                .none => "",
-            };
+                if (custom_label.len > 0) custom_label else self.qrModeLabel(assets.effective_qr_mode)
+            else
+                self.qrModeLabel(assets.effective_qr_mode);
 
             if (qr_label.len > 0) {
                 // Center label under QR (approximate centering based on label length)
@@ -1348,15 +2399,14 @@ pub const InvoiceRenderer = struct {
                 const btn_x = qr_x - btn_width - 15; // Left of QR with spacing
                 var btn_y = qr_y + (qr_size + stack_h) / 2 - btn_height; // stack centered on QR
                 for (pay_btns) |b| {
-                    const bg = document.Color.fromHex(b.color);
+                    const bgc = document.Color.fromHex(b.color);
                     const tc = document.Color.fromHex(b.text_color);
-                    const bounds = try content.drawButton(b.label, btn_x, btn_y, btn_width, btn_height, self.font_bold, 11, bg, tc, 6);
+                    const bounds = try content.drawButton(b.label, btn_x, btn_y, btn_width, btn_height, self.font_bold, 11, bgc, tc, 6);
                     try self.doc.addLinkAnnotation(bounds.x1, bounds.y1, bounds.x2, bounds.y2, b.url);
                     btn_y -= btn_height + gap;
                 }
             }
 
-            // Update current_y to account for QR placement
             self.current_y = qr_y - 25;
         } else if (pay_btns.len > 0) {
             // No QR code — stack the payment button(s) standalone, right-aligned.
@@ -1366,14 +2416,13 @@ pub const InvoiceRenderer = struct {
             const btn_x = table_right_edge - btn_width;
             var btn_y = self.current_y - btn_height - 15;
             for (pay_btns) |b| {
-                const bg = document.Color.fromHex(b.color);
+                const bgc = document.Color.fromHex(b.color);
                 const tc = document.Color.fromHex(b.text_color);
-                const bounds = try content.drawButton(b.label, btn_x, btn_y, btn_width, btn_height, self.font_bold, 12, bg, tc, 6);
+                const bounds = try content.drawButton(b.label, btn_x, btn_y, btn_width, btn_height, self.font_bold, 12, bgc, tc, 6);
                 try self.doc.addLinkAnnotation(bounds.x1, bounds.y1, bounds.x2, bounds.y2, b.url);
                 btn_y -= btn_height + gap;
             }
 
-            // "Click to Pay" hint below a single button.
             if (pay_btns.len == 1) {
                 const label_text = self.data.labels.click_to_pay;
                 const lbl_width: f32 = @as(f32, @floatFromInt(label_text.len)) * 4.0;
@@ -1383,99 +2432,114 @@ pub const InvoiceRenderer = struct {
 
             self.current_y = btn_y - 20;
         }
+        if (bank_end != null) self.current_y = @min(self.current_y, flow_y);
 
-        // Footer line - fixed position near bottom
+        if (self.data.show_signature) try self.drawSignatureBlock(content, assets.sig_id);
+    }
+
+    fn qrModeLabel(self: *const InvoiceRenderer, mode: QrCodeMode) []const u8 {
+        return switch (mode) {
+            .verifactu => "VeriFactu",
+            .payment_link => self.data.labels.scan_to_pay,
+            .bank_details => self.data.labels.bank_details,
+            .verification => self.data.labels.verify_invoice,
+            .crypto => "Crypto Payment",
+            .none => "",
+        };
+    }
+
+    fn footerStrap(self: *const InvoiceRenderer, mode: QrCodeMode) []const u8 {
+        return switch (mode) {
+            .verifactu => self.data.labels.footer_verifactu,
+            .payment_link => self.data.labels.footer_scan_to_pay,
+            .bank_details => self.data.labels.footer_bank_details,
+            .verification => self.data.labels.footer_verify,
+            .crypto => "Cryptocurrency Payment Accepted",
+            .none => "",
+        };
+    }
+
+    /// VeriFactu hash (huella), series and NIF along one line at `y`.
+    fn drawVerifactuLine(self: *InvoiceRenderer, content: *document.ContentStream, y: f32, color: document.Color) !void {
+        if (self.data.verifactu_hash) |hash| {
+            if (hash.len > 0) {
+                // First 16 chars, as per the VeriFactu QR standard
+                const hash_display = if (hash.len > 16) hash[0..16] else hash;
+                var hash_buf: [32]u8 = undefined;
+                const hash_text = std.fmt.bufPrint(&hash_buf, "Huella: {s}...", .{hash_display}) catch "Huella: [error]";
+                try content.drawText(hash_text, self.margin_left, y, self.font_regular, 7, color);
+            }
+        }
+        if (self.data.verifactu_series) |series| {
+            if (series.len > 0) {
+                var series_buf: [32]u8 = undefined;
+                const series_text = std.fmt.bufPrint(&series_buf, "Serie: {s}", .{series}) catch "Serie: [error]";
+                try content.drawText(series_text, self.margin_left + 180, y, self.font_regular, 7, color);
+            }
+        }
+        if (self.data.verifactu_nif) |nif| {
+            if (nif.len > 0) {
+                var nif_buf: [32]u8 = undefined;
+                const nif_text = std.fmt.bufPrint(&nif_buf, "NIF: {s}", .{nif}) catch "NIF: [error]";
+                try content.drawText(nif_text, self.margin_left + 250, y, self.font_regular, 7, color);
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Footers
+    // -------------------------------------------------------------------------
+
+    /// Classic/squircle/glass footer on the last page: rule, QR strap-line,
+    /// VeriFactu details, thank-you line and the optional branding link.
+    fn drawClassicFooter(self: *InvoiceRenderer, content: *document.ContentStream, assets: Assets) !void {
+        const secondary = document.Color.fromHex(self.data.secondary_color);
+
         try content.drawLine(self.margin_left, self.margin_bottom - 10, self.page_width - self.margin_right, self.margin_bottom - 10, secondary, 0.5);
 
-        // Footer text - varies by QR mode
-        if (qr_id != null) {
-            const footer_label: []const u8 = switch (effective_qr_mode) {
-                .verifactu => self.data.labels.footer_verifactu,
-                .payment_link => self.data.labels.footer_scan_to_pay,
-                .bank_details => self.data.labels.footer_bank_details,
-                .verification => self.data.labels.footer_verify,
-                .crypto => "Cryptocurrency Payment Accepted",
-                .none => "",
-            };
+        if (assets.qr_id != null) {
+            const footer_label = self.footerStrap(assets.effective_qr_mode);
             if (footer_label.len > 0) {
                 try content.drawText(footer_label, self.margin_left, self.margin_bottom - 25, self.font_regular, 8, secondary);
             }
-
-            // VeriFactu: Display hash signature (huella) in footer
-            if (effective_qr_mode == .verifactu) {
-                if (self.data.verifactu_hash) |hash| {
-                    if (hash.len > 0) {
-                        // Show truncated hash (first 16 chars as per VeriFactu QR standard)
-                        const hash_display = if (hash.len > 16) hash[0..16] else hash;
-                        // Format: "Huella: XXXXXXXXXXXXXXXX"
-                        var hash_buf: [32]u8 = undefined;
-                        const hash_text = std.fmt.bufPrint(&hash_buf, "Huella: {s}...", .{hash_display}) catch "Huella: [error]";
-                        try content.drawText(hash_text, self.margin_left, self.margin_bottom - 38, self.font_regular, 7, secondary);
-                    }
-                }
-
-                // Display series and NIF if available
-                if (self.data.verifactu_series) |series| {
-                    if (series.len > 0) {
-                        var series_buf: [32]u8 = undefined;
-                        const series_text = std.fmt.bufPrint(&series_buf, "Serie: {s}", .{series}) catch "Serie: [error]";
-                        try content.drawText(series_text, self.margin_left + 180, self.margin_bottom - 38, self.font_regular, 7, secondary);
-                    }
-                }
-
-                if (self.data.verifactu_nif) |nif| {
-                    if (nif.len > 0) {
-                        var nif_buf: [32]u8 = undefined;
-                        const nif_text = std.fmt.bufPrint(&nif_buf, "NIF: {s}", .{nif}) catch "NIF: [error]";
-                        try content.drawText(nif_text, self.margin_left + 250, self.margin_bottom - 38, self.font_regular, 7, secondary);
-                    }
-                }
-            }
-
+            if (assets.effective_qr_mode == .verifactu) try self.drawVerifactuLine(content, self.margin_bottom - 38, secondary);
             try content.drawText(self.data.labels.thank_you, self.page_width - self.margin_right - 130, self.margin_bottom - 25, self.font_regular, 9, secondary);
         } else {
             try content.drawText(self.data.labels.thank_you, self.page_width / 2 - 60, self.margin_bottom - 25, self.font_regular, 9, secondary);
         }
 
-        // Branding footer with clickable link
         if (self.data.show_branding) {
             const branding_text = "Generated by Quantify";
             const branding_font_size: f32 = 7;
             const branding_y = self.margin_bottom - 45;
-
-            // Calculate text width for link annotation (approx 4.2 points per char at size 7)
             const text_width: f32 = @as(f32, @floatFromInt(branding_text.len)) * 4.2;
-
-            // Draw centered branding text in subtle gray
             const branding_x = (self.page_width - text_width) / 2;
-            const branding_color = document.Color{ .r = 0.6, .g = 0.6, .b = 0.6 }; // Light gray
+            const branding_color = document.Color{ .r = 0.6, .g = 0.6, .b = 0.6 };
             try content.drawText(branding_text, branding_x, branding_y, self.font_regular, branding_font_size, branding_color);
-
-            // Add clickable link annotation (PDF coordinates: x1, y1, x2, y2)
-            try self.doc.addLinkAnnotation(
-                branding_x,
-                branding_y - 2, // Slight padding below text
-                branding_x + text_width,
-                branding_y + branding_font_size + 2, // Slight padding above text
-                self.data.branding_url,
-            );
+            try self.doc.addLinkAnnotation(branding_x, branding_y - 2, branding_x + text_width, branding_y + branding_font_size + 2, self.data.branding_url);
         }
-
-        // Add page to document — composite the glass background beneath the
-        // foreground (a no-op for other themes, whose bg layer is empty).
-        try self.flushPage(&content);
-
-        // Password-protect the document (AES-256) when a password is set. Must
-        // be configured before build() so every stream/string is encrypted.
-        if (self.data.password.len > 0) {
-            const owner = if (self.data.owner_password.len > 0) self.data.owner_password else self.data.password;
-            try self.doc.enableEncryption(self.data.password, owner, document.DEFAULT_PERMS, self.data.seed orelse osSeed());
-        }
-
-        // Build and return PDF
-        return try self.doc.build();
     }
 
+    /// Minimal/letterhead last-page footer, under the per-page line drawn by
+    /// commitPendingPages: thank-you (or QR strap-line) left, branding right,
+    /// VeriFactu details beneath.
+    fn drawModernFooter(self: *InvoiceRenderer, content: *document.ContentStream, assets: Assets) !void {
+        const muted = document.Color.fromHex("#6B7280");
+        const right = self.page_width - self.margin_right;
+        const y = self.margin_bottom - 35;
+        const strap = if (assets.qr_id != null) self.footerStrap(assets.effective_qr_mode) else "";
+        const left_text = if (strap.len > 0) strap else self.data.labels.thank_you;
+        try content.drawText(left_text, self.margin_left, y, self.font_regular, 7.5, muted);
+        if (assets.qr_id != null and assets.effective_qr_mode == .verifactu) try self.drawVerifactuLine(content, y - 11, muted);
+        if (self.data.show_branding) {
+            const branding_text = "Generated by Quantify";
+            const size: f32 = 7;
+            const w = self.fontEnumRegular().measureText(branding_text, size);
+            const color = document.Color{ .r = 0.6, .g = 0.6, .b = 0.6 };
+            try content.drawText(branding_text, right - w, y, self.font_regular, size, color);
+            try self.doc.addLinkAnnotation(right - w, y - 2, right, y + size + 2, self.data.branding_url);
+        }
+    }
     /// Build cryptocurrency payment URI for QR code
     /// Supports BIP21 (Bitcoin), EIP681 (Ethereum/ERC20), and other chain-specific formats
     fn buildCryptoUri(self: *InvoiceRenderer, wallet: []const u8, network: crypto_receipt.Network, symbol: []const u8, amount_str: ?[]const u8) ![]u8 {
@@ -1892,4 +2956,178 @@ test "generate multi-chain invoice - Solana" {
 
     try std.testing.expect(pdf_bytes.len > 2000);
     try std.testing.expect(std.mem.indexOf(u8, pdf_bytes, "Solana") != null);
+}
+
+// -----------------------------------------------------------------------------
+// Document-system tests
+// -----------------------------------------------------------------------------
+
+test "quantity prints up to two decimals, trailing zeros trimmed" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("3", fmtQty(&buf, 3));
+    try std.testing.expectEqualStrings("40", fmtQty(&buf, 40));
+    try std.testing.expectEqualStrings("2.5", fmtQty(&buf, 2.5));
+    try std.testing.expectEqualStrings("0.13", fmtQty(&buf, 0.125));
+    try std.testing.expectEqualStrings("1.75", fmtQty(&buf, 1.75));
+    try std.testing.expectEqualStrings("0", fmtQty(&buf, 0));
+}
+
+test "line totals, document totals and balance" {
+    try std.testing.expectApproxEqAbs(@as(f64, 270), lineTotal(3, 100, 10), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 33.33), lineTotal(1, 33.333, 0), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), lineTotal(1, 50, 150), 1e-9); // clamped to 100%
+
+    const items = [_]LineItem{
+        .{ .description = "a", .quantity = 1, .unit_price = 100, .total = 100 },
+        .{ .description = "b", .quantity = 2, .unit_price = 50, .total = 90, .discount = 10 },
+    };
+    const adj = [_]Adjustment{ .{ .label = "Shipping", .amount = 10 }, .{ .label = "Deposit", .amount = -50 } };
+    const t = computeTotals(&items, &adj, 0.2, true, 0);
+    try std.testing.expectApproxEqAbs(@as(f64, 190), t.subtotal, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, -40), t.adjustments, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 30), t.tax, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 180), t.total, 1e-9);
+
+    const untaxed = computeTotals(&items, &adj, 0.2, false, 15);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), untaxed.tax, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 135), untaxed.total, 1e-9);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 80), balanceDue(180, 100), 1e-9);
+    try std.testing.expectEqual(@as(f64, 0), balanceDue(180, 200));
+}
+
+fn renderForTest(data: InvoiceData) ![]u8 {
+    return generateInvoice(std.testing.allocator, data);
+}
+
+fn contains(hay: []const u8, needle: []const u8) bool {
+    return std.mem.indexOf(u8, hay, needle) != null;
+}
+
+test "an empty buyer collapses in every style" {
+    const items = [_]LineItem{.{ .description = "Item", .quantity = 1, .unit_price = 10, .total = 10 }};
+    for ([_]Theme{ .classic, .squircle, .glass, .minimal, .letterhead }) |theme| {
+        const pdf = try renderForTest(.{ .company_name = "Co", .items = &items, .subtotal = 10, .total = 12, .theme = theme });
+        defer std.testing.allocator.free(pdf);
+        try std.testing.expect(!contains(pdf, "Bill To"));
+        try std.testing.expect(!contains(pdf, "BILL TO"));
+        try std.testing.expect(contains(pdf, "Co"));
+
+        // show_client:false hides a buyer that is present.
+        const hidden = try renderForTest(.{ .company_name = "Co", .client_name = "Buyer Ltd", .show_client = false, .items = &items, .total = 12, .theme = theme });
+        defer std.testing.allocator.free(hidden);
+        try std.testing.expect(!contains(hidden, "Buyer Ltd"));
+
+        const shown = try renderForTest(.{ .company_name = "Co", .client_name = "Buyer Ltd", .items = &items, .total = 12, .theme = theme });
+        defer std.testing.allocator.free(shown);
+        try std.testing.expect(contains(shown, "Buyer Ltd"));
+    }
+}
+
+test "quote meta reads Valid Until unless overridden" {
+    const items = [_]LineItem{.{ .description = "Item", .quantity = 1, .unit_price = 10, .total = 10 }};
+    const q = try renderForTest(.{ .document_type = "quote", .due_date = "2026-10-01", .items = &items });
+    defer std.testing.allocator.free(q);
+    try std.testing.expect(contains(q, "Valid Until:"));
+    try std.testing.expect(contains(q, "Quote #:"));
+
+    const inv = try renderForTest(.{ .due_date = "2026-10-01", .items = &items });
+    defer std.testing.allocator.free(inv);
+    try std.testing.expect(contains(inv, "Due Date:"));
+
+    const custom = try renderForTest(.{ .document_type = "quote", .due_date = "2026-10-01", .due_date_label = "Expires:", .items = &items });
+    defer std.testing.allocator.free(custom);
+    try std.testing.expect(contains(custom, "Expires:"));
+    try std.testing.expect(!contains(custom, "Valid Until"));
+
+    var labels = Labels{};
+    labels.due_date = "Vence:";
+    const localised = try renderForTest(.{ .document_type = "quote", .due_date = "2026-10-01", .labels = labels, .items = &items });
+    defer std.testing.allocator.free(localised);
+    try std.testing.expect(contains(localised, "Vence:"));
+}
+
+test "units, fractional quantities, discounts and the flat-rate table" {
+    const items = [_]LineItem{
+        .{ .description = "Consulting", .quantity = 2.5, .unit = "hrs", .unit_price = 80, .total = 180, .discount = 10 },
+        .{ .description = "Setup", .quantity = 1, .unit_price = 50, .total = 50 },
+    };
+    for ([_]Theme{ .classic, .squircle, .glass, .minimal, .letterhead }) |theme| {
+        const pdf = try renderForTest(.{ .items = &items, .subtotal = 230, .total = 230, .theme = theme });
+        defer std.testing.allocator.free(pdf);
+        try std.testing.expect(contains(pdf, "(2.5 hrs)"));
+        try std.testing.expect(contains(pdf, "10%"));
+
+        const flat = try renderForTest(.{ .items = &items, .subtotal = 230, .total = 230, .theme = theme, .show_qty_columns = false });
+        defer std.testing.allocator.free(flat);
+        try std.testing.expect(!contains(flat, "2.5 hrs"));
+        try std.testing.expect(contains(flat, "Amount") or contains(flat, "AMOUNT"));
+    }
+}
+
+test "adjustments, payment rows and the PAID IN FULL mark" {
+    const items = [_]LineItem{.{ .description = "Goods", .quantity = 1, .unit_price = 100, .total = 100 }};
+    const adj = [_]Adjustment{.{ .label = "Shipping", .amount = 12.5 }};
+    for ([_]Theme{ .classic, .squircle, .glass, .minimal, .letterhead }) |theme| {
+        const rct = try renderForTest(.{
+            .document_type = "receipt",
+            .show_tax = false,
+            .items = &items,
+            .adjustments = &adj,
+            .subtotal = 100,
+            .total = 112.5,
+            .amount_paid = 112.5,
+            .payment_method = "Card",
+            .theme = theme,
+        });
+        defer std.testing.allocator.free(rct);
+        try std.testing.expect(contains(rct, "Shipping"));
+        try std.testing.expect(contains(rct, "PAID IN FULL"));
+        try std.testing.expect(contains(rct, "Card"));
+
+        const part = try renderForTest(.{ .items = &items, .total = 120, .amount_paid = 50, .theme = theme });
+        defer std.testing.allocator.free(part);
+        try std.testing.expect(!contains(part, "PAID IN FULL"));
+        try std.testing.expect(contains(part, "70.00"));
+    }
+}
+
+test "bank details and signature blocks draw only when enabled" {
+    const items = [_]LineItem{.{ .description = "Goods", .quantity = 1, .unit_price = 100, .total = 100 }};
+    const bank = BankDetails{ .account_name = "Example Ltd", .sort_code = "00-00-00", .account_number = "00000000" };
+    for ([_]Theme{ .classic, .squircle, .glass, .minimal, .letterhead }) |theme| {
+        const on = try renderForTest(.{ .items = &items, .total = 100, .bank_details = bank, .show_signature = true, .signature_name = "A. Signer", .theme = theme });
+        defer std.testing.allocator.free(on);
+        try std.testing.expect(contains(on, "00-00-00"));
+        try std.testing.expect(contains(on, "A. Signer"));
+
+        const off = try renderForTest(.{ .items = &items, .total = 100, .bank_details = bank, .show_bank_details = false, .theme = theme });
+        defer std.testing.allocator.free(off);
+        try std.testing.expect(!contains(off, "00-00-00"));
+        try std.testing.expect(!contains(off, "signature"));
+    }
+}
+
+test "notes and payment terms honour newlines" {
+    const items = [_]LineItem{.{ .description = "Goods", .quantity = 1, .unit_price = 100, .total = 100 }};
+    const pdf = try renderForTest(.{ .items = &items, .total = 100, .notes = "First line\nSecond line", .payment_terms = "Net 14\r\n\r\nBank transfer" });
+    defer std.testing.allocator.free(pdf);
+    try std.testing.expect(contains(pdf, "(First line)"));
+    try std.testing.expect(contains(pdf, "(Second line)"));
+    try std.testing.expect(contains(pdf, "(Net 14)"));
+    try std.testing.expect(contains(pdf, "(Bank transfer)"));
+}
+
+test "long tables paginate in every style with page numbers in the typographic ones" {
+    var items: [40]LineItem = undefined;
+    for (&items, 0..) |*it, i| {
+        _ = i;
+        it.* = .{ .description = "A line item with a description long enough to be realistic", .quantity = 1, .unit_price = 10, .total = 10 };
+    }
+    for ([_]Theme{ .classic, .squircle, .glass, .minimal, .letterhead }) |theme| {
+        const pdf = try renderForTest(.{ .company_name = "Co", .items = &items, .subtotal = 400, .total = 400, .theme = theme });
+        defer std.testing.allocator.free(pdf);
+        try std.testing.expect(contains(pdf, "/Count 2") or contains(pdf, "/Count 3"));
+        if (theme == .minimal or theme == .letterhead) try std.testing.expect(contains(pdf, "Page 1 of "));
+    }
 }

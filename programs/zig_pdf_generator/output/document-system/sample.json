@@ -1,0 +1,58 @@
+{
+  "company_name": "Harbourline Design Studio Ltd",
+  "company_address": "Unit 4, Quayside Works\n12 Harbour Row, Falmouth TR11 2AB\n07700 900123 · hello@harbourline.example",
+  "company_vat": "GB 000 0000 00",
+  "logo_inline": true,
+  "logo_width": 46,
+  "logo_height": 46,
+  "client_name": "Northfield Property Group",
+  "client_address": "Attn: Priya Shah\n88 Meridian Way\nBristol BS1 4XY",
+  "invoice_number": "INV-2026-0417",
+  "invoice_date": "26 Sep 2026",
+  "due_date": "10 Oct 2026",
+  "currency_symbol": "£",
+  "tax_rate": 0.2,
+  "primary_color": "#0F6E68",
+  "secondary_color": "#1F2937",
+  "bank_details": {
+    "account_name": "Harbourline Design Studio Ltd",
+    "bank_name": "Example Bank plc",
+    "sort_code": "00-00-00",
+    "account_number": "00000000",
+    "iban": "GB00 XMPL 0000 0000 0000 00",
+    "bic": "XMPLGB2L",
+    "reference": "INV-2026-0417"
+  },
+  "items": [
+    {
+      "description": "Discovery workshop",
+      "quantity": 1,
+      "unit": "day",
+      "unit_price": 850.0
+    },
+    {
+      "description": "Brand identity: logo suite, colour palette, typography system and a 24-page usage guideline document",
+      "quantity": 1,
+      "unit_price": 2400.0
+    },
+    {
+      "description": "Website design and build (12 responsive pages)",
+      "quantity": 42.5,
+      "unit": "hrs",
+      "unit_price": 65.0
+    },
+    {
+      "description": "On-site photography",
+      "quantity": 1.5,
+      "unit": "days",
+      "unit_price": 600.0
+    },
+    {
+      "description": "Hosting and maintenance",
+      "quantity": 12,
+      "unit": "months",
+      "unit_price": 25.0
+    }
+  ],
+  "notes": "Thank you for choosing Harbourline."
+}
