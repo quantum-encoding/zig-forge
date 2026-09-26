@@ -334,6 +334,10 @@ test "trash: verified, protected roots refused, changes skipped, totals correcte
     try testing.expectEqual(@as(i64, 2), int(after, "removed_count"));
     try testing.expect(int(after, "bytes") < int(before, "bytes"));
     try testing.expectEqual(@as(i64, 0), int(typeEntry(field(after, "types"), "code"), "files"));
+    // docs lost a.pdf, which sat directly inside it: its own total says so.
+    const docs_after = try parse(arena, s.spaceChildren(try std.fmt.allocPrint(arena, "{{\"node\":{d}}}", .{int(findItem(items, "docs").?, "id")})));
+    try testing.expectEqual(@as(i64, 1), int(field(docs_after, "node"), "files"));
+    try testing.expectEqual(int(field(docs, "node"), "bytes") - int(findItem(docs_items, "a.pdf").?, "bytes"), int(field(docs_after, "node"), "bytes"));
     const listing = try parse(arena, s.spaceChildren("{\"limit\":500}"));
     try testing.expect(findItem(field(field(listing, "groups").array.items[0], "items"), "proj") == null);
     s.close();

@@ -1273,14 +1273,17 @@ pub const RemovedIndex = struct {
     dir_runs: std.ArrayListUnmanaged(Run) = .empty,
     /// Disjoint, sorted: file-index runs removed (whole folders and single files).
     file_runs: std.ArrayListUnmanaged(Run) = .empty,
-    /// Sorted by `at`: the folder a removed piece sat in (or was).
+    /// Sorted by `key`: `2 * folder` for a removed folder, `2 * folder + 1`
+    /// for a file removed from directly inside that folder, so everything
+    /// removed within folder `d` - its own files included, `d` itself not -
+    /// is the one key range `[2d + 1, 2 * subtree_end)`.
     entries: std.ArrayListUnmanaged(Entry) = .empty,
     /// prefix[i] = sum of entries[0..i].
     prefix: std.ArrayListUnmanaged(Agg) = .empty,
     cat_files: [category_count]u64 = @splat(0),
 
     pub const Run = struct { start: u64, end: u64 };
-    const Entry = struct { at: u32, agg: Agg };
+    const Entry = struct { key: u64, agg: Agg };
 
     pub fn deinit(self: *RemovedIndex, gpa: Allocator) void {
         self.dir_runs.deinit(gpa);
@@ -1326,7 +1329,7 @@ pub const RemovedIndex = struct {
             try self.dir_runs.append(gpa, .{ .start = d, .end = rec.subtree_end });
             var agg = rec.agg();
             agg.dirs += 1;
-            try self.entries.append(gpa, .{ .at = d, .agg = agg });
+            try self.entries.append(gpa, .{ .key = 2 * @as(u64, d), .agg = agg });
             const first = rec.first_file;
             const end = try r.subtreeFileEnd(&rec);
             if (end > first) try self.file_runs.append(gpa, .{ .start = first, .end = end });
@@ -1342,7 +1345,7 @@ pub const RemovedIndex = struct {
             if (self.dirRemoved(rec.dir)) continue;
             if (lone.items.len > 0 and lone.items[lone.items.len - 1].start == f) continue;
             try lone.append(gpa, .{ .start = f, .end = f + 1 });
-            try self.entries.append(gpa, .{ .at = rec.dir, .agg = rec.agg() });
+            try self.entries.append(gpa, .{ .key = 2 * @as(u64, rec.dir) + 1, .agg = rec.agg() });
             self.cat_files[rec.categoryIndex()] += 1;
         }
         try self.file_runs.appendSlice(gpa, lone.items);
@@ -1353,7 +1356,7 @@ pub const RemovedIndex = struct {
         }.less);
         std.sort.pdq(Entry, self.entries.items, {}, struct {
             fn less(_: void, a: Entry, b: Entry) bool {
-                return a.at < b.at;
+                return a.key < b.key;
             }
         }.less);
         try self.prefix.ensureTotalCapacity(gpa, self.entries.items.len + 1);
@@ -1385,21 +1388,22 @@ pub const RemovedIndex = struct {
         return containing(self.file_runs.items, f);
     }
 
-    fn lowerBound(self: *const RemovedIndex, at: u64) usize {
+    fn lowerBound(self: *const RemovedIndex, key: u64) usize {
         var lo: usize = 0;
         var hi: usize = self.entries.items.len;
         while (lo < hi) {
             const mid = lo + (hi - lo) / 2;
-            if (self.entries.items[mid].at < at) lo = mid + 1 else hi = mid;
+            if (self.entries.items[mid].key < key) lo = mid + 1 else hi = mid;
         }
         return lo;
     }
 
-    /// What was removed from inside folders `[start, end)` (preorder).
-    pub fn inside(self: *const RemovedIndex, start: u64, end: u64) Agg {
+    /// What was removed from inside folder `d`, whose subtree ends at
+    /// `subtree_end`: its own files and everything below it.
+    pub fn inside(self: *const RemovedIndex, d: u64, subtree_end: u64) Agg {
         if (self.entries.items.len == 0) return .{};
-        const lo = self.lowerBound(start);
-        const hi = self.lowerBound(end);
+        const lo = self.lowerBound(2 * d + 1);
+        const hi = self.lowerBound(2 * subtree_end);
         var out = self.prefix.items[hi];
         out.sub(self.prefix.items[lo]);
         return out;
@@ -1511,7 +1515,7 @@ pub const View = struct {
     /// Folder `d` with what was removed from it taken off.
     pub fn dirAgg(self: *const View, d: u32, rec: *const DirRecord) Agg {
         var agg = rec.agg();
-        agg.sub(self.removed.inside(@as(u64, d) + 1, rec.subtree_end));
+        agg.sub(self.removed.inside(d, rec.subtree_end));
         return agg;
     }
 
