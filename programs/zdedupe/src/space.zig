@@ -1470,6 +1470,12 @@ pub const ChildrenQuery = struct {
     limit: usize = 150,
     /// Items per group in the type and size views; clamped to `max_per_group`.
     per_group: usize = 40,
+    /// Folder view: levels of subfolders to nest inside each folder item (1 =
+    /// none), for a map that draws folders inside folders. Clamped to
+    /// `max_depth`.
+    depth: u8 = 1,
+    /// Items listed inside each nested folder; clamped to `max_nested`.
+    nested_limit: usize = 16,
 };
 
 pub const LargestKind = enum { files, folders };
@@ -1484,6 +1490,11 @@ pub const LargestQuery = struct {
 
 pub const max_children: usize = 500;
 pub const max_per_group: usize = 200;
+pub const max_depth: u8 = 3;
+pub const max_nested: usize = 60;
+/// Most nested items one answer carries, whatever depth and limits ask for,
+/// so a deep request on a huge folder stays a few hundred KB.
+pub const nested_budget: usize = 3000;
 pub const max_largest: usize = 200;
 /// A folder whose largest subfolder holds at least this share of it is only
 /// a wrapper around that subfolder, and is left out of the largest folders.
@@ -1602,7 +1613,14 @@ pub const View = struct {
 
     // --- JSON pieces -------------------------------------------------------
 
+    /// Nesting still to do for folder items, shared by one answer.
+    const Nest = struct { depth: u8, limit: usize, budget: *usize };
+
     fn writeDir(self: *const View, json: *std.json.Stringify, d: u32, rec: *const DirRecord, agg: Agg) !void {
+        return self.writeDirNested(json, d, rec, agg, null);
+    }
+
+    fn writeDirNested(self: *const View, json: *std.json.Stringify, d: u32, rec: *const DirRecord, agg: Agg, nest: ?Nest) anyerror!void {
         const path = try self.r.dirPath(self.arena, d);
         try json.beginObject();
         try json.objectField("kind");
@@ -1635,6 +1653,21 @@ pub const View = struct {
         try json.write(self.guard.guardsFolder(path));
         try json.objectField("root");
         try json.write(rec.parent == no_parent);
+        if (nest) |n| {
+            if (n.depth > 1 and n.budget.* > 0) {
+                const inner = try self.scope(d);
+                // Reserved before anything nested deeper is written, so a
+                // first folder's descendants cannot starve its siblings of
+                // their own children.
+                const take = @min(n.limit, n.budget.*);
+                n.budget.* -= take;
+                try json.objectField("children");
+                try json.beginArray();
+                const done = try self.writeMerged(json, &inner, take, .{ .depth = n.depth - 1, .limit = n.limit, .budget = n.budget });
+                try json.endArray();
+                try writeRestNamed(json, "children_rest", done.total - done.shown, agg.bytes -| done.shown_bytes);
+            }
+        }
         try json.endObject();
     }
 
@@ -1692,7 +1725,11 @@ pub const View = struct {
     }
 
     fn writeRest(json: *std.json.Stringify, count: u64, bytes: u64) !void {
-        try json.objectField("rest");
+        return writeRestNamed(json, "rest", count, bytes);
+    }
+
+    fn writeRestNamed(json: *std.json.Stringify, name: []const u8, count: u64, bytes: u64) !void {
+        try json.objectField(name);
         try json.beginObject();
         try json.objectField("count");
         try json.write(count);
@@ -1781,7 +1818,13 @@ pub const View = struct {
         try json.objectField("groups");
         try json.beginArray();
         switch (query.by) {
-            .folder => try self.folderGroup(json, &s, @min(query.limit, max_children)),
+            .folder => try self.folderGroup(
+                json,
+                &s,
+                @min(query.limit, max_children),
+                std.math.clamp(query.depth, 1, max_depth),
+                @min(query.nested_limit, max_nested),
+            ),
             .type, .size => try self.bandGroups(json, &s, query.by, @min(query.per_group, max_per_group)),
         }
         try json.endArray();
@@ -1790,9 +1833,32 @@ pub const View = struct {
 
     const Item = struct { bytes: u64, kind: enum { dir, file }, id: u64 };
 
-    /// Subfolders and files directly inside, merged largest first. Files are
-    /// already stored largest first, so only the subfolders need sorting.
-    fn folderGroup(self: *const View, json: *std.json.Stringify, s: *const Scope, limit: usize) !void {
+    /// The folder view's one group: what is directly inside, largest first.
+    fn folderGroup(self: *const View, json: *std.json.Stringify, s: *const Scope, limit: usize, depth: u8, nested_limit: usize) !void {
+        var budget: usize = nested_budget;
+        try json.beginObject();
+        try json.objectField("key");
+        try json.write("all");
+        try json.objectField("bytes");
+        try json.write(s.agg.bytes);
+        try json.objectField("files");
+        try json.write(s.agg.files);
+        try json.objectField("items");
+        try json.beginArray();
+        const done = try self.writeMerged(json, s, limit, .{ .depth = depth, .limit = nested_limit, .budget = &budget });
+        try json.endArray();
+        try writeRest(json, done.total - done.shown, s.agg.bytes -| done.shown_bytes);
+        try json.endObject();
+    }
+
+    const Merged = struct { shown: u64, shown_bytes: u64, total: u64 };
+
+    /// Subfolders and files directly inside the scope, merged largest first,
+    /// `limit` of them, as array elements. Files are already stored largest
+    /// first, so only the subfolders need sorting. Folder items nest their
+    /// own children while `nest` has depth and budget left; each nested list
+    /// spends its limit from the budget.
+    fn writeMerged(self: *const View, json: *std.json.Stringify, s: *const Scope, limit: usize, nest: Nest) anyerror!Merged {
         var subdirs: std.ArrayListUnmanaged(Item) = .empty;
         var c: u32 = if (s.dir) |d| d + 1 else 0;
         while (c < s.dir_end) {
@@ -1819,15 +1885,6 @@ pub const View = struct {
         var files = self.removed.aliveFiles(file_start, file_end);
         const alive_files = (file_end - file_start) - self.removed.removedFilesIn(file_start, file_end);
 
-        try json.beginObject();
-        try json.objectField("key");
-        try json.write("all");
-        try json.objectField("bytes");
-        try json.write(s.agg.bytes);
-        try json.objectField("files");
-        try json.write(s.agg.files);
-        try json.objectField("items");
-        try json.beginArray();
         var shown: u64 = 0;
         var shown_bytes: u64 = 0;
         var next_dir: usize = 0;
@@ -1841,7 +1898,7 @@ pub const View = struct {
                 const item = dir_item.?;
                 const id: u32 = @intCast(item.id);
                 const rec = try self.r.dir(id);
-                try self.writeDir(json, id, &rec, self.dirAgg(id, &rec));
+                try self.writeDirNested(json, id, &rec, self.dirAgg(id, &rec), nest);
                 shown_bytes +|= item.bytes;
                 next_dir += 1;
             } else {
@@ -1853,10 +1910,7 @@ pub const View = struct {
             }
             shown += 1;
         }
-        try json.endArray();
-        const total_items = subdirs.items.len + alive_files;
-        try writeRest(json, total_items - shown, s.agg.bytes -| shown_bytes);
-        try json.endObject();
+        return .{ .shown = shown, .shown_bytes = shown_bytes, .total = subdirs.items.len + alive_files };
     }
 
     /// Every file in the subtree, grouped by type or size band.

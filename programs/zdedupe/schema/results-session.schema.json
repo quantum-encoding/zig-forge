@@ -833,7 +833,9 @@
         "path": { "type": ["string", "null"], "default": null },
         "by": { "type": "string", "enum": ["folder", "type", "size"], "default": "folder" },
         "limit": { "type": "integer", "minimum": 0, "maximum": 500, "default": 150, "description": "Clamped to 500." },
-        "per_group": { "type": "integer", "minimum": 0, "maximum": 200, "default": 40, "description": "Clamped to 200." }
+        "per_group": { "type": "integer", "minimum": 0, "maximum": 200, "default": 40, "description": "Clamped to 200." },
+        "depth": { "type": "integer", "minimum": 0, "maximum": 255, "default": 1, "description": "Folder view only: levels of subfolders nested inside each folder item, for a map that draws folders inside folders. 1 = none; clamped to 1..3." },
+        "nested_limit": { "type": "integer", "minimum": 0, "maximum": 60, "default": 16, "description": "Items listed inside each nested folder; clamped to 60. One answer carries at most 3000 nested items in all; past that, folder items come back without children." }
       }
     },
 
@@ -890,7 +892,16 @@
           "description": "zdedupe_results_space_trash would refuse it: a protected location, or a folder holding one.",
           "type": "boolean"
         },
-        "root": { "type": "boolean", "description": "A scan root; never trashed whole." }
+        "root": { "type": "boolean", "description": "A scan root; never trashed whole." },
+        "children": {
+          "description": "Folder items of a folder view asked for with depth > 1: this folder's own largest subfolders and files, merged largest first, nesting further while depth remains. Absent when not asked for or out of budget.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/SpaceNode" }
+        },
+        "children_rest": {
+          "description": "Present with children: what the nested list left out.",
+          "$ref": "#/$defs/SpaceRest"
+        }
       }
     },
 

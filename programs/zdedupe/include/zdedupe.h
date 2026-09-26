@@ -896,13 +896,18 @@ const char* zdedupe_results_space_overview(zdedupe_results* r);
 /**
  * One folder's contents -> SpaceChildren. Query (SpaceChildrenQuery):
  *   { "node": id | null, "path": "/abs" | null,
- *     "by": "folder" | "type" | "size", "limit": 150, "per_group": 40 }
+ *     "by": "folder" | "type" | "size", "limit": 150, "per_group": 40,
+ *     "depth": 1, "nested_limit": 16 }
  * No node and no path means the scan root (every root, as a node of kind
  * "all", when there were several). "folder": one group, the folder's
  * subfolders and files merged largest first, `limit` of them (<= 500).
  * "type": every file below the folder grouped by type, largest group first;
  * "size": grouped by size band (over_1g, 100m_1g, 10m_100m, 1m_10m,
- * under_1m); each group lists its `per_group` (<= 200) largest files. Every
+ * under_1m); each group lists its `per_group` (<= 200) largest files. With
+ * "depth" 2 or 3 (folder view), each folder item also carries "children" -
+ * its own `nested_limit` (<= 60) largest items - and "children_rest", nesting
+ * again while depth remains, for a map that draws folders inside folders; at
+ * most 3000 nested items per answer. Every
  * group carries a "rest" {count, bytes} for what it did not list. "trail"
  * leads from the root to the folder, for a breadcrumb. Fails when the folder
  * is not in these results or was removed.

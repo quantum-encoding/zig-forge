@@ -218,6 +218,21 @@ test "children come back largest first, capped, with the remainder summed" {
     try testing.expectEqual(@as(usize, 2), field(proj, "trail").array.items.len);
     try testing.expectEqualStrings("code", str(field(proj, "node"), "type"));
 
+    // Nested: each folder item carries its own largest children, one level
+    // per extra depth; without depth there is no `children` field at all.
+    try testing.expect(findItem(items, "proj").?.object.get("children") == null);
+    const nested = try parse(arena, s.spaceChildren("{\"depth\":3,\"nested_limit\":1}"));
+    const proj_nested = findItem(field(field(nested, "groups").array.items[0], "items"), "proj").?;
+    const proj_kids = field(proj_nested, "children").array.items;
+    try testing.expectEqual(@as(usize, 1), proj_kids.len);
+    try testing.expectEqualStrings("node_modules", str(proj_kids[0], "name"));
+    try testing.expectEqual(@as(i64, 1), int(field(proj_nested, "children_rest"), "count"));
+    try testing.expectEqual(int(proj_nested, "bytes") - int(proj_kids[0], "bytes"), int(field(proj_nested, "children_rest"), "bytes"));
+    // Depth 3 reaches node_modules' own child, and no further.
+    const pkg = field(proj_kids[0], "children").array.items[0];
+    try testing.expectEqualStrings("pkg", str(pkg, "name"));
+    try testing.expect(pkg.object.get("children") == null);
+
     // By type and by size.
     const by_type = try parse(arena, s.spaceChildren("{\"by\":\"type\",\"per_group\":1}"));
     const first_type = field(by_type, "groups").array.items[0];
