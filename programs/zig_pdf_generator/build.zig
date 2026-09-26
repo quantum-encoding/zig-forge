@@ -55,6 +55,16 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "zig_toml", .module = toml_mod }},
     });
 
+    // zig_docx (DOCX/XLSX read and write), from its sibling source directory
+    // on the same terms. Rooted at docx.zig; the engine's library roots
+    // reference its `ffi` so the zig_docx_* C API is exported from libzigpdf
+    // too. Its PDF-extraction and Claude Code helpers (which spawn processes)
+    // are declared lazily in docx.zig and never referenced, so they are not
+    // compiled in.
+    const docx_mod = b.createModule(.{
+        .root_source_file = b.path("../zig_docx/src/docx.zig"),
+    });
+
     // ==========================================================================
     // Core Library (Static) - Uses ffi.zig as root for C FFI exports
     // ==========================================================================
@@ -435,8 +445,9 @@ pub fn build(b: *std.Build) void {
     };
     for (roots) |m| {
         m.addImport("beacon_assets", beacon_assets_mod);
-        // letter + legend_letter are reachable from every root too.
+        // letter, legend_letter and docx_bridge are reachable from every root too.
         m.addImport("zig_legend", legend_mod);
+        m.addImport("zig_docx", docx_mod);
     }
 }
 

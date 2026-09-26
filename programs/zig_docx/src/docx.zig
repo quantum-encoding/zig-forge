@@ -216,6 +216,10 @@ const ParserState = struct {
     in_table_cell: bool = false,
     in_drawing: bool = false,
     in_num_props: bool = false,
+    /// Inside a `w:t` text element. Only its content is run text: `w:delText`
+    /// (tracked deletions), `w:instrText` (field codes) and the whitespace
+    /// between elements are not.
+    in_text: bool = false,
 
     // Current paragraph being built
     current_runs: std.ArrayListUnmanaged(Run),
@@ -399,6 +403,10 @@ const ParserState = struct {
             if (xml.getAttr(es.attrs, "embed")) |rid| {
                 self.current_image_rel = rid;
             }
+        } else if (self.in_run and std.mem.eql(u8, name, "t")) {
+            self.in_text = true;
+        } else if (self.in_run and std.mem.eql(u8, name, "tab")) {
+            try self.current_text.append(self.allocator, '\t');
         } else if (self.in_run and std.mem.eql(u8, name, "br")) {
             // Line break within a run
             try self.current_text.append(self.allocator, '\n');
@@ -431,6 +439,8 @@ const ParserState = struct {
         } else if (std.mem.eql(u8, name, "r")) {
             try self.finishRun();
             self.in_run = false;
+        } else if (std.mem.eql(u8, name, "t")) {
+            self.in_text = false;
         } else if (std.mem.eql(u8, name, "rPr")) {
             self.in_run_props = false;
         } else if (std.mem.eql(u8, name, "drawing") or std.mem.eql(u8, name, "pict")) {
@@ -439,7 +449,7 @@ const ParserState = struct {
     }
 
     fn handleText(self: *ParserState, text: []const u8) !void {
-        if (self.in_run and !self.in_run_props and !self.in_drawing) {
+        if (self.in_run and self.in_text and !self.in_run_props and !self.in_drawing) {
             try self.current_text.appendSlice(self.allocator, text);
         }
     }
@@ -482,6 +492,9 @@ pub fn parseDocument(allocator: std.mem.Allocator, archive: *zip.ZipArchive) !Do
     defer state.row_cells.deinit(allocator);
     defer state.table_rows.deinit(allocator);
     var parser = xml.XmlParser.init(doc_xml);
+    // A run holding only a space (`<w:t xml:space="preserve"> </w:t>`) is
+    // common in Word output; skipping it would glue the words either side.
+    parser.keep_whitespace = true;
 
     while (parser.next()) |event| {
         switch (event) {
@@ -943,4 +956,55 @@ test "cell colspan parsing" {
 
     const table = doc.elements[0].table;
     try std.testing.expectEqual(@as(u16, 2), table.rows[0].cells[0].col_span);
+}
+
+test "space-only runs are kept; deleted text and field codes are not run text" {
+    const allocator = std.testing.allocator;
+
+    const doc_xml =
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        \\  <w:body>
+        \\    <w:p>
+        \\      <w:r><w:t>Dear</w:t></w:r>
+        \\      <w:r><w:t xml:space="preserve"> </w:t></w:r>
+        \\      <w:r><w:t>Ms</w:t></w:r>
+        \\      <w:r><w:tab/><w:t>Mor</w:t></w:r>
+        \\      <w:r><w:t>gan</w:t></w:r>
+        \\      <w:del><w:r><w:delText>removed</w:delText></w:r></w:del>
+        \\      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+        \\      <w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>
+        \\    </w:p>
+        \\  </w:body>
+        \\</w:document>
+    ;
+
+    var state = ParserState.init(allocator, &[_]rels.Relationship{}, &[_]styles.StyleInfo{});
+    defer state.current_text.deinit(allocator);
+    defer state.current_runs.deinit(allocator);
+    defer state.cell_paragraphs.deinit(allocator);
+    defer state.row_cells.deinit(allocator);
+    defer state.table_rows.deinit(allocator);
+    var parser = xml.XmlParser.init(doc_xml);
+    parser.keep_whitespace = true;
+
+    while (parser.next()) |event| {
+        switch (event) {
+            .element_start => |es| try state.handleElementStart(es),
+            .element_end => |name| try state.handleElementEnd(name),
+            .text => |text| try state.handleText(text),
+        }
+    }
+
+    var doc = Document{
+        .elements = try state.elements.toOwnedSlice(allocator),
+        .media = @constCast(&[_]MediaFile{}),
+        .allocator = allocator,
+    };
+    defer doc.deinit();
+
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(allocator);
+    for (doc.elements[0].paragraph.runs) |r| try joined.appendSlice(allocator, r.text);
+    try std.testing.expectEqualStrings("Dear Ms\tMorgan", joined.items);
 }

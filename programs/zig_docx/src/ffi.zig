@@ -15,6 +15,7 @@
 //!   zig_docx_free(result.data, result.len)
 
 const std = @import("std");
+const builtin = @import("builtin");
 const docx = @import("docx.zig");
 
 // ─── Types ─────────────────────────────────────────────────────────
@@ -90,7 +91,18 @@ pub const ZigDocxMarkdownResult = extern struct {
 
 // ─── Allocator ─────────────────────────────────────────────────────
 
-const allocator = std.heap.c_allocator;
+/// libc malloc where libc is linked (the native, iOS and Android libraries);
+/// WASM linear memory, or whole pages, where it is not — e.g. when a host
+/// library without libc (zig_pdf_generator's WASM builds and its Android
+/// shared library) compiles this file in to re-export the same surface.
+/// Every buffer this file returns is freed through the same allocator by
+/// zig_docx_free*, so the choice never crosses the API.
+pub const allocator = if (builtin.link_libc)
+    std.heap.c_allocator
+else if (builtin.cpu.arch.isWasm())
+    std.heap.wasm_allocator
+else
+    std.heap.page_allocator;
 
 // ─── Helpers ───────────────────────────────────────────────────────
 
@@ -261,7 +273,7 @@ fn zig_docx_md_to_docx(
 /// A reference with no matching image is dropped rather than written out
 /// unresolved (see writeImageRun); passing null/0 here is exactly the old
 /// behaviour, minus the invalid drawing it used to emit.
-fn zig_docx_md_to_docx_with_images(
+pub fn zig_docx_md_to_docx_with_images(
     md_ptr: [*]const u8,
     md_len: usize,
     opts: ?*const ZigDocxOptions,
@@ -721,7 +733,7 @@ fn zig_docx_info(
 }
 
 /// Free memory returned by zig_docx_* functions.
-fn zig_docx_free(ptr: ?[*]u8, len: usize) callconv(.c) void {
+pub fn zig_docx_free(ptr: ?[*]u8, len: usize) callconv(.c) void {
     if (ptr) |p| {
         if (len > 0) {
             allocator.free(p[0..len]);
@@ -730,7 +742,7 @@ fn zig_docx_free(ptr: ?[*]u8, len: usize) callconv(.c) void {
 }
 
 /// Free a sentinel-terminated string returned by zig_docx_* functions.
-fn zig_docx_free_string(ptr: ?[*:0]u8) callconv(.c) void {
+pub fn zig_docx_free_string(ptr: ?[*:0]u8) callconv(.c) void {
     if (ptr) |p| {
         const s = std.mem.span(p);
         allocator.free(s[0 .. s.len + 1]); // include sentinel

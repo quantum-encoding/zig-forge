@@ -228,29 +228,15 @@ fn writeParagraph(
             try w.print("*", .{});
         }
 
-        // Write merged text, inserting spaces between runs where needed
+        // Write merged text. Runs carry their own spaces: Word splits text
+        // across runs mid-word (spelling marks, revision ids), so joining
+        // them verbatim is the only faithful reading.
         var j = i;
         while (j < merged_end) : (j += 1) {
             const r = p.runs[j];
             if (r.text.len == 0) continue;
             if (r.image_rel_id != null) continue;
 
-            // Check if we need a space between this run and the previous
-            if (j > i) {
-                var prev_text: []const u8 = "";
-                var k = j - 1;
-                while (true) {
-                    if (p.runs[k].text.len > 0 and p.runs[k].image_rel_id == null) {
-                        prev_text = p.runs[k].text;
-                        break;
-                    }
-                    if (k == i) break;
-                    k -= 1;
-                }
-                if (needsSpaceBetween(prev_text, r.text)) {
-                    try w.print(" ", .{});
-                }
-            }
             try w.print("{s}", .{r.text});
         }
 
@@ -332,20 +318,6 @@ fn writeEscapedLinkUrl(w: anytype, url: []const u8) !void {
     }
 }
 
-fn needsSpaceBetween(prev_text: []const u8, next_text: []const u8) bool {
-    if (prev_text.len == 0 or next_text.len == 0) return false;
-    const prev = prev_text[prev_text.len - 1];
-    const next = next_text[0];
-    // If either side is already whitespace, no space needed
-    if (prev == ' ' or prev == '\t' or prev == '\n') return false;
-    if (next == ' ' or next == '\t' or next == '\n') return false;
-    // If both sides are word characters (letter/digit), insert a space.
-    // Word splits text across runs at formatting boundaries, not mid-word.
-    const prev_is_word = (prev >= 'a' and prev <= 'z') or (prev >= 'A' and prev <= 'Z') or (prev >= '0' and prev <= '9');
-    const next_is_word = (next >= 'a' and next <= 'z') or (next >= 'A' and next <= 'Z') or (next >= '0' and next <= '9');
-    return prev_is_word and next_is_word;
-}
-
 /// Handle paragraphs where the author typed • bullet characters manually
 /// instead of using Word's list formatting. Splits on • and emits proper markdown list.
 fn writeInlineBulletList(
@@ -390,27 +362,11 @@ fn writeInlineBulletList(
             try buf.appendSlice(allocator, "*");
         }
 
-        // Write merged runs with space insertion
+        // Write merged runs verbatim
         var rj = ri;
         while (rj < merge_end) : (rj += 1) {
             const r = p.runs[rj];
             if (r.text.len == 0 or r.image_rel_id != null) continue;
-            if (rj > ri) {
-                // Find prev text
-                var prev_text: []const u8 = "";
-                var rk = rj - 1;
-                while (true) {
-                    if (p.runs[rk].text.len > 0 and p.runs[rk].image_rel_id == null) {
-                        prev_text = p.runs[rk].text;
-                        break;
-                    }
-                    if (rk == ri) break;
-                    rk -= 1;
-                }
-                if (needsSpaceBetween(prev_text, r.text)) {
-                    try buf.appendSlice(allocator, " ");
-                }
-            }
             try buf.appendSlice(allocator, r.text);
         }
 
@@ -508,7 +464,7 @@ fn writeCellText(w: anytype, cell: *const docx.TableCell) !void {
         }
         first_para = false;
 
-        // Merge adjacent runs with same formatting, insert spaces between word runs
+        // Merge adjacent runs with same formatting
         var ri: usize = 0;
         while (ri < para.runs.len) {
             const run = para.runs[ri];
@@ -538,21 +494,6 @@ fn writeCellText(w: anytype, cell: *const docx.TableCell) !void {
             while (rj < merge_end) : (rj += 1) {
                 const r = para.runs[rj];
                 if (r.text.len == 0 or r.image_rel_id != null) continue;
-                if (rj > ri) {
-                    var prev_text: []const u8 = "";
-                    var rk = rj - 1;
-                    while (true) {
-                        if (para.runs[rk].text.len > 0 and para.runs[rk].image_rel_id == null) {
-                            prev_text = para.runs[rk].text;
-                            break;
-                        }
-                        if (rk == ri) break;
-                        rk -= 1;
-                    }
-                    if (needsSpaceBetween(prev_text, r.text)) {
-                        try w.print(" ", .{});
-                    }
-                }
                 try w.print("{s}", .{r.text});
             }
 

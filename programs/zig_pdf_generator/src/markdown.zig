@@ -15,7 +15,12 @@
 //!   - Optional YAML frontmatter at top (`---\nkey: value\n---`) — extracts
 //!     title/author/date for the PDF metadata
 //!
-//! Not supported (yet): tables, nested lists, images.
+//!   - Pipe tables
+//!   - Images on a line of their own (`![alt](name)`), resolved only against
+//!     the in-memory images a letter supplies (`LetterInput.images`), never
+//!     the filesystem; an unresolved or undecodable image is left out
+//!
+//! Not supported (yet): nested lists, inline images.
 
 const std = @import("std");
 const document = @import("document.zig");
@@ -54,6 +59,8 @@ pub const LetterInput = struct {
     // Drawn/scanned signature image (path, `data:` URL, or raw base64; PNG
     // with transparency recommended). "" = leave the wet-signature gap.
     signature_image: []const u8 = "",
+    /// Images the body's `![alt](name)` lines refer to.
+    images: []const BodyImage = &.{},
 
     accent_hex: []const u8 = "#1a1a1a",
     margin: f32 = 64,
@@ -101,6 +108,7 @@ pub const BlockKind = enum {
     blockquote,
     horizontal_rule,
     table,
+    image,
 };
 
 pub const TableCell = struct {
@@ -128,6 +136,27 @@ pub const Block = struct {
     code: []const u8 = "",
     // table
     table: ?Table = null,
+    // image: the reference inside `(...)` and the alt text
+    image_ref: []const u8 = "",
+    image_alt: []const u8 = "",
+};
+
+/// `![alt](ref)` filling the whole (trimmed) line, or null.
+fn parseImageLine(line: []const u8) ?struct { alt: []const u8, ref: []const u8 } {
+    if (!std.mem.startsWith(u8, line, "![") or line[line.len - 1] != ')') return null;
+    const close_alt = std.mem.indexOf(u8, line, "](") orelse return null;
+    const ref = std.mem.trim(u8, line[close_alt + 2 .. line.len - 1], " \t");
+    if (ref.len == 0 or std.mem.indexOfAny(u8, ref, " ()") != null) return null;
+    return .{ .alt = line[2..close_alt], .ref = ref };
+}
+
+/// An image a letter body may show, named as its Markdown reference names it
+/// (the whole reference, or its final path component). Exactly one of
+/// `bytes` (raw PNG/JPEG) and `base64` (raw base64 or a `data:` URL) is set.
+pub const BodyImage = struct {
+    name: []const u8,
+    bytes: []const u8 = "",
+    base64: []const u8 = "",
 };
 
 pub const Frontmatter = struct {
@@ -249,6 +278,12 @@ pub fn parse(allocator: std.mem.Allocator, md: []const u8) !ParsedDocument {
                     continue;
                 }
             }
+        }
+
+        // Image on its own line
+        if (parseImageLine(trimmed)) |img| {
+            try blocks.append(allocator, .{ .kind = .image, .image_ref = img.ref, .image_alt = img.alt });
+            continue;
         }
 
         // Bullet list
@@ -1381,6 +1416,51 @@ const Renderer = struct {
         self.current_y = start_y - max_consumed;
     }
 
+    /// The body image a reference names: whole reference first, then by
+    /// final path component (`./images/1-logo.png` finds `1-logo.png`).
+    fn findBodyImage(self: *const Renderer, ref: []const u8) ?BodyImage {
+        const L = self.letter orelse return null;
+        for (L.images) |img| if (std.mem.eql(u8, img.name, ref)) return img;
+        const base = if (std.mem.lastIndexOfAny(u8, ref, "/\\")) |i| ref[i + 1 ..] else ref;
+        for (L.images) |img| {
+            const ib = if (std.mem.lastIndexOfAny(u8, img.name, "/\\")) |i| img.name[i + 1 ..] else img.name;
+            if (std.mem.eql(u8, ib, base)) return img;
+        }
+        return null;
+    }
+
+    /// A body image at its natural size (96 dpi), scaled down to the text
+    /// width and to half the page height, kept whole on one page. Images the
+    /// letter did not supply, or that are not PNG/JPEG, are left out.
+    fn drawImageBlock(self: *Renderer, content: *document.ContentStream, block: Block) !void {
+        const found = self.findBodyImage(block.image_ref) orelse return;
+        const img: document.Image = if (found.bytes.len > 0)
+            image_lib.loadImage(self.allocator, found.bytes) catch return
+        else if (found.base64.len > 0)
+            (image_lib.loadImageFromBase64(self.allocator, found.base64) catch return).image
+        else
+            return;
+        if (img.width == 0 or img.height == 0) return;
+        const id = self.doc.addImage(img) catch return;
+
+        const px_to_pt: f32 = 0.75;
+        var w: f32 = @as(f32, @floatFromInt(img.width)) * px_to_pt;
+        var h: f32 = @as(f32, @floatFromInt(img.height)) * px_to_pt;
+        const max_h = (self.page_height - self.margin_top - self.margin_bottom) / 2;
+        if (w > self.usable_width) {
+            h *= self.usable_width / w;
+            w = self.usable_width;
+        }
+        if (h > max_h) {
+            w *= max_h / h;
+            h = max_h;
+        }
+        try self.checkPageBreak(content, h + PARAGRAPH_GAP);
+        self.current_y -= h;
+        try content.drawImage(id, self.margin_left, self.current_y, w, h);
+        self.current_y -= PARAGRAPH_GAP + BODY_SIZE;
+    }
+
     fn drawHorizontalRule(self: *Renderer, content: *document.ContentStream) !void {
         try self.checkPageBreak(content, 20);
         self.current_y -= 6;
@@ -1443,6 +1523,7 @@ const Renderer = struct {
                 .code_block => try self.drawCodeBlock(&content, block),
                 .horizontal_rule => try self.drawHorizontalRule(&content),
                 .table => try self.drawTable(&content, block),
+                .image => try self.drawImageBlock(&content, block),
             }
         }
 

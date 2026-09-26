@@ -63,6 +63,7 @@ pub const template_card = @import("template_card.zig");
 pub const order_email = @import("order_email.zig");
 pub const letter = @import("letter.zig");
 pub const legend_letter = @import("legend_letter.zig");
+pub const docx_bridge = @import("docx_bridge.zig");
 pub const pdf_crypt = @import("pdf_crypt.zig");
 pub const types = @import("types.zig");
 pub const CryptoPaymentBlock = types.CryptoPaymentBlock;
@@ -597,6 +598,7 @@ test {
     _ = @import("order_email.zig");
     _ = @import("letter.zig");
     _ = @import("legend_letter_tests.zig");
+    _ = @import("docx_bridge_tests.zig");
     _ = @import("pdf_crypt.zig");
     // seal.zig imports the `ml_dsa` module (native targets only). Importing it
     // here (test block — never compiled for android/ios/wasm) keeps the seal off

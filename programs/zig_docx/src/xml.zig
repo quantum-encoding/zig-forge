@@ -45,6 +45,12 @@ pub const XmlParser = struct {
     // Buffer for decoded entity text
     entity_buf: [4096]u8,
     pending_self_close: ?[]const u8,
+    /// Emit whitespace-only text nodes instead of skipping them. Off by
+    /// default: most consumers only want element content and treat the
+    /// indentation between elements as noise. A consumer that must keep
+    /// significant whitespace (a WordprocessingML run of just " ") turns it
+    /// on and scopes text to the elements it cares about.
+    keep_whitespace: bool = false,
 
     pub fn init(data: []const u8) XmlParser {
         return .{
@@ -208,7 +214,7 @@ pub const XmlParser = struct {
                 break;
             }
         }
-        if (all_ws) return self.next();
+        if (all_ws and !self.keep_whitespace) return self.next();
 
         // If it contains entities, decode them
         if (std.mem.indexOf(u8, raw, "&")) |_| {

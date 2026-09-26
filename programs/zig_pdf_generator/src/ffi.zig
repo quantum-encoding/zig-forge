@@ -46,6 +46,7 @@ const clean_quote = @import("clean_quote.zig");
 const letter_quote = @import("letter_quote.zig");
 const letter = @import("letter.zig");
 const legend_letter = @import("legend_letter.zig");
+const docx_bridge = @import("docx_bridge.zig");
 const markdown = @import("markdown.zig");
 const template_card = @import("template_card.zig");
 
@@ -1488,6 +1489,66 @@ fn setLegendError(err: legend_letter.Error, diag: *const legend_letter.Diagnosti
     const detail = if (diag.len > 0) diag.text() else @errorName(err);
     const msg = std.fmt.bufPrint(&buf, "Legend letter: {s}", .{detail}) catch "Legend letter error";
     setLastError(msg);
+}
+
+// =============================================================================
+// Word documents — zig_docx's C API, and bridges to letters (src/docx_bridge.zig)
+// =============================================================================
+
+// zig_docx's ffi.zig exports its own C surface (zig_docx_md_to_docx,
+// zig_docx_to_markdown, zig_docx_xlsx_to_csv, zig_docx_info, zig_docx_free …;
+// see include/zig_docx.h) from a comptime block; referencing it here makes
+// this library carry those symbols too.
+comptime {
+    _ = @import("zig_docx").ffi;
+}
+
+/// Lay out a Word document's body as a letter PDF. `letter_json` is the
+/// letter frame (zigpdf_generate_letter's fields without body_markdown) or
+/// NULL for none. Word images are carried across. Returns NULL with the
+/// reason in zigpdf_get_error() ("DOCX: …") for a non-DOCX input.
+pub export fn zigpdf_docx_to_letter(docx_ptr: [*]const u8, docx_len: usize, letter_json: ?[*:0]const u8, output_len: *usize) ?[*]u8 {
+    var diag = docx_bridge.Diagnostic{};
+    const frame: []const u8 = if (letter_json) |j| std.mem.span(j) else "";
+    const pdf = docx_bridge.docxToLetter(ffi_allocator, docx_ptr[0..docx_len], frame, &diag) catch |err| {
+        setDocxError(err, &diag);
+        return null;
+    };
+    output_len.* = pdf.len;
+    return pdf.ptr;
+}
+
+/// Turn a Word document into a zig_legend template. Returns UTF-8 JSON
+/// {"template", "placeholders": [...], "legend_toml", "images": [{"name",
+/// "data"}]}; placeholders split across Word runs or retyped by autocorrect
+/// are repaired. Caller frees with zigpdf_free.
+pub export fn zigpdf_docx_to_legend_template(docx_ptr: [*]const u8, docx_len: usize, output_len: *usize) ?[*]u8 {
+    var diag = docx_bridge.Diagnostic{};
+    const out = docx_bridge.docxToLegendTemplateJson(ffi_allocator, docx_ptr[0..docx_len], &diag) catch |err| {
+        setDocxError(err, &diag);
+        return null;
+    };
+    output_len.* = out.len;
+    return out.ptr;
+}
+
+/// Render a legend letter (zigpdf_generate_legend_letter's input) as an
+/// editable .docx. `letter.letterhead_image` (base64 or data: URL, PNG/JPEG)
+/// becomes the Word letterhead. Caller frees with zigpdf_free.
+pub export fn zigpdf_legend_letter_to_docx(json_input: [*:0]const u8, output_len: *usize) ?[*]u8 {
+    var diag = docx_bridge.Diagnostic{};
+    const out = docx_bridge.legendLetterToDocx(ffi_allocator, std.mem.span(json_input), &diag) catch |err| {
+        setDocxError(err, &diag);
+        return null;
+    };
+    output_len.* = out.len;
+    return out.ptr;
+}
+
+fn setDocxError(err: docx_bridge.Error, diag: *const docx_bridge.Diagnostic) void {
+    var buf: [256]u8 = undefined;
+    const detail = if (diag.len > 0) diag.text() else @errorName(err);
+    setLastError(std.fmt.bufPrint(&buf, "DOCX: {s}", .{detail}) catch "DOCX error");
 }
 
 fn writeFileAbsolute(path: []const u8, data: []const u8) ZigPdfError {

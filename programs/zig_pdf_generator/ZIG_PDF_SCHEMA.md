@@ -524,6 +524,7 @@ static/shared, iOS, Android); WASM export `zigpdf_generate_letter` (both
 | `closing` | string | No | `""` | e.g. `"Yours sincerely,"` |
 | `signature_name` | string | No | `""` | Bold name under signature space |
 | `signature_title` | string | No | `""` | Grey title under the name |
+| `images` | array | No | `[]` | `[{"name", "data"}]`: PNG/JPEG (base64 or `data:` URL) shown by `![alt](name)` lines in the body; matched by whole reference or file name; never read from disk |
 | `signature_image` | string | No | `""` | Drawn/scanned signature (path, `data:` URL or raw base64; PNG with transparency recommended), 40pt tall, in place of the blank signature gap |
 | `accent_hex` | hex_color | No | `#1a1a1a` | Letterhead title + accents |
 | `margin` | number | No | `64` | Uniform page margin (points) |
@@ -605,21 +606,118 @@ and `template` appear only when a template is passed.
 
 ### Vendoring: sibling directories
 
-The engine imports zig_legend and zig_toml as **relative-path modules**
-(`build.zig`: `../zig_legend/src/lib.zig`, `../zig_toml/src/lib.zig`), like
-the seal's `../zig-quantum-encryption`. An app that vendors
-`programs/zig_pdf_generator` as a source copy must copy these beside it, keeping
-the layout:
+The engine imports zig_legend, zig_toml and zig_docx as **relative-path
+modules** (`build.zig`: `../zig_legend/src/lib.zig`, `../zig_toml/src/lib.zig`,
+`../zig_docx/src/docx.zig`), like the seal's `../zig-quantum-encryption`. An
+app that vendors `programs/zig_pdf_generator` as a source copy must copy these
+beside it, keeping the layout:
 
-| Directory | Files the build reaches |
+| Directory | Files that must be present |
 |---|---|
-| `zig_legend/src/` | `lib.zig`, `diag.zig`, `template.zig`, `legend.zig`, `render.zig`, `plan.zig` (`golden_test.zig` and `main.zig` are not compiled into the engine) |
+| `zig_legend/src/` | `lib.zig`, `diag.zig`, `template.zig`, `legend.zig`, `render.zig`, `plan.zig`, `golden_test.zig` |
 | `zig_toml/src/` | `lib.zig`, `toml.zig` |
+| `zig_docx/src/` | `docx.zig`, `ffi.zig`, `xml.zig`, `zip.zig`, `zip_writer.zig`, `rels.zig`, `styles.zig`, `mdx.zig`, `md_parser.zig`, `docx_writer.zig`, `xlsx.zig`, `fra.zig`, and `pdf.zig`, `claude_code.zig`, `anthropic.zig`, `chunker.zig`, `tier1_anchors.zig` |
+| `zig_docx/include/` | `zig_docx.h` (C declarations of the `zig_docx_*` functions libzigpdf exports) |
 | `zig-quantum-encryption/src/` | `ml_dsa.zig` and the files it imports (already required for the seal) |
 
-Copying the two `src/` directories whole is the simple rule. Both are pure
-Zig with no libc or OS calls, so they build for every engine target (native,
-iOS, Android, `wasm32-wasi`, `wasm32-freestanding`).
+Zig loads every file named by an `@import`, even one whose declaration is
+never used, so these must exist although none of their code is compiled into
+the engine: zig_legend's `golden_test.zig` (imported
+from a test block) and zig_docx's `pdf.zig` and `claude_code.zig` (which start
+`pdftotext`/`mutool` and `claude` processes), `anthropic.zig`, `chunker.zig`
+and `tier1_anchors.zig` (declared in `docx.zig`, referenced by nothing the
+engine uses). None of their strings or symbols appear in any engine library.
+Not needed: zig_legend's `main.zig`, zig_docx's `main.zig`, `wasm.zig` and
+`testdata/`. This list was checked by building every target and the tests
+from a copy holding only these files. Copying the three `src/` directories
+whole is the simple rule.
+
+zig_legend and zig_toml are pure Zig with no libc or OS calls. zig_docx uses
+libc's allocator where libc is linked and otherwise WASM memory or pages, so
+all three build for every engine target (native, iOS, Android,
+`wasm32-wasi`, `wasm32-freestanding`).
+
+---
+
+## Word documents: zig_docx and the letter bridges
+
+libzigpdf carries **zig_docx** (`programs/zig_docx`): every library the
+engine builds (native static/shared, iOS, iOS simulator, Android, both WASM
+modules) exports its C API unchanged —
+`zig_docx_md_to_docx(_with_images)`, `zig_docx_to_markdown(_with_images)`,
+`zig_docx_xlsx_to_csv`, `zig_docx_xlsx_sheet_names`, `zig_docx_info`,
+`zig_docx_fra_from_json`, `zig_docx_alloc`, `zig_docx_free`,
+`zig_docx_free_string`, `zig_docx_free_info`, `zig_docx_free_markdown_result`,
+`zig_docx_version`. Their declarations are **`zig_docx.h`**
+(`programs/zig_docx/include/`), not `zigpdf.h`: include both. Memory from a
+`zig_docx_*` call is freed with the `zig_docx_free*` functions, never
+`zigpdf_free`. zig_docx's PDF-to-text path (which runs `pdftotext`/`mutool`)
+is not part of the engine on any target.
+
+Three engine exports connect Word documents and letters. Errors return NULL
+(WASM: 0) with `zigpdf_get_error()` = `DOCX: <reason>`, e.g.
+`DOCX: input is not a DOCX file (no ZIP signature)`,
+`DOCX: input has no word/document.xml, so it is not a Word document`,
+`DOCX: the Word text is not a valid template: …`.
+
+| Export (C) | WASM signature | Does |
+|---|---|---|
+| `uint8_t* zigpdf_docx_to_letter(const uint8_t* docx, size_t docx_len, const char* letter_json /* or NULL */, size_t* out_len)` | `(docx_ptr, docx_len, json_ptr /* or 0 */, json_len, out_len)` | The Word body laid out as a `letter` PDF. `letter_json` is the letter frame: every `letter` field except `body_markdown`. Word images are carried across |
+| `uint8_t* zigpdf_docx_to_legend_template(const uint8_t* docx, size_t docx_len, size_t* out_len)` | `(docx_ptr, docx_len, out_len)` | A Word letter with `{PLACEHOLDERS}` as a zig_legend template; JSON below |
+| `uint8_t* zigpdf_legend_letter_to_docx(const char* json, size_t* out_len)` | `(json_ptr, json_len, out_len)` | A legend letter (the `legend_letter` input) as an editable `.docx` |
+
+CLI: `pdf-gen docx-letter in.docx [frame.json] [-o out.pdf]`,
+`pdf-gen docx-template in.docx [-o out.json]`,
+`pdf-gen --legend-letter-docx in.json out.docx`.
+
+**What comes across from Word.** Headings (Title/Heading 1 → `#`, Heading 2 →
+`##`, …), paragraphs, bold/italic, hyperlinks (http/https/mailto/relative
+only), bulleted and numbered list items (as bullets), tables (first row as the
+header; merged cells are not merged), line breaks (as new paragraphs) and
+inline pictures (PNG or JPEG, each on its own line at natural size, capped to
+the text width and half a page; PNG transparency is kept as a PDF soft mask).
+Not carried: headers and footers, text boxes, footnotes, fonts, colours,
+alignment, page layout. Tracked deletions and field codes are not text; only
+the visible text of `w:t` elements is.
+
+**`zigpdf_docx_to_legend_template` output**
+
+```json
+{"template": "# Account statement\n\nDear {CLIENT_NAME},\n\n…{?STATUS=\"paid\"}…{:}…{/}\n",
+ "placeholders": ["CLIENT_NAME", "INVOICE_NO", "STATUS", "BALANCE", "PAY_BY"],
+ "legend_toml": "# Drafted from the 5 placeholder(s) …\n[[var]]\nname = \"CLIENT_NAME\"\ntype = \"string\"\nrequired = true\n…",
+ "images": [{"name": "1-image1.png", "data": "data:image/png;base64,…"}]}
+```
+
+- `placeholders`: every name the template reads, in first-use order.
+- `legend_toml`: a legend declaring each one, typed from its use — compared in
+  `{?X=value}` → enum of the values seen; `{?X}` → bool; `|long`/`|us`/`|uk`
+  → date; `|plain` → money (GBP); `|bullets`/`|lines`/`|count` → list; else
+  string; all `required`. Review it, widen enums to every outcome, add
+  scenarios.
+- `images`: pass them as `letter.images` when rendering; the template refers
+  to them as `![Image N](N-name.png)`.
+
+**Placeholders Word has mangled.** Word splits a paragraph's text into runs
+wherever an edit, a spelling mark or a formatting change happened, so
+`{CLIENT_NAME}` may arrive as `{CLI` + `ENT_NAME}`, half of it bold, with
+proofing and bookmark elements between; autocorrect makes quotes curly. The
+converter joins the runs, and inside each `{…}` on one line (at most 256
+bytes) gives the whole tag the formatting of its opening brace, turns curly
+quotes into straight ones and no-break spaces into spaces, drops zero-width
+characters and soft hyphens, trims spaces just inside the braces, and accepts
+full-width `｛｝`. `{{` stays a literal brace. Text outside tags is not
+changed. If the result is not a valid template (an unclosed `{?…}` block, an
+unknown filter), the call fails with the zig_legend parser's reason.
+
+**`letter.images` and `letter.letterhead_image`.** The `letter` and
+`legend_letter` inputs accept `"images": [{"name": "1-image1.png", "data":
+"<base64 or data: URL>"}]` for `![alt](name)` lines in the body; an image is
+matched by the whole reference or its file name and is only ever read from
+this list, never the filesystem. `zigpdf_legend_letter_to_docx` also takes
+`letter.letterhead_image` (PNG or JPEG, base64 or `data:` URL) as the Word
+letterhead; without it the company name, address and contact are written as
+text at the top.
 
 ---
 
@@ -789,6 +887,9 @@ Refer to the **clean_quote** tables above for the full field list —
 | `proposal_legacy`   | `zigpdf_generate_proposal`            | `proposal.zig`     | ✗ (CLI / demo fixture only)                  | ✗                                |
 | `letter`            | `zigpdf_generate_letter`              | `letter.zig`       | ✗ (JSON / CLI / WASM)                        | ✗                                |
 | `legend_letter`     | `zigpdf_generate_legend_letter`       | `legend_letter.zig`| ✗ (JSON / CLI / WASM)                        | ✗                                |
+| Word → letter       | `zigpdf_docx_to_letter`               | `docx_bridge.zig`  | ✗ (CLI / WASM)                               | ✗                                |
+| Word → template     | `zigpdf_docx_to_legend_template`      | `docx_bridge.zig`  | ✗ (CLI / WASM)                               | ✗                                |
+| legend letter → Word| `zigpdf_legend_letter_to_docx`        | `docx_bridge.zig`  | ✗ (CLI / WASM)                               | ✗                                |
 
 ## Implementation priority for the templateData refactor
 
