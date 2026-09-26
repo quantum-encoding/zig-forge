@@ -2,17 +2,15 @@
 {! Legend: statutory-interest.toml, whose DEBTOR_TYPE has no "individual" value. }
 Dear {SALUTATION},
 
-Our invoice {INVOICE_NUMBER}, dated {INVOICE_DATE|long}, for {GOODS_OR_SERVICES}, was due for payment by {DUE_DATE|long}. {?PAYMENT_STATUS=paid_late}Thank you for your payment of {PRINCIPAL}, which we received on {PAID_DATE|long}, after the date it was due.{:}{PRINCIPAL} remains unpaid.{/}
+Our invoice {INVOICE_NUMBER}, dated {INVOICE_DATE|long}, for {GOODS_OR_SERVICES}, was due for payment by {DUE_DATE|long}. {?PAYMENT_STATUS=paid_late}Thank you for your payment of {PRINCIPAL}, which we received on {PAID_DATE|long}, after the date it was due.{:}The invoice remains unpaid.{/}
 
 Our contract with {DEBTOR_NAME} was made between two businesses, each acting in the course of business. The Late Payment of Commercial Debts (Interest) Act 1998 therefore entitles us to simple interest on the late payment from the day after it was due, and to a fixed sum as compensation. We now claim both.
 
-## Statutory interest
+**Statutory interest.** The rate of statutory interest is 8% a year above the Bank of England's official dealing rate (Bank Rate) in force on {REFERENCE_DATE|long}, the 30 June or 31 December immediately before interest started to run. That rate was {REFERENCE_RATE}%, so statutory interest runs at {STATUTORY_RATE}% a year.
 
-The rate of statutory interest is 8% a year above the Bank of England's official dealing rate (Bank Rate) in force on {REFERENCE_DATE|long}, the 30 June or 31 December immediately before interest started to run. That rate was {REFERENCE_RATE}%, so statutory interest runs at {STATUTORY_RATE}% a year.
+Interest runs from {INTEREST_START|long} to {INTEREST_TO|long}, {DAYS} days: {PRINCIPAL} × {STATUTORY_RATE}% × {DAYS} ÷ 365 = {INTEREST_AMOUNT}, or {DAILY_INTEREST} a day.
 
-Interest is calculated from {INTEREST_START|long} to {INTEREST_TO|long}, {DAYS} days, as {PRINCIPAL} × {STATUTORY_RATE}% × {DAYS} ÷ 365, which is {DAILY_INTEREST} a day.
-
-## Amount claimed
+**Amount claimed.**
 
 | Item | Amount |
 |---|---|

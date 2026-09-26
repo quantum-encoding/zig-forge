@@ -3,9 +3,10 @@
 #
 #   templates/letters/render-proofs.sh [out_dir]    (default: output/legend-letters)
 #
-# Needs: zig, jq, pdftoppm (poppler). Builds pdf-gen, writes one CLI input per
+# Needs: zig, jq, and a rasteriser. Builds pdf-gen, writes one CLI input per
 # letter/scenario to <out_dir>/inputs/, renders <name>.pdf, then rasterises
-# each page to render-<name>-<page>.png at 120 dpi.
+# each page to render-<name>-<page>.png at 120 dpi: with PDFKit on macOS
+# (pdf2png.swift), else with poppler's pdftoppm.
 set -euo pipefail
 
 pack="$(cd "$(dirname "$0")" && pwd)"
@@ -32,7 +33,11 @@ render() { # legend letter scenario stage
       bindings: ($stages[0].creditor + (if $stage == "" then {} else $stages[0].stages[$stage] end))}' \
     > "$input"
   "$gen" --legend-letter "$input" "$out/$name.pdf"
-  pdftoppm -r 120 -png "$out/$name.pdf" "$out/render-$name"
+  if [[ "$(uname)" == Darwin ]] && command -v swift >/dev/null; then
+    swift "$pack/pdf2png.swift" "$out/$name.pdf" "$out/render-$name" 120
+  else
+    pdftoppm -r 120 -png "$out/$name.pdf" "$out/render-$name"
+  fi
 }
 
 for letter in reminder second-reminder final-demand; do

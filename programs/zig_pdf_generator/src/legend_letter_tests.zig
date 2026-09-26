@@ -113,7 +113,7 @@ test "legend letter: final demand follows the protocol only for individuals and 
     const a = arena.allocator();
 
     const company = try renderBody(a, try packInput(a, "debt-recovery.toml", "final-demand", "company-unpaid", "final-demand", &.{}));
-    try testing.expect(has(company, "Letter before action"));
+    try testing.expect(has(company, "This letter before action sets out our claim"));
     try testing.expect(has(company, "29 September 2026"));
     try testing.expect(has(company, "Practice Direction on Pre-Action Conduct"));
     try testing.expect(!has(company, "Pre-Action Protocol for Debt Claims"));

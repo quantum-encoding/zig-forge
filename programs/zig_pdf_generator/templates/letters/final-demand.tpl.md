@@ -7,9 +7,7 @@
 Dear {SALUTATION},
 
 {?DEBTOR_TYPE=company}
-## Letter before action
-
-We write about the sum of {TOTAL_CLAIMED} owed by {DEBTOR_NAME} to {CREDITOR_NAME}, which remains unpaid despite our earlier reminders. This letter sets out our claim so that you can consider it before we start court proceedings.
+We write about the sum of {TOTAL_CLAIMED} owed by {DEBTOR_NAME} to {CREDITOR_NAME}, which remains unpaid despite our earlier reminders. This letter before action sets out our claim so that you can consider it before we start court proceedings.
 
 **Basis of the claim.** Under a contract between our companies, we supplied {GOODS_OR_SERVICES}. We invoiced you on {INVOICE_DATE|long} (invoice {INVOICE_NUMBERS}) for {INVOICE_TOTAL}, payable by {DUE_DATE|long}. Payment is now {DAYS_OVERDUE} days overdue.
 
@@ -51,9 +49,7 @@ Please note that the court expects parties to follow the Practice Direction on P
 
 Enclosure: copy invoice {INVOICE_NUMBERS}.
 {:}
-## Letter of Claim
-
-This letter is sent under the Pre-Action Protocol for Debt Claims. Please read it, and the enclosed Information Sheet, carefully.
+This is a Letter of Claim under the Pre-Action Protocol for Debt Claims. Please read it, and the enclosed Information Sheet, carefully.
 
 **The debt.** You owe {CREDITOR_NAME} {AMOUNT_OUTSTANDING} for {GOODS_OR_SERVICES}. We invoiced you on {INVOICE_DATE|long} (invoice {INVOICE_NUMBERS}), and payment was due by {DUE_DATE|long}.
 
