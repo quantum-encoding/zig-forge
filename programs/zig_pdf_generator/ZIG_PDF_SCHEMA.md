@@ -500,8 +500,10 @@ letters, page 1 carries the full letterhead/recipient block; continuation pages
 get a compact running header (company name + "Re: subject" + rule), and every
 page gets a footer (company name + `N / M`).
 
-WASM export `zigpdf_generate_letter`; CLI `pdf-gen --letter-md in.json out.pdf`;
-lib `generateLetterFromJson` / `generateLetter(LetterInput)`. Source: rendered by
+C export `zigpdf_generate_letter` / `zigpdf_generate_letter_to_file` (native
+static/shared, iOS, Android); WASM export `zigpdf_generate_letter` (both
+`wasm` and `wasm-web`); CLI `pdf-gen --letter-md in.json out.pdf`; lib
+`generateLetterFromJson` / `generateLetter(LetterInput)`. Source: rendered by
 `markdown.zig` (`letter.zig` is the JSON shim).
 
 | Field | Type | Req | Default | Notes |
@@ -521,6 +523,7 @@ lib `generateLetterFromJson` / `generateLetter(LetterInput)`. Source: rendered b
 | `closing` | string | No | `""` | e.g. `"Yours sincerely,"` |
 | `signature_name` | string | No | `""` | Bold name under signature space |
 | `signature_title` | string | No | `""` | Grey title under the name |
+| `signature_image` | string | No | `""` | Drawn/scanned signature (path, `data:` URL or raw base64; PNG with transparency recommended), 40pt tall, in place of the blank signature gap |
 | `accent_hex` | hex_color | No | `#1a1a1a` | Letterhead title + accents |
 | `margin` | number | No | `64` | Uniform page margin (points) |
 | `justify` | bool | No | `false` | Justify body paragraphs to both margins (last line stays ragged). For plain markdown, set `justify: true` in YAML frontmatter instead |
@@ -531,6 +534,92 @@ Caveats: PNG backgrounds with transparency are flattened onto white (fine on the
 default white page; a transparent image over a coloured region would show white
 there). No Svelte UI yet — author via JSON / CLI / WASM. (Clickable links inside
 a multi-page letter now register on the correct page.)
+
+---
+
+## Template: `legend_letter`
+
+A `letter` whose **body is rendered from a [zig_legend](../zig_legend/README.md)
+template** against a **typed legend**, for pre-constructed letters with
+outcome branches (e.g. the debt-recovery pack in `templates/letters/`). The
+template renders to Markdown, which is laid out exactly like `letter`.
+
+C exports (native, iOS, Android): `zigpdf_generate_legend_letter`,
+`zigpdf_generate_legend_letter_to_file`, `zigpdf_legend_render_text`,
+`zigpdf_legend_describe`. WASM (`wasm` and `wasm-web`): the same names minus
+`_to_file`, with the `(ptr, len, out_len)` ABI. CLI: `pdf-gen --legend-letter
+in.json out.pdf`, `pdf-gen --legend-describe in.json [out.json]`. Lib:
+`legend_letter.generate` / `renderText` / `describe`. Source:
+`src/legend_letter.zig`.
+
+| Field | Type | Req | Default | Notes |
+|---|---|---|---|---|
+| `legend_toml` | string (TOML) | Yes | — | The legend: `[[var]]` declarations (`name`, `type` = `string`\|`enum`\|`int`\|`money`\|`date`\|`bool`\|`list`, `values`, `value` default, `required`, `currency`, `decimals`, `min`/`max`, `by` + `[var.map]`, `sep`/`join`) and `[[scenario]]` binding sets. See the zig_legend README |
+| `template` | string | Yes | — | zig_legend template producing the Markdown body: `{NAME}`, filters (`{DATE\|long}`, `{AMOUNT\|plain}`, `{LIST\|bullets}` …), `{?VAR=value}…{:}…{/}` blocks, `{! comments }` (one line each) |
+| `scenario` | string | No | none | Name of a `[[scenario]]` in the legend |
+| `bindings` | object | No | `{}` | `{"VAR": value}`; strings bind as-is, numbers and booleans as text, arrays bind `list` variables (joined by the variable's `sep`), `null` is skipped. Highest precedence: bindings > scenario > legend default; `by` variables then follow their map |
+| `letter` | object | No | `{}` | Any `letter` field (table above) except `body_markdown`. The text fields `company_name`, `company_address`, `sender_contact`, `date`, `reference`, `recipient_name`, `recipient_address`, `subject`, `closing`, `signature_name`, `signature_title` are rendered as templates with the same bindings; others (images, colour, margin, password) pass through |
+
+**Refusals.** The call returns NULL (WASM: 0; CLI: exit 1) with the reason in
+`zigpdf_get_error()` as `Legend letter: <where>: <what>`, and no PDF is made,
+when:
+
+| Case | Example message |
+|---|---|
+| input is not a JSON object / a field has the wrong type | `Legend letter: 'legend_toml' is required` |
+| legend does not load | `Legend letter: legend: enum variable 'DEBTOR_TYPE' has no values` |
+| template does not parse | `Legend letter: template line 3: tag spans a line break` |
+| template or letter field uses an undeclared name (in any branch) | `Legend letter: template uses 'GHOST', which the legend does not declare` |
+| unknown scenario | `Legend letter: bindings: unknown scenario 'nope'` |
+| binding of an undeclared variable | `Legend letter: bindings: 'AMOUNT_OUTSTANDNG' is not in the legend` |
+| value fails its type | `Legend letter: bindings: 'partnership' is not a value of enum 'DEBTOR_TYPE'` (also dates, money decimals, int bounds, booleans) |
+| binding a dependent (`by`) variable | `Legend letter: bindings: 'COMPENSATION' follows 'DEBT_BAND'; bind 'DEBT_BAND' instead` |
+| required variable unbound or blank | `Legend letter: bindings: required variable 'SALUTATION' is not bound` / `… is blank` |
+| a taken branch uses an unbound variable | `Legend letter: template line 18: 'PAY_BY' is not bound` |
+| the body renders empty | `Legend letter: template rendered an empty body` |
+
+**`zigpdf_legend_render_text`** takes the same input and returns JSON
+`{"body_markdown": "...", "letter": {<the rendered text fields>}}`, for a
+preview or an email body.
+
+**`zigpdf_legend_describe`** takes `{"legend_toml": "...", "template": "..."?}`
+and returns JSON for building a form:
+
+```json
+{"name": "Statutory late-payment interest claim (England and Wales)",
+ "variables": [
+   {"name": "DEBTOR_TYPE", "type": "enum", "required": true, "description": "…",
+    "default": null, "values": ["company", "sole_trader"], "used_by_template": true},
+   {"name": "PRINCIPAL", "type": "money", "required": true, "description": "…",
+    "default": null, "values": [], "currency": "GBP", "decimals": 2, "used_by_template": true},
+   {"name": "COMPENSATION", "type": "money", "required": false, "description": "…",
+    "default": null, "values": [], "currency": "GBP", "decimals": 2,
+    "by": "DEBT_BAND", "map": {"under_1000": "40", "1000_to_9999": "70", "10000_or_more": "100"},
+    "used_by_template": true}],
+ "scenarios": [{"name": "company-unpaid", "set": {"DEBTOR_TYPE": "company", "…": "…"}}],
+ "template": {"variables": ["SALUTATION", "INVOICE_NUMBER", "…"], "undeclared": []}}
+```
+
+`int` variables add `min`/`max`, `list` variables add `sep`. `used_by_template`
+and `template` appear only when a template is passed.
+
+### Vendoring: sibling directories
+
+The engine imports zig_legend and zig_toml as **relative-path modules**
+(`build.zig`: `../zig_legend/src/lib.zig`, `../zig_toml/src/lib.zig`), like
+the seal's `../zig-quantum-encryption`. An app that vendors
+`programs/zig_pdf_generator` as a source copy must copy these beside it, keeping
+the layout:
+
+| Directory | Files the build reaches |
+|---|---|
+| `zig_legend/src/` | `lib.zig`, `diag.zig`, `template.zig`, `legend.zig`, `render.zig`, `plan.zig` (`golden_test.zig` and `main.zig` are not compiled into the engine) |
+| `zig_toml/src/` | `lib.zig`, `toml.zig` |
+| `zig-quantum-encryption/src/` | `ml_dsa.zig` and the files it imports (already required for the seal) |
+
+Copying the two `src/` directories whole is the simple rule. Both are pure
+Zig with no libc or OS calls, so they build for every engine target (native,
+iOS, Android, `wasm32-wasi`, `wasm32-freestanding`).
 
 ---
 
@@ -698,6 +787,8 @@ Refer to the **clean_quote** tables above for the full field list —
 | `letter_quote`      | `zigpdf_generate_letter_quote`        | `letter_quote.zig` | ✓ `buildLetterQuotePayload(invoiceData)`     | ✓ `letter_quote_serializer.rs`   |
 | `proposal`          | `zigpdf_generate_presentation`        | `presentation.zig` | ✓ `buildPresentationJson(invoiceData)`       | ✗                                |
 | `proposal_legacy`   | `zigpdf_generate_proposal`            | `proposal.zig`     | ✗ (CLI / demo fixture only)                  | ✗                                |
+| `letter`            | `zigpdf_generate_letter`              | `letter.zig`       | ✗ (JSON / CLI / WASM)                        | ✗                                |
+| `legend_letter`     | `zigpdf_generate_legend_letter`       | `legend_letter.zig`| ✗ (JSON / CLI / WASM)                        | ✗                                |
 
 ## Implementation priority for the templateData refactor
 

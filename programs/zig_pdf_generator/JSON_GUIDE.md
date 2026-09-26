@@ -1209,6 +1209,68 @@ Each signatory object:
 
 ---
 
+## Letter Schema
+
+`zigpdf_generate_letter` (C and WASM) / `pdf-gen --letter-md in.json out.pdf`: a letter with a Markdown body that flows across pages, a letterhead, recipient block, subject, closing and signature.
+
+```json
+{
+  "company_name": "Harbourlight Joinery Ltd",
+  "company_address": "Unit 4, Example Trading Estate|Anytown|ZZ9 9ZZ",
+  "sender_contact": "accounts@harbourlight.example · 07700 900123",
+  "date": "14 August 2026",
+  "reference": "HJ-DR-0421",
+  "recipient_name": "Ms Alex Morgan",
+  "recipient_address": "9 Linden Road|Southgate Vale|ZZ7 1GH",
+  "subject": "Payment reminder: invoice INV-1043",
+  "body_markdown": "Dear Ms Morgan,\n\nOur records show...\n\n| Invoice | Amount |\n|---|---|\n| INV-1043 | £960.00 |",
+  "closing": "Yours sincerely,",
+  "signature_name": "Sam Hollis",
+  "signature_title": "Director, Harbourlight Joinery Ltd",
+  "accent_hex": "#1f4e79"
+}
+```
+
+Addresses take newline- or `|`-separated lines. Every field is optional; see `ZIG_PDF_SCHEMA.md` (Template: `letter`) for the full table, background images, signature images and password protection.
+
+## Legend Letter Schema
+
+`zigpdf_generate_legend_letter` (C and WASM) / `pdf-gen --legend-letter in.json out.pdf`: the same letter, with the body rendered from a [zig_legend](../zig_legend/README.md) template and a typed legend. Use it for pre-constructed letters whose wording branches on an outcome, such as the debt-recovery pack in `templates/letters/`.
+
+```json
+{
+  "legend_toml": "[[var]]\nname = \"DEBTOR_TYPE\"\ntype = \"enum\"\nvalues = [\"company\", \"individual\"]\nrequired = true\n...",
+  "template": "Dear {SALUTATION},\n\n{?DEBTOR_TYPE=company}...{:}...{/}",
+  "scenario": "individual-unpaid",
+  "bindings": {
+    "LETTER_DATE": "2026-08-14",
+    "DAYS_OVERDUE": 14,
+    "AMOUNT_OUTSTANDING": "960.00",
+    "CREDITOR_ADDRESS": ["Unit 4, Example Trading Estate", "Anytown", "ZZ9 9ZZ"]
+  },
+  "letter": {
+    "company_name": "{CREDITOR_NAME}",
+    "date": "{LETTER_DATE|long}",
+    "subject": "Payment reminder: invoice {INVOICE_NUMBERS}",
+    "accent_hex": "#1f4e79"
+  }
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `legend_toml` | Yes | The legend (TOML): every variable's type, default, whether required, and named scenarios |
+| `template` | Yes | The body template; renders to Markdown |
+| `scenario` | No | A scenario from the legend supplying a set of bindings |
+| `bindings` | No | Values that override the scenario and defaults. Dates are `YYYY-MM-DD`; money is a decimal string such as `"1840.00"` (no thousands separators); lists are arrays |
+| `letter` | No | The `letter` fields; text fields may contain placeholders |
+
+Values are type-checked. Any problem — an unknown scenario, a missing required variable, `"partnership"` for an enum that does not list it, `"2026-02-30"` as a date, `"1,840"` as money, a placeholder the legend does not declare, or a placeholder in the chosen branch with no value — makes the call return NULL with the reason in `zigpdf_get_error()`, e.g. `Legend letter: bindings: 'partnership' is not a value of enum 'DEBTOR_TYPE'`. A letter with an unfilled placeholder is never produced.
+
+`zigpdf_legend_describe` (`pdf-gen --legend-describe`) returns the legend's variables and scenarios as JSON so an app can build a form; `zigpdf_legend_render_text` returns the rendered body and letter fields without making a PDF.
+
+On the command line only, `legend_file`, `template_file` and `letter_file` may name files (relative to the input JSON) instead of inlining `legend_toml`, `template` and `letter`.
+
 ## AI Prompt Template
 
 ### For Invoices

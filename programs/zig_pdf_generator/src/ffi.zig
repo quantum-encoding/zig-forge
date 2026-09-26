@@ -44,6 +44,8 @@ const written_resolution = @import("written_resolution.zig");
 const proposal = @import("proposal.zig");
 const clean_quote = @import("clean_quote.zig");
 const letter_quote = @import("letter_quote.zig");
+const letter = @import("letter.zig");
+const legend_letter = @import("legend_letter.zig");
 const markdown = @import("markdown.zig");
 const template_card = @import("template_card.zig");
 
@@ -198,7 +200,7 @@ export fn zigpdf_generate_simple(
 /// Free memory allocated by zigpdf functions
 ///
 /// Must be called for every non-NULL return from zigpdf_generate_*
-export fn zigpdf_free(ptr: ?[*]u8, len: usize) void {
+pub export fn zigpdf_free(ptr: ?[*]u8, len: usize) void {
     if (ptr) |p| {
         ffi_allocator.free(p[0..len]);
     }
@@ -207,7 +209,7 @@ export fn zigpdf_free(ptr: ?[*]u8, len: usize) void {
 /// Get the last error message
 ///
 /// Returns: Null-terminated error string (valid until next zigpdf call)
-export fn zigpdf_get_error() [*:0]const u8 {
+pub export fn zigpdf_get_error() [*:0]const u8 {
     return @ptrCast(&last_error);
 }
 
@@ -1394,6 +1396,117 @@ export fn zigpdf_generate_letter_quote_to_file(
         return .render_failed;
     };
 
+    return .success;
+}
+
+// =============================================================================
+// Letter — Markdown body + letterhead + signature (src/letter.zig)
+// =============================================================================
+
+/// Generate a letter PDF: a Markdown body flowed across pages, framed by a
+/// letterhead, recipient block, subject, closing and signature, over an
+/// optional background image. See src/letter.zig for the JSON contract.
+/// Caller frees the result with zigpdf_free.
+pub export fn zigpdf_generate_letter(json_input: [*:0]const u8, output_len: *usize) ?[*]u8 {
+    const pdf_bytes = letter.generateLetterFromJson(ffi_allocator, std.mem.span(json_input)) catch |err| {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Letter error: {s}", .{@errorName(err)}) catch "Letter error";
+        setLastError(msg);
+        return null;
+    };
+    output_len.* = pdf_bytes.len;
+    return pdf_bytes.ptr;
+}
+
+/// Generate a letter PDF and write it to an absolute path.
+pub export fn zigpdf_generate_letter_to_file(json_input: [*:0]const u8, output_path: [*:0]const u8) ZigPdfError {
+    var len: usize = 0;
+    const pdf_ptr = zigpdf_generate_letter(json_input, &len) orelse return .invalid_json;
+    defer zigpdf_free(pdf_ptr, len);
+    return writeFileAbsolute(std.mem.span(output_path), pdf_ptr[0..len]);
+}
+
+// =============================================================================
+// Legend letter — zig_legend template + typed legend → letter PDF
+// (src/legend_letter.zig)
+// =============================================================================
+
+/// Generate a letter whose body is rendered from a zig_legend template.
+/// Input: {legend_toml, template, scenario?, bindings?, letter?}. On any
+/// legend, template or binding problem (unknown scenario, missing required
+/// variable, bad enum/date/money value, undeclared placeholder) this returns
+/// NULL and zigpdf_get_error() says which, prefixed "Legend letter: ".
+/// Caller frees the result with zigpdf_free.
+pub export fn zigpdf_generate_legend_letter(json_input: [*:0]const u8, output_len: *usize) ?[*]u8 {
+    var diag = legend_letter.Diagnostic{};
+    const pdf_bytes = legend_letter.generate(ffi_allocator, std.mem.span(json_input), &diag) catch |err| {
+        setLegendError(err, &diag);
+        return null;
+    };
+    output_len.* = pdf_bytes.len;
+    return pdf_bytes.ptr;
+}
+
+/// Generate a legend letter and write it to an absolute path.
+pub export fn zigpdf_generate_legend_letter_to_file(json_input: [*:0]const u8, output_path: [*:0]const u8) ZigPdfError {
+    var len: usize = 0;
+    const pdf_ptr = zigpdf_generate_legend_letter(json_input, &len) orelse return .invalid_json;
+    defer zigpdf_free(pdf_ptr, len);
+    return writeFileAbsolute(std.mem.span(output_path), pdf_ptr[0..len]);
+}
+
+/// Render a legend letter's text without laying out a PDF. Same input as
+/// zigpdf_generate_legend_letter; returns UTF-8 JSON
+/// {"body_markdown": "...", "letter": {"subject": "...", ...}} (not
+/// NUL-terminated; use output_len). Caller frees with zigpdf_free.
+pub export fn zigpdf_legend_render_text(json_input: [*:0]const u8, output_len: *usize) ?[*]u8 {
+    var diag = legend_letter.Diagnostic{};
+    const out = legend_letter.renderTextJson(ffi_allocator, std.mem.span(json_input), &diag) catch |err| {
+        setLegendError(err, &diag);
+        return null;
+    };
+    output_len.* = out.len;
+    return out.ptr;
+}
+
+/// Describe a legend for building a form: input {legend_toml, template?};
+/// returns UTF-8 JSON listing variables (type, required, default, values,
+/// currency, bounds, dependency), scenarios and, with a template, the names
+/// it uses and any the legend lacks. Caller frees with zigpdf_free.
+pub export fn zigpdf_legend_describe(json_input: [*:0]const u8, output_len: *usize) ?[*]u8 {
+    var diag = legend_letter.Diagnostic{};
+    const out = legend_letter.describe(ffi_allocator, std.mem.span(json_input), &diag) catch |err| {
+        setLegendError(err, &diag);
+        return null;
+    };
+    output_len.* = out.len;
+    return out.ptr;
+}
+
+fn setLegendError(err: legend_letter.Error, diag: *const legend_letter.Diagnostic) void {
+    var buf: [256]u8 = undefined;
+    const detail = if (diag.len > 0) diag.text() else @errorName(err);
+    const msg = std.fmt.bufPrint(&buf, "Legend letter: {s}", .{detail}) catch "Legend letter error";
+    setLastError(msg);
+}
+
+fn writeFileAbsolute(path: []const u8, data: []const u8) ZigPdfError {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const file = std.Io.Dir.createFileAbsolute(io, path, .{}) catch {
+        setLastError("Failed to create output file");
+        return .render_failed;
+    };
+    defer file.close(io);
+    var buf: [4096]u8 = undefined;
+    var writer = file.writer(io, &buf);
+    writer.interface.writeAll(data) catch {
+        setLastError("Failed to write PDF data");
+        return .render_failed;
+    };
+    writer.interface.flush() catch {
+        setLastError("Failed to flush PDF data");
+        return .render_failed;
+    };
     return .success;
 }
 

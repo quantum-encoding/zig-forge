@@ -1,0 +1,24 @@
+{
+  "legend_file": "../../../templates/letters/debt-recovery.toml",
+  "template_file": "../../../templates/letters/final-demand.tpl.md",
+  "letter_file": "../../../templates/letters/final-demand.letter.json",
+  "scenario": "sole-trader-plan",
+  "bindings": {
+    "CREDITOR_NAME": "Harbourlight Joinery Ltd",
+    "CREDITOR_ADDRESS": [
+      "Unit 4, Example Trading Estate",
+      "Anytown",
+      "ZZ9 9ZZ"
+    ],
+    "CREDITOR_EMAIL": "accounts@harbourlight.example",
+    "CREDITOR_PHONE": "07700 900123",
+    "SIGNATORY": "Sam Hollis",
+    "SIGNATORY_ROLE": "Director",
+    "PAYEE_NAME": "Harbourlight Joinery Ltd",
+    "SORT_CODE": "00-00-00",
+    "ACCOUNT_NUMBER": "00000000",
+    "LETTER_DATE": "2026-09-15",
+    "DAYS_OVERDUE": 46,
+    "RESPONSE_DEADLINE": "2026-09-29"
+  }
+}

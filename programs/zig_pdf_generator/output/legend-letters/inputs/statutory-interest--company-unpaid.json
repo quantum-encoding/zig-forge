@@ -1,0 +1,21 @@
+{
+  "legend_file": "../../../templates/letters/statutory-interest.toml",
+  "template_file": "../../../templates/letters/statutory-interest.tpl.md",
+  "letter_file": "../../../templates/letters/statutory-interest.letter.json",
+  "scenario": "company-unpaid",
+  "bindings": {
+    "CREDITOR_NAME": "Harbourlight Joinery Ltd",
+    "CREDITOR_ADDRESS": [
+      "Unit 4, Example Trading Estate",
+      "Anytown",
+      "ZZ9 9ZZ"
+    ],
+    "CREDITOR_EMAIL": "accounts@harbourlight.example",
+    "CREDITOR_PHONE": "07700 900123",
+    "SIGNATORY": "Sam Hollis",
+    "SIGNATORY_ROLE": "Director",
+    "PAYEE_NAME": "Harbourlight Joinery Ltd",
+    "SORT_CODE": "00-00-00",
+    "ACCOUNT_NUMBER": "00000000"
+  }
+}

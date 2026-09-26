@@ -1257,7 +1257,7 @@ const Renderer = struct {
         // cutting through glyphs.
         const col_pad: f32 = 8;
         const above_text_pad: f32 = 10; // clearance above ascender for top border
-        const below_text_pad: f32 = 2; // clearance below descender for bottom border
+        const below_text_pad: f32 = 5; // clearance below descender for bottom border
         const table_line_h: f32 = 13;
         const col_w = self.usable_width / @as(f32, @floatFromInt(ncols));
         const row_height_min: f32 = above_text_pad + table_line_h + below_text_pad;
@@ -1290,7 +1290,10 @@ const Renderer = struct {
             try self.drawTableRowWithBorders(content, row, col_w, col_pad, above_text_pad, below_text_pad, table_line_h, false, cell_border, page_broke);
         }
 
-        self.current_y -= PARAGRAPH_GAP;
+        // current_y is the table's bottom border; the next block draws its
+        // first baseline at current_y, so leave room for that line's ascent
+        // as well as the usual gap.
+        self.current_y -= PARAGRAPH_GAP + BODY_SIZE;
     }
 
     /// Draw a table row with full cell borders (top edge, bottom edge, left,

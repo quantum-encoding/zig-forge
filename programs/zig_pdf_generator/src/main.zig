@@ -27,6 +27,8 @@ const TemplateMode = enum {
     certificate,
     beacon_report,
     health_report,
+    legend_letter,
+    legend_describe,
 };
 
 /// Company / legal document sub-types selected via `--certificate <type>`.
@@ -115,6 +117,8 @@ pub fn main(init: std.process.Init) !void {
     var opt_certificate = false;
     var opt_beacon_report = false;
     var opt_health_report = false;
+    var opt_legend_letter = false;
+    var opt_legend_describe = false;
     var cert_type: ?CertType = null;
 
     var input_path: ?[]const u8 = null;
@@ -148,6 +152,10 @@ pub fn main(init: std.process.Init) !void {
             opt_beacon_report = true;
         } else if (std.mem.eql(u8, arg, "--health-report")) {
             opt_health_report = true;
+        } else if (std.mem.eql(u8, arg, "--legend-letter")) {
+            opt_legend_letter = true;
+        } else if (std.mem.eql(u8, arg, "--legend-describe")) {
+            opt_legend_describe = true;
         } else if (std.mem.eql(u8, arg, "--certificate")) {
             opt_certificate = true;
             // Consume the next token as the document <type>. The loop's
@@ -195,8 +203,10 @@ pub fn main(init: std.process.Init) !void {
     const certificate_val: usize = if (opt_certificate) 1 else 0;
     const beacon_report_val: usize = if (opt_beacon_report) 1 else 0;
     const health_report_val: usize = if (opt_health_report) 1 else 0;
+    const letter_md_val: usize = if (opt_letter_md) 1 else 0;
+    const legend_val: usize = (if (opt_legend_letter) @as(usize, 1) else 0) + (if (opt_legend_describe) @as(usize, 1) else 0);
 
-    const total_flags = basic_val + minimalist_val + letter_val + presentation_val + proposal_val + certificate_val + beacon_report_val + health_report_val;
+    const total_flags = basic_val + minimalist_val + letter_val + letter_md_val + presentation_val + proposal_val + certificate_val + beacon_report_val + health_report_val + legend_val;
     if (total_flags > 1) {
         try stderr.writeAll("Error: Multiple template flags specified. Template flags (--basic, --minimalist, --letter, --presentation, --proposal, --certificate) are mutually exclusive.\n");
         try stderr.flush();
@@ -220,6 +230,10 @@ pub fn main(init: std.process.Init) !void {
         .beacon_report
     else if (opt_health_report)
         .health_report
+    else if (opt_legend_letter)
+        .legend_letter
+    else if (opt_legend_describe)
+        .legend_describe
     else
         .basic;
 
@@ -230,6 +244,23 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     defer allocator.free(json_data);
+
+    // Legend letters report zig_legend's own diagnostic (which variable,
+    // which value, which template line) rather than a bare error name.
+    if (mode == .legend_letter or mode == .legend_describe) {
+        const out = runLegend(allocator, mode, json_data, input_path, stderr) catch |err| {
+            stderr.print("Error: --{s}: {s}\n", .{ @tagName(mode), @errorName(err) }) catch {};
+            stderr.flush() catch {};
+            std.process.exit(1);
+        } orelse std.process.exit(1);
+        defer allocator.free(out);
+        writeOutputData(output_path, out, stdout, stderr) catch |err| {
+            try stderr.print("Error: Failed to write output data: {s}\n", .{@errorName(err)});
+            try stderr.flush();
+            std.process.exit(1);
+        };
+        return;
+    }
 
     // Generate PDF bytes. Schema-validation failures (missing required root
     // fields) surface as a specific, human-readable diagnostic and a non-zero
@@ -382,11 +413,21 @@ fn printUsage(stderr: *std.Io.Writer) void {
         \\  --presentation       Freeform presentation/canvas-style template
         \\  --proposal           Structured proposal template (charts, metrics, sections)
         \\  --certificate <type> Company/legal document (see <type> list below)
+        \\  --letter-md          Letter: Markdown body + letterhead + signature
+        \\  --legend-letter      Letter whose body is a zig_legend template rendered
+        \\                       from a typed legend (see "Legend letters" below)
+        \\  --legend-describe    Print a legend's variables and scenarios as JSON
         \\
         \\Certificate Types (used as: --certificate <type>):
         \\  contract               share-certificate      dividend-voucher
         \\  stock-transfer         board-resolution       director-consent
         \\  director-appointment   director-resignation   written-resolution
+        \\
+        \\Legend letters:
+        \\  Input JSON: {legend_toml, template, scenario?, bindings?, letter?}.
+        \\  On the command line, legend_file / template_file / letter_file may
+        \\  name files (relative to the input JSON's directory) instead of
+        \\  inlining legend_toml / template / letter.
         \\
         \\Other Flags:
         \\  -h, --help        Show this help message and exit
@@ -453,6 +494,7 @@ fn generatePdfBytes(allocator: std.mem.Allocator, mode: TemplateMode, cert_type:
             // baton-audit SiteHealthReport JSON -> paginating branded audit PDF.
             return try lib.generateWebsiteHealthReportFromJson(allocator, json_data);
         },
+        .legend_letter, .legend_describe => unreachable, // handled by runLegend
         .certificate => {
             // cert_type is always set when mode == .certificate (the arg parser
             // resolves it before selecting this mode), but assert defensively.
@@ -517,6 +559,73 @@ fn reportGenerationError(stderr: *std.Io.Writer, mode: TemplateMode, err: anyerr
         ) catch {},
     }
     stderr.flush() catch {};
+}
+
+/// Run a legend mode. Returns the output bytes, or null after printing the
+/// legend diagnostic.
+fn runLegend(
+    allocator: std.mem.Allocator,
+    mode: TemplateMode,
+    json_data: []const u8,
+    input_path: ?[]const u8,
+    stderr: *std.Io.Writer,
+) !?[]u8 {
+    const expanded = try expandLegendFiles(allocator, json_data, input_path, stderr);
+    defer allocator.free(expanded);
+    var diag = lib.legend_letter.Diagnostic{};
+    const result = switch (mode) {
+        .legend_letter => lib.legend_letter.generate(allocator, expanded, &diag),
+        .legend_describe => lib.legend_letter.describe(allocator, expanded, &diag),
+        else => unreachable,
+    };
+    return result catch |err| {
+        const detail = if (diag.len > 0) diag.text() else @errorName(err);
+        try stderr.print("Error: legend letter: {s}\n", .{detail});
+        try stderr.flush();
+        return null;
+    };
+}
+
+/// CLI convenience: replace `legend_file`, `template_file` and `letter_file`
+/// with the contents of those files (`letter_file` is parsed as JSON), read
+/// relative to the input JSON's directory. Returns re-serialised JSON owned
+/// by the caller; input without those keys is returned as a copy.
+fn expandLegendFiles(allocator: std.mem.Allocator, json_data: []const u8, input_path: ?[]const u8, stderr: *std.Io.Writer) ![]u8 {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var root = std.json.parseFromSliceLeaky(std.json.Value, arena, json_data, .{}) catch return allocator.dupe(u8, json_data);
+    if (root != .object) return allocator.dupe(u8, json_data);
+    const base: []const u8 = if (input_path) |p| (std.fs.path.dirname(p) orelse ".") else ".";
+
+    const pairs = [_][2][]const u8{
+        .{ "legend_file", "legend_toml" },
+        .{ "template_file", "template" },
+        .{ "letter_file", "letter" },
+    };
+    for (pairs) |pair| {
+        const v = root.object.get(pair[0]) orelse continue;
+        if (v != .string) {
+            try stderr.print("Error: '{s}' must be a path string\n", .{pair[0]});
+            return error.InvalidInput;
+        }
+        const path = if (std.fs.path.isAbsolute(v.string)) v.string else try std.fs.path.join(arena, &.{ base, v.string });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(global_io, path, arena, .limited(8 * 1024 * 1024)) catch |err| {
+            try stderr.print("Error: Cannot read {s} '{s}': {s}\n", .{ pair[0], path, @errorName(err) });
+            return err;
+        };
+        const value: std.json.Value = if (std.mem.eql(u8, pair[1], "letter"))
+            std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch {
+                try stderr.print("Error: letter_file '{s}' is not valid JSON\n", .{path});
+                return error.InvalidInput;
+            }
+        else
+            .{ .string = bytes };
+        _ = root.object.orderedRemove(pair[0]);
+        try root.object.put(arena, pair[1], value);
+    }
+    return std.json.Stringify.valueAlloc(allocator, root, .{});
 }
 
 fn writeOutputData(output_path: ?[]const u8, pdf_bytes: []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {

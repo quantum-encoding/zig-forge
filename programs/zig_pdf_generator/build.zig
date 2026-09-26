@@ -41,6 +41,20 @@ pub fn build(b: *std.Build) void {
     );
     const beacon_assets_mod = beaconAssetsModule(b, beacon_assets_dir);
 
+    // zig_legend (typed template text) and the zig_toml parser it loads
+    // legends with, imported from their sibling source directories rather
+    // than the package manager: apps vendor this engine as a source copy, and
+    // a relative module path keeps working in that copy as long as the two
+    // sibling `src/` directories travel with it (see ZIG_PDF_SCHEMA.md,
+    // "Legend letters"). No target is set, so each root's target applies.
+    const toml_mod = b.createModule(.{
+        .root_source_file = b.path("../zig_toml/src/lib.zig"),
+    });
+    const legend_mod = b.createModule(.{
+        .root_source_file = b.path("../zig_legend/src/lib.zig"),
+        .imports = &.{.{ .name = "zig_toml", .module = toml_mod }},
+    });
+
     // ==========================================================================
     // Core Library (Static) - Uses ffi.zig as root for C FFI exports
     // ==========================================================================
@@ -419,7 +433,11 @@ pub fn build(b: *std.Build) void {
         web_wasm_module,            exe.root_module,       seal_exe.root_module,
         lib_unit_tests.root_module,
     };
-    for (roots) |m| m.addImport("beacon_assets", beacon_assets_mod);
+    for (roots) |m| {
+        m.addImport("beacon_assets", beacon_assets_mod);
+        // letter + legend_letter are reachable from every root too.
+        m.addImport("zig_legend", legend_mod);
+    }
 }
 
 const beacon_asset_files = [_][]const u8{

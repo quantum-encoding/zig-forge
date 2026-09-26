@@ -62,6 +62,7 @@ pub const markdown = @import("markdown.zig");
 pub const template_card = @import("template_card.zig");
 pub const order_email = @import("order_email.zig");
 pub const letter = @import("letter.zig");
+pub const legend_letter = @import("legend_letter.zig");
 pub const pdf_crypt = @import("pdf_crypt.zig");
 pub const types = @import("types.zig");
 pub const CryptoPaymentBlock = types.CryptoPaymentBlock;
@@ -243,6 +244,10 @@ pub const LetterInput = markdown.LetterInput;
 pub const generateLetter = markdown.generateLetter;
 pub const generateLetterFromJson = letter.generateLetterFromJson;
 
+// Legend letter (zig_legend template + typed legend → letter PDF)
+pub const generateLegendLetter = legend_letter.generate;
+pub const describeLegend = legend_letter.describe;
+
 // Template Card types
 pub const TemplateCardData = template_card.TemplateCardData;
 pub const TemplateCardRenderer = template_card.TemplateCardRenderer;
@@ -287,6 +292,12 @@ pub const zigpdf_generate_markdown = ffi.zigpdf_generate_markdown;
 pub const zigpdf_generate_markdown_to_file = ffi.zigpdf_generate_markdown_to_file;
 pub const zigpdf_generate_template_card = ffi.zigpdf_generate_template_card;
 pub const zigpdf_generate_template_card_to_file = ffi.zigpdf_generate_template_card_to_file;
+pub const zigpdf_generate_letter = ffi.zigpdf_generate_letter;
+pub const zigpdf_generate_letter_to_file = ffi.zigpdf_generate_letter_to_file;
+pub const zigpdf_generate_legend_letter = ffi.zigpdf_generate_legend_letter;
+pub const zigpdf_generate_legend_letter_to_file = ffi.zigpdf_generate_legend_letter_to_file;
+pub const zigpdf_legend_render_text = ffi.zigpdf_legend_render_text;
+pub const zigpdf_legend_describe = ffi.zigpdf_legend_describe;
 pub const zigpdf_free = ffi.zigpdf_free;
 pub const zigpdf_get_error = ffi.zigpdf_get_error;
 pub const zigpdf_version = ffi.zigpdf_version;
@@ -585,6 +596,7 @@ test {
     _ = @import("pdf_extract.zig");
     _ = @import("order_email.zig");
     _ = @import("letter.zig");
+    _ = @import("legend_letter_tests.zig");
     _ = @import("pdf_crypt.zig");
     // seal.zig imports the `ml_dsa` module (native targets only). Importing it
     // here (test block — never compiled for android/ios/wasm) keeps the seal off

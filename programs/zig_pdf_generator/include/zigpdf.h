@@ -546,6 +546,66 @@ uint8_t* zigpdf_generate_presentation(const char* json_input, size_t* output_len
 ZigPdfError zigpdf_generate_presentation_to_file(const char* json_input, const char* output_path);
 
 /* ============================================================================
+ * Letters
+ * ============================================================================ */
+
+/**
+ * @brief Generate a letter PDF (Markdown body + letterhead + signature)
+ *
+ * JSON: {body_markdown, company_name, company_address, sender_contact, date,
+ * reference, recipient_name, recipient_address, subject, closing,
+ * signature_name, signature_title, signature_image?, background_image?,
+ * accent_hex?, margin?, justify?, password?}. See JSON_GUIDE.md.
+ *
+ * @note Caller must free the returned buffer with zigpdf_free()
+ */
+uint8_t* zigpdf_generate_letter(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_letter_to_file(const char* json_input, const char* output_path);
+
+/**
+ * @brief Generate a letter whose body comes from a zig_legend template
+ *
+ * JSON: {legend_toml, template, scenario?, bindings?, letter?}. The template
+ * renders to the Markdown body; text fields of `letter` (the
+ * zigpdf_generate_letter fields) may hold {PLACEHOLDERS} too. Bindings are
+ * type-checked against the legend.
+ *
+ * Returns NULL, with the reason in zigpdf_get_error() ("Legend letter: ..."),
+ * when the legend or template does not parse, the template uses a name the
+ * legend does not declare, the scenario is unknown, a required variable is
+ * unbound or blank, or a value fails its type (enum, int bounds, money,
+ * date, bool). A letter with an unfilled placeholder is never produced.
+ *
+ * @note Caller must free the returned buffer with zigpdf_free()
+ */
+uint8_t* zigpdf_generate_legend_letter(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_legend_letter_to_file(const char* json_input, const char* output_path);
+
+/**
+ * @brief Render a legend letter's text only (no PDF)
+ *
+ * Same input as zigpdf_generate_legend_letter. Returns UTF-8 JSON (not
+ * NUL-terminated; use output_len):
+ * {"body_markdown": "...", "letter": {"company_name": "...", "subject": "...", ...}}
+ *
+ * @note Caller must free the returned buffer with zigpdf_free()
+ */
+uint8_t* zigpdf_legend_render_text(const char* json_input, size_t* output_len);
+
+/**
+ * @brief Describe a legend so an app can build an input form
+ *
+ * JSON in: {legend_toml, template?}. Returns UTF-8 JSON (not NUL-terminated):
+ * {"name", "variables": [{name, type, required, description, default,
+ * values, currency?, decimals?, min?, max?, sep?, by?, map?,
+ * used_by_template?}], "scenarios": [{name, set}],
+ * "template"?: {variables, undeclared}}
+ *
+ * @note Caller must free the returned buffer with zigpdf_free()
+ */
+uint8_t* zigpdf_legend_describe(const char* json_input, size_t* output_len);
+
+/* ============================================================================
  * QR Code Modes for Invoices
  * ============================================================================ */
 
