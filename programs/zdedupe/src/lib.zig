@@ -28,6 +28,7 @@ pub const store = @import("store.zig");
 pub const filters = @import("filters.zig");
 pub const removed = @import("removed.zig");
 pub const session = @import("session.zig");
+pub const space = @import("space.zig");
 
 // Re-export commonly used types
 pub const FileEntry = types.FileEntry;
@@ -73,7 +74,7 @@ const InternalContext = struct {
     /// stable for the whole run and other threads can reach it.
     monitor: types.Monitor,
 
-    const Mode = enum(c_int) { find_duplicates = 0, compare_folders = 1 };
+    const Mode = enum(c_int) { find_duplicates = 0, compare_folders = 1, disk_space = 2 };
     const alloc = std.heap.c_allocator;
 
     fn init() ?*InternalContext {
@@ -137,7 +138,8 @@ pub export fn zdedupe_add_path(ctx: ?*ZDedupeContext, path: [*:0]const u8) c_int
 pub export fn zdedupe_set_mode(ctx: ?*ZDedupeContext, mode: c_int) void {
     const c = ctx orelse return;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
-    internal.mode = @enumFromInt(mode);
+    // An unknown mode leaves the mode as it was rather than become one.
+    internal.mode = std.enums.fromInt(InternalContext.Mode, mode) orelse return;
 }
 
 pub export fn zdedupe_set_min_size(ctx: ?*ZDedupeContext, bytes: u64) void {
@@ -315,6 +317,11 @@ pub export fn zdedupe_run_to_file(ctx: ?*ZDedupeContext, path: ?[*:0]const u8) c
     const c = ctx orelse return @intFromEnum(RunStatus.failed);
     const path_z = path orelse return @intFromEnum(RunStatus.failed);
     const internal: *InternalContext = @ptrCast(@alignCast(c));
+    if (internal.mode == .disk_space) {
+        const space_status = runSpaceScan(internal, std.mem.span(path_z));
+        releaseFreedMemory();
+        return @intFromEnum(space_status);
+    }
     if (internal.mode != .find_duplicates) return @intFromEnum(RunStatus.unsupported);
 
     const status = runDuplicateScan(internal, std.mem.span(path_z), struct {
@@ -350,6 +357,8 @@ pub export fn zdedupe_run_sync(ctx: ?*ZDedupeContext) ?[*:0]const u8 {
     const json_result: ?[]u8 = switch (internal.mode) {
         .find_duplicates => runDuplicates(internal),
         .compare_folders => runCompare(internal),
+        // Only as a result store: a whole disk's tree is not a JSON document.
+        .disk_space => null,
     };
     // The scan's working memory is gone by now; only the report is live.
     releaseFreedMemory();
@@ -435,6 +444,45 @@ fn runDuplicateScan(
     const status = emit(context, internal, &finder);
     if (status == .ok) monitor.enter(.done, 0);
     return status;
+}
+
+/// A disk-space scan: walk, aggregate, write the store. The walk keeps the
+/// duplicate scan's scoping (same volume, app libraries and Steam skipped,
+/// credential stores and the host's own excludes never entered, hidden files as
+/// configured) but not the default excludes: those are build output and
+/// dependency folders, noise to a duplicate finder and exactly what a
+/// disk-space view has to show.
+fn runSpaceScan(internal: *InternalContext, out_path: []const u8) RunStatus {
+    const alloc = std.heap.c_allocator;
+    const monitor = &internal.monitor;
+
+    const cancel_was_requested = monitor.cancelled();
+    monitor.reset();
+    if (cancel_was_requested) monitor.cancel();
+    defer monitor.cancel_requested.store(false, .release);
+
+    var excludes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer excludes.deinit(alloc);
+    if (internal.use_credential_excludes) {
+        excludes.appendSlice(alloc, &Config.credential_excludes) catch return .failed;
+    }
+    excludes.appendSlice(alloc, internal.user_excludes.items) catch return .failed;
+
+    monitor.enter(.scanning, 0);
+    space.scanToStore(alloc, .{
+        .include_hidden = internal.config.include_hidden,
+        .excludes = excludes.items,
+        .exclude_paths = internal.exclude_paths.items,
+        .one_filesystem = internal.config.one_filesystem,
+        .skip_app_libraries = internal.config.skip_app_libraries,
+        .threads = internal.config.threads,
+        .monitor = monitor,
+    }, internal.paths.items, out_path) catch |err| return switch (err) {
+        error.Cancelled => .cancelled,
+        else => .failed,
+    };
+    monitor.enter(.done, 0);
+    return .ok;
 }
 
 fn runDuplicates(internal: *InternalContext) ?[]u8 {
@@ -626,6 +674,42 @@ pub export fn zdedupe_results_delete_folders(
     const s = asSession(r) orelse return null;
     const items = items_json orelse return null;
     return (s.deleteFolders(std.mem.span(items), use_trash, trash_fn, user) orelse return null).ptr;
+}
+
+// === Disk space ===
+
+pub export fn zdedupe_results_space_overview(r: ?*ZDedupeResults) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    return (s.spaceOverview() orelse return null).ptr;
+}
+
+pub export fn zdedupe_results_space_children(r: ?*ZDedupeResults, query_json: ?[*:0]const u8) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const query = query_json orelse return null;
+    return (s.spaceChildren(std.mem.span(query)) orelse return null).ptr;
+}
+
+pub export fn zdedupe_results_space_largest(r: ?*ZDedupeResults, query_json: ?[*:0]const u8) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const query = query_json orelse return null;
+    return (s.spaceLargest(std.mem.span(query)) orelse return null).ptr;
+}
+
+pub export fn zdedupe_results_space_history(r: ?*ZDedupeResults, history_dir: ?[*:0]const u8) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const dir = history_dir orelse return null;
+    return (s.spaceHistory(std.mem.span(dir)) orelse return null).ptr;
+}
+
+pub export fn zdedupe_results_space_trash(
+    r: ?*ZDedupeResults,
+    items_json: ?[*:0]const u8,
+    trash_fn: ?ZDedupeTrashFn,
+    user: ?*anyopaque,
+) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const items = items_json orelse return null;
+    return (s.spaceTrash(std.mem.span(items), trash_fn, user) orelse return null).ptr;
 }
 
 pub export fn zdedupe_results_export(

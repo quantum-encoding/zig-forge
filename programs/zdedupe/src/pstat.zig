@@ -33,6 +33,14 @@ pub const Stat = struct {
     /// exactly one link cannot be a hard link of anything, which lets a walker
     /// skip inode tracking for the overwhelming majority of files.
     nlink: u32 = 0,
+    /// Bytes the file occupies on disk (allocated blocks × 512), 0 if the
+    /// filesystem did not say. Below `size` for sparse, compressed and
+    /// cloud-evicted files; above it for small files rounded up to a block.
+    allocated: u64 = 0,
+    /// macOS: the file is a dataless placeholder (iCloud "Optimize Mac
+    /// Storage", File Provider). Its content is not on disk, and reading it
+    /// would download it.
+    dataless: bool = false,
 
     pub const IFMT: u32 = 0o170000;
     pub const IFREG: u32 = 0o100000;
@@ -92,7 +100,8 @@ const STATX_NLINK: u32 = 0x004;
 const STATX_MTIME: u32 = 0x040;
 const STATX_INO: u32 = 0x100;
 const STATX_SIZE: u32 = 0x200;
-const STATX_NEEDED: u32 = STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_MTIME | STATX_INO | STATX_SIZE;
+const STATX_BLOCKS: u32 = 0x400;
+const STATX_NEEDED: u32 = STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_MTIME | STATX_INO | STATX_SIZE | STATX_BLOCKS;
 
 const AT_FDCWD: c_int = -100;
 const AT_SYMLINK_NOFOLLOW: c_int = 0x100;
@@ -112,6 +121,7 @@ fn statxTo(stx: *const Statx) Stat {
         .mtime_sec = stx.stx_mtime.sec,
         // Only trust the count if the filesystem says it filled it in.
         .nlink = if (stx.stx_mask & STATX_NLINK != 0) stx.stx_nlink else 0,
+        .allocated = if (stx.stx_mask & STATX_BLOCKS != 0) stx.stx_blocks *| 512 else 0,
     };
 }
 
@@ -122,6 +132,9 @@ fn statxCall(path: [*:0]const u8, flags: c_int) Error!Stat {
     }
     return statxTo(&stx);
 }
+
+/// `st_flags` bit of a dataless file (sys/stat.h).
+const SF_DATALESS: u32 = 0x40000000;
 
 // ---------------------------------------------------------------------------
 // libc backend (Darwin / BSD): std.c, which maps the $INODE64 symbols
@@ -140,6 +153,8 @@ fn cStatTo(st: *const std.c.Stat) Stat {
         .size = if (st.size > 0) @intCast(st.size) else 0,
         .mtime_sec = st.mtime().sec,
         .nlink = std.math.cast(u32, st.nlink) orelse 0,
+        .allocated = if (st.blocks > 0) @as(u64, @intCast(st.blocks)) *| 512 else 0,
+        .dataless = st.flags & SF_DATALESS != 0,
     };
 }
 

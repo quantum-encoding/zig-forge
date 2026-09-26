@@ -47,6 +47,7 @@ const filters_mod = @import("filters.zig");
 const removed_mod = @import("removed.zig");
 const keep_mod = @import("keep.zig");
 const protect_mod = @import("protect.zig");
+const space_mod = @import("space.zig");
 
 const Allocator = std.mem.Allocator;
 const Filters = filters_mod.Filters;
@@ -377,6 +378,11 @@ pub const Session = struct {
     plan_members: std.ArrayListUnmanaged(keep_mod.Member) = .empty,
     plan_kept: std.ArrayListUnmanaged(bool) = .empty,
     plan_targets: std.ArrayListUnmanaged(bool) = .empty,
+    /// A disk-space scan's tree, when the store holds one.
+    space: ?space_mod.Reader = null,
+    /// The removed overlay resolved against that tree; rebuilt when the
+    /// overlay's generation moves.
+    space_removed: space_mod.RemovedIndex = .{},
 
     pub const OpenError = error{
         CannotOpenStore,
@@ -416,6 +422,10 @@ pub const Session = struct {
         errdefer std.posix.munmap(map);
 
         const reader = store.Reader.init(map, null) catch return error.StoreIsInvalid;
+        const space_reader: ?space_mod.Reader = if (reader.spaceBytes()) |bytes|
+            space_mod.Reader.init(bytes) catch return error.StoreIsInvalid
+        else
+            null;
 
         const self = try gpa.create(Session);
         errdefer gpa.destroy(self);
@@ -427,6 +437,7 @@ pub const Session = struct {
             .store_path = try gpa.dupe(u8, store_path),
             .roots = &.{},
             .removed = .init(gpa),
+            .space = space_reader,
         };
         errdefer {
             self.arena.deinit();
@@ -458,6 +469,7 @@ pub const Session = struct {
         self.plan_members.deinit(gpa);
         self.plan_kept.deinit(gpa);
         self.plan_targets.deinit(gpa);
+        self.space_removed.deinit(gpa);
         if (self.home) |home| gpa.free(home);
         self.freeUserProtected();
         self.removed.deinit();
@@ -2017,6 +2029,272 @@ pub const Session = struct {
         }
         err_buf[0] = 0;
         return trash_fn(user, paths.ptr, paths.len, err_buf, err_buf.len) == 0;
+    }
+
+    // --- disk space -------------------------------------------------------
+
+    /// The view every disk-space call reads through, with the removed overlay
+    /// resolved against the tree. Null (and the error set) when the store is
+    /// not a disk-space scan.
+    fn spaceView(self: *Session, arena: Allocator) ?space_mod.View {
+        const sp = if (self.space) |*sp| sp else {
+            self.fail("these results are not a disk-space scan", .{});
+            return null;
+        };
+        self.space_removed.refresh(self.gpa, sp, &self.removed) catch |err| {
+            _ = self.callFailed(err);
+            return null;
+        };
+        return .{ .r = sp, .removed = &self.space_removed, .guard = self.protection(), .arena = arena };
+    }
+
+    fn spaceFailed(self: *Session, err: anyerror) ?[:0]const u8 {
+        return switch (err) {
+            error.NotFound => blk: {
+                self.fail("that folder is not in these results (or was removed)", .{});
+                break :blk null;
+            },
+            else => self.callFailed(err),
+        };
+    }
+
+    pub fn spaceOverview(self: *Session) ?[:0]const u8 {
+        const arena = self.beginCall();
+        const view = self.spaceView(arena) orelse return null;
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        const header = &self.reader.header;
+        view.overview(&json, self.roots, millis(header.generated_at), header.scan_time_ns) catch |err| return self.spaceFailed(err);
+        return self.finishJson(&out);
+    }
+
+    pub fn spaceChildren(self: *Session, query_json: []const u8) ?[:0]const u8 {
+        const arena = self.beginCall();
+        const query = std.json.parseFromSliceLeaky(space_mod.ChildrenQuery, arena, query_json, .{
+            .ignore_unknown_fields = true,
+        }) catch {
+            self.fail("disk-space query is not valid JSON", .{});
+            return null;
+        };
+        const view = self.spaceView(arena) orelse return null;
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        view.children(&json, query) catch |err| return self.spaceFailed(err);
+        return self.finishJson(&out);
+    }
+
+    pub fn spaceLargest(self: *Session, query_json: []const u8) ?[:0]const u8 {
+        const arena = self.beginCall();
+        const query = std.json.parseFromSliceLeaky(space_mod.LargestQuery, arena, query_json, .{
+            .ignore_unknown_fields = true,
+        }) catch {
+            self.fail("largest-items query is not valid JSON", .{});
+            return null;
+        };
+        const view = self.spaceView(arena) orelse return null;
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        view.largest(&json, query) catch |err| return self.spaceFailed(err);
+        return self.finishJson(&out);
+    }
+
+    /// Record this scan in the volume's history under `dir` and describe it.
+    pub fn spaceHistory(self: *Session, dir: []const u8) ?[:0]const u8 {
+        const arena = self.beginCall();
+        if (dir.len == 0 or dir[0] != '/') {
+            self.fail("history folder \"{s}\" is not an absolute path", .{dir});
+            return null;
+        }
+        _ = self.spaceView(arena) orelse return null;
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        space_mod.history(self.gpa, arena, &self.space.?, &json, .{
+            .dir = dir,
+            .roots = self.roots,
+            .generated_at = millis(self.reader.header.generated_at),
+        }) catch |err| return self.spaceFailed(err);
+        return self.finishJson(&out);
+    }
+
+    const SpaceKind = enum { dir, file };
+    const SpaceItem = struct { kind: SpaceKind, id: u64 };
+    const SpaceTrashQuery = struct { items: []const SpaceItem };
+    /// More than a person picks by hand; a list this long is a mistake.
+    const max_space_trash_items: usize = 10_000;
+
+    /// Move folders and files from a disk-space view to the Trash. Each is
+    /// checked against the scan first: a folder must still be a folder (not a
+    /// link) and neither be, nor hold, a protected location; a file must still
+    /// be a regular file of the size and modification time the scan recorded,
+    /// outside every protected location. A scan root is never trashed whole.
+    /// The Trash only: nothing here deletes permanently.
+    pub fn spaceTrash(self: *Session, items_json: []const u8, trash_fn: ?TrashFn, user: ?*anyopaque) ?[:0]const u8 {
+        // Claimed before `beginCall`, for the reason `delete` gives.
+        if (self.del.running.swap(true, .acq_rel)) {
+            self.fail("A delete is already running", .{});
+            return null;
+        }
+        defer self.del.running.store(false, .release);
+        defer self.del.cancel.store(false, .release);
+        self.del.done.store(0, .release);
+        self.del.total.store(0, .release);
+
+        const arena = self.beginCall();
+        const query = std.json.parseFromSliceLeaky(SpaceTrashQuery, arena, items_json, .{
+            .ignore_unknown_fields = true,
+        }) catch {
+            self.fail("item list is not valid JSON", .{});
+            return null;
+        };
+        if (query.items.len > max_space_trash_items) {
+            self.fail("too many items at once ({d}; at most {d})", .{ query.items.len, max_space_trash_items });
+            return null;
+        }
+        const trash = trash_fn orelse {
+            self.fail("no Trash callback was provided", .{});
+            return null;
+        };
+        const view = self.spaceView(arena) orelse return null;
+
+        var report: Report = .{};
+        self.runSpaceTrash(arena, &view, &report, query.items, trash, user) catch |err| return self.callFailed(err);
+
+        if (report.removed_paths.items.len > 0) {
+            report.needs_rescan = !self.removed.record(report.removed_paths.items);
+            self.clearOrder();
+        } else {
+            report.needs_rescan = self.removed.needsRescan();
+        }
+
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        writeReport(&json, &report) catch return self.outOfMemory();
+        return self.finishJson(&out);
+    }
+
+    fn runSpaceTrash(
+        self: *Session,
+        arena: Allocator,
+        view: *const space_mod.View,
+        report: *Report,
+        items: []const SpaceItem,
+        trash_fn: TrashFn,
+        user: ?*anyopaque,
+    ) !void {
+        const r = view.r;
+        const guard = self.protection();
+        self.del.total.store(items.len, .release);
+
+        // Folders asked for, so that anything inside one of them is left to it.
+        var folders: std.ArrayListUnmanaged(space_mod.RemovedIndex.Run) = .empty;
+        for (items) |item| {
+            if (item.kind != .dir or item.id >= r.dirCount()) continue;
+            const rec = try r.dir(item.id);
+            try folders.append(arena, .{ .start = item.id, .end = rec.subtree_end });
+        }
+        const Cover = struct {
+            fn strictly(runs: []const space_mod.RemovedIndex.Run, d: u64) bool {
+                for (runs) |run| if (run.start < d and d < run.end) return true;
+                return false;
+            }
+            fn holds(runs: []const space_mod.RemovedIndex.Run, d: u64) bool {
+                for (runs) |run| if (run.start <= d and d < run.end) return true;
+                return false;
+            }
+        };
+
+        var seen_dirs: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        var seen_files: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        var batch: std.ArrayListUnmanaged(Target) = .empty;
+        try batch.ensureTotalCapacity(arena, trash_batch);
+
+        for (items) |item| {
+            if (self.del.cancel.load(.acquire)) {
+                report.cancelled = true;
+                break;
+            }
+            _ = self.del.done.fetchAdd(1, .release);
+
+            var path: []const u8 = undefined;
+            var bytes: u64 = 0;
+            switch (item.kind) {
+                .dir => {
+                    if (item.id >= r.dirCount()) {
+                        report.fail(arena, "(unknown folder)", "not in these results");
+                        continue;
+                    }
+                    const d: u32 = @intCast(item.id);
+                    if ((try seen_dirs.fetchPut(arena, d, {})) != null) continue;
+                    if (Cover.strictly(folders.items, d)) continue;
+                    const rec = try r.dir(d);
+                    path = try r.dirPath(arena, d);
+                    if (view.removed.dirRemoved(d)) {
+                        report.fail(arena, path, "already removed");
+                        continue;
+                    }
+                    if (rec.parent == space_mod.no_parent) {
+                        report.fail(arena, path, "is a scanned folder; remove what is inside it instead");
+                        continue;
+                    }
+                    if (guard.guardsFolder(path)) {
+                        report.fail(arena, path, "is, or holds, a protected location");
+                        continue;
+                    }
+                    var path_buf: [4096]u8 = undefined;
+                    const path_z = pathZ(&path_buf, path) orelse {
+                        report.fail(arena, path, "path is too long");
+                        continue;
+                    };
+                    if (folderKind(path_z)) |reason| {
+                        report.skipped_changed += 1;
+                        report.fail(arena, path, reason);
+                        continue;
+                    }
+                    bytes = view.dirAgg(d, &rec).bytes;
+                },
+                .file => {
+                    if (item.id >= r.fileCount()) {
+                        report.fail(arena, "(unknown file)", "not in these results");
+                        continue;
+                    }
+                    if ((try seen_files.fetchPut(arena, item.id, {})) != null) continue;
+                    const rec = try r.file(item.id);
+                    if (Cover.holds(folders.items, rec.dir)) continue;
+                    path = try r.filePath(arena, item.id);
+                    if (view.removed.fileRemoved(item.id)) {
+                        report.fail(arena, path, "already removed");
+                        continue;
+                    }
+                    if (guard.protects(path)) {
+                        report.fail(arena, path, "is in a protected location");
+                        continue;
+                    }
+                    var path_buf: [4096]u8 = undefined;
+                    const path_z = pathZ(&path_buf, path) orelse {
+                        report.fail(arena, path, "path is too long");
+                        continue;
+                    };
+                    const st = pstat.lstat(path_z) catch {
+                        report.skipped_changed += 1;
+                        report.fail(arena, path, "no longer exists");
+                        continue;
+                    };
+                    if (!st.isFile() or st.size != rec.logical or st.mtime_sec != rec.mtime) {
+                        report.skipped_changed += 1;
+                        report.fail(arena, path, "changed since the scan; rescan to see it as it is now");
+                        continue;
+                    }
+                    // Another link keeps the inode, and its blocks, alive.
+                    bytes = if (rec.flags & space_mod.file_flag_hard_linked != 0) 0 else rec.bytes;
+                },
+            }
+            batch.appendAssumeCapacity(.{ .path = path, .size = bytes });
+            if (batch.items.len == trash_batch) {
+                self.removeBatch(arena, batch.items, true, trash_fn, user, report);
+                batch.clearRetainingCapacity();
+            }
+        }
+        self.removeBatch(arena, batch.items, true, trash_fn, user, report);
     }
 
     // --- export -----------------------------------------------------------

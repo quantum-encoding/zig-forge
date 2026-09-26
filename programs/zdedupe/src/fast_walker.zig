@@ -70,6 +70,10 @@ pub const FastFileEntry = struct {
     mtime: i64,
     /// Hard-link count as reported by the filesystem (0 = unknown).
     nlink: u32 = 0,
+    /// Bytes on disk; see `pstat.Stat.allocated`.
+    allocated: u64 = 0,
+    /// A cloud placeholder whose content is not on disk.
+    dataless: bool = false,
     /// Index of the entry that stands for this inode, when this entry is an
     /// extra hard link to it. Only ever set in tree-recording mode; otherwise
     /// extra hard links are dropped.
@@ -242,6 +246,8 @@ const Worker = struct {
     path_buf: [max_path + 64]u8 = undefined,
 
     fn run(self: *Worker) void {
+        // Worker 0 is the caller's thread, which `walk` sets and restores.
+        if (self.index != 0 and self.shared.walker.no_materialize) _ = noMaterializeThisThread();
         while (self.shared.take()) |path| {
             const failure: ?anyerror = if (self.readDir(path)) |_| null else |err| err;
             self.shared.done(failure);
@@ -419,10 +425,12 @@ const Worker = struct {
     }
 
     fn join(self: *Worker, dir_path: []const u8, name: []const u8) ![]const u8 {
-        const out = try self.strings().alloc(u8, dir_path.len + 1 + name.len);
-        @memcpy(out[0..dir_path.len], dir_path);
-        out[dir_path.len] = '/';
-        @memcpy(out[dir_path.len + 1 ..], name);
+        // Under the filesystem root the separator is already there: "/x", not "//x".
+        const base = if (dir_path.len == 1 and dir_path[0] == '/') "" else dir_path;
+        const out = try self.strings().alloc(u8, base.len + 1 + name.len);
+        @memcpy(out[0..base.len], base);
+        out[base.len] = '/';
+        @memcpy(out[base.len + 1 ..], name);
         return out;
     }
 
@@ -440,6 +448,8 @@ const Worker = struct {
             .dev = st.dev,
             .mtime = st.mtime_sec,
             .nlink = st.nlink,
+            .allocated = st.allocated,
+            .dataless = st.dataless,
         });
         return true;
     }
@@ -541,6 +551,31 @@ const Worker = struct {
     }
 };
 
+extern "c" fn getiopolicy_np(iotype: c_int, scope: c_int) c_int;
+extern "c" fn setiopolicy_np(iotype: c_int, scope: c_int, policy: c_int) c_int;
+
+/// sys/resource.h
+const IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES: c_int = 3;
+const IOPOL_SCOPE_THREAD: c_int = 1;
+const IOPOL_MATERIALIZE_DATALESS_FILES_OFF: c_int = 1;
+
+/// macOS: from here on this thread never makes the system fetch a cloud
+/// placeholder (iCloud Drive with "Optimize Mac Storage", File Provider
+/// folders). An access that would have downloaded one fails instead, so a
+/// dataless directory is reported unreadable rather than pulled down. Returns
+/// the policy it replaced, for `restoreMaterialize`.
+fn noMaterializeThisThread() c_int {
+    if (comptime builtin.os.tag != .macos) return 0;
+    const previous = getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD);
+    _ = setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, IOPOL_MATERIALIZE_DATALESS_FILES_OFF);
+    return previous;
+}
+
+fn restoreMaterialize(previous: c_int) void {
+    if (comptime builtin.os.tag != .macos) return;
+    if (previous >= 0) _ = setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, previous);
+}
+
 fn isAppLibraryDir(dir_path: []const u8) bool {
     for (types.Config.app_library_dirs) |suffix| {
         if (std.mem.endsWith(u8, dir_path, suffix)) return true;
@@ -571,6 +606,9 @@ pub const FastWalker = struct {
     skip_app_libraries: bool = false,
     /// Also record dirs, unfollowed symlinks and extra hard links.
     record_tree: bool = false,
+    /// macOS: never trigger a download of a cloud placeholder while walking
+    /// (see `noMaterializeThisThread`).
+    no_materialize: bool = false,
     /// Progress out, cancellation in (borrowed).
     monitor: ?*types.Monitor = null,
     /// Worker threads; 0 = one per CPU.
@@ -677,6 +715,18 @@ pub const FastWalker = struct {
         self.record_tree = true;
     }
 
+    /// Under `one_filesystem`, also enter directories on device `dev`. For a
+    /// volume split into several filesystems that one path tree joins (macOS:
+    /// the sealed system volume and the Data volume behind its firmlinks).
+    pub fn allowDevice(self: *FastWalker, dev: u64) !void {
+        try self.root_devs.append(self.allocator, dev);
+    }
+
+    /// Never download a cloud placeholder to walk it (macOS; a no-op elsewhere).
+    pub fn setNoMaterialize(self: *FastWalker, on: bool) void {
+        self.no_materialize = on;
+    }
+
     /// Publish progress to, and take cancellation from, `monitor`.
     pub fn setMonitor(self: *FastWalker, monitor: ?*types.Monitor) void {
         self.monitor = monitor;
@@ -694,6 +744,9 @@ pub const FastWalker = struct {
         if (root_path.len > max_path) return error.PathTooLong;
 
         // Remove trailing slash if present
+        const previous_policy: c_int = if (self.no_materialize) noMaterializeThisThread() else -1;
+        defer if (self.no_materialize) restoreMaterialize(previous_policy);
+
         var trimmed = root_path;
         if (trimmed.len > 1 and trimmed[trimmed.len - 1] == '/') trimmed = trimmed[0 .. trimmed.len - 1];
 
@@ -802,6 +855,8 @@ pub const FastWalker = struct {
                 .hash = null,
                 .quick_hash = null,
                 .nlink = fast.nlink,
+                .allocated = fast.allocated,
+                .dataless = fast.dataless,
             });
         }
         worker.files.clearAndFree(self.allocator);
