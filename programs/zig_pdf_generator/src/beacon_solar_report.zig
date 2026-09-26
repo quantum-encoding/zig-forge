@@ -41,12 +41,12 @@ const HAIR = "#000000";
 
 // ---- Helvetica / Helvetica-Bold AFM widths (units per 1000 em), ASCII 32..126
 const HELV = [95]u16{
-    278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278,
-    556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556,
+    278,  278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278,
+    556,  556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556,
     1015, 667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778,
-    667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556,
-    333, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556,
-    556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584,
+    667,  778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556,
+    333,  556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556,
+    556,  556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584,
 };
 const HELVB = [95]u16{
     278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278, 278,
@@ -121,19 +121,21 @@ fn wrap(a: std.mem.Allocator, s: []const u8, size: f64, maxw: f64, bold: bool) !
 }
 
 // ---- embedded brand assets (base64 data URLs, built once per generate) -----
+// Supplied by the build as the `beacon_assets` module; see build.zig.
+const beacon_assets = @import("beacon_assets");
 const AssetsRaw = struct {
-    cover: []const u8 = @embedFile("beacon_assets/cover_house.jpg"),
-    quote_photo: []const u8 = @embedFile("beacon_assets/quote_photo.jpg"),
-    medal: []const u8 = @embedFile("beacon_assets/medal.png"),
-    reviews: []const u8 = @embedFile("beacon_assets/reviews.jpg"),
-    logo: []const u8 = @embedFile("beacon_assets/logo.png"),
-    accreditation: []const u8 = @embedFile("beacon_assets/accreditation.png"),
-    canadian1: []const u8 = @embedFile("beacon_assets/canadian1.jpg"),
-    canadian2: []const u8 = @embedFile("beacon_assets/canadian2.jpg"),
-    sunsynk_inverter: []const u8 = @embedFile("beacon_assets/sunsynk_inverter.jpg"),
-    signature: []const u8 = @embedFile("beacon_assets/signature.png"),
-    sunpath: []const u8 = @embedFile("beacon_assets/sunpath.png"),
-    battery: []const u8 = @embedFile("beacon_assets/battery.jpg"),
+    cover: []const u8 = beacon_assets.cover_house,
+    quote_photo: []const u8 = beacon_assets.quote_photo,
+    medal: []const u8 = beacon_assets.medal,
+    reviews: []const u8 = beacon_assets.reviews,
+    logo: []const u8 = beacon_assets.logo,
+    accreditation: []const u8 = beacon_assets.accreditation,
+    canadian1: []const u8 = beacon_assets.canadian1,
+    canadian2: []const u8 = beacon_assets.canadian2,
+    sunsynk_inverter: []const u8 = beacon_assets.sunsynk_inverter,
+    signature: []const u8 = beacon_assets.signature,
+    sunpath: []const u8 = beacon_assets.sunpath,
+    battery: []const u8 = beacon_assets.battery,
 };
 
 const Assets = struct {
@@ -726,11 +728,19 @@ fn p08(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
         b.f("Battery Storage System {s}", .{q.battery_kwh}),
         "Panels, inverter, mounting frame",
         "Additional electrical work, cabling etc",
-        "Delivery", "Fitting Cost", "Scaffolding", "Roof Survey",
+        "Delivery",
+        "Fitting Cost",
+        "Scaffolding",
+        "Roof Survey",
         "Generation Meter – a means of recording and displaying the total AC generation",
         "Handover Pack and MCS Certificate (if a valid Mpan is submitted)",
-        "Guarantees and Warranties", "Registration with DNO", "iBoost",
-        "BirdGuard no", "Number of optimisers to be installed 0", "EPS no", "UPS no",
+        "Guarantees and Warranties",
+        "Registration with DNO",
+        "iBoost",
+        "BirdGuard no",
+        "Number of optimisers to be installed 0",
+        "EPS no",
+        "UPS no",
     }, .{ .size = 10.5, .gap_after = 12 });
     try b.heading("SCHEDULE FOR PAYMENT", .{ .size = 17, .gap_after = 10 });
     try b.para("This price includes the following:", .{ .size = 10.5, .gap_after = 4 });
@@ -961,9 +971,9 @@ fn p12(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     var wind: std.ArrayListUnmanaged(Row) = .empty;
     try wind.append(a, .{ .cells = cs(a, &.{.{ .t = "MCS Wind Loading Calculation", .al = .center, .bg = BLUE_LT, .size = 10 }}), .widths = ws(a, &.{CW}), .h = 22 });
     const wind_rows = [_]WV{
-        .{ .k = "Wind Zone:", .v = "1-SU" }, .{ .k = "Peak Pressure:", .v = "1,009Pa" },
+        .{ .k = "Wind Zone:", .v = "1-SU" },                  .{ .k = "Peak Pressure:", .v = "1,009Pa" },
         .{ .k = "Altitude Correction Factor:", .v = "NONE" }, .{ .k = "Typography Correction Factor:", .v = "NONE" },
-        .{ .k = "Peak Velocity Pressure:", .v = "1009Pa" }, .{ .k = "Pressure Coefficient:", .v = "-0.5" },
+        .{ .k = "Peak Velocity Pressure:", .v = "1009Pa" },   .{ .k = "Pressure Coefficient:", .v = "-0.5" },
         .{ .k = "Wind Pressure:", .v = "-681Pa" },
     };
     for (wind_rows) |r| try wind.append(a, .{ .cells = cs(a, &.{ .{ .t = r.k }, .{ .t = r.v } }), .h = 24 });
@@ -972,7 +982,7 @@ fn p12(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     var snow: std.ArrayListUnmanaged(Row) = .empty;
     try snow.append(a, .{ .cells = cs(a, &.{.{ .t = "Snow Landing Calculation", .al = .center, .bg = BLUE_LT, .size = 10 }}), .widths = ws(a, &.{CW}), .h = 22 });
     const snow_rows = [_]WV{
-        .{ .k = "Snow Load:", .v = "500Pa" }, .{ .k = "Altitude Correction:", .v = "NONE" },
+        .{ .k = "Snow Load:", .v = "500Pa" },       .{ .k = "Altitude Correction:", .v = "NONE" },
         .{ .k = "Pitch Adjustment:", .v = "1000" }, .{ .k = "Adjust Snow Load:", .v = "500Pa" },
     };
     for (snow_rows) |r| try snow.append(a, .{ .cells = cs(a, &.{ .{ .t = r.k }, .{ .t = r.v } }), .h = 24 });
