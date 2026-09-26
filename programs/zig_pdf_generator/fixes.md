@@ -42,6 +42,23 @@ by the pre-change binary).
 | 14 | CHANGED | src/invoice.zig | Quotes label their date `Valid Until:` instead of `Due Date:` (owner decision: a quote has a validity date, not a due date). `labels.due_date` or the new `due_date_label` still override it. |
 | 15 | CHANGED | src/json.zig | The `receipt` preset no longer pins `theme:"classic"`; the default theme is still classic, so bare receipt payloads are unchanged, and a receipt can now take any `style`. |
 
-Known limitation, not changed: the PNG decoder flattens alpha onto white
-(`image.rgbaToRgb`), so a transparent logo or signature shows a white box over
-the glass wash. Proper `/SMask` support would change every RGBA-logo payload.
+Known limitation at the time (fixed in wave 4): the PNG decoder flattened
+alpha onto white, so a transparent logo or signature showed a white box over
+the glass wash.
+
+## Wave 4 — 2026-09-26 — money formatting, PNG transparency
+
+| ID | Status | Files | Description |
+|----|--------|-------|-------------|
+| 16 | CHANGED | src/invoice.zig, src/json.zig | Money figures group thousands: `£2,400.00` (was `£2400.00`). New `number_format: {thousands, decimal}` (default `","` / `"."`) swaps the marks for locales such as Spanish (`2.400,00`); the decimal mark also applies to quantities and percentages. One formatter (`formatMoney`) now draws every money figure; negatives put the sign before the symbol (`-£120.00`, was `£-120.00` in the classic totals). Rounding is half away from zero after settling float noise (`1.005` → `1.01`). |
+| 17 | FIXED | src/image.zig, src/document.zig | Transparent PNGs were flattened onto white, leaving a white box on tinted backgrounds. RGBA, grey+alpha and palette/colour-key (`tRNS`) PNGs now embed an 8-bit `/SMask`. Opaque images (including RGBA whose alpha is all 255) embed exactly as before and reserve no extra objects. |
+| 18 | FIXED | src/image.zig | The decoder refused greyscale, grey+alpha, palette and 16-bit PNGs (`UnsupportedColorType`) — common output of image optimisers. Now decoded (16-bit reduced to the high byte). The pixel cap, chunk and IDAT caps and the truncated-stream refusal from wave 2 apply unchanged, and the inflated size is capped at the 8-bit-RGBA budget so 16-bit samples cannot double it. Adam7 is still refused. |
+| 19 | FIXED | src/document.zig | `object_offsets[obj_id]` was written unchecked; an object id past `MAX_OBJECTS` (4096 — reachable with ~1024 pages or images) indexed out of bounds. Now `error.TooManyObjects`. An `/SMask` alpha plane whose length disagrees with width × height is refused (`InvalidImage`). |
+| 20 | FIXED | src/letter_quote.zig | A PNG watermark's decoded pixel buffer was never freed (leak per render). |
+| 21 | FIXED | src/share_certificate.zig | A file-path PNG freed `image.data` directly; with an alpha plane that is a prefix of the allocation, so all callers now free `image.ownedPixels(img)`. |
+
+Not changed (separate formatters, noted for a later pass): `clean_quote.zig`
+and `letter_quote.zig` print money with a bare `{d:.2}` (no grouping, `£`
+hard-coded in clean_quote). `proposal.zig`'s `formatCurrency` groups thousands
+but computes pence by truncation plus 0.5, so an amount like 0.999 prints
+`£0.100`.

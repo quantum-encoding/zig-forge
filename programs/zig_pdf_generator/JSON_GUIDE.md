@@ -132,7 +132,7 @@ without the key.
 | `company_name` | string | Yes | Your business name |
 | `company_address` | string | Yes | Full address (use `\n` for line breaks) |
 | `company_vat` | string | No | VAT/tax registration number; drawn as `VAT: <number>` under the company name |
-| `company_logo_base64` | string | No | Base64-encoded PNG/JPEG logo |
+| `company_logo_base64` | string | No | Base64-encoded PNG/JPEG logo. PNG transparency is preserved (RGBA, grey+alpha, palette with tRNS) |
 
 ### Client Information
 | Field | Type | Required | Description |
@@ -233,6 +233,7 @@ adjustments + tax − IRPF.
 |-------|------|---------|-------------|
 | `show_tax` | bool | `true`; `false` for a receipt | When `false` the Subtotal and Tax rows are suppressed and only the TOTAL bar is drawn — for a business that is not VAT-registered. Alias: `show_vat` |
 | `currency_symbol` | string | `""` | Prepended to every money figure (`"£"`, `"€"`). Empty renders bare numbers |
+| `number_format` | object | `{"thousands": ",", "decimal": "."}` | Money reads `£2,400.00` by default. For Spanish/German documents send `{"thousands": ".", "decimal": ","}` → `2.400,00` (quantities follow the decimal mark: `2,5 h`). `"thousands": ""` turns grouping off. Never inferred from the currency or language |
 | `irpf_rate` | number | `0` | IRPF retention fraction (`0.15` → an `IRPF (15%)` row). `0` hides the row. Spanish freelancer invoices |
 | `irpf_amount` | number | `0` | The absolute amount withheld — you compute it; shown as a negative row beneath Tax |
 
@@ -258,7 +259,7 @@ Both honour `\n` line breaks (a blank line between paragraphs is kept).
 |-------|------|---------|-------------|
 | `show_signature` | bool | `false` | Draws a signature block: heading, signature line, name, title |
 | `signature_name` / `signature_title` | string | `""` | Printed under the line |
-| `signature_image_base64` | data_url | none | Signature image placed on the line. Transparency is flattened onto white |
+| `signature_image_base64` | data_url | none | Signature image placed on the line; PNG transparency is kept |
 
 ### Styling Options
 | Field | Type | Default | Description |

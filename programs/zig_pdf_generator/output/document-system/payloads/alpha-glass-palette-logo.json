@@ -1,0 +1,61 @@
+{
+ "company_name": "Harbourline Design Studio Ltd",
+ "company_address": "Unit 4, Quayside Works\n12 Harbour Row, Falmouth TR11 2AB\n07700 900123 · hello@harbourline.example",
+ "company_vat": "GB 000 0000 00",
+ "logo_inline": true,
+ "logo_width": 46,
+ "logo_height": 46,
+ "client_name": "Northfield Property Group",
+ "client_address": "Attn: Priya Shah\n88 Meridian Way\nBristol BS1 4XY",
+ "invoice_number": "INV-2026-0417",
+ "invoice_date": "26 Sep 2026",
+ "due_date": "10 Oct 2026",
+ "currency_symbol": "£",
+ "tax_rate": 0.2,
+ "primary_color": "#0F6E68",
+ "secondary_color": "#1F2937",
+ "bank_details": {
+  "account_name": "Harbourline Design Studio Ltd",
+  "bank_name": "Example Bank plc",
+  "sort_code": "00-00-00",
+  "account_number": "00000000",
+  "iban": "GB00 XMPL 0000 0000 0000 00",
+  "bic": "XMPLGB2L",
+  "reference": "INV-2026-0417"
+ },
+ "items": [
+  {
+   "description": "Discovery workshop",
+   "quantity": 1,
+   "unit": "day",
+   "unit_price": 850.0
+  },
+  {
+   "description": "Brand identity: logo suite, colour palette, typography system and a 24-page usage guideline document",
+   "quantity": 1,
+   "unit_price": 2400.0
+  },
+  {
+   "description": "Website design and build (12 responsive pages)",
+   "quantity": 42.5,
+   "unit": "hrs",
+   "unit_price": 65.0
+  },
+  {
+   "description": "On-site photography",
+   "quantity": 1.5,
+   "unit": "days",
+   "unit_price": 600.0
+  },
+  {
+   "description": "Hosting and maintenance",
+   "quantity": 12,
+   "unit": "months",
+   "unit_price": 25.0
+  }
+ ],
+ "notes": "Thank you for choosing Harbourline.",
+ "preset": "invoice",
+ "style": "glass",
+ "company_logo_base64": "data:image/png;base64,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"
+}

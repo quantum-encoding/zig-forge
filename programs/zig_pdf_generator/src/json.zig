@@ -202,6 +202,25 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     data.font_family = try dupeJsonString(allocator, obj, "font_family") orelse try allocator.dupe(u8, "Helvetica");
     data.currency_symbol = try dupeJsonString(allocator, obj, "currency_symbol") orelse try allocator.dupe(u8, "");
 
+    // Money number format: {"thousands": ",", "decimal": "."}. Each is at
+    // most 4 bytes; an over-long or non-string value keeps the default.
+    // "thousands" may be "" (no grouping); an empty "decimal" keeps ".".
+    {
+        const nf_obj: ?std.json.ObjectMap = if (obj.get("number_format")) |v| (if (v == .object) v.object else null) else null;
+        const Sep = struct {
+            fn pick(o: ?std.json.ObjectMap, key: []const u8, default: []const u8, allow_empty: bool) []const u8 {
+                const m = o orelse return default;
+                const v = getJsonString(m, key) orelse return default;
+                if (v.len > 4 or (v.len == 0 and !allow_empty)) return default;
+                return v;
+            }
+        };
+        data.number_format = .{
+            .thousands = try allocator.dupe(u8, Sep.pick(nf_obj, "thousands", ",", true)),
+            .decimal = try allocator.dupe(u8, Sep.pick(nf_obj, "decimal", ".", false)),
+        };
+    }
+
     // Fixed drawn labels — optional "labels" object, each field falling back
     // to its English default. Every field is always heap-allocated (defaults
     // included) so freeInvoiceData can free them uniformly.
@@ -607,6 +626,8 @@ pub fn freeInvoiceData(allocator: std.mem.Allocator, data: *const invoice.Invoic
     if (data.company_name_color.len > 0) allocator.free(data.company_name_color);
     if (data.font_family.len > 0) allocator.free(data.font_family);
     if (data.currency_symbol.len > 0) allocator.free(data.currency_symbol);
+    allocator.free(data.number_format.thousands);
+    allocator.free(data.number_format.decimal);
     inline for (@typeInfo(invoice.Labels).@"struct".fields) |f| {
         const s = @field(data.labels, f.name);
         if (s.len > 0) allocator.free(s);
@@ -1247,4 +1268,28 @@ test "adjustments are capped and non-object items are safe" {
     try std.testing.expectEqual(@as(usize, 3), odd.items.len);
     try std.testing.expectEqualStrings("", odd.items[0].description);
     try std.testing.expectApproxEqAbs(@as(f64, 5), odd.subtotal, 0.001);
+}
+
+test "number_format parses, defaults to UK marks and ignores bad values" {
+    const allocator = std.testing.allocator;
+
+    const def = try parseInvoiceJson(allocator, "{}");
+    defer freeInvoiceData(allocator, &def);
+    try std.testing.expectEqualStrings(",", def.number_format.thousands);
+    try std.testing.expectEqualStrings(".", def.number_format.decimal);
+
+    const es = try parseInvoiceJson(allocator, "{\"number_format\": {\"thousands\": \".\", \"decimal\": \",\"}}");
+    defer freeInvoiceData(allocator, &es);
+    try std.testing.expectEqualStrings(".", es.number_format.thousands);
+    try std.testing.expectEqualStrings(",", es.number_format.decimal);
+
+    const odd = try parseInvoiceJson(allocator, "{\"number_format\": {\"thousands\": \"\", \"decimal\": \"\"}}");
+    defer freeInvoiceData(allocator, &odd);
+    try std.testing.expectEqualStrings("", odd.number_format.thousands);
+    try std.testing.expectEqualStrings(".", odd.number_format.decimal);
+
+    const long = try parseInvoiceJson(allocator, "{\"number_format\": {\"thousands\": \"xxxxx\", \"decimal\": 3}}");
+    defer freeInvoiceData(allocator, &long);
+    try std.testing.expectEqualStrings(",", long.number_format.thousands);
+    try std.testing.expectEqualStrings(".", long.number_format.decimal);
 }

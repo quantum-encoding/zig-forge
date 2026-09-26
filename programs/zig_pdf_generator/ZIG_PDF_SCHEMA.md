@@ -85,7 +85,7 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 | `company_name`                 | string                           | No        | `""`                              | Header + footer                                                              |
 | `company_address`              | string                           | No        | `""`                              | One line per `\n`; without a newline, split at `", "`                        |
 | `company_vat`                  | string                           | No        | `""`                              | Tax/VAT ID; informational                                                    |
-| `company_logo_base64`          | data_url                         | No        | none                              | Rendered top-left when present                                               |
+| `company_logo_base64`          | data_url                         | No        | none                              | Rendered top-left when present. PNG transparency is kept (alpha channel, grey+alpha, palette/colour-key tRNS → a PDF soft mask), so a cut-out logo sits cleanly on the glass wash; fully opaque PNGs embed exactly as before |
 | `client_name`                  | string                           | No        | `""`                              | Recipient block                                                              |
 | `client_address`               | string                           | No        | `""`                              | Displayed above items                                                        |
 | `client_vat`                   | string                           | No        | `""`                              | Client tax ID; informational                                                 |
@@ -103,7 +103,7 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 | `show_bank_details`            | bool                             | No        | `true`; `false` for a quote or receipt (document type or preset) | Toggle for the `bank_details` block |
 | `show_signature`               | bool                             | No        | `false`                           | Signature block: `labels.signature` heading, signature line, name, title. Sits right of the notes when that column is free |
 | `signature_name`, `signature_title` | string                      | No        | `""`                              | Printed under the signature line                                             |
-| `signature_image_base64`       | data_url                         | No        | none                              | Signature image on the line (fit to 170×40pt; transparency is flattened onto white by the PNG decoder) |
+| `signature_image_base64`       | data_url                         | No        | none                              | Signature image on the line (fit to 170×40pt; PNG transparency kept as a soft mask) |
 | `subject`                      | string                           | No        | `""`                              | Subject line under the title — `minimal` and `letterhead` styles only; letterhead prefixes `labels.subject_prefix` |
 | `style`                        | same values as `theme`           | No        | —                                 | Synonym of `theme`; wins when both are present |
 | `display_mode`                 | `enum("itemized"\|"blackbox")`   | No        | `"itemized"`                      | `blackbox` collapses items into one summary line using `blackbox_description` |
@@ -113,7 +113,8 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 | `tax_rate`                     | number                           | No        | `0.21`                            | Fraction (`0.0`–`1.0`); 21% default                                          |
 | `tax_amount`                   | number                           | No        | derived                           | Absent → `(subtotal + Σadjustments) × tax_rate`, rounded to cents; `0` when `show_tax` is false |
 | `total`                        | number                           | No        | derived                           | Absent → `subtotal + Σadjustments + tax_amount − |irpf_amount|`, rounded to cents |
-| `currency_symbol`              | string                           | No        | `""`                              | Prepended to every money figure (e.g. `"£"`, `"€"`). Empty renders bare numbers |
+| `currency_symbol`              | string                           | No        | `""`                              | Prepended to every money figure (e.g. `"£"`, `"€"`), after the minus sign (`-£120.00`). Empty renders bare numbers |
+| `number_format`                | `{thousands, decimal}`           | No        | `{"thousands": ",", "decimal": "."}` | Digit grouping and decimal mark for every money figure (`£1,234.50`); `decimal` also applies to quantities and percentages (`2,5 hrs`, `12,5%`). Spanish/German: `{"thousands": ".", "decimal": ","}` → `2.400,00`. `thousands: ""` disables grouping; each value is at most 4 bytes (longer, non-string or an empty `decimal` keeps the default). Nothing switches convention implicitly. Money rounds half away from zero (`1.005` → `1.01`); figures ≥ 1e11 print ungrouped |
 | `show_tax`                     | bool                             | No        | `true`; `false` for `document_type:"receipt"` or `preset:"receipt"` | VAT/tax toggle. When `false`, the **Subtotal** and **Tax** rows are suppressed and only the **TOTAL** bar is drawn — use for a business that is not VAT-registered. Alias: `show_vat` |
 | `notes`                        | string                           | No        | `""`                              | Free-form text block below items                                             |
 | `payment_terms`                | string                           | No        | `""`                              | Separate from notes — specifically payment terms                             |
@@ -527,9 +528,8 @@ lib `generateLetterFromJson` / `generateLetter(LetterInput)`. Source: rendered b
 | `password` | string | No | `""` | When set, the PDF is **AES-256 encrypted** (ISO 32000-2 /V5 /R6) — the open password. Validated by qpdf/pikepdf/Acrobat. Native targets only (WASM has no CSPRNG seed) |
 | `owner_password` | string | No | `password` | Permissions password (full access); defaults to `password` when blank |
 
-Caveats: PNG backgrounds with transparency are flattened onto white (fine on the
-default white page; a transparent image over a coloured region would show white
-there). No Svelte UI yet — author via JSON / CLI / WASM. (Clickable links inside
+Caveats: PNG transparency is embedded as a soft mask, so a transparent image
+composites over coloured regions. No Svelte UI yet — author via JSON / CLI / WASM. (Clickable links inside
 a multi-page letter now register on the correct page.)
 
 ---

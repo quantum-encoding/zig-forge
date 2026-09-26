@@ -88,9 +88,40 @@ def build_payloads(sample):
     return out
 
 
+def build_alpha_payloads(sample):
+    """Transparent-image proofs: RGBA and palette+tRNS logos on the glass
+    wash, and a grey+alpha signature over the glass wash. (The RGBA signature
+    also appears on every *-all-toggles page.)"""
+    out = {}
+    base = copy.deepcopy(sample)
+    base.update(preset="invoice", style="glass", company_logo_base64=data_url("logo-transparent.png"))
+    out["alpha-glass-rgba-logo"] = base
+
+    pal = copy.deepcopy(base)
+    pal["company_logo_base64"] = data_url("logo-palette.png")
+    out["alpha-glass-palette-logo"] = pal
+
+    sig = copy.deepcopy(sample)
+    sig.update(preset="invoice", style="glass", company_logo_base64=data_url("logo-transparent.png"),
+               show_signature=True, signature_name="Morgan Ellis", signature_title="Director",
+               signature_image_base64=data_url("signature-grey-alpha.png"),
+               notes="Signature: grey+alpha PNG; logo: RGBA PNG with a 35% disc.",
+               display_mode="blackbox", blackbox_description="Brand identity and website, phase 1",
+               show_bank_details=False)
+    sig.pop("subtotal", None)
+    sig["subtotal"] = 7212.50
+    out["alpha-glass-signature"] = sig
+    return out
+
+
 def main():
     sample = json.loads((HERE / "sample.json").read_text())
     payloads = build_payloads(sample)
+    payloads.update(build_alpha_payloads(sample))
+    # Locale proof: Spanish number format (thousands ".", decimal ",").
+    es = copy.deepcopy(payloads["letterhead-all-toggles"])
+    es.update(currency_symbol="€", number_format={"thousands": ".", "decimal": ","})
+    payloads["letterhead-es-number-format"] = es
     (HERE / "payloads").mkdir(exist_ok=True)
     (HERE / "pdf").mkdir(exist_ok=True)
     for old in HERE.glob("render-*.png"):
