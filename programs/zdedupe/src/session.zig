@@ -561,6 +561,8 @@ pub const Session = struct {
     /// The deepest directory containing every path in the results — the stand-in
     /// when nothing recorded what was scanned.
     fn deriveRoots(self: *Session) ![][]u8 {
+        // A disk-space scan names its roots itself.
+        if (self.space) |*sp| return spaceRoots(self.gpa, sp);
         var common: ?[]const u8 = null;
         for (0..self.reader.groupCount()) |i| {
             const group = self.reader.group(i) catch return &.{};
@@ -2849,6 +2851,21 @@ fn narrowToCommonDir(common: *?[]const u8, path: []const u8) void {
         narrowed = narrowed[0..cut];
     }
     common.* = narrowed;
+}
+
+fn spaceRoots(gpa: Allocator, sp: *const space_mod.Reader) ![][]u8 {
+    var list: std.ArrayListUnmanaged([]u8) = .empty;
+    errdefer {
+        for (list.items) |root| gpa.free(root);
+        list.deinit(gpa);
+    }
+    var c: u32 = 0;
+    while (c < sp.dirCount()) {
+        const d = sp.dir(c) catch break;
+        try list.append(gpa, try gpa.dupe(u8, sp.dirName(&d) catch break));
+        c = d.subtree_end;
+    }
+    return list.toOwnedSlice(gpa);
 }
 
 fn parseRoots(gpa: Allocator, json: []const u8) ![][]u8 {

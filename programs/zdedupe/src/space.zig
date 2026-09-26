@@ -78,7 +78,7 @@ const by_extension = std.StaticStringMap(Category).initComptime(.{
     .{ "heic", .media },     .{ "heif", .media },     .{ "webp", .media },    .{ "avif", .media },
     .{ "tif", .media },      .{ "tiff", .media },     .{ "bmp", .media },     .{ "svg", .media },
     .{ "ico", .media },      .{ "icns", .media },     .{ "psd", .media },     .{ "psb", .media },
-    .{ "raw", .media },      .{ "cr2", .media },      .{ "cr3", .media },     .{ "nef", .media },
+    .{ "cr2", .media },      .{ "cr3", .media },     .{ "nef", .media },
     .{ "arw", .media },      .{ "dng", .media },      .{ "orf", .media },     .{ "rw2", .media },
     .{ "raf", .media },      .{ "xcf", .media },      .{ "exr", .media },     .{ "hdr", .media },
     .{ "blend", .media },    .{ "obj", .media },      .{ "fbx", .media },     .{ "glb", .media },
@@ -135,6 +135,8 @@ const by_extension = std.StaticStringMap(Category).initComptime(.{
     .{ "qcow2", .archives }, .{ "vhd", .archives },   .{ "vhdx", .archives }, .{ "xar", .archives },
     .{ "cpio", .archives },  .{ "sit", .archives },   .{ "sitx", .archives }, .{ "zipx", .archives },
     .{ "bak", .archives },   .{ "backup", .archives },
+    // A raw disk image (Docker.raw, VM disks) far more often than a camera file.
+    .{ "raw", .archives },
     // Installers and applications
     .{ "dmg", .applications }, .{ "pkg", .applications }, .{ "mpkg", .applications }, .{ "exe", .applications },
     .{ "msi", .applications }, .{ "msix", .applications }, .{ "appx", .applications }, .{ "deb", .applications },
@@ -2335,6 +2337,7 @@ test "file names map to categories by extension, case-insensitively" {
     try std.testing.expectEqual(Category.system, categoryOfName("libz.dylib"));
     try std.testing.expectEqual(Category.other, categoryOfName(".bashrc"));
     try std.testing.expectEqual(Category.other, categoryOfName("README"));
+    try std.testing.expectEqual(Category.archives, categoryOfName("Docker.raw"));
     try std.testing.expectEqual(Category.other, categoryOfName("x.averyveryverylongextension"));
 }
 

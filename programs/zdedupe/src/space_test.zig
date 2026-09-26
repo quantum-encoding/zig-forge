@@ -339,12 +339,17 @@ test "trash: verified, protected roots refused, changes skipped, totals correcte
     s.close();
     closed = true;
 
-    // Reopened later, what went stays gone.
+    // Reopened later, what went stays gone; without the roots sidecar the
+    // roots come from the tree itself.
+    const sidecar = try std.fmt.allocPrintSentinel(arena, "{s}", .{fx.store_path}, 0);
+    const roots_sidecar = try std.fmt.allocPrintSentinel(arena, "{s}.roots.json", .{sidecar[0 .. sidecar.len - ".zds".len]}, 0);
+    _ = std.c.unlink(roots_sidecar.ptr);
     const again = try fx.open(false);
     defer again.close();
     const reopened = try parse(arena, again.spaceOverview());
     try testing.expectEqual(int(after, "files"), int(reopened, "files"));
     try testing.expectEqual(int(after, "bytes"), int(reopened, "bytes"));
+    try testing.expectEqualStrings(fx.tree.path, field(reopened, "roots").array.items[0].string);
 }
 
 test "history records each scan once and reports what grew" {
