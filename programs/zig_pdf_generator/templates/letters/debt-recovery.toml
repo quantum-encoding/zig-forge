@@ -1,0 +1,453 @@
+# Debt-recovery letter pack: legend for the three chasing letters
+#
+#   reminder.tpl.md          (a) friendly payment reminder
+#   second-reminder.tpl.md   (b) second reminder
+#   final-demand.tpl.md      (c) final demand: letter before action (company)
+#                                or Letter of Claim under the Pre-Action
+#                                Protocol for Debt Claims (individual / sole trader)
+#
+# The statutory late-payment interest claim (d) has its own legend,
+# statutory-interest.toml, because it only applies between businesses.
+#
+# Variables with no default and `required = false` are needed only by the
+# letters or branches that use them: a letter that reaches one unbound is
+# refused with "'NAME' is not bound", never rendered with a gap.
+#
+# Amounts are not calculated here. The app computes AMOUNT_OUTSTANDING,
+# interest and totals and binds them; see README.md for the formulas.
+#
+# All scenario data below is fictional.
+
+[legend]
+name = "Debt recovery letters (England and Wales)"
+
+# --- Creditor (the sender) ---------------------------------------------------
+
+[[var]]
+name = "CREDITOR_NAME"
+type = "string"
+required = true
+description = "Your business name as it appears on the invoice"
+
+[[var]]
+name = "CREDITOR_ADDRESS"
+type = "list"
+sep = "|"
+join = ", "
+required = true
+description = "Postal address lines. Also the address the Reply Form goes back to."
+
+[[var]]
+name = "CREDITOR_EMAIL"
+type = "string"
+required = true
+
+[[var]]
+name = "CREDITOR_PHONE"
+type = "string"
+required = true
+
+[[var]]
+name = "SIGNATORY"
+type = "string"
+required = true
+description = "Name of the person signing"
+
+[[var]]
+name = "SIGNATORY_ROLE"
+type = "string"
+required = true
+
+[[var]]
+name = "CLOSING"
+type = "string"
+value = "Yours sincerely,"
+description = "Use \"Yours faithfully,\" when SALUTATION is \"Sir or Madam\""
+
+# --- Debtor -------------------------------------------------------------------
+
+[[var]]
+name = "DEBTOR_TYPE"
+type = "enum"
+values = ["company", "sole_trader", "individual"]
+required = true
+description = "company (incl. LLP): letter before action under the Practice Direction on Pre-Action Conduct. sole_trader / individual: Letter of Claim under the Pre-Action Protocol for Debt Claims."
+
+[[var]]
+name = "DEBTOR_NAME"
+type = "string"
+required = true
+description = "Company name, or the person's full name (sole trader: \"Name trading as Business\")"
+
+[[var]]
+name = "DEBTOR_ADDRESS"
+type = "list"
+sep = "|"
+join = ", "
+required = true
+
+[[var]]
+name = "SALUTATION"
+type = "string"
+required = true
+description = "Follows \"Dear\", e.g. \"Ms Morgan\" or \"Sir or Madam\""
+
+# --- This letter ----------------------------------------------------------------
+
+[[var]]
+name = "LETTER_DATE"
+type = "date"
+required = true
+description = "Date printed at the top. A Letter of Claim should be posted on this date or the next day."
+
+[[var]]
+name = "OUR_REF"
+type = "string"
+required = true
+
+[[var]]
+name = "PREVIOUS_LETTER_DATE"
+type = "date"
+description = "Second reminder: date of the first reminder"
+
+[[var]]
+name = "PAY_BY"
+type = "date"
+description = "Reminders: date by which payment is requested"
+
+[[var]]
+name = "RESPONSE_DEADLINE"
+type = "date"
+description = "Final demand to a company: date for payment or a response. Practice Direction – Pre-Action Conduct para 6(b): 14 days is a reasonable time in a straightforward case."
+
+# --- The debt ---------------------------------------------------------------------
+
+[[var]]
+name = "GOODS_OR_SERVICES"
+type = "string"
+required = true
+description = "What was supplied, e.g. \"the fabrication and delivery of 40 steel brackets\""
+
+[[var]]
+name = "INVOICE_NUMBERS"
+type = "list"
+sep = ","
+join = ", "
+required = true
+
+[[var]]
+name = "INVOICE_DATE"
+type = "date"
+required = true
+description = "Invoice date (the earliest, if several)"
+
+[[var]]
+name = "DUE_DATE"
+type = "date"
+required = true
+description = "Date payment was due (the earliest, if several)"
+
+[[var]]
+name = "DAYS_OVERDUE"
+type = "int"
+min = 1
+required = true
+
+[[var]]
+name = "INVOICE_TOTAL"
+type = "money"
+currency = "GBP"
+required = true
+
+[[var]]
+name = "AMOUNT_PAID"
+type = "money"
+currency = "GBP"
+value = "0"
+
+[[var]]
+name = "AMOUNT_OUTSTANDING"
+type = "money"
+currency = "GBP"
+required = true
+description = "INVOICE_TOTAL less AMOUNT_PAID"
+
+[[var]]
+name = "PAYMENT_STATUS"
+type = "enum"
+values = ["unpaid", "partial", "plan_offered"]
+value = "unpaid"
+description = "unpaid; partial (a part payment was received); plan_offered (you offer to take instalments)"
+
+[[var]]
+name = "LAST_PAYMENT_DATE"
+type = "date"
+description = "partial: date the part payment was received"
+
+[[var]]
+name = "PLAN_INSTALMENT"
+type = "money"
+currency = "GBP"
+description = "plan_offered: amount of each instalment"
+
+[[var]]
+name = "PLAN_COUNT"
+type = "int"
+min = 2
+description = "plan_offered: number of instalments"
+
+[[var]]
+name = "PLAN_FREQUENCY"
+type = "enum"
+values = ["weekly", "monthly"]
+value = "monthly"
+
+[[var]]
+name = "PLAN_FIRST_DATE"
+type = "date"
+description = "plan_offered: date of the first instalment"
+
+[[var]]
+name = "PLAN_ACCEPT_BY"
+type = "date"
+description = "plan_offered: date by which the debtor should accept the plan"
+
+# --- Interest ---------------------------------------------------------------------
+
+[[var]]
+name = "CLAIM_STATUTORY_INTEREST"
+type = "bool"
+value = "false"
+description = "Final demand to a company or sole trader: add statutory interest and fixed-sum compensation under the Late Payment of Commercial Debts (Interest) Act 1998. Ignored for individuals."
+
+[[var]]
+name = "INTEREST_RATE"
+type = "string"
+description = "Statutory rate in % a year: 8 plus the reference rate, e.g. \"12.00\""
+
+[[var]]
+name = "INTEREST_TO_DATE"
+type = "money"
+currency = "GBP"
+description = "Statutory interest accrued up to LETTER_DATE"
+
+[[var]]
+name = "DAILY_INTEREST"
+type = "money"
+currency = "GBP"
+description = "Statutory interest per day: principal x rate / 365"
+
+[[var]]
+name = "DEBT_BAND"
+type = "enum"
+values = ["under_1000", "1000_to_9999", "10000_or_more"]
+description = "Size of the debt, which fixes the s.5A compensation: less than £1,000; £1,000 or more but less than £10,000; £10,000 or more"
+
+[[var]]
+name = "COMPENSATION"
+type = "money"
+currency = "GBP"
+by = "DEBT_BAND"
+description = "Fixed sum under s.5A(2) of the Late Payment of Commercial Debts (Interest) Act 1998; follows DEBT_BAND"
+[var.map]
+under_1000 = "40"
+1000_to_9999 = "70"
+10000_or_more = "100"
+
+[[var]]
+name = "TOTAL_CLAIMED"
+type = "money"
+currency = "GBP"
+description = "Final demand: AMOUNT_OUTSTANDING plus any interest and compensation claimed"
+
+[[var]]
+name = "INTEREST_CONTINUING"
+type = "bool"
+value = "false"
+description = "Final demand to an individual or sole trader (not claiming statutory interest): whether contractual interest or other charges are still being added"
+
+[[var]]
+name = "INTEREST_DETAILS"
+type = "string"
+description = "INTEREST_CONTINUING: what is being added, at what rate, under which term"
+
+# --- Agreement (Letter of Claim, Pre-Action Protocol para 3.1(a)(iii)-(iv)) --------
+
+[[var]]
+name = "AGREEMENT_TYPE"
+type = "enum"
+values = ["written", "oral"]
+value = "written"
+
+[[var]]
+name = "AGREEMENT_DATE"
+type = "date"
+description = "written: date of the agreement"
+
+[[var]]
+name = "AGREEMENT_DESCRIPTION"
+type = "string"
+description = "written: what the agreement is, e.g. \"our quotation Q-2291, which you accepted by email\""
+
+[[var]]
+name = "ORAL_AGREEMENT"
+type = "string"
+description = "oral: who made the agreement, what was agreed (as far as possible, the words used), and when and where"
+
+[[var]]
+name = "INSTALMENTS_OFFERED"
+type = "bool"
+value = "false"
+description = "Letter of Claim: the debtor is offering or paying regular instalments (Protocol para 3.1(a)(vi))"
+
+[[var]]
+name = "INSTALMENT_OFFER"
+type = "string"
+description = "INSTALMENTS_OFFERED: the debtor's offer, e.g. \"£10 a month\""
+
+[[var]]
+name = "OFFER_REJECTION_REASON"
+type = "string"
+description = "INSTALMENTS_OFFERED: why the offer is not acceptable and a claim is still being considered"
+
+# --- Payment details -------------------------------------------------------------
+
+[[var]]
+name = "PAYEE_NAME"
+type = "string"
+required = true
+
+[[var]]
+name = "SORT_CODE"
+type = "string"
+required = true
+
+[[var]]
+name = "ACCOUNT_NUMBER"
+type = "string"
+required = true
+
+[[var]]
+name = "PAYMENT_REFERENCE"
+type = "string"
+required = true
+
+# --- Scenarios (fictional) --------------------------------------------------------
+# Each scenario is a debtor and debt. The stage of the sequence (LETTER_DATE,
+# DAYS_OVERDUE, PAY_BY, RESPONSE_DEADLINE ...) is bound per letter; see
+# stages.json. The shared creditor is bound there too.
+
+[[scenario]]
+name = "company-unpaid"
+[scenario.set]
+DEBTOR_TYPE = "company"
+DEBTOR_NAME = "Northwind Fabrication Ltd"
+DEBTOR_ADDRESS = "FAO Accounts Payable|Unit 7, Example Business Park|Northfield|ZZ1 4AB"
+SALUTATION = "Sir or Madam"
+CLOSING = "Yours faithfully,"
+OUR_REF = "HJ-DR-0412"
+GOODS_OR_SERVICES = "the manufacture and delivery of 40 powder-coated steel brackets under your purchase order PO-5521"
+INVOICE_NUMBERS = "INV-1041"
+INVOICE_DATE = "2026-07-01"
+DUE_DATE = "2026-07-31"
+INVOICE_TOTAL = "1840.00"
+AMOUNT_OUTSTANDING = "1840.00"
+PAYMENT_REFERENCE = "INV-1041"
+CLAIM_STATUTORY_INTEREST = "true"
+INTEREST_RATE = "12.00"
+INTEREST_TO_DATE = "27.83"
+DAILY_INTEREST = "0.60"
+DEBT_BAND = "1000_to_9999"
+TOTAL_CLAIMED = "1937.83"
+
+[[scenario]]
+name = "company-partial"
+[scenario.set]
+DEBTOR_TYPE = "company"
+DEBTOR_NAME = "Brightwater Events Ltd"
+DEBTOR_ADDRESS = "2 Harbour Walk|Eastmouth|ZZ3 8CD"
+SALUTATION = "Ms Okafor"
+OUR_REF = "HJ-DR-0415"
+GOODS_OR_SERVICES = "the design, build and installation of exhibition stand joinery for the Eastmouth Trade Fair"
+INVOICE_NUMBERS = "INV-1037,INV-1044"
+INVOICE_DATE = "2026-07-01"
+DUE_DATE = "2026-07-31"
+INVOICE_TOTAL = "6500.00"
+PAYMENT_STATUS = "partial"
+AMOUNT_PAID = "2000.00"
+LAST_PAYMENT_DATE = "2026-08-06"
+AMOUNT_OUTSTANDING = "4500.00"
+PAYMENT_REFERENCE = "BWE-1037"
+TOTAL_CLAIMED = "4500.00"
+
+[[scenario]]
+name = "sole-trader-plan"
+[scenario.set]
+DEBTOR_TYPE = "sole_trader"
+DEBTOR_NAME = "Jordan Ellery trading as Ellery Garden Design"
+DEBTOR_ADDRESS = "14 Orchard Lane|Westbury Green|ZZ5 2EF"
+SALUTATION = "Mr Ellery"
+OUR_REF = "HJ-DR-0419"
+GOODS_OR_SERVICES = "the supply and fitting of hardwood decking and a pergola at 3 Meadow Close, Westbury Green, for your client"
+INVOICE_NUMBERS = "INV-1039"
+INVOICE_DATE = "2026-07-01"
+DUE_DATE = "2026-07-31"
+INVOICE_TOTAL = "2350.00"
+AMOUNT_OUTSTANDING = "2350.00"
+PAYMENT_STATUS = "plan_offered"
+PLAN_INSTALMENT = "470.00"
+PLAN_COUNT = "5"
+PLAN_FIRST_DATE = "2026-10-01"
+PLAN_ACCEPT_BY = "2026-09-25"
+PAYMENT_REFERENCE = "ELLERY-1039"
+AGREEMENT_TYPE = "written"
+AGREEMENT_DATE = "2026-05-18"
+AGREEMENT_DESCRIPTION = "our quotation Q-2291, which you accepted by email"
+CLAIM_STATUTORY_INTEREST = "true"
+INTEREST_RATE = "12.00"
+INTEREST_TO_DATE = "35.54"
+DAILY_INTEREST = "0.77"
+DEBT_BAND = "1000_to_9999"
+TOTAL_CLAIMED = "2455.54"
+
+[[scenario]]
+name = "individual-unpaid"
+[scenario.set]
+DEBTOR_TYPE = "individual"
+DEBTOR_NAME = "Ms Alex Morgan"
+DEBTOR_ADDRESS = "9 Linden Road|Southgate Vale|ZZ7 1GH"
+SALUTATION = "Ms Morgan"
+OUR_REF = "HJ-DR-0421"
+GOODS_OR_SERVICES = "the supply and fitting of fitted wardrobes at your home"
+INVOICE_NUMBERS = "INV-1043"
+INVOICE_DATE = "2026-07-01"
+DUE_DATE = "2026-07-31"
+INVOICE_TOTAL = "960.00"
+AMOUNT_OUTSTANDING = "960.00"
+PAYMENT_REFERENCE = "MORGAN-1043"
+AGREEMENT_TYPE = "written"
+AGREEMENT_DATE = "2026-06-02"
+AGREEMENT_DESCRIPTION = "our written quotation Q-2310, which you signed"
+TOTAL_CLAIMED = "960.00"
+
+[[scenario]]
+name = "individual-instalments"
+[scenario.set]
+DEBTOR_TYPE = "individual"
+DEBTOR_NAME = "Mr Chris Doyle"
+DEBTOR_ADDRESS = "Flat 3, 21 Mill Street|Southgate Vale|ZZ7 3JK"
+SALUTATION = "Mr Doyle"
+OUR_REF = "HJ-DR-0423"
+GOODS_OR_SERVICES = "the repair and refitting of your kitchen worktops and cupboard doors"
+INVOICE_NUMBERS = "INV-1046"
+INVOICE_DATE = "2026-07-01"
+DUE_DATE = "2026-07-31"
+INVOICE_TOTAL = "1275.00"
+AMOUNT_OUTSTANDING = "1275.00"
+PAYMENT_REFERENCE = "DOYLE-1046"
+AGREEMENT_TYPE = "oral"
+ORAL_AGREEMENT = "The agreement was made between you and our director, Sam Hollis, at your home at Flat 3, 21 Mill Street, Southgate Vale, on 12 June 2026. You asked us to repair and refit the kitchen worktops and cupboard doors, and agreed to pay £1,275.00 on completion. Mr Hollis said the work would be finished by 30 June 2026, and you said words to the effect of \"that's fine, go ahead\"."
+INSTALMENTS_OFFERED = "true"
+INSTALMENT_OFFER = "£10 a month"
+OFFER_REJECTION_REASON = "at that rate the debt would take more than ten years to clear, and you have not given us any information about your income and outgoings to show that a higher amount is not affordable"
+TOTAL_CLAIMED = "1275.00"

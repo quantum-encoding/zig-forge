@@ -1,0 +1,14 @@
+{
+  "company_name": "{CREDITOR_NAME}",
+  "company_address": "{CREDITOR_ADDRESS|raw}",
+  "sender_contact": "{CREDITOR_EMAIL} · {CREDITOR_PHONE}",
+  "date": "{LETTER_DATE|long}",
+  "reference": "{OUR_REF}",
+  "recipient_name": "{DEBTOR_NAME}",
+  "recipient_address": "{DEBTOR_ADDRESS|raw}",
+  "subject": "Payment reminder: invoice {INVOICE_NUMBERS}",
+  "closing": "{CLOSING}",
+  "signature_name": "{SIGNATORY}",
+  "signature_title": "{SIGNATORY_ROLE}, {CREDITOR_NAME}",
+  "accent_hex": "#1f4e79"
+}

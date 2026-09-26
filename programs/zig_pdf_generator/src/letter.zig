@@ -49,8 +49,20 @@ pub fn generateLetterFromJsonSeeded(allocator: std.mem.Allocator, json_str: []co
     };
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidJson;
-    const o = parsed.value.object;
 
+    var in = letterInputFromObject(parsed.value.object);
+    in.seed = seed;
+
+    return markdown.generateLetter(allocator, in) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidJson,
+    };
+}
+
+/// Map a parsed letter JSON object onto `markdown.LetterInput`. Strings are
+/// borrowed from `o`, so the parsed document must outlive the returned value.
+/// Absent or mistyped fields take the `LetterInput` defaults.
+pub fn letterInputFromObject(o: std.json.ObjectMap) markdown.LetterInput {
     var in = markdown.LetterInput{};
     in.body_markdown = getStr(o, "body_markdown");
     in.background_image = getStr(o, "background_image");
@@ -76,12 +88,7 @@ pub fn generateLetterFromJsonSeeded(allocator: std.mem.Allocator, json_str: []co
     }
     in.password = getStr(o, "password");
     in.owner_password = getStr(o, "owner_password");
-    in.seed = seed;
-
-    return markdown.generateLetter(allocator, in) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.InvalidJson,
-    };
+    return in;
 }
 
 fn parseFit(s: []const u8) markdown.BackgroundFit {

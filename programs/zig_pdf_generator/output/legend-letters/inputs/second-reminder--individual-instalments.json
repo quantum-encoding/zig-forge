@@ -1,0 +1,25 @@
+{
+  "legend_file": "../../../templates/letters/debt-recovery.toml",
+  "template_file": "../../../templates/letters/second-reminder.tpl.md",
+  "letter_file": "../../../templates/letters/second-reminder.letter.json",
+  "scenario": "individual-instalments",
+  "bindings": {
+    "CREDITOR_NAME": "Harbourlight Joinery Ltd",
+    "CREDITOR_ADDRESS": [
+      "Unit 4, Example Trading Estate",
+      "Anytown",
+      "ZZ9 9ZZ"
+    ],
+    "CREDITOR_EMAIL": "accounts@harbourlight.example",
+    "CREDITOR_PHONE": "07700 900123",
+    "SIGNATORY": "Sam Hollis",
+    "SIGNATORY_ROLE": "Director",
+    "PAYEE_NAME": "Harbourlight Joinery Ltd",
+    "SORT_CODE": "00-00-00",
+    "ACCOUNT_NUMBER": "00000000",
+    "LETTER_DATE": "2026-09-01",
+    "PREVIOUS_LETTER_DATE": "2026-08-14",
+    "DAYS_OVERDUE": 32,
+    "PAY_BY": "2026-09-08"
+  }
+}

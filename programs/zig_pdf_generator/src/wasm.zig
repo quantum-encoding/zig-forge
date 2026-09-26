@@ -64,6 +64,7 @@ const letter_quote = @import("letter_quote.zig");
 const template_card = @import("template_card.zig");
 const order_email = @import("order_email.zig");
 const letter = @import("letter.zig");
+const legend_letter = @import("legend_letter.zig");
 
 // =============================================================================
 // WASM Allocator
@@ -380,6 +381,63 @@ export fn zigpdf_generate_letter(json_ptr: [*]const u8, json_len: usize, output_
 
     output_len.* = pdf_bytes.len;
     return @ptrCast(@constCast(pdf_bytes.ptr));
+}
+
+// =============================================================================
+// Legend letter — zig_legend template + typed legend → letter PDF.
+// Same (ptr, len, out_len) ABI; see src/legend_letter.zig for the input.
+// =============================================================================
+
+fn legendUtf8Ok(json_slice: []const u8) bool {
+    if (std.unicode.utf8ValidateSlice(json_slice)) return true;
+    setLastError("Invalid UTF-8 input");
+    return false;
+}
+
+fn setLegendError(err: legend_letter.Error, diag: *const legend_letter.Diagnostic) void {
+    var buf: [256]u8 = undefined;
+    const detail = if (diag.len > 0) diag.text() else @errorName(err);
+    setLastError(std.fmt.bufPrint(&buf, "Legend letter: {s}", .{detail}) catch "Legend letter error");
+}
+
+/// Letter PDF with a body rendered from {legend_toml, template, scenario?,
+/// bindings?, letter?}. Null on error; zigpdf_get_error() names the cause.
+export fn zigpdf_generate_legend_letter(json_ptr: [*]const u8, json_len: usize, output_len: *usize) ?[*]u8 {
+    const json_slice = json_ptr[0..json_len];
+    if (!legendUtf8Ok(json_slice)) return null;
+    var diag = legend_letter.Diagnostic{};
+    const pdf_bytes = legend_letter.generate(wasm_allocator, json_slice, &diag) catch |err| {
+        setLegendError(err, &diag);
+        return null;
+    };
+    output_len.* = pdf_bytes.len;
+    return pdf_bytes.ptr;
+}
+
+/// The rendered text as JSON {body_markdown, letter{...}} — no PDF.
+export fn zigpdf_legend_render_text(json_ptr: [*]const u8, json_len: usize, output_len: *usize) ?[*]u8 {
+    const json_slice = json_ptr[0..json_len];
+    if (!legendUtf8Ok(json_slice)) return null;
+    var diag = legend_letter.Diagnostic{};
+    const out = legend_letter.renderTextJson(wasm_allocator, json_slice, &diag) catch |err| {
+        setLegendError(err, &diag);
+        return null;
+    };
+    output_len.* = out.len;
+    return out.ptr;
+}
+
+/// Variables and scenarios of {legend_toml, template?} as JSON, for forms.
+export fn zigpdf_legend_describe(json_ptr: [*]const u8, json_len: usize, output_len: *usize) ?[*]u8 {
+    const json_slice = json_ptr[0..json_len];
+    if (!legendUtf8Ok(json_slice)) return null;
+    var diag = legend_letter.Diagnostic{};
+    const out = legend_letter.describe(wasm_allocator, json_slice, &diag) catch |err| {
+        setLegendError(err, &diag);
+        return null;
+    };
+    output_len.* = out.len;
+    return out.ptr;
 }
 
 // Note: zigpdf_generate_crypto_receipt requires manual JSON parsing

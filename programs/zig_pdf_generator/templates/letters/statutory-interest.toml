@@ -1,0 +1,366 @@
+# Debt-recovery letter pack: legend for the statutory late-payment interest
+# claim (d), statutory-interest.tpl.md.
+#
+# The Late Payment of Commercial Debts (Interest) Act 1998 applies only to a
+# contract for goods or services where the purchaser and the supplier are
+# each acting in the course of a business (s.2(1)). DEBTOR_TYPE therefore
+# has no "individual" value: binding one is refused.
+#
+# Interest is simple interest (s.1(1)) at 8% a year over the Bank of England
+# official dealing rate in force on the 30 June or 31 December immediately
+# before interest starts to run (SI 2002/1675 art. 4). The app computes the
+# figures and binds them; see README.md for the formula.
+#
+# All scenario data below is fictional, including the reference rate.
+
+[legend]
+name = "Statutory late-payment interest claim (England and Wales)"
+
+# --- Creditor (the sender) ---------------------------------------------------
+
+[[var]]
+name = "CREDITOR_NAME"
+type = "string"
+required = true
+description = "Your business name as it appears on the invoice"
+
+[[var]]
+name = "CREDITOR_ADDRESS"
+type = "list"
+sep = "|"
+join = ", "
+required = true
+description = "Postal address lines. Also the address the Reply Form goes back to."
+
+[[var]]
+name = "CREDITOR_EMAIL"
+type = "string"
+required = true
+
+[[var]]
+name = "CREDITOR_PHONE"
+type = "string"
+required = true
+
+[[var]]
+name = "SIGNATORY"
+type = "string"
+required = true
+description = "Name of the person signing"
+
+[[var]]
+name = "SIGNATORY_ROLE"
+type = "string"
+required = true
+
+[[var]]
+name = "CLOSING"
+type = "string"
+value = "Yours sincerely,"
+description = "Use \"Yours faithfully,\" when SALUTATION is \"Sir or Madam\""
+
+# --- Debtor (a business) ---------------------------------------------------------
+
+[[var]]
+name = "DEBTOR_TYPE"
+type = "enum"
+values = ["company", "sole_trader"]
+required = true
+description = "The debtor must be a business: a company or LLP, or a sole trader who bought in the course of business"
+
+[[var]]
+name = "DEBTOR_NAME"
+type = "string"
+required = true
+
+[[var]]
+name = "DEBTOR_ADDRESS"
+type = "list"
+sep = "|"
+join = ", "
+required = true
+
+[[var]]
+name = "SALUTATION"
+type = "string"
+required = true
+
+[[var]]
+name = "LETTER_DATE"
+type = "date"
+required = true
+
+[[var]]
+name = "OUR_REF"
+type = "string"
+required = true
+
+[[var]]
+name = "PAY_BY"
+type = "date"
+required = true
+
+# --- The debt ---------------------------------------------------------------------
+
+[[var]]
+name = "GOODS_OR_SERVICES"
+type = "string"
+required = true
+
+[[var]]
+name = "INVOICE_NUMBER"
+type = "string"
+required = true
+description = "One invoice: each qualifying debt carries its own interest and compensation"
+
+[[var]]
+name = "INVOICE_DATE"
+type = "date"
+required = true
+
+[[var]]
+name = "DUE_DATE"
+type = "date"
+required = true
+description = "The agreed payment date; statutory interest starts the day after it"
+
+[[var]]
+name = "PRINCIPAL"
+type = "money"
+currency = "GBP"
+required = true
+description = "The debt on which interest runs"
+
+[[var]]
+name = "PAYMENT_STATUS"
+type = "enum"
+values = ["unpaid", "paid_late"]
+required = true
+
+[[var]]
+name = "PAID_DATE"
+type = "date"
+description = "paid_late: date the principal was paid"
+
+# --- Interest ---------------------------------------------------------------------
+
+[[var]]
+name = "INTEREST_START"
+type = "date"
+required = true
+description = "The day after DUE_DATE"
+
+[[var]]
+name = "INTEREST_TO"
+type = "date"
+required = true
+description = "End of the calculation: LETTER_DATE if unpaid, PAID_DATE if paid late"
+
+[[var]]
+name = "DAYS"
+type = "int"
+min = 1
+required = true
+
+[[var]]
+name = "REFERENCE_DATE"
+type = "date"
+required = true
+description = "The 30 June or 31 December immediately before INTEREST_START"
+
+[[var]]
+name = "REFERENCE_RATE"
+type = "string"
+required = true
+description = "Bank of England official dealing rate (Bank Rate) in force on REFERENCE_DATE, in %, e.g. \"4.00\""
+
+[[var]]
+name = "STATUTORY_RATE"
+type = "string"
+required = true
+description = "8 plus REFERENCE_RATE, in %"
+
+[[var]]
+name = "INTEREST_AMOUNT"
+type = "money"
+currency = "GBP"
+required = true
+description = "PRINCIPAL x STATUTORY_RATE / 100 x DAYS / 365"
+
+[[var]]
+name = "DAILY_INTEREST"
+type = "money"
+currency = "GBP"
+required = true
+description = "PRINCIPAL x STATUTORY_RATE / 100 / 365"
+
+[[var]]
+name = "DEBT_BAND"
+type = "enum"
+values = ["under_1000", "1000_to_9999", "10000_or_more"]
+required = true
+description = "Size of the debt: less than £1,000; £1,000 or more but less than £10,000; £10,000 or more"
+
+[[var]]
+name = "COMPENSATION"
+type = "money"
+currency = "GBP"
+by = "DEBT_BAND"
+description = "Fixed sum, s.5A(2); follows DEBT_BAND"
+[var.map]
+under_1000 = "40"
+1000_to_9999 = "70"
+10000_or_more = "100"
+
+[[var]]
+name = "BAND_TEXT"
+type = "string"
+by = "DEBT_BAND"
+[var.map]
+under_1000 = "less than £1,000"
+1000_to_9999 = "£1,000 or more but less than £10,000"
+10000_or_more = "£10,000 or more"
+
+[[var]]
+name = "RECOVERY_COSTS_CLAIMED"
+type = "bool"
+value = "false"
+description = "Claim reasonable recovery costs beyond the fixed sum (s.5A(2A))"
+
+[[var]]
+name = "RECOVERY_COSTS_TOTAL"
+type = "money"
+currency = "GBP"
+description = "RECOVERY_COSTS_CLAIMED: your reasonable costs of recovering the debt"
+
+[[var]]
+name = "RECOVERY_COSTS_DETAILS"
+type = "string"
+description = "RECOVERY_COSTS_CLAIMED: what the costs were"
+
+[[var]]
+name = "RECOVERY_COSTS"
+type = "money"
+currency = "GBP"
+description = "RECOVERY_COSTS_CLAIMED: RECOVERY_COSTS_TOTAL less the fixed sum"
+
+[[var]]
+name = "TOTAL_CLAIMED"
+type = "money"
+currency = "GBP"
+required = true
+description = "Interest + compensation + recovery costs, plus PRINCIPAL if unpaid"
+
+# --- Payment details -------------------------------------------------------------
+
+[[var]]
+name = "PAYEE_NAME"
+type = "string"
+required = true
+
+[[var]]
+name = "SORT_CODE"
+type = "string"
+required = true
+
+[[var]]
+name = "ACCOUNT_NUMBER"
+type = "string"
+required = true
+
+[[var]]
+name = "PAYMENT_REFERENCE"
+type = "string"
+required = true
+
+# --- Scenarios (fictional; the 4.00% reference rate is illustrative only) ----
+
+[[scenario]]
+name = "company-unpaid"
+[scenario.set]
+DEBTOR_TYPE = "company"
+DEBTOR_NAME = "Northwind Fabrication Ltd"
+DEBTOR_ADDRESS = "FAO Accounts Payable|Unit 7, Example Business Park|Northfield|ZZ1 4AB"
+SALUTATION = "Sir or Madam"
+CLOSING = "Yours faithfully,"
+LETTER_DATE = "2026-09-15"
+OUR_REF = "HJ-LP-0412"
+PAY_BY = "2026-09-29"
+GOODS_OR_SERVICES = "the manufacture and delivery of 40 powder-coated steel brackets under your purchase order PO-5521"
+INVOICE_NUMBER = "INV-1041"
+INVOICE_DATE = "2026-07-01"
+DUE_DATE = "2026-07-31"
+PRINCIPAL = "1840.00"
+PAYMENT_STATUS = "unpaid"
+INTEREST_START = "2026-08-01"
+INTEREST_TO = "2026-09-15"
+DAYS = "46"
+REFERENCE_DATE = "2026-06-30"
+REFERENCE_RATE = "4.00"
+STATUTORY_RATE = "12.00"
+INTEREST_AMOUNT = "27.83"
+DAILY_INTEREST = "0.60"
+DEBT_BAND = "1000_to_9999"
+TOTAL_CLAIMED = "1937.83"
+PAYMENT_REFERENCE = "INV-1041"
+
+[[scenario]]
+name = "company-paid-late"
+[scenario.set]
+DEBTOR_TYPE = "company"
+DEBTOR_NAME = "Brightwater Events Ltd"
+DEBTOR_ADDRESS = "2 Harbour Walk|Eastmouth|ZZ3 8CD"
+SALUTATION = "Ms Okafor"
+LETTER_DATE = "2026-09-01"
+OUR_REF = "HJ-LP-0409"
+PAY_BY = "2026-09-15"
+GOODS_OR_SERVICES = "the fit-out of your Eastmouth showroom"
+INVOICE_NUMBER = "INV-1029"
+INVOICE_DATE = "2026-05-31"
+DUE_DATE = "2026-06-30"
+PRINCIPAL = "12400.00"
+PAYMENT_STATUS = "paid_late"
+PAID_DATE = "2026-08-20"
+INTEREST_START = "2026-07-01"
+INTEREST_TO = "2026-08-20"
+DAYS = "51"
+REFERENCE_DATE = "2026-06-30"
+REFERENCE_RATE = "4.00"
+STATUTORY_RATE = "12.00"
+INTEREST_AMOUNT = "207.91"
+DAILY_INTEREST = "4.08"
+DEBT_BAND = "10000_or_more"
+TOTAL_CLAIMED = "307.91"
+PAYMENT_REFERENCE = "LPI-1029"
+
+[[scenario]]
+name = "sole-trader-unpaid"
+[scenario.set]
+DEBTOR_TYPE = "sole_trader"
+DEBTOR_NAME = "Jordan Ellery trading as Ellery Garden Design"
+DEBTOR_ADDRESS = "14 Orchard Lane|Westbury Green|ZZ5 2EF"
+SALUTATION = "Mr Ellery"
+LETTER_DATE = "2026-09-15"
+OUR_REF = "HJ-LP-0419"
+PAY_BY = "2026-09-29"
+GOODS_OR_SERVICES = "the supply and fitting of hardwood decking and a pergola at 3 Meadow Close, Westbury Green, for your client"
+INVOICE_NUMBER = "INV-1039"
+INVOICE_DATE = "2026-07-01"
+DUE_DATE = "2026-07-31"
+PRINCIPAL = "2350.00"
+PAYMENT_STATUS = "unpaid"
+INTEREST_START = "2026-08-01"
+INTEREST_TO = "2026-09-15"
+DAYS = "46"
+REFERENCE_DATE = "2026-06-30"
+REFERENCE_RATE = "4.00"
+STATUTORY_RATE = "12.00"
+INTEREST_AMOUNT = "35.54"
+DAILY_INTEREST = "0.77"
+DEBT_BAND = "1000_to_9999"
+RECOVERY_COSTS_CLAIMED = "true"
+RECOVERY_COSTS_TOTAL = "115.00"
+RECOVERY_COSTS_DETAILS = "a debt recovery agent's fee of £115.00"
+RECOVERY_COSTS = "45.00"
+TOTAL_CLAIMED = "2500.54"
+PAYMENT_REFERENCE = "ELLERY-1039"
