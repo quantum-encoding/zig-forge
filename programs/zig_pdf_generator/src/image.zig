@@ -2,11 +2,12 @@
 //!
 //! Supports:
 //! - JPEG: Pass-through embedding (DCTDecode)
-//! - PNG: Decode to raw RGB/RGBA, embed as raw pixels
+//! - PNG: Decode to raw RGB (+ an 8-bit alpha plane embedded as a PDF /SMask)
 //! - Base64: Decode data URLs (data:image/png;base64,...)
 //!
-//! Note: PNG decoding is simplified - handles common cases (RGB, RGBA, 8-bit).
-//! For full PNG compliance, a dedicated library would be needed.
+//! PNG coverage: greyscale (1/2/4/8/16-bit), RGB (8/16), palette (1/2/4/8)
+//! with tRNS, grey+alpha (8/16) and RGBA (8/16). Not supported: Adam7
+//! interlacing. 16-bit samples are reduced to their high byte.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -214,6 +215,10 @@ pub fn decodePng(allocator: std.mem.Allocator, png_data: []const u8) !struct { p
 
     var offset: usize = 8;
     var info: ?PngInfo = null;
+    var palette: [256 * 3]u8 = undefined;
+    var palette_len: usize = 0; // entries
+    var trns: [256]u8 = undefined;
+    var trns_len: usize = 0; // bytes
     var compressed_data: std.ArrayListUnmanaged(u8) = .empty;
     defer compressed_data.deinit(allocator);
 
@@ -229,19 +234,38 @@ pub fn decodePng(allocator: std.mem.Allocator, png_data: []const u8) !struct { p
                 return error.PngChunkTooLarge;
             }
             try compressed_data.appendSlice(allocator, chunk.data);
+        } else if (std.mem.eql(u8, &chunk.chunk_type, "PLTE")) {
+            if (chunk.data.len % 3 != 0 or chunk.data.len > palette.len) return error.InvalidPngHeader;
+            @memcpy(palette[0..chunk.data.len], chunk.data);
+            palette_len = chunk.data.len / 3;
+        } else if (std.mem.eql(u8, &chunk.chunk_type, "tRNS")) {
+            if (chunk.data.len > trns.len) return error.InvalidPngHeader;
+            @memcpy(trns[0..chunk.data.len], chunk.data);
+            trns_len = chunk.data.len;
         } else if (std.mem.eql(u8, &chunk.chunk_type, "IEND")) {
             break;
         }
     }
 
-    const png_info = info orelse return error.InvalidPngHeader;
+    var png_info = info orelse return error.InvalidPngHeader;
 
-    // Only support 8-bit truecolor (RGB/RGBA) for now
-    if (png_info.bit_depth != 8) return error.UnsupportedColorType;
-    if (png_info.color_type != 2 and png_info.color_type != 6) {
-        // 2 = RGB, 6 = RGBA
-        return error.UnsupportedColorType;
-    }
+    const ct = png_info.color_type;
+    const depth = png_info.bit_depth;
+    const samples: u32 = switch (ct) {
+        0 => 1, // grey
+        2 => 3, // RGB
+        3 => 1, // palette index
+        4 => 2, // grey + alpha
+        6 => 4, // RGBA
+        else => return error.UnsupportedColorType,
+    };
+    const depth_ok = switch (ct) {
+        0 => depth == 1 or depth == 2 or depth == 4 or depth == 8 or depth == 16,
+        3 => depth == 1 or depth == 2 or depth == 4 or depth == 8,
+        else => depth == 8 or depth == 16,
+    };
+    if (!depth_ok) return error.UnsupportedColorType;
+    if (ct == 3 and palette_len == 0) return error.InvalidPngHeader;
     // Adam7 interlacing lays the scanlines out as seven sub-images, which the
     // single-pass filter loop below cannot read. Say so rather than decoding
     // the bytes as if they were sequential.
@@ -256,28 +280,28 @@ pub fn decodePng(allocator: std.mem.Allocator, png_data: []const u8) !struct { p
     const pixel_count: u64 = @as(u64, png_info.width) * @as(u64, png_info.height);
     if (pixel_count > MAX_PNG_PIXELS) return error.ImageTooLarge;
 
-    // Decompress using zlib (DEFLATE)
-    const channels: u32 = if (png_info.color_type == 6) 4 else 3;
-    const scanline_bytes_64: u64 = @as(u64, png_info.width) * channels + 1; // +1 for filter byte
+    const bits_per_pixel: u64 = @as(u64, samples) * depth;
+    const row_bytes_64: u64 = (@as(u64, png_info.width) * bits_per_pixel + 7) / 8;
+    const scanline_bytes_64: u64 = row_bytes_64 + 1; // +1 for filter byte
     const raw_size_64: u64 = scanline_bytes_64 * png_info.height;
+    // The inflated image never exceeds what 8-bit RGBA at the pixel cap needs
+    // (16-bit samples would otherwise double it).
+    if (raw_size_64 > MAX_PNG_PIXELS * 4 + png_info.height) return error.ImageTooLarge;
     if (raw_size_64 > std.math.maxInt(usize)) return error.ImageTooLarge;
+    const row_bytes: usize = @intCast(row_bytes_64);
     const scanline_bytes: usize = @intCast(scanline_bytes_64);
     const raw_size: usize = @intCast(raw_size_64);
+    // Filter unit: bytes per complete pixel, at least 1 for sub-byte depths.
+    const bpp: usize = @intCast(@max(1, bits_per_pixel / 8));
 
     var decompressed = try allocator.alloc(u8, raw_size);
     defer allocator.free(decompressed);
 
-    // Use std.compress.flate to decompress (Zig 0.16 API)
-    // Create a Reader from the compressed data
     var input_reader = std.Io.Reader.fixed(compressed_data.items);
-
-    // Allocate decompression window buffer (must be >= flate.max_window_len)
+    // Decompression window buffer (must be >= flate.max_window_len)
     var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
-
-    // Initialize zlib decompressor
     var decompress = std.compress.flate.Decompress.init(&input_reader, .zlib, &window_buf);
 
-    // Read decompressed data using readSliceShort
     var total_read: usize = 0;
     while (total_read < raw_size) {
         const n = decompress.reader.readSliceShort(decompressed[total_read..]) catch |err| {
@@ -294,82 +318,133 @@ pub fn decodePng(allocator: std.mem.Allocator, png_data: []const u8) !struct { p
     // instead.
     if (total_read < raw_size) return error.DecompressFailed;
 
-    // Apply PNG filters and extract pixels
-    const pixel_bytes: usize = @intCast(pixel_count * channels);
-    var pixels = try allocator.alloc(u8, pixel_bytes);
-    errdefer allocator.free(pixels);
-
-    var y: u32 = 0;
+    // Undo the per-scanline filters into `rows` (row_bytes per row).
+    var rows = try allocator.alloc(u8, row_bytes * png_info.height);
+    errdefer allocator.free(rows);
+    var y: usize = 0;
     while (y < png_info.height) : (y += 1) {
         const scanline_start = y * scanline_bytes;
         const filter_type = decompressed[scanline_start];
         const scanline = decompressed[scanline_start + 1 .. scanline_start + scanline_bytes];
-        const pixel_row_start = y * png_info.width * channels;
-
-        // Apply filter (simplified - only None and Sub)
-        var x: u32 = 0;
-        while (x < png_info.width * channels) : (x += 1) {
+        const row = y * row_bytes;
+        var x: usize = 0;
+        while (x < row_bytes) : (x += 1) {
             var value = scanline[x];
-
+            const left: u8 = if (x >= bpp) rows[row + x - bpp] else 0;
+            const up: u8 = if (y > 0) rows[row - row_bytes + x] else 0;
+            const up_left: u8 = if (y > 0 and x >= bpp) rows[row - row_bytes + x - bpp] else 0;
             switch (filter_type) {
                 0 => {}, // None
-                1 => { // Sub
-                    if (x >= channels) {
-                        value +%= pixels[pixel_row_start + x - channels];
-                    }
-                },
-                2 => { // Up
-                    if (y > 0) {
-                        const prev_row = (y - 1) * png_info.width * channels;
-                        value +%= pixels[prev_row + x];
-                    }
-                },
-                3 => { // Average
-                    var left: u16 = 0;
-                    var up: u16 = 0;
-                    if (x >= channels) {
-                        left = pixels[pixel_row_start + x - channels];
-                    }
-                    if (y > 0) {
-                        const prev_row = (y - 1) * png_info.width * channels;
-                        up = pixels[prev_row + x];
-                    }
-                    value +%= @truncate((left + up) / 2);
-                },
+                1 => value +%= left, // Sub
+                2 => value +%= up, // Up
+                3 => value +%= @truncate((@as(u16, left) + up) / 2), // Average
                 4 => { // Paeth
-                    var a: i16 = 0; // Left
-                    var b: i16 = 0; // Up
-                    var c: i16 = 0; // Upper-left
-                    if (x >= channels) {
-                        a = pixels[pixel_row_start + x - channels];
-                    }
-                    if (y > 0) {
-                        const prev_row = (y - 1) * png_info.width * channels;
-                        b = pixels[prev_row + x];
-                        if (x >= channels) {
-                            c = pixels[prev_row + x - channels];
-                        }
-                    }
+                    const a: i16 = left;
+                    const b: i16 = up;
+                    const c: i16 = up_left;
                     const p = a + b - c;
                     const pa = @abs(p - a);
                     const pb = @abs(p - b);
                     const pc = @abs(p - c);
-                    const predictor: u8 = if (pa <= pb and pa <= pc)
-                        @truncate(@as(u16, @intCast(a)))
-                    else if (pb <= pc)
-                        @truncate(@as(u16, @intCast(b)))
-                    else
-                        @truncate(@as(u16, @intCast(c)));
-                    value +%= predictor;
+                    value +%= if (pa <= pb and pa <= pc) left else if (pb <= pc) up else up_left;
                 },
                 else => {}, // Unknown filter, skip
             }
-
-            pixels[pixel_row_start + x] = value;
+            rows[row + x] = value;
         }
     }
 
+    // 8-bit RGB / RGBA without a colour key are already in output layout.
+    if (depth == 8 and (ct == 6 or (ct == 2 and trns_len == 0))) {
+        png_info.has_alpha = ct == 6;
+        return .{ .pixels = rows, .info = png_info };
+    }
+
+    // Everything else expands to 8-bit RGB, or RGBA when the image carries
+    // alpha (an alpha channel, or a tRNS colour key / palette alpha).
+    const keyed = trns_len > 0 and (ct == 0 or ct == 2 or ct == 3);
+    const has_alpha = ct == 4 or ct == 6 or keyed;
+    const out_ch: usize = if (has_alpha) 4 else 3;
+    const out_len: usize = @intCast(pixel_count * out_ch);
+    var pixels = try allocator.alloc(u8, out_len);
+    errdefer allocator.free(pixels);
+
+    const max_val: u32 = (@as(u32, 1) << @intCast(@min(depth, 8))) - 1;
+    const key_grey: ?u16 = if (ct == 0 and trns_len >= 2) (@as(u16, trns[0]) << 8) | trns[1] else null;
+    const key_rgb: ?[3]u16 = if (ct == 2 and trns_len >= 6) .{
+        (@as(u16, trns[0]) << 8) | trns[1],
+        (@as(u16, trns[2]) << 8) | trns[3],
+        (@as(u16, trns[4]) << 8) | trns[5],
+    } else null;
+
+    y = 0;
+    var o: usize = 0;
+    while (y < png_info.height) : (y += 1) {
+        const row = rows[y * row_bytes ..][0..row_bytes];
+        var x: usize = 0;
+        while (x < png_info.width) : (x += 1) {
+            var rgba = [4]u8{ 0, 0, 0, 255 };
+            switch (ct) {
+                0 => {
+                    const v = rawSample(row, x, 0, 1, depth);
+                    const g: u8 = if (depth == 16) @truncate(v >> 8) else @intCast(v * 255 / max_val);
+                    rgba = .{ g, g, g, 255 };
+                    if (key_grey) |k| {
+                        if (v == k) rgba[3] = 0;
+                    }
+                },
+                2 => {
+                    var raw3: [3]u16 = undefined;
+                    for (0..3) |c| {
+                        raw3[c] = rawSample(row, x, c, 3, depth);
+                        rgba[c] = if (depth == 16) @truncate(raw3[c] >> 8) else @intCast(raw3[c]);
+                    }
+                    if (key_rgb) |k| {
+                        if (raw3[0] == k[0] and raw3[1] == k[1] and raw3[2] == k[2]) rgba[3] = 0;
+                    }
+                },
+                3 => {
+                    const idx: usize = rawSample(row, x, 0, 1, depth);
+                    if (idx < palette_len) {
+                        rgba = .{ palette[idx * 3], palette[idx * 3 + 1], palette[idx * 3 + 2], 255 };
+                    }
+                    if (idx < trns_len) rgba[3] = trns[idx];
+                },
+                4 => {
+                    const g: u8 = if (depth == 16) @truncate(rawSample(row, x, 0, 2, depth) >> 8) else @intCast(rawSample(row, x, 0, 2, depth));
+                    const a: u8 = if (depth == 16) @truncate(rawSample(row, x, 1, 2, depth) >> 8) else @intCast(rawSample(row, x, 1, 2, depth));
+                    rgba = .{ g, g, g, a };
+                },
+                6 => for (0..4) |c| {
+                    rgba[c] = @truncate(rawSample(row, x, c, 4, depth) >> 8); // 16-bit only reaches here
+                },
+                else => unreachable,
+            }
+            @memcpy(pixels[o..][0..out_ch], rgba[0..out_ch]);
+            o += out_ch;
+        }
+    }
+    allocator.free(rows);
+
+    png_info.has_alpha = has_alpha;
     return .{ .pixels = pixels, .info = png_info };
+}
+
+/// Sample `c` of pixel `x` in a defiltered scanline with `samples` samples
+/// per pixel at `depth` bits each, as its raw integer value.
+fn rawSample(row: []const u8, x: usize, c: usize, samples: usize, depth: u8) u16 {
+    const i = x * samples + c;
+    return switch (depth) {
+        16 => (@as(u16, row[i * 2]) << 8) | row[i * 2 + 1],
+        8 => row[i],
+        else => blk: {
+            const bit = i * depth;
+            const byte = row[bit / 8];
+            const shift: u3 = @intCast(8 - depth - (bit % 8));
+            const mask: u8 = @intCast((@as(u16, 1) << @intCast(depth)) - 1);
+            break :blk (byte >> shift) & mask;
+        },
+    };
 }
 
 /// Flatten RGBA to RGB by alpha-compositing each pixel onto a WHITE background.
@@ -450,14 +525,35 @@ pub fn loadImage(allocator: std.mem.Allocator, data: []const u8) !document.Image
         .png_rgb, .png_rgba => {
             const decoded = try decodePng(allocator, data);
             if (decoded.info.has_alpha) {
-                // Convert to RGB (PDF doesn't handle RGBA well)
-                const rgb = try rgbaToRgb(allocator, decoded.pixels, decoded.info.width, decoded.info.height);
+                // A fully opaque alpha channel carries nothing: plain RGB.
+                if (isOpaque(decoded.pixels)) {
+                    const rgb = try rgbaToRgb(allocator, decoded.pixels, decoded.info.width, decoded.info.height);
+                    allocator.free(decoded.pixels);
+                    return document.Image{
+                        .width = decoded.info.width,
+                        .height = decoded.info.height,
+                        .format = .raw_rgb,
+                        .data = rgb,
+                    };
+                }
+                // Real transparency: colour planes + an alpha plane, embedded
+                // as the image and its /SMask. Both live in one allocation
+                // (colour first) — see ownedPixels.
+                const n: usize = @as(usize, decoded.info.width) * decoded.info.height;
+                const buf = try allocator.alloc(u8, n * 4);
+                for (0..n) |i| {
+                    buf[i * 3] = decoded.pixels[i * 4];
+                    buf[i * 3 + 1] = decoded.pixels[i * 4 + 1];
+                    buf[i * 3 + 2] = decoded.pixels[i * 4 + 2];
+                    buf[n * 3 + i] = decoded.pixels[i * 4 + 3];
+                }
                 allocator.free(decoded.pixels);
                 return document.Image{
                     .width = decoded.info.width,
                     .height = decoded.info.height,
                     .format = .raw_rgb,
-                    .data = rgb,
+                    .data = buf[0 .. n * 3],
+                    .alpha = buf[n * 3 ..],
                 };
             } else {
                 return document.Image{
@@ -470,6 +566,22 @@ pub fn loadImage(allocator: std.mem.Allocator, data: []const u8) !document.Image
         },
         else => return error.UnsupportedFormat,
     }
+}
+
+fn isOpaque(rgba: []const u8) bool {
+    var i: usize = 3;
+    while (i < rgba.len) : (i += 4) {
+        if (rgba[i] != 255) return false;
+    }
+    return true;
+}
+
+/// The heap buffer behind a decoded (non-JPEG) image returned by `loadImage`:
+/// its colour data, extended over the alpha plane that follows it in the same
+/// allocation when the image has one. This is the slice to free.
+pub fn ownedPixels(img: document.Image) []u8 {
+    const extra: usize = if (img.alpha) |a| a.len else 0;
+    return @constCast(img.data.ptr)[0 .. img.data.len + extra];
 }
 
 /// Load image from base64 data URL
@@ -494,8 +606,7 @@ pub fn loadImageFromBase64(allocator: std.mem.Allocator, base64_data: []const u8
     } else {
         // PNG was decoded to new buffer
         allocator.free(decoded);
-        // Note: caller must free img.data when done
-        return .{ .image = img, .decoded_bytes = @constCast(img.data) };
+        return .{ .image = img, .decoded_bytes = ownedPixels(img) };
     }
 }
 
@@ -538,7 +649,7 @@ pub fn loadImageFlexible(
             }
             // PNG decoded to a fresh pixel buffer; the raw file bytes are done.
             allocator.free(raw);
-            return .{ .image = img, .decoded_bytes = @constCast(img.data) };
+            return .{ .image = img, .decoded_bytes = ownedPixels(img) };
         } else |_| {}
     }
 
@@ -773,4 +884,136 @@ test "detect JPEG format" {
 test "detect PNG format" {
     const png_header = [_]u8{ 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
     try std.testing.expectEqual(document.ImageFormat.png_rgb, detectFormat(&png_header).?);
+}
+
+// -----------------------------------------------------------------------------
+// Colour-type and alpha tests
+// -----------------------------------------------------------------------------
+
+/// A PNG with the given depth / colour type, optional extra chunks placed
+/// before IDAT (PLTE, tRNS), and `rows` — the unfiltered scanlines, each
+/// already prefixed with its filter byte.
+fn buildPngEx(allocator: std.mem.Allocator, width: u32, height: u32, depth: u8, color_type: u8, extra: []const struct { kind: *const [4]u8, data: []const u8 }, rows: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, &[_]u8{ 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A });
+    var be: [4]u8 = undefined;
+    std.mem.writeInt(u32, &be, 13, .big);
+    try out.appendSlice(allocator, &be);
+    try out.appendSlice(allocator, "IHDR");
+    std.mem.writeInt(u32, &be, width, .big);
+    try out.appendSlice(allocator, &be);
+    std.mem.writeInt(u32, &be, height, .big);
+    try out.appendSlice(allocator, &be);
+    try out.appendSlice(allocator, &[_]u8{ depth, color_type, 0, 0, 0, 0, 0, 0, 0 });
+    for (extra) |c| {
+        std.mem.writeInt(u32, &be, @intCast(c.data.len), .big);
+        try out.appendSlice(allocator, &be);
+        try out.appendSlice(allocator, c.kind);
+        try out.appendSlice(allocator, c.data);
+        try out.appendSlice(allocator, &[_]u8{ 0, 0, 0, 0 });
+    }
+    const z = try zlibStored(allocator, rows);
+    defer allocator.free(z);
+    std.mem.writeInt(u32, &be, @intCast(z.len), .big);
+    try out.appendSlice(allocator, &be);
+    try out.appendSlice(allocator, "IDAT");
+    try out.appendSlice(allocator, z);
+    try out.appendSlice(allocator, &[_]u8{ 0, 0, 0, 0 });
+    try out.appendSlice(allocator, &[_]u8{ 0, 0, 0, 0 });
+    try out.appendSlice(allocator, "IEND");
+    try out.appendSlice(allocator, &[_]u8{ 0, 0, 0, 0 });
+    return out.toOwnedSlice(allocator);
+}
+
+test "RGBA with transparency keeps its colour and gains an alpha plane" {
+    const allocator = std.testing.allocator;
+    // 2x1: opaque red, fully transparent green.
+    const png = try buildPngEx(allocator, 2, 1, 8, 6, &.{}, &[_]u8{ 0, 255, 0, 0, 255, 0, 255, 0, 0 });
+    defer allocator.free(png);
+    const img = try loadImage(allocator, png);
+    defer allocator.free(ownedPixels(img));
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 0, 255, 0 }, img.data);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0 }, img.alpha.?);
+    try std.testing.expectEqual(@as(usize, 8), ownedPixels(img).len);
+}
+
+test "fully opaque RGBA stays plain RGB (no mask)" {
+    const allocator = std.testing.allocator;
+    const png = try buildPngEx(allocator, 2, 1, 8, 6, &.{}, &[_]u8{ 0, 10, 20, 30, 255, 40, 50, 60, 255 });
+    defer allocator.free(png);
+    const img = try loadImage(allocator, png);
+    defer allocator.free(ownedPixels(img));
+    try std.testing.expect(img.alpha == null);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 10, 20, 30, 40, 50, 60 }, img.data);
+}
+
+test "grey+alpha, 16-bit grey and colour-keyed RGB decode" {
+    const allocator = std.testing.allocator;
+
+    const ga = try buildPngEx(allocator, 2, 1, 8, 4, &.{}, &[_]u8{ 0, 100, 255, 200, 128 });
+    defer allocator.free(ga);
+    const g = try loadImage(allocator, ga);
+    defer allocator.free(ownedPixels(g));
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 100, 100, 100, 200, 200, 200 }, g.data);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 128 }, g.alpha.?);
+
+    const g16 = try buildPngEx(allocator, 1, 1, 16, 0, &.{}, &[_]u8{ 0, 0xAB, 0xCD });
+    defer allocator.free(g16);
+    const h = try loadImage(allocator, g16);
+    defer allocator.free(ownedPixels(h));
+    try std.testing.expect(h.alpha == null);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xAB, 0xAB, 0xAB }, h.data);
+
+    // RGB with a tRNS colour key: pixel 2 matches the key and turns transparent.
+    const key = try buildPngEx(allocator, 2, 1, 8, 2, &.{.{ .kind = "tRNS", .data = &[_]u8{ 0, 1, 0, 2, 0, 3 } }}, &[_]u8{ 0, 9, 9, 9, 1, 2, 3 });
+    defer allocator.free(key);
+    const k = try loadImage(allocator, key);
+    defer allocator.free(ownedPixels(k));
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0 }, k.alpha.?);
+}
+
+test "palette PNGs (sub-byte) resolve colours and tRNS alpha" {
+    const allocator = std.testing.allocator;
+    const plte = [_]u8{ 255, 0, 0, 0, 255, 0, 0, 0, 255, 9, 9, 9 };
+    // 2-bit indices 0,1,2,3 packed into one byte: 00 01 10 11.
+    const png = try buildPngEx(allocator, 4, 1, 2, 3, &.{
+        .{ .kind = "PLTE", .data = &plte },
+        .{ .kind = "tRNS", .data = &[_]u8{ 255, 0, 128 } },
+    }, &[_]u8{ 0, 0b00_01_10_11 });
+    defer allocator.free(png);
+    const img = try loadImage(allocator, png);
+    defer allocator.free(ownedPixels(img));
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 0, 255, 0, 0, 0, 255, 9, 9, 9 }, img.data);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 128, 255 }, img.alpha.?);
+
+    // Without tRNS a palette image is opaque RGB.
+    const opaque_png = try buildPngEx(allocator, 4, 1, 2, 3, &.{.{ .kind = "PLTE", .data = &plte }}, &[_]u8{ 0, 0b00_01_10_11 });
+    defer allocator.free(opaque_png);
+    const o = try loadImage(allocator, opaque_png);
+    defer allocator.free(ownedPixels(o));
+    try std.testing.expect(o.alpha == null);
+
+    // A palette image with no PLTE is refused.
+    const no_plte = try buildPngEx(allocator, 1, 1, 8, 3, &.{}, &[_]u8{ 0, 0 });
+    defer allocator.free(no_plte);
+    try std.testing.expectError(error.InvalidPngHeader, decodePng(allocator, no_plte));
+}
+
+test "size bounds apply to every colour type" {
+    const allocator = std.testing.allocator;
+    // Over the pixel cap as grey+alpha and as palette.
+    for ([_]u8{ 4, 0 }) |ct| {
+        const huge = try buildPngEx(allocator, 65536, 65536, 8, ct, &.{}, "x");
+        defer allocator.free(huge);
+        try std.testing.expectError(error.ImageTooLarge, decodePng(allocator, huge));
+    }
+    // 16-bit RGBA at the pixel cap would inflate to twice the 8-bit budget.
+    const deep = try buildPngEx(allocator, 10_000, 5_000, 16, 6, &.{}, "x");
+    defer allocator.free(deep);
+    try std.testing.expectError(error.ImageTooLarge, decodePng(allocator, deep));
+    // Unsupported depth for the colour type.
+    const bad = try buildPngEx(allocator, 1, 1, 4, 2, &.{}, &[_]u8{ 0, 0 });
+    defer allocator.free(bad);
+    try std.testing.expectError(error.UnsupportedColorType, decodePng(allocator, bad));
 }

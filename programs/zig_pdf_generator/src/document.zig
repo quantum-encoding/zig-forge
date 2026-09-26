@@ -498,6 +498,9 @@ pub const Image = struct {
     format: ImageFormat,
     data: []const u8,
     object_id: u32 = 0,
+    /// Optional 8-bit alpha plane (width x height bytes, 255 = opaque),
+    /// written as the image's /SMask so it composites over what is beneath.
+    alpha: ?[]const u8 = null,
 };
 
 // =============================================================================
@@ -1483,8 +1486,13 @@ pub const PdfDocument = struct {
             try xobject_dict.appendSlice(self.allocator, ">>");
         }
 
-        // Reserve object IDs for images
+        // Reserve object IDs for images, then one soft-mask object per image
+        // that carries an alpha plane (none reserved when no image does).
         self.next_object_id += self.image_count;
+        const first_smask_obj = self.next_object_id;
+        for (0..self.image_count) |i| {
+            if (self.images[i].alpha != null) self.next_object_id += 1;
+        }
 
         // Build ExtGState dictionary (if any) + reserve object IDs
         var extgstate_dict: std.ArrayListUnmanaged(u8) = .empty;
@@ -1592,10 +1600,18 @@ pub const PdfDocument = struct {
             }
         }
 
-        // Write Image objects
+        // Write Image objects (and their soft masks)
+        var next_smask = first_smask_obj;
         for (0..self.image_count) |i| {
             const img = &self.images[i];
-            try self.writeImageObject(first_image_obj + @as(u32, @intCast(i)), img);
+            var smask: ?u32 = null;
+            if (img.alpha) |a| {
+                if (a.len != @as(usize, img.width) * img.height) return error.InvalidImage;
+                smask = next_smask;
+                next_smask += 1;
+            }
+            try self.writeImageObject(first_image_obj + @as(u32, @intCast(i)), img, smask);
+            if (smask) |id| try self.writeSMaskObject(id, img);
         }
 
         // Write ExtGState objects — each one sets /ca (non-stroke alpha) so
@@ -1756,6 +1772,7 @@ pub const PdfDocument = struct {
         }
 
         // Cross-reference table
+        if (self.next_object_id > MAX_OBJECTS) return error.TooManyObjects;
         const xref_offset = self.output.items.len;
         try self.output.appendSlice(self.allocator, "xref\n");
         {
@@ -1814,7 +1831,7 @@ pub const PdfDocument = struct {
     }
 
     fn writeObject(self: *PdfDocument, obj_id: u32, content: []const u8) !void {
-        self.object_offsets[obj_id] = @intCast(self.output.items.len);
+        try self.markObject(obj_id);
 
         var buf: [32]u8 = undefined;
         const header = std.fmt.bufPrint(&buf, "{d} 0 obj\n", .{obj_id}) catch return error.BufferTooSmall;
@@ -1824,7 +1841,7 @@ pub const PdfDocument = struct {
     }
 
     fn writeStreamObject(self: *PdfDocument, obj_id: u32, content: []const u8) !void {
-        self.object_offsets[obj_id] = @intCast(self.output.items.len);
+        try self.markObject(obj_id);
 
         var header_buf: [32]u8 = undefined;
         const header = std.fmt.bufPrint(&header_buf, "{d} 0 obj\n", .{obj_id}) catch return error.BufferTooSmall;
@@ -1863,7 +1880,7 @@ pub const PdfDocument = struct {
     /// data to read after inflating. FlateDecode is applied when it actually
     /// shrinks the font — falling back to the uncompressed bytes on failure.
     fn writeFontFileObject(self: *PdfDocument, obj_id: u32, ttf: []const u8) !void {
-        self.object_offsets[obj_id] = @intCast(self.output.items.len);
+        try self.markObject(obj_id);
 
         var header_buf: [32]u8 = undefined;
         const header = std.fmt.bufPrint(&header_buf, "{d} 0 obj\n", .{obj_id}) catch return error.BufferTooSmall;
@@ -1891,8 +1908,41 @@ pub const PdfDocument = struct {
         try self.output.appendSlice(self.allocator, "\nendstream\nendobj\n");
     }
 
-    fn writeImageObject(self: *PdfDocument, obj_id: u32, image: *const Image) !void {
+    /// Record where object `obj_id` starts. Refuses ids past the offset table.
+    fn markObject(self: *PdfDocument, obj_id: u32) !void {
+        if (obj_id >= MAX_OBJECTS) return error.TooManyObjects;
         self.object_offsets[obj_id] = @intCast(self.output.items.len);
+    }
+
+    /// The soft mask for an image with an alpha plane: a DeviceGray image of
+    /// the same size, Flate-compressed and encrypted like any other stream.
+    fn writeSMaskObject(self: *PdfDocument, obj_id: u32, image: *const Image) !void {
+        try self.markObject(obj_id);
+        const alpha = image.alpha.?;
+        var header_buf: [32]u8 = undefined;
+        const header = std.fmt.bufPrint(&header_buf, "{d} 0 obj\n", .{obj_id}) catch return error.BufferTooSmall;
+        try self.output.appendSlice(self.allocator, header);
+
+        const compressed = deflateCompress(self.allocator, alpha) catch null;
+        defer if (compressed) |c| self.allocator.free(c);
+        const stream_data = compressed orelse alpha;
+        const enc = try self.encryptBytes(stream_data);
+        defer if (enc.owned) self.allocator.free(@constCast(enc.bytes));
+
+        const filter: []const u8 = if (compressed != null) " /Filter /FlateDecode" else "";
+        const dict = try std.fmt.allocPrint(self.allocator,
+            "<< /Type /XObject /Subtype /Image /Width {d} /Height {d} /ColorSpace /DeviceGray /BitsPerComponent 8{s} /Length {d} >>",
+            .{ image.width, image.height, filter, enc.bytes.len },
+        );
+        defer self.allocator.free(dict);
+        try self.output.appendSlice(self.allocator, dict);
+        try self.output.appendSlice(self.allocator, "\nstream\n");
+        try self.output.appendSlice(self.allocator, enc.bytes);
+        try self.output.appendSlice(self.allocator, "\nendstream\nendobj\n");
+    }
+
+    fn writeImageObject(self: *PdfDocument, obj_id: u32, image: *const Image, smask: ?u32) !void {
+        try self.markObject(obj_id);
 
         var header_buf: [32]u8 = undefined;
         const header = std.fmt.bufPrint(&header_buf, "{d} 0 obj\n", .{obj_id}) catch return error.BufferTooSmall;
@@ -1923,18 +1973,19 @@ pub const PdfDocument = struct {
         const final = enc.bytes;
 
         const actual_filter: []const u8 = if (filter.len > 0) filter else if (compressed_img != null) "/FlateDecode" else "";
+        var smask_buf: [32]u8 = undefined;
 
         if (actual_filter.len > 0) {
             const dict = try std.fmt.allocPrint(self.allocator,
-                "<< /Type /XObject /Subtype /Image /Width {d} /Height {d} /ColorSpace {s} /BitsPerComponent 8 /Filter {s} /Length {d} >>",
-                .{ image.width, image.height, color_space, actual_filter, final.len },
+                "<< /Type /XObject /Subtype /Image /Width {d} /Height {d} /ColorSpace {s} /BitsPerComponent 8{s} /Filter {s} /Length {d} >>",
+                .{ image.width, image.height, color_space, smaskRef(&smask_buf, smask), actual_filter, final.len },
             );
             defer self.allocator.free(dict);
             try self.output.appendSlice(self.allocator, dict);
         } else {
             const dict = try std.fmt.allocPrint(self.allocator,
-                "<< /Type /XObject /Subtype /Image /Width {d} /Height {d} /ColorSpace {s} /BitsPerComponent 8 /Length {d} >>",
-                .{ image.width, image.height, color_space, final.len },
+                "<< /Type /XObject /Subtype /Image /Width {d} /Height {d} /ColorSpace {s} /BitsPerComponent 8{s} /Length {d} >>",
+                .{ image.width, image.height, color_space, smaskRef(&smask_buf, smask), final.len },
             );
             defer self.allocator.free(dict);
             try self.output.appendSlice(self.allocator, dict);
@@ -1946,7 +1997,7 @@ pub const PdfDocument = struct {
     }
 
     fn writeAnnotationObject(self: *PdfDocument, obj_id: u32, annot: *const LinkAnnotation) !void {
-        self.object_offsets[obj_id] = @intCast(self.output.items.len);
+        try self.markObject(obj_id);
 
         var header_buf: [32]u8 = undefined;
         const header = std.fmt.bufPrint(&header_buf, "{d} 0 obj\n", .{obj_id}) catch return error.BufferTooSmall;
@@ -1975,6 +2026,12 @@ pub const PdfDocument = struct {
         try self.output.appendSlice(self.allocator, "\nendobj\n");
     }
 };
+
+/// " /SMask N 0 R" for an image with a soft mask, else "".
+fn smaskRef(buf: *[32]u8, smask: ?u32) []const u8 {
+    const id = smask orelse return "";
+    return std.fmt.bufPrint(buf, " /SMask {d} 0 R", .{id}) catch "";
+}
 
 // =============================================================================
 // PDF String Escaping Helper
@@ -2081,4 +2138,33 @@ test "color from hex" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.702), color.r, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 0.604), color.g, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 0.490), color.b, 0.01);
+}
+
+test "an image with an alpha plane is written with an /SMask; opaque images are not" {
+    const allocator = std.testing.allocator;
+
+    var doc = PdfDocument.init(allocator);
+    defer doc.deinit();
+    const rgb = [_]u8{ 255, 0, 0, 0, 255, 0 };
+    const alpha = [_]u8{ 255, 0 };
+    const opaque_id = try doc.addImage(.{ .width = 2, .height = 1, .format = .raw_rgb, .data = &rgb });
+    const masked_id = try doc.addImage(.{ .width = 2, .height = 1, .format = .raw_rgb, .data = &rgb, .alpha = &alpha });
+    var cs = ContentStream.init(allocator);
+    defer cs.deinit();
+    try cs.drawImage(opaque_id, 0, 0, 10, 10);
+    try cs.drawImage(masked_id, 20, 0, 10, 10);
+    try doc.addPage(&cs);
+    const pdf = try doc.build();
+
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, pdf, "/SMask"));
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "/ColorSpace /DeviceGray") != null);
+
+    // An alpha plane of the wrong size is refused, not read out of bounds.
+    var bad = PdfDocument.init(allocator);
+    defer bad.deinit();
+    _ = try bad.addImage(.{ .width = 2, .height = 2, .format = .raw_rgb, .data = &rgb, .alpha = &alpha });
+    var cs2 = ContentStream.init(allocator);
+    defer cs2.deinit();
+    try bad.addPage(&cs2);
+    try std.testing.expectError(error.InvalidImage, bad.build());
 }

@@ -278,6 +278,9 @@ pub const InvoiceData = struct {
     // default so existing callers keep rendering bare numbers unchanged.
     currency_symbol: []const u8 = "",
 
+    // Thousands separator and decimal mark for every money figure.
+    number_format: NumberFormat = .{},
+
     // VAT/tax toggle. When false, the Subtotal and Tax rows are suppressed and
     // only the TOTAL is shown — used for receipts from businesses that are not
     // (yet) VAT-registered, where breaking out a "Tax (0%)" line is misleading.
@@ -445,10 +448,48 @@ pub fn fmtQty(buf: []u8, q: f64) []const u8 {
     return s[0..end];
 }
 
-/// Money with the sign ahead of the currency symbol ("-£12.50").
-fn fmtMoney(buf: []u8, symbol: []const u8, amount: f64) []const u8 {
-    if (amount <= -0.005) return std.fmt.bufPrint(buf, "-{s}{d:.2}", .{ symbol, -amount }) catch "0.00";
-    return std.fmt.bufPrint(buf, "{s}{d:.2}", .{ symbol, @abs(amount) }) catch "0.00";
+/// Digit grouping and decimal mark for money figures. Defaults to the UK/US
+/// convention ("1,234.50"); Spanish/German documents pass "." and ",".
+pub const NumberFormat = struct {
+    thousands: []const u8 = ",",
+    decimal: []const u8 = ".",
+};
+
+/// Money: sign ahead of the currency symbol, grouped thousands, two decimals
+/// rounded half away from zero ("-£1,234.50"). Rounding first settles binary
+/// noise at a millionth of a cent, so 1.005 (stored as 1.00499999…) rounds to
+/// 1.01 as written. Figures of 1e11 or more fall back to an ungrouped print.
+pub fn formatMoney(buf: []u8, symbol: []const u8, amount: f64, nf: NumberFormat) []const u8 {
+    const dec = if (nf.decimal.len > 0) nf.decimal else ".";
+    if (!std.math.isFinite(amount)) return std.fmt.bufPrint(buf, "{s}0{s}00", .{ symbol, dec }) catch "0.00";
+    const a = @abs(amount);
+    if (a >= 1e11) return std.fmt.bufPrint(buf, "{s}{s}{d:.2}", .{ if (amount < 0) "-" else "", symbol, a }) catch "0.00";
+    const cents: u64 = @intFromFloat(@round(@round(a * 1e8) / 1e6));
+    const units = cents / 100;
+    const frac = cents % 100;
+
+    var digits_buf: [24]u8 = undefined;
+    const digits = std.fmt.bufPrint(&digits_buf, "{d}", .{units}) catch unreachable;
+    var i: usize = 0;
+    const put = struct {
+        fn f(out: []u8, at: *usize, bytes: []const u8) bool {
+            if (out.len - at.* < bytes.len) return false;
+            @memcpy(out[at.*..][0..bytes.len], bytes);
+            at.* += bytes.len;
+            return true;
+        }
+    }.f;
+    var ok = true;
+    if (amount < 0 and cents != 0) ok = ok and put(buf, &i, "-");
+    ok = ok and put(buf, &i, symbol);
+    for (digits, 0..) |d, k| {
+        if (k > 0 and (digits.len - k) % 3 == 0) ok = ok and put(buf, &i, nf.thousands);
+        ok = ok and put(buf, &i, &[_]u8{d});
+    }
+    ok = ok and put(buf, &i, dec);
+    const f = [2]u8{ '0' + @as(u8, @intCast(frac / 10)), '0' + @as(u8, @intCast(frac % 10)) };
+    ok = ok and put(buf, &i, &f);
+    return if (ok) buf[0..i] else "0.00";
 }
 
 /// Wrap `text` to `max_width`, honouring explicit line breaks: each
@@ -703,6 +744,26 @@ pub const InvoiceRenderer = struct {
         if (self.data.due_date_label) |l| return l;
         if (self.isQuote() and std.mem.eql(u8, self.data.labels.due_date, "Due Date:")) return self.data.labels.valid_until;
         return self.data.labels.due_date;
+    }
+
+    /// A quantity or percentage (fmtQty) written with the document's decimal
+    /// mark ("2,5" under a Spanish number_format).
+    fn decimalText(self: *const InvoiceRenderer, buf: []u8, v: f64) []const u8 {
+        var tmp: [32]u8 = undefined;
+        const q = fmtQty(&tmp, v);
+        const dec = self.data.number_format.decimal;
+        const dot = std.mem.indexOfScalar(u8, q, '.') orelse {
+            if (q.len > buf.len) return "0";
+            @memcpy(buf[0..q.len], q);
+            return buf[0..q.len];
+        };
+        if (dec.len == 0) return q;
+        return std.fmt.bufPrint(buf, "{s}{s}{s}", .{ q[0..dot], dec, q[dot + 1 ..] }) catch "0";
+    }
+
+    /// A money figure in the document's currency and number format.
+    fn money(self: *const InvoiceRenderer, buf: []u8, amount: f64) []const u8 {
+        return formatMoney(buf, self.data.currency_symbol, amount, self.data.number_format);
     }
 
     fn anyDiscount(self: *const InvoiceRenderer) bool {
@@ -1782,17 +1843,17 @@ pub const InvoiceRenderer = struct {
                 }
                 if (cols.price) |x| {
                     var price_buf: [48]u8 = undefined;
-                    const price_str = std.fmt.bufPrint(&price_buf, "{s}{d:.2}", .{ self.data.currency_symbol, item.unit_price }) catch "0.00";
+                    const price_str = self.money(&price_buf, item.unit_price);
                     try content.drawText(price_str, x, self.current_y, self.font_regular, 9, document.Color.black);
                 }
                 if (cols.disc) |x| {
                     if (item.discount != 0) {
                         var db: [40]u8 = undefined;
-                        try content.drawText(discText(&db, item.discount), x, self.current_y, self.font_regular, 9, document.Color.black);
+                        try content.drawText(self.discText(&db, item.discount), x, self.current_y, self.font_regular, 9, document.Color.black);
                     }
                 }
                 var total_buf: [48]u8 = undefined;
-                const total_str = std.fmt.bufPrint(&total_buf, "{s}{d:.2}", .{ self.data.currency_symbol, item.total }) catch "0.00";
+                const total_str = self.money(&total_buf, item.total);
                 try content.drawText(total_str, cols.total, self.current_y, self.font_regular, 9, document.Color.black);
 
                 self.current_y -= row_height + 2; // Move down by row height plus small gap
@@ -1821,7 +1882,7 @@ pub const InvoiceRenderer = struct {
             }
 
             var total_buf: [48]u8 = undefined;
-            const total_str = std.fmt.bufPrint(&total_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.subtotal }) catch "0.00";
+            const total_str = self.money(&total_buf, self.data.subtotal);
             try content.drawText(total_str, cols.total, self.current_y, self.font_regular, 9, document.Color.black);
 
             self.current_y -= row_height + 2;
@@ -1830,9 +1891,8 @@ pub const InvoiceRenderer = struct {
 
     /// "3", "2.5 hrs", "12 m²".
     fn qtyText(self: *const InvoiceRenderer, buf: []u8, item: LineItem) []const u8 {
-        _ = self;
         var qb: [32]u8 = undefined;
-        const q = fmtQty(&qb, item.quantity);
+        const q = self.decimalText(&qb, item.quantity);
         if (item.unit.len == 0) {
             if (q.len > buf.len) return "0";
             @memcpy(buf[0..q.len], q);
@@ -1842,9 +1902,9 @@ pub const InvoiceRenderer = struct {
     }
 
     /// "10%", "12.5%".
-    fn discText(buf: []u8, pct: f64) []const u8 {
+    fn discText(self: *const InvoiceRenderer, buf: []u8, pct: f64) []const u8 {
         var qb: [32]u8 = undefined;
-        return std.fmt.bufPrint(buf, "{s}%", .{fmtQty(&qb, pct)}) catch "";
+        return std.fmt.bufPrint(buf, "{s}%", .{self.decimalText(&qb, pct)}) catch "";
     }
 
     /// Minimal/letterhead rows: right-aligned figures, hairline separators.
@@ -1888,17 +1948,17 @@ pub const InvoiceRenderer = struct {
                 }
                 if (cols.price) |x| {
                     var pb: [48]u8 = undefined;
-                    try content.drawTextRightAligned(fmtMoney(&pb, self.data.currency_symbol, item.unit_price), x, self.current_y, self.font_regular, reg, size, ink);
+                    try content.drawTextRightAligned(self.money(&pb, item.unit_price), x, self.current_y, self.font_regular, reg, size, ink);
                 }
                 if (cols.disc) |x| {
                     if (item.discount != 0) {
                         var db: [40]u8 = undefined;
-                        try content.drawTextRightAligned(discText(&db, item.discount), x, self.current_y, self.font_regular, reg, size, ink);
+                        try content.drawTextRightAligned(self.discText(&db, item.discount), x, self.current_y, self.font_regular, reg, size, ink);
                     }
                 }
             }
             var tb: [48]u8 = undefined;
-            try content.drawTextRightAligned(fmtMoney(&tb, self.data.currency_symbol, row.amount), cols.total, self.current_y, self.font_regular, reg, size, ink);
+            try content.drawTextRightAligned(self.money(&tb, row.amount), cols.total, self.current_y, self.font_regular, reg, size, ink);
 
             const sep_y = self.current_y - block - 8;
             const last = i + 1 == count;
@@ -1954,7 +2014,7 @@ pub const InvoiceRenderer = struct {
         if (self.data.show_tax) {
             var subtotal_buf: [48]u8 = undefined;
             try content.drawText(self.data.labels.subtotal, col_price, self.current_y, self.font_regular, 10, document.Color.black);
-            const subtotal_str = std.fmt.bufPrint(&subtotal_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.subtotal }) catch "0.00";
+            const subtotal_str = self.money(&subtotal_buf, self.data.subtotal);
             try self.drawRightFit(content, subtotal_str, amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
             self.current_y -= 16;
 
@@ -1965,7 +2025,7 @@ pub const InvoiceRenderer = struct {
             const tax_label = std.fmt.bufPrint(&tax_label_buf, "{s} ({d:.0}%):", .{ self.data.labels.tax_prefix, tax_pct }) catch self.data.labels.tax_prefix;
             try content.drawText(tax_label, col_price, self.current_y, self.font_regular, 10, document.Color.black);
             var tax_buf: [48]u8 = undefined;
-            const tax_str = std.fmt.bufPrint(&tax_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.tax_amount }) catch "0.00";
+            const tax_str = self.money(&tax_buf, self.data.tax_amount);
             try self.drawRightFit(content, tax_str, amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
             self.current_y -= 16;
 
@@ -1976,7 +2036,7 @@ pub const InvoiceRenderer = struct {
                 const irpf_label = std.fmt.bufPrint(&irpf_label_buf, "IRPF ({d:.0}%):", .{irpf_pct}) catch "IRPF:";
                 try content.drawText(irpf_label, col_price, self.current_y, self.font_regular, 10, document.Color.black);
                 var irpf_buf: [48]u8 = undefined;
-                const irpf_str = std.fmt.bufPrint(&irpf_buf, "-{s}{d:.2}", .{ self.data.currency_symbol, @abs(self.data.irpf_amount) }) catch "0.00";
+                const irpf_str = self.money(&irpf_buf, -@abs(self.data.irpf_amount));
                 try self.drawRightFit(content, irpf_str, amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
                 self.current_y -= 16;
             }
@@ -1986,7 +2046,7 @@ pub const InvoiceRenderer = struct {
             if (adjustments.len > 0) {
                 var subtotal_buf: [48]u8 = undefined;
                 try content.drawText(self.data.labels.subtotal, col_price, self.current_y, self.font_regular, 10, document.Color.black);
-                try self.drawRightFit(content, fmtMoney(&subtotal_buf, self.data.currency_symbol, self.data.subtotal), amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
+                try self.drawRightFit(content, self.money(&subtotal_buf, self.data.subtotal), amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
                 self.current_y -= 16;
                 try self.drawClassicAdjustments(content, col_price, amt_right, amt_width);
             }
@@ -2013,7 +2073,7 @@ pub const InvoiceRenderer = struct {
         const total_text_color = if (self.data.theme == .glass) secondary else document.Color.white;
         try content.drawText(self.data.labels.total, col_price, self.current_y, self.font_bold, 12, total_text_color);
         var grand_total_buf: [48]u8 = undefined;
-        const grand_total_str = std.fmt.bufPrint(&grand_total_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.total }) catch "0.00";
+        const grand_total_str = self.money(&grand_total_buf, self.data.total);
         try self.drawRightFit(content, grand_total_str, table_right_edge - 10, (table_right_edge - 10) - (col_price + 64), self.current_y, self.font_bold, self.fontEnumBold(), 12, total_text_color);
 
         const total_y = self.current_y;
@@ -2023,7 +2083,7 @@ pub const InvoiceRenderer = struct {
             self.current_y -= 26;
             var pb: [48]u8 = undefined;
             try content.drawText(self.data.labels.amount_paid, col_price, self.current_y, self.font_regular, 10, document.Color.black);
-            try self.drawRightFit(content, fmtMoney(&pb, self.data.currency_symbol, paid), amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
+            try self.drawRightFit(content, self.money(&pb, paid), amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
             var mb: [160]u8 = undefined;
             if (self.paymentMeta(&mb)) |meta| {
                 self.current_y -= 11;
@@ -2032,7 +2092,7 @@ pub const InvoiceRenderer = struct {
             self.current_y -= 17;
             var bb: [48]u8 = undefined;
             try content.drawText(self.data.labels.balance_due, col_price, self.current_y, self.font_bold, 10, document.Color.black);
-            try self.drawRightFit(content, fmtMoney(&bb, self.data.currency_symbol, balanceDue(self.data.total, paid)), amt_right, amt_width, self.current_y, self.font_bold, self.fontEnumBold(), 10, document.Color.black);
+            try self.drawRightFit(content, self.money(&bb, balanceDue(self.data.total, paid)), amt_right, amt_width, self.current_y, self.font_bold, self.fontEnumBold(), 10, document.Color.black);
         }
 
         if (self.showPaidStamp()) try self.drawPaidStamp(content, self.margin_left, total_y + 6);
@@ -2042,7 +2102,7 @@ pub const InvoiceRenderer = struct {
         for (self.data.adjustments) |adj| {
             var ab: [48]u8 = undefined;
             try content.drawText(adj.label, label_x, self.current_y, self.font_regular, 10, document.Color.black);
-            try self.drawRightFit(content, fmtMoney(&ab, self.data.currency_symbol, adj.amount), amt_right, amt_width, self.current_y, self.font_regular, self.fontEnumRegular(), 10, document.Color.black);
+            try self.drawRightFit(content, self.money(&ab, adj.amount), amt_right, amt_width, self.current_y, self.font_regular, self.fontEnumRegular(), 10, document.Color.black);
             self.current_y -= 16;
         }
     }
@@ -2080,7 +2140,6 @@ pub const InvoiceRenderer = struct {
         const lx = right - 230;
         const reg = self.fontEnumRegular();
         const bold = self.fontEnumBold();
-        const sym = self.data.currency_symbol;
         const letter = self.data.theme == .letterhead;
         const adjustments = self.data.adjustments;
 
@@ -2098,26 +2157,26 @@ pub const InvoiceRenderer = struct {
 
         if (self.data.show_tax or adjustments.len > 0) {
             try content.drawText(bareLabel(self.data.labels.subtotal), lx, y, self.font_regular, 9.5, body);
-            try content.drawTextRightAligned(fmtMoney(&mb, sym, self.data.subtotal), right, y, self.font_regular, reg, 9.5, ink);
+            try content.drawTextRightAligned(self.money(&mb, self.data.subtotal), right, y, self.font_regular, reg, 9.5, ink);
             y -= 17;
         }
         for (adjustments) |adj| {
             const l = Line{ .label = adj.label, .amount = adj.amount };
             try content.drawText(l.label, lx, y, self.font_regular, 9.5, body);
-            try content.drawTextRightAligned(fmtMoney(&mb, sym, l.amount), right, y, self.font_regular, reg, 9.5, ink);
+            try content.drawTextRightAligned(self.money(&mb, l.amount), right, y, self.font_regular, reg, 9.5, ink);
             y -= 17;
         }
         if (self.data.show_tax) {
             var qb: [32]u8 = undefined;
-            const tax_label = std.fmt.bufPrint(&buf, "{s} ({s}%)", .{ self.data.labels.tax_prefix, fmtQty(&qb, self.data.tax_rate * 100) }) catch self.data.labels.tax_prefix;
+            const tax_label = std.fmt.bufPrint(&buf, "{s} ({s}%)", .{ self.data.labels.tax_prefix, self.decimalText(&qb, self.data.tax_rate * 100) }) catch self.data.labels.tax_prefix;
             try content.drawText(tax_label, lx, y, self.font_regular, 9.5, body);
-            try content.drawTextRightAligned(fmtMoney(&mb, sym, self.data.tax_amount), right, y, self.font_regular, reg, 9.5, ink);
+            try content.drawTextRightAligned(self.money(&mb, self.data.tax_amount), right, y, self.font_regular, reg, 9.5, ink);
             y -= 17;
             if (self.data.irpf_rate != 0 or self.data.irpf_amount != 0) {
                 var ib: [32]u8 = undefined;
-                const irpf_label = std.fmt.bufPrint(&buf, "IRPF ({s}%)", .{fmtQty(&ib, self.data.irpf_rate * 100)}) catch "IRPF";
+                const irpf_label = std.fmt.bufPrint(&buf, "IRPF ({s}%)", .{self.decimalText(&ib, self.data.irpf_rate * 100)}) catch "IRPF";
                 try content.drawText(irpf_label, lx, y, self.font_regular, 9.5, body);
-                try content.drawTextRightAligned(fmtMoney(&mb, sym, -@abs(self.data.irpf_amount)), right, y, self.font_regular, reg, 9.5, ink);
+                try content.drawTextRightAligned(self.money(&mb, -@abs(self.data.irpf_amount)), right, y, self.font_regular, reg, 9.5, ink);
                 y -= 17;
             }
         }
@@ -2133,7 +2192,7 @@ pub const InvoiceRenderer = struct {
         const total_y = y;
         try content.drawText(bareLabel(self.data.labels.total), lx, y, self.font_bold, 10.5, ink);
         var tb: [48]u8 = undefined;
-        const total_str = fmtMoney(&tb, sym, self.data.total);
+        const total_str = self.money(&tb, self.data.total);
         if (letter) {
             try content.drawTextRightAligned(total_str, right, y, self.font_bold, bold, 12, ink);
             const w = bold.measureText(total_str, 12);
@@ -2146,7 +2205,7 @@ pub const InvoiceRenderer = struct {
 
         if (self.data.amount_paid) |paid| {
             try content.drawText(bareLabel(self.data.labels.amount_paid), lx, y, self.font_regular, 9.5, body);
-            try content.drawTextRightAligned(fmtMoney(&mb, sym, paid), right, y, self.font_regular, reg, 9.5, ink);
+            try content.drawTextRightAligned(self.money(&mb, paid), right, y, self.font_regular, reg, 9.5, ink);
             var pmb: [160]u8 = undefined;
             if (if (self.payment_in_header) null else self.paymentMeta(&pmb)) |meta| {
                 y -= 11;
@@ -2155,7 +2214,7 @@ pub const InvoiceRenderer = struct {
             y -= 17;
             const bal_color = if (letter) ink else primary;
             try content.drawText(bareLabel(self.data.labels.balance_due), lx, y, self.font_bold, 10, ink);
-            try content.drawTextRightAligned(fmtMoney(&mb, sym, balanceDue(self.data.total, paid)), right, y, self.font_bold, bold, 10, bal_color);
+            try content.drawTextRightAligned(self.money(&mb, balanceDue(self.data.total, paid)), right, y, self.font_bold, bold, 10, bal_color);
             y -= 17;
         }
 
@@ -3167,5 +3226,63 @@ test "long tables paginate in every style with page numbers in the typographic o
         defer std.testing.allocator.free(pdf);
         try std.testing.expect(contains(pdf, "/Count 2") or contains(pdf, "/Count 3"));
         if (theme == .minimal or theme == .letterhead) try std.testing.expect(contains(pdf, "Page 1 of "));
+    }
+}
+
+test "money figures group thousands and round half away from zero" {
+    var b: [64]u8 = undefined;
+    const uk = NumberFormat{};
+    const cases = [_]struct { v: f64, want: []const u8 }{
+        .{ .v = 0, .want = "£0.00" },
+        .{ .v = 999.99, .want = "£999.99" },
+        .{ .v = 1000, .want = "£1,000.00" },
+        .{ .v = 2400, .want = "£2,400.00" },
+        .{ .v = 1234567.89, .want = "£1,234,567.89" },
+        .{ .v = 12345678, .want = "£12,345,678.00" },
+        .{ .v = -1234.5, .want = "-£1,234.50" },
+        .{ .v = -0.5, .want = "-£0.50" },
+        .{ .v = 1.005, .want = "£1.01" },
+        .{ .v = 0.005, .want = "£0.01" },
+        .{ .v = 2.675, .want = "£2.68" },
+        .{ .v = 999.995, .want = "£1,000.00" },
+        .{ .v = -0.005, .want = "-£0.01" },
+        .{ .v = -0.004, .want = "£0.00" }, // no negative zero
+    };
+    for (cases) |c| try std.testing.expectEqualStrings(c.want, formatMoney(&b, "£", c.v, uk));
+
+    const es = NumberFormat{ .thousands = ".", .decimal = "," };
+    try std.testing.expectEqualStrings("€2.400,00", formatMoney(&b, "€", 2400, es));
+    try std.testing.expectEqualStrings("-1.234.567,89", formatMoney(&b, "", -1234567.89, es));
+    try std.testing.expectEqualStrings("12,50", formatMoney(&b, "", 12.5, es));
+
+    try std.testing.expectEqualStrings("1234567.89", formatMoney(&b, "", 1234567.89, .{ .thousands = "" }));
+    try std.testing.expectEqualStrings("1 234,50", formatMoney(&b, "", 1234.5, .{ .thousands = " ", .decimal = "," }));
+
+    // Beyond the grouping range: an ungrouped figure, never a garbled one.
+    try std.testing.expectEqualStrings("£1000000000000.00", formatMoney(&b, "£", 1e12, uk));
+    // A buffer too small for the figure yields the placeholder.
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("0.00", formatMoney(&tiny, "£", 1234, uk));
+}
+
+test "every style draws grouped money; a Spanish number format swaps the marks" {
+    const items = [_]LineItem{.{ .description = "Work", .quantity = 2.5, .unit = "h", .unit_price = 1000, .total = 2500, .discount = 12.5 }};
+    const adj = [_]Adjustment{.{ .label = "Shipping", .amount = 1250 }};
+    for ([_]Theme{ .classic, .squircle, .glass, .minimal, .letterhead }) |theme| {
+        const pdf = try renderForTest(.{ .currency_symbol = "£", .items = &items, .adjustments = &adj, .subtotal = 2500, .tax_amount = 750, .total = 4500, .amount_paid = 1000, .theme = theme });
+        defer std.testing.allocator.free(pdf);
+        try std.testing.expect(contains(pdf, "2,500.00"));
+        try std.testing.expect(contains(pdf, "1,000.00"));
+        try std.testing.expect(contains(pdf, "1,250.00"));
+        try std.testing.expect(contains(pdf, "4,500.00"));
+        try std.testing.expect(contains(pdf, "3,500.00")); // balance
+        try std.testing.expect(!contains(pdf, "2500.00"));
+
+        const es = try renderForTest(.{ .currency_symbol = "", .number_format = .{ .thousands = ".", .decimal = "," }, .items = &items, .subtotal = 2500, .total = 4500, .theme = theme });
+        defer std.testing.allocator.free(es);
+        try std.testing.expect(contains(es, "2.500,00"));
+        try std.testing.expect(contains(es, "4.500,00"));
+        try std.testing.expect(contains(es, "2,5 h"));
+        try std.testing.expect(contains(es, "12,5%"));
     }
 }
