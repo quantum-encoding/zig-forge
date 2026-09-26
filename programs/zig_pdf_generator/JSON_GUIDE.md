@@ -74,12 +74,37 @@ what:
 { "preset": "receipt", "company_name": "Lutuno", "items": [ ... ] }
 ```
 
+One schema drives every transactional document. Three independent choices
+make a document:
+
+- **What it says** — a *document preset*: `quote`, `invoice`, `receipt` or
+  `custom` (any title and number label: estimate, proforma, credit note,
+  purchase order, statement).
+- **How it looks** — a *visual style*, `style` (or its synonym `theme`):
+  `classic`, `squircle`, `glass`, `minimal`, `letterhead`. Every style works
+  with every preset and uses your `primary_color`, `secondary_color`,
+  `title_color` and logo.
+- **What is shown** — *block toggles* (`show_client`, `show_bank_details`,
+  `show_qty_columns`, `show_tax`, `show_signature`), defaulted by the preset.
+
+```json
+{ "preset": "quote", "style": "letterhead", "company_name": "Example Ltd", "items": [ ... ] }
+```
+
 | `preset` | Sets |
 |----------|------|
-| `"receipt"`  | `document_type:"receipt"` (RECEIPT title, `Receipt #:` label), `show_tax:false` (no Subtotal/Tax rows), `show_branding:false`, `theme:"classic"` |
-| `"squircle"` | `theme:"squircle"` (rounded FROM / BILL TO cards, rounded table container and TOTAL chip), `table_style:"bands"` |
-| `"glass"`    | `theme:"glass"` (squircle's shapes as translucent panels with a sheen, over a soft wash of `primary_color`) |
-| `"minimal"`  | `table_style:"minimal"` (no row fills, one rule under the header), `show_branding:false` |
+| `"quote"`      | `document_type:"quote"` (QUOTE, `Quote #:`, `Valid Until:`), `show_bank_details:false` |
+| `"invoice"`    | `document_type:"invoice"` (INVOICE, `Invoice #:`, `Due Date:`), `show_bank_details:true` |
+| `"receipt"`    | `document_type:"receipt"` (RECEIPT title, `Receipt #:` label), `show_tax:false` (no Subtotal/Tax rows), `show_branding:false`, `show_bank_details:false`. Any `style` applies |
+| `"custom"`     | `document_type:"custom"` (title `DOCUMENT`, label `Reference:` unless you set `title` / `number_label`) |
+| `"classic"`    | `theme:"classic"` |
+| `"squircle"`   | `theme:"squircle"` (rounded FROM / BILL TO cards, rounded table container and TOTAL chip), `table_style:"bands"` |
+| `"glass"`      | `theme:"glass"` (squircle's shapes as translucent panels with a sheen, over a soft wash of `primary_color`) |
+| `"letterhead"` | `theme:"letterhead"` |
+| `"minimal"`    | `table_style:"minimal"` (no row fills, one rule under the header), `show_branding:false` — the classic layout with a rule-only table. For the Minimal **style**, use `"style":"minimal"` |
+
+`preset` takes one word; pick the document with `preset` and the look with
+`style`.
 
 Everything a preset sets is a **default**. Name the same key yourself and
 yours wins — `{"preset":"squircle","table_style":"boxes"}` gives you the
@@ -89,7 +114,7 @@ squircle theme with a boxed table. That is per field: overriding
 An unrecognised preset is an error, not a silent fallback. The CLI prints
 the valid set to stderr and exits 1; through FFI/WASM the generator returns
 NULL and `zigpdf_get_error()` reads
-`JSON parse error: unknown "preset" (valid: receipt, squircle, glass, minimal)`.
+`JSON parse error: unknown "preset" (valid: quote, invoice, receipt, custom, classic, squircle, glass, minimal, letterhead)`.
 
 Omit `preset` and nothing changes — output is byte-identical to a build
 without the key.
@@ -121,7 +146,14 @@ without the key.
 |-------|------|----------|-------------|
 | `invoice_number` | string | Yes | Unique document reference |
 | `invoice_date` | string | Yes | Issue date (any format, displayed as-is) |
-| `due_date` | string | No | Payment due date |
+| `due_date` | string | No | Payment due date (a quote's validity date) |
+| `due_date_label` | string | No | Label for `due_date`. Default `"Valid Until:"` on a quote (unless `labels.due_date` is set), otherwise `labels.due_date` (`"Due Date:"`) |
+| `subject` | string | No | Subject line under the title in the `minimal` and `letterhead` styles (`letterhead` prefixes `labels.subject_prefix`, `"Re:"`) |
+
+### Buyer block
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `show_client` | bool | `true` | `false` hides the buyer. With no buyer data at all (`client_name`, `client_address`, `client_vat` empty) the block is omitted anyway: classic drops the `Bill To:` heading, squircle/glass widen the FROM card across the row |
 
 ### Line Items
 
@@ -157,6 +189,17 @@ The `display_mode` field chooses how `items` are drawn.
 
 **Note:** Long descriptions automatically wrap within the column. No character limit.
 
+Per-item extras and the table toggle:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `items[].unit` | string | `""` | Unit printed after the quantity in the Qty column: `"2.5 hrs"`, `"12 m²"` |
+| `items[].discount` | number | `0` | Line discount in **percent** (`10` = 10% off). Any non-zero discount adds a `Disc.` column |
+| `items[].total` | number | derived | Omitted → `quantity × unit_price × (1 − discount/100)`, rounded to cents. Supplied → drawn as given |
+| `show_qty_columns` | bool | `true` | `false` draws Description \| Amount only — flat-rate and fixed-fee documents |
+
+Quantities print with up to two decimals, trailing zeros trimmed (`3`, `2.5`, `0.13`).
+
 #### Blackbox Mode
 ```json
 {
@@ -174,7 +217,17 @@ The `display_mode` field chooses how `items` are drawn.
 | `tax_amount` | number | Calculated tax amount |
 | `total` | number | Final total including tax |
 
-**Important:** You must calculate these values. The generator displays them as provided.
+Figures you supply are drawn exactly as given — even `0`. Figures you **omit**
+are derived: `subtotal` = sum of the item totals; `tax_amount` = `tax_rate` ×
+(subtotal + adjustments), `0` when `show_tax` is false; `total` = subtotal +
+adjustments + tax − IRPF.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `adjustments` | array of `{label, amount}` | `[]` | Rows between Subtotal and Tax — `{"label":"Shipping","amount":12.5}`, `{"label":"Deposit","amount":-200}`. Part of the taxable base when the tax is derived. Capped at 50 |
+| `amount_paid` | number | none | Adds `Amount Paid:` and `Balance Due:` (total − paid, never negative) rows after the TOTAL |
+| `payment_date` / `payment_method` | string | `""` | Printed under the Amount Paid row (`12 Sep 2026 · Card`) |
+| `paid_stamp` | bool | auto | The PAID IN FULL mark. Auto: shown on a receipt whose balance is 0 |
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -192,6 +245,21 @@ The `display_mode` field chooses how `items` are drawn.
 | `notes` | string | Displayed under "Notes:" heading. Auto-wraps. |
 | `payment_terms` | string | Displayed under "Payment Terms:" heading. Auto-wraps. |
 
+Both honour `\n` line breaks (a blank line between paragraphs is kept).
+
+### Bank details
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bank_details` | object | `{}` | `account_name`, `bank_name`, `sort_code`, `account_number`, `iban`, `bic` (alias `swift`), `reference` — each optional; drawn as a labelled text block (beside the totals when there is room). Separate from the image-only `qr_mode:"bank_details"` |
+| `show_bank_details` | bool | `true`; `false` for quotes and receipts | Toggle for that block |
+
+### Signature
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `show_signature` | bool | `false` | Draws a signature block: heading, signature line, name, title |
+| `signature_name` / `signature_title` | string | `""` | Printed under the line |
+| `signature_image_base64` | data_url | none | Signature image placed on the line. Transparency is flattened onto white |
+
 ### Styling Options
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -201,7 +269,7 @@ The `display_mode` field chooses how `items` are drawn.
 | `company_name_color` | hex string | `"#1a1a1a"` | Company name color |
 | `font_family` | string | `"Helvetica"` | `"Helvetica"`, `"Times"`, `"Courier"` |
 | `template_style` | string | `"professional"` | `"professional"`, `"modern"`, `"classic"`, `"creative"` — cosmetic; only `professional` is rendered today |
-| `theme` | string | `"classic"` | Whole-document look: `"classic"` (original flat layout), `"squircle"` (rounded FROM / BILL TO cards, rounded table container + TOTAL chip), `"glass"` (squircle's shapes as translucent panels with a top-edge sheen over a wash of `primary_color`). `squircle`/`glass` take over the table row treatment from `table_style` |
+| `style` / `theme` | string | `"classic"` | Whole-document look (`style` wins if both are set): `"classic"` (original flat layout), `"squircle"` (rounded FROM / BILL TO cards, rounded table container + TOTAL chip), `"glass"` (squircle's shapes as translucent panels with a top-edge sheen over a wash of `primary_color`), `"minimal"` (typography-led: no bands or cards, hairline rules, right-aligned figures, one accent from `primary_color`, logo at natural aspect), `"letterhead"` (formal letter: letterhead over a double rule, recipient address and date/reference block, title and optional `subject`, compact table, double-ruled total). `squircle`/`glass`/`minimal`/`letterhead` take over the table row treatment from `table_style`. `minimal`/`letterhead` number multi-page documents ("Page 1 of 2") and ignore `logo_x`/`logo_y`/`logo_width`/`logo_height`/`logo_inline` |
 | `table_style` | string | `"bands"` | Items table: `"bands"` = alternating row fill, `"boxes"` = bordered header + per-row borders (Spanish-invoice grid), `"minimal"` = no fills, one rule under the header |
 | `show_branding` | bool | `true` | The "Generated by Quantify" footer link |
 | `branding_url` | string | marketing URL | Where that footer link points |
@@ -412,11 +480,25 @@ The big title and the number label are not in here: those are the top-level
 |  | `footer_verify` | `"Scan to Verify Invoice"` |
 |  | `footer_verifactu` | `"VeriFactu Compliant Invoice"` |
 |  | `thank_you` | `"Thank you for your business"` |
+| Document system | `valid_until` | `"Valid Until:"` (quote due-date label) |
+|  | `amount` | `"Amount"` (total column when `show_qty_columns:false`) |
+|  | `discount` | `"Disc."` |
+|  | `amount_paid` | `"Amount Paid:"` |
+|  | `balance_due` | `"Balance Due:"` |
+|  | `payment` | `"Payment"` (minimal header column on a receipt without a buyer) |
+|  | `paid_in_full` | `"PAID IN FULL"` |
+|  | `account_name` / `bank_name` / `sort_code` / `account_number` / `iban` / `bic` / `payment_reference` | `"Account name"` / `"Bank"` / `"Sort code"` / `"Account no."` / `"IBAN"` / `"BIC / SWIFT"` / `"Reference"` |
+|  | `signature` | `"Authorised signature"` |
+|  | `subject_prefix` | `"Re:"` |
+|  | `page` / `page_of` | `"Page"` / `"of"` (minimal/letterhead page footer) |
 
 `tax_prefix` has the percentage appended (`"IVA"` renders as `IVA (21%):`),
 and `vat_prefix` prefixes both identity lines (`VAT: GB123456789`).
 `from_card` / `bill_to_card` are only drawn by the `squircle` and `glass`
-themes; `bill_to` is the classic layout's heading.
+themes (`bill_to_card` also heads the buyer column in `minimal`); `bill_to` is
+the classic layout's heading. The `minimal` and `letterhead` styles draw
+labels without their trailing colon, and `minimal` sets its small headings in
+capitals.
 
 ---
 

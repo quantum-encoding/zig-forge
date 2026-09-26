@@ -78,12 +78,12 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 
 | Field                          | Type                             | Required? | Fallback                          | Notes                                                                        |
 |--------------------------------|----------------------------------|-----------|-----------------------------------|------------------------------------------------------------------------------|
-| `preset`                       | `enum("receipt"\|"squircle"\|"glass"\|"minimal")` | No | none (no defaults changed) | One-word shorthand for a set of house defaults; see **`preset`** below. Read before every other field; any explicit key still overrides it. An unrecognised value is an error, not a silent fallback |
-| `document_type`                | `enum("invoice"\|"quote"\|"receipt")` | No   | `"invoice"`                       | Sets the title word (INVOICE / QUOTE / RECEIPT) and the number label. `"receipt"` also defaults `show_tax` to `false` |
+| `preset`                       | `enum("quote"\|"invoice"\|"receipt"\|"custom"\|"classic"\|"squircle"\|"glass"\|"minimal"\|"letterhead")` | No | none (no defaults changed) | One-word shorthand for a set of house defaults; see **`preset`** below. Read before every other field; any explicit key still overrides it. An unrecognised value is an error, not a silent fallback |
+| `document_type`                | `enum("invoice"\|"quote"\|"receipt"\|"custom")` | No   | `"invoice"`                       | Sets the title word (INVOICE / QUOTE / RECEIPT / DOCUMENT), the number label (`Invoice #:` / `Quote #:` / `Receipt #:` / `Reference:`) and, for a quote, the `Valid Until:` due-date label. `"receipt"` also defaults `show_tax` to `false`; `"quote"`/`"receipt"` default `show_bank_details` to `false` |
 | `title`                        | string                           | No        | derived from `document_type`      | Overrides the big title word, so one template can serve statements, credit notes, purchase orders. Drawn verbatim (no upper-casing) |
 | `number_label`                 | string                           | No        | derived from `document_type`      | Overrides the reference label (`Invoice #:` / `Quote #:` / `Receipt #:`) |
 | `company_name`                 | string                           | No        | `""`                              | Header + footer                                                              |
-| `company_address`              | string                           | No        | `""`                              | Single line; no `\n` splitting in this template                              |
+| `company_address`              | string                           | No        | `""`                              | One line per `\n`; without a newline, split at `", "`                        |
 | `company_vat`                  | string                           | No        | `""`                              | Tax/VAT ID; informational                                                    |
 | `company_logo_base64`          | data_url                         | No        | none                              | Rendered top-left when present                                               |
 | `client_name`                  | string                           | No        | `""`                              | Recipient block                                                              |
@@ -91,14 +91,28 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 | `client_vat`                   | string                           | No        | `""`                              | Client tax ID; informational                                                 |
 | `invoice_number`               | string                           | No        | `""`                              | Reference (e.g. `INV-2025-001`, `Q-2026-001`)                                |
 | `invoice_date`                 | string                           | No        | `""`                              | Free-form date; not parsed                                                   |
-| `due_date`                     | string                           | No        | `""`                              | Free-form date; not parsed                                                   |
+| `due_date`                     | string                           | No        | `""`                              | Free-form date; not parsed. A quote's validity date                          |
+| `due_date_label`               | string                           | No        | `"Valid Until:"` for a quote whose `labels.due_date` is untouched; else `labels.due_date` | Label drawn beside `due_date` |
+| `show_client`                  | bool                             | No        | `true`                            | `false` hides the buyer block. When `client_name`, `client_address` and `client_vat` are all empty the block is omitted regardless: classic drops `Bill To:`, squircle/glass widen the FROM card across the row, minimal/letterhead leave the column out |
+| `show_qty_columns`             | bool                             | No        | `true`                            | `false`: Description \| Amount only (Qty and Unit Price hidden; header `labels.amount`) |
+| `adjustments`                  | array of `{label, amount}`       | No        | `[]`                              | Rows between Subtotal and Tax (Shipping, Deposit, credits — negative amounts print `-£x`). Part of the taxable base when tax is derived. Shown with a Subtotal row even when `show_tax:false`. Capped at **50** (`TooManyAdjustments`) |
+| `amount_paid`                  | number                           | No        | none                              | Adds `Amount Paid:` and `Balance Due:` (= `total − amount_paid`, floored at 0) rows after the TOTAL |
+| `payment_date`, `payment_method` | string                         | No        | `""`                              | Annotate the Amount Paid row (`12 Sep 2026 · Card`); the minimal style leads a buyer-less receipt with them |
+| `paid_stamp`                   | bool                             | No        | auto                              | PAID IN FULL mark beside the TOTAL. Auto: on when `document_type:"receipt"`, `amount_paid` is set and the balance is 0 |
+| `bank_details`                 | `{account_name, bank_name, sort_code, account_number, iban, bic, reference}` | No | `{}` | Structured bank-transfer block (text, only non-empty rows; `swift` is an alias of `bic`). Drawn beside the totals when it fits, else after the notes. Independent of the image-only `qr_mode:"bank_details"` |
+| `show_bank_details`            | bool                             | No        | `true`; `false` for a quote or receipt (document type or preset) | Toggle for the `bank_details` block |
+| `show_signature`               | bool                             | No        | `false`                           | Signature block: `labels.signature` heading, signature line, name, title. Sits right of the notes when that column is free |
+| `signature_name`, `signature_title` | string                      | No        | `""`                              | Printed under the signature line                                             |
+| `signature_image_base64`       | data_url                         | No        | none                              | Signature image on the line (fit to 170×40pt; transparency is flattened onto white by the PNG decoder) |
+| `subject`                      | string                           | No        | `""`                              | Subject line under the title — `minimal` and `letterhead` styles only; letterhead prefixes `labels.subject_prefix` |
+| `style`                        | same values as `theme`           | No        | —                                 | Synonym of `theme`; wins when both are present |
 | `display_mode`                 | `enum("itemized"\|"blackbox")`   | No        | `"itemized"`                      | `blackbox` collapses items into one summary line using `blackbox_description` |
 | `items`                        | array<LineItem>                  | No        | `[]`                              | See **LineItem**. Capped at **500** entries — more is refused with `TooManyLineItems` before anything is allocated |
 | `blackbox_description`         | string                           | No        | `""`                              | One-line summary used when `display_mode="blackbox"`                         |
-| `subtotal`                     | number                           | No        | `0`                               | Pre-tax total; recalculated from items if absent                             |
+| `subtotal`                     | number                           | No        | derived                           | Pre-tax total. Absent → sum of the line totals. A present key (even `0`) is drawn verbatim |
 | `tax_rate`                     | number                           | No        | `0.21`                            | Fraction (`0.0`–`1.0`); 21% default                                          |
-| `tax_amount`                   | number                           | No        | derived                           | `subtotal * tax_rate` if absent                                              |
-| `total`                        | number                           | No        | derived                           | `subtotal + tax_amount` if absent                                            |
+| `tax_amount`                   | number                           | No        | derived                           | Absent → `(subtotal + Σadjustments) × tax_rate`, rounded to cents; `0` when `show_tax` is false |
+| `total`                        | number                           | No        | derived                           | Absent → `subtotal + Σadjustments + tax_amount − |irpf_amount|`, rounded to cents |
 | `currency_symbol`              | string                           | No        | `""`                              | Prepended to every money figure (e.g. `"£"`, `"€"`). Empty renders bare numbers |
 | `show_tax`                     | bool                             | No        | `true`; `false` for `document_type:"receipt"` or `preset:"receipt"` | VAT/tax toggle. When `false`, the **Subtotal** and **Tax** rows are suppressed and only the **TOTAL** bar is drawn — use for a business that is not VAT-registered. Alias: `show_vat` |
 | `notes`                        | string                           | No        | `""`                              | Free-form text block below items                                             |
@@ -110,7 +124,7 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 | `font_family`                  | `enum("Helvetica"\|"Times-Roman"\|"Courier")` | No | `"Helvetica"`                 | Values not in the enum fall back to Helvetica                                |
 | `template_style`               | `enum("professional"\|"modern"\|"classic"\|"creative")` | No | `"professional"` | Cosmetic variation; `professional` is the only one rendered today            |
 | `table_style`                  | `enum("bands"\|"boxes"\|"minimal")` | No | `"bands"`              | Line-item table look: `bands` = alternating row fill (original); `boxes` = bordered header + per-row borders (Spanish-invoice grid); `minimal` = no fills, one rule under the header |
-| `theme`                        | `enum("classic"\|"squircle"\|"glass")` | No | `"classic"`                | Whole-document treatment. `classic` = the original flat layout. `squircle` = rounded FROM / BILL TO cards, rounded table container with an accent header band, hairline row separators, rounded TOTAL chip. `glass` = squircle's geometry rendered as translucent panels with hairline borders and a top-edge sheen over a soft vertical wash of `primary_color`. `squircle`/`glass` override `table_style`'s row treatment; every other field still applies |
+| `theme`                        | `enum("classic"\|"squircle"\|"glass"\|"minimal"\|"letterhead")` | No | `"classic"`                | Whole-document treatment. `classic` = the original flat layout. `squircle` = rounded FROM / BILL TO cards, rounded table container with an accent header band, hairline row separators, rounded TOTAL chip. `glass` = squircle's geometry rendered as translucent panels with hairline borders and a top-edge sheen over a soft vertical wash of `primary_color`. `minimal` = typography-led: no bands or cards, hairline rules, right-aligned figures, small-caps headings, generous margins, one accent from `primary_color`, logo fitted at its natural aspect. `letterhead` = formal letter: logo/name over a double rule with the sender block on the right, recipient address block and a Date / number / due block, the title and optional `subject`, then a compact table and a double-ruled TOTAL. `minimal`/`letterhead` print "Page n of N" on multi-page documents and ignore `logo_x`/`logo_y`/`logo_width`/`logo_height`/`logo_inline`. All but `classic` override `table_style`'s row treatment; every other field still applies |
 | `irpf_rate`                    | number                           | No        | `0`                               | IRPF retention fraction (e.g. `0.15` → "IRPF (15%)"). `0` hides the row. Spanish freelancer invoices |
 | `irpf_amount`                  | number                           | No        | `0`                               | Absolute IRPF amount withheld; shown as a negative row beneath Tax (caller computes it) |
 | `logo_x`, `logo_y`             | number                           | No        | `40`, `750`                       | Logo position (points, PDF coord system)                                      |
@@ -139,7 +153,7 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 | `crypto_sender_wallet`         | string                           | No        | none                              | Sender wallet (for receipts/confirmations)                                   |
 | `show_crypto_identicons`       | bool                             | No        | `false`                           | Render blockie identicons for wallet addresses                               |
 | `crypto_custom_symbol`         | string                           | No        | derived from network              | Overrides default token symbol (e.g. `USDC` on Ethereum)                     |
-| `labels`                       | object                           | No        | English defaults                  | Overrides the fixed drawn strings (column headers, `Bill To:`, `Subtotal:`, footer lines) for non-English documents. Supply any subset — see **`labels`** below for all 24 fields |
+| `labels`                       | object                           | No        | English defaults                  | Overrides the fixed drawn strings (column headers, `Bill To:`, `Subtotal:`, footer lines) for non-English documents. Supply any subset — see **`labels`** below for every field |
 | `crypto_payment`               | `{network,to_address,from_address,amount,currency}` | No | none          | Nested form of the `crypto_*` fields; `amount` accepts a string or a number |
 | `password`                     | string                           | No        | `""`                              | When set, produces an AES-256 (`/V5 /R6`) password-encrypted PDF. Native: seed from OS CSPRNG. WASI WASM (`zig build wasm`): use the host-seeded `zigpdf_generate_invoice_encrypted` export. **Not available in the browser build** (`zig build wasm-web`), which has no entropy source and fails with `InsecureSeed` — see **Build surface** below |
 | `owner_password`               | string                           | No        | = `password`                      | Permissions (owner) password; falls back to `password` when blank            |
@@ -154,17 +168,35 @@ because the preset set `show_tax` as its own default.
 
 | `preset` | Expands to |
 |---|---|
-| `"receipt"`  | `document_type:"receipt"`, `show_tax:false`, `show_branding:false`, `theme:"classic"` |
-| `"squircle"` | `theme:"squircle"`, `table_style:"bands"` |
-| `"glass"`    | `theme:"glass"` |
-| `"minimal"`  | `table_style:"minimal"`, `show_branding:false` |
+| `"quote"`      | `document_type:"quote"`, `show_bank_details:false` |
+| `"invoice"`    | `document_type:"invoice"`, `show_bank_details:true` |
+| `"receipt"`    | `document_type:"receipt"`, `show_tax:false`, `show_branding:false`, `show_bank_details:false` (theme untouched — any `style` applies) |
+| `"custom"`     | `document_type:"custom"` |
+| `"classic"`    | `theme:"classic"` |
+| `"squircle"`   | `theme:"squircle"`, `table_style:"bands"` |
+| `"glass"`      | `theme:"glass"` |
+| `"letterhead"` | `theme:"letterhead"` |
+| `"minimal"`    | `table_style:"minimal"`, `show_branding:false` (the classic layout with a rule-only table — the Minimal **style** is `style:"minimal"`) |
+
+`preset` names the document (quote/invoice/receipt/custom) *or* a look; to
+choose both, pair a document preset with `style`:
+`{"preset":"receipt","style":"glass"}`.
 
 An unrecognised value is **refused**, not ignored: the parser returns
 `UnknownPreset` and the diagnostic names the valid set
-(`zigpdf_get_error()` → `JSON parse error: unknown "preset" (valid: receipt,
-squircle, glass, minimal)`; the CLI prints the same on stderr and exits 1).
+(`zigpdf_get_error()` → `JSON parse error: unknown "preset" (valid: quote,
+invoice, receipt, custom, classic, squircle, glass, minimal, letterhead)`; the CLI prints the same on stderr and exits 1).
 
 Omitting `preset` renders byte-identically to a build without the key.
+
+### Rendering notes (all styles)
+
+- Notes and payment terms honour `\n` line breaks; blank lines are kept.
+- Long item lists paginate with the table header redrawn on each page; the
+  totals block is kept together. Link annotations (pay buttons, branding) land
+  on the page they are drawn on.
+- Proof renders of every style × preset: `output/document-system/`
+  (regenerate with `python3 output/document-system/build_matrix.py`).
 
 ### `labels` — the fixed drawn strings
 
@@ -211,6 +243,24 @@ are the top-level `title` and `number_label`.
 | `footer_verify` | `"Scan to Verify Invoice"` |  |
 | `footer_verifactu` | `"VeriFactu Compliant Invoice"` |  |
 | `thank_you` | `"Thank you for your business"` | Centred footer line, drawn for every QR mode |
+| **Document system** | | |
+| `valid_until` | `"Valid Until:"` | Quote due-date label (see `due_date_label`) |
+| `amount` | `"Amount"` | Total-column header when `show_qty_columns:false` |
+| `discount` | `"Disc."` | Discount-column header |
+| `amount_paid` | `"Amount Paid:"` |  |
+| `balance_due` | `"Balance Due:"` |  |
+| `payment` | `"Payment"` | Minimal-style header column on a receipt without a buyer |
+| `paid_in_full` | `"PAID IN FULL"` | The paid mark |
+| `account_name` | `"Account name"` | Bank-details rows … |
+| `bank_name` | `"Bank"` |  |
+| `sort_code` | `"Sort code"` |  |
+| `account_number` | `"Account no."` |  |
+| `iban` | `"IBAN"` |  |
+| `bic` | `"BIC / SWIFT"` |  |
+| `payment_reference` | `"Reference"` | … (the block heading is `bank_details`) |
+| `signature` | `"Authorised signature"` | Signature-block heading |
+| `subject_prefix` | `"Re:"` | Letterhead subject line |
+| `page`, `page_of` | `"Page"`, `"of"` | Minimal/letterhead page footer ("Page 2 of 3") |
 
 ### Build surface: what the browser WASM does *not* have
 
@@ -232,9 +282,11 @@ WASI build, or the CLI.
 | Field         | Type   | Required? | Fallback | Notes                                           |
 |---------------|--------|-----------|----------|-------------------------------------------------|
 | `description` | string | No        | `""`     | Item name/description                           |
-| `quantity`    | number | No        | `0`      |                                                 |
+| `quantity`    | number | No        | `0`      | Printed with up to 2 decimals, trailing zeros trimmed (`2.5`, `3`) |
 | `unit_price`  | number | No        | `0`      |                                                 |
-| `total`       | number | No        | derived  | `quantity * unit_price` if omitted              |
+| `total`       | number | No        | derived  | `quantity * unit_price * (1 - discount/100)`, rounded to cents, if omitted |
+| `unit`        | string | No        | `""`     | Unit after the quantity in the Qty column (`"hrs"`, `"m²"`) |
+| `discount`    | number | No        | `0`      | Percent off the line. Any non-zero discount adds a `Disc.` column (`10%`) |
 
 ### UI gap (invoice)
 

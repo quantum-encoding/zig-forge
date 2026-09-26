@@ -36,7 +36,7 @@ def build_payloads(sample):
         base["company_logo_base64"] = logo
 
         quote = copy.deepcopy(base)
-        quote.update(preset="quote", invoice_number="QTE-2026-0118", due_date="2026-10-26",
+        quote.update(preset="quote", invoice_number="QTE-2026-0118", due_date="26 Oct 2026",
                      notes="This quote is valid for 30 days.\nPrices include all design rounds listed; extra rounds are billed at the day rate.",
                      payment_terms="50% deposit on acceptance, balance on completion.")
         out[f"{style}-quote"] = quote

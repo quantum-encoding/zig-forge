@@ -217,6 +217,8 @@ pub const Labels = struct {
     // Payment rows under the TOTAL
     amount_paid: []const u8 = "Amount Paid:",
     balance_due: []const u8 = "Balance Due:",
+    // Minimal header column for a receipt without a buyer
+    payment: []const u8 = "Payment",
     paid_in_full: []const u8 = "PAID IN FULL",
     // Structured bank-details rows (the block heading is `bank_details`)
     account_name: []const u8 = "Account name",
@@ -553,6 +555,11 @@ pub const InvoiceRenderer = struct {
     /// Baseline of the first totals row, on the page the totals block is
     /// drawn on — the bank-details block can sit beside it on the left.
     totals_top: f32 = 0,
+    /// Minimal: the payment method/date already lead the header.
+    payment_in_header: bool = false,
+    /// Wrap width for notes / payment terms; narrowed while the signature
+    /// block occupies the right-hand column.
+    section_width: ?f32 = null,
     margin_left: f32 = 40,
     margin_right: f32 = 40,
     margin_top: f32 = 40,
@@ -729,20 +736,22 @@ pub const InvoiceRenderer = struct {
             if (disc) return .{ .desc_x = ml + 5, .desc_w = 370, .qty = null, .price = null, .disc = ml + 385, .total = ml + 450, .right_aligned = false };
             return .{ .desc_x = ml + 5, .desc_w = 435, .qty = null, .price = null, .disc = null, .total = ml + 450, .right_aligned = false };
         }
+        // Right edges, walking leftward: each column is as wide as its
+        // widest usual content plus a gutter.
         const r = ml + usable;
-        var left = r - 85; // total column
+        var edge = r - 82; // left of the total column
         var c = TableCols{ .desc_x = ml, .desc_w = 0, .qty = null, .price = null, .disc = null, .total = r, .right_aligned = true };
         if (disc) {
-            c.disc = left - 10;
-            left -= 55;
+            c.disc = edge;
+            edge -= 46;
         }
         if (qty) {
-            c.price = left - 10;
-            left -= 85;
-            c.qty = left - 10;
-            left -= 70;
+            c.price = edge;
+            edge -= 80;
+            c.qty = edge;
+            edge -= 62;
         }
-        c.desc_w = left - ml - 14;
+        c.desc_w = edge - ml - 14;
         return c;
     }
 
@@ -993,6 +1002,11 @@ pub const InvoiceRenderer = struct {
             self.current_y -= 30;
         }
         if (redraw_header) try self.drawTableHeader(content);
+    }
+
+    /// Pages committed so far (the index of the page being drawn).
+    fn pagesFlushed(self: *const InvoiceRenderer) usize {
+        return if (self.isModern()) self.pending_pages.items.len else self.doc.page_count;
     }
 
     /// Start a new page (no table header) unless `needed` points still fit
@@ -1303,7 +1317,7 @@ pub const InvoiceRenderer = struct {
         if (!self.roundedLayout() and self.data.company_vat.len > 0) {
             var vat_buf: [128]u8 = undefined;
             const vat_line = std.fmt.bufPrint(&vat_buf, "{s}: {s}", .{ self.data.labels.vat_prefix, self.data.company_vat }) catch self.data.company_vat;
-            try content.drawText(vat_line, self.margin_left, self.current_y, self.font_regular, 10, document.Color.black);
+            try content.drawText(vat_line, block_x, self.current_y, self.font_regular, 10, document.Color.black);
             self.current_y -= 18;
         }
 
@@ -1555,7 +1569,8 @@ pub const InvoiceRenderer = struct {
             y_end = @min(y_end, y + 12);
         } else if (self.data.amount_paid != null and (self.data.payment_method.len > 0 or self.data.payment_date.len > 0)) {
             // A receipt without a buyer leads with how it was paid.
-            try content.drawTrackedText(capsLabel(&cb, self.data.labels.amount_paid), left, label_y, self.font_bold, 7, 0.8, muted);
+            try content.drawTrackedText(capsLabel(&cb, self.data.labels.payment), left, label_y, self.font_bold, 7, 0.8, muted);
+            self.payment_in_header = true;
             var y = value_y;
             if (self.data.payment_method.len > 0) {
                 try content.drawText(self.data.payment_method, left, y, self.font_bold, 10.5, ink);
@@ -2133,7 +2148,7 @@ pub const InvoiceRenderer = struct {
             try content.drawText(bareLabel(self.data.labels.amount_paid), lx, y, self.font_regular, 9.5, body);
             try content.drawTextRightAligned(fmtMoney(&mb, sym, paid), right, y, self.font_regular, reg, 9.5, ink);
             var pmb: [160]u8 = undefined;
-            if (self.paymentMeta(&pmb)) |meta| {
+            if (if (self.payment_in_header) null else self.paymentMeta(&pmb)) |meta| {
                 y -= 11;
                 try content.drawText(meta, lx, y, self.font_regular, 7.5, muted);
             }
@@ -2171,7 +2186,7 @@ pub const InvoiceRenderer = struct {
         const color = if (self.isModern()) document.Color.fromHex("#374151") else document.Color.black;
         try self.ensureSpace(content, 40);
         try self.drawSectionHeading(content, heading, self.margin_left);
-        var wrapped = try wrapParagraphs(self.allocator, text, self.fontEnumRegular(), 9, usable_width - 10);
+        var wrapped = try wrapParagraphs(self.allocator, text, self.fontEnumRegular(), 9, self.section_width orelse usable_width - 10);
         defer wrapped.deinit();
         for (wrapped.lines) |line| {
             if (self.current_y < self.margin_bottom + 10) try self.startNewPage(content, false);
@@ -2217,27 +2232,27 @@ pub const InvoiceRenderer = struct {
 
     /// Signature line block: heading, signature image (or blank space) over a
     /// rule, then name and title beneath it.
-    fn drawSignatureBlock(self: *InvoiceRenderer, content: *document.ContentStream, sig_id: ?[]const u8) !void {
+    fn drawSignatureBlock(self: *InvoiceRenderer, content: *document.ContentStream, sig_id: ?[]const u8, x: f32) !void {
         const secondary = document.Color.fromHex(self.data.secondary_color);
         const muted = document.Color.fromHex("#6B7280");
         const ink = if (self.isModern()) document.Color.fromHex("#111827") else document.Color.black;
         try self.ensureSpace(content, 92);
         self.current_y -= 10;
-        try self.drawSectionHeading(content, self.data.labels.signature, self.margin_left);
+        try self.drawSectionHeading(content, self.data.labels.signature, x);
         const line_y = self.current_y - 40;
         const line_w: f32 = 210;
         if (sig_id) |sid| {
             const fit = fitBox(self.sig_px_w, self.sig_px_h, 170, 40);
-            try content.drawImage(sid, self.margin_left + 4, line_y + 2, fit[0], fit[1]);
+            try content.drawImage(sid, x + 4, line_y + 2, fit[0], fit[1]);
         }
-        try content.drawLine(self.margin_left, line_y, self.margin_left + line_w, line_y, secondary, 0.6);
+        try content.drawLine(x, line_y, x + line_w, line_y, secondary, 0.6);
         var y = line_y - 13;
         if (self.data.signature_name.len > 0) {
-            try content.drawText(self.data.signature_name, self.margin_left, y, self.font_bold, 9.5, ink);
+            try content.drawText(self.data.signature_name, x, y, self.font_bold, 9.5, ink);
             y -= 12;
         }
         if (self.data.signature_title.len > 0) {
-            try content.drawText(self.data.signature_title, self.margin_left, y, self.font_regular, 8.5, muted);
+            try content.drawText(self.data.signature_title, x, y, self.font_regular, 8.5, muted);
             y -= 12;
         }
         self.current_y = y - 8;
@@ -2262,8 +2277,31 @@ pub const InvoiceRenderer = struct {
 
         self.current_y -= if (self.isModern()) 18 else 30;
 
-        if (self.data.notes.len > 0) try self.drawTextSection(content, self.data.labels.notes, self.data.notes, 6);
-        if (self.data.payment_terms.len > 0) try self.drawTextSection(content, self.data.labels.payment_terms, self.data.payment_terms, 8);
+        // With nothing else claiming the right-hand column (QR, pay buttons,
+        // crypto), the signature sits there, level with the notes, and the
+        // notes wrap to the left half.
+        const has_text = self.data.notes.len > 0 or self.data.payment_terms.len > 0;
+        const right_col_free = assets.qr_id == null and assets.wallet == null and
+            self.data.payment_buttons.len == 0 and self.data.payment_button_url == null;
+        var sig_beside = false;
+        if (self.data.show_signature and has_text and right_col_free and self.current_y - 92 > self.margin_bottom + 10) {
+            const top = self.current_y;
+            const sig_x = self.margin_left + usable_width * 0.58;
+            self.current_y = top + 10; // the block opens with its own 10pt gap
+            try self.drawSignatureBlock(content, assets.sig_id, sig_x);
+            const sig_end = self.current_y;
+            const page = self.pagesFlushed();
+            self.current_y = top;
+            self.section_width = usable_width * 0.58 - 24;
+            if (self.data.notes.len > 0) try self.drawTextSection(content, self.data.labels.notes, self.data.notes, 6);
+            if (self.data.payment_terms.len > 0) try self.drawTextSection(content, self.data.labels.payment_terms, self.data.payment_terms, 8);
+            self.section_width = null;
+            if (self.pagesFlushed() == page) self.current_y = @min(self.current_y, sig_end);
+            sig_beside = true;
+        } else {
+            if (self.data.notes.len > 0) try self.drawTextSection(content, self.data.labels.notes, self.data.notes, 6);
+            if (self.data.payment_terms.len > 0) try self.drawTextSection(content, self.data.labels.payment_terms, self.data.payment_terms, 8);
+        }
 
         // Bank details sit on the left; the QR / pay buttons, when present,
         // share their top edge on the right.
@@ -2434,7 +2472,7 @@ pub const InvoiceRenderer = struct {
         }
         if (bank_end != null) self.current_y = @min(self.current_y, flow_y);
 
-        if (self.data.show_signature) try self.drawSignatureBlock(content, assets.sig_id);
+        if (self.data.show_signature and !sig_beside) try self.drawSignatureBlock(content, assets.sig_id, self.margin_left);
     }
 
     fn qrModeLabel(self: *const InvoiceRenderer, mode: QrCodeMode) []const u8 {
