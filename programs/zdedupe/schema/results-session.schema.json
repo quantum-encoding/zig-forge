@@ -818,8 +818,261 @@
       }
     },
 
+    "SpaceType": {
+      "description": "Disk-space file type. The extension decides, except inside a folder that decides for everything it holds: an app bundle (.app, .framework, ...) is applications, a dependency, build or repository store (node_modules, .git, DerivedData, .venv, ...) is code, operating-system trees and ~/Library/Caches|Logs are system. The outermost such folder wins.",
+      "type": "string",
+      "enum": ["media", "documents", "code", "archives", "applications", "system", "other"]
+    },
+
+    "SpaceChildrenQuery": {
+      "description": "Query for zdedupe_results_space_children. by 'folder': the folder's subfolders and files merged largest first, `limit` of them. 'type' and 'size': every file below the folder grouped by type or by size band, `per_group` largest listed per group.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "node": { "type": ["integer", "null"], "minimum": 0, "default": null },
+        "path": { "type": ["string", "null"], "default": null },
+        "by": { "type": "string", "enum": ["folder", "type", "size"], "default": "folder" },
+        "limit": { "type": "integer", "minimum": 0, "maximum": 500, "default": 150, "description": "Clamped to 500." },
+        "per_group": { "type": "integer", "minimum": 0, "maximum": 200, "default": 40, "description": "Clamped to 200." }
+      }
+    },
+
+    "SpaceLargestQuery": {
+      "description": "Query for zdedupe_results_space_largest. Folders rank by their whole size and leave out wrappers: a folder whose largest subfolder holds 90% or more of it is represented by that subfolder. type narrows files only.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "node": { "type": ["integer", "null"], "minimum": 0, "default": null },
+        "path": { "type": ["string", "null"], "default": null },
+        "kind": { "type": "string", "enum": ["files", "folders"], "default": "files" },
+        "type": { "oneOf": [{ "$ref": "#/$defs/SpaceType" }, { "type": "null" }], "default": null },
+        "limit": { "type": "integer", "minimum": 0, "maximum": 200, "default": 100, "description": "Clamped to 200." }
+      }
+    },
+
+    "SpaceNode": {
+      "description": "One folder or file in a disk-space answer, or (kind 'all', id null) every scan root together. bytes is space on disk (allocated blocks: a cloud placeholder counts ~0, a sparse file what it occupies); logical is the apparent size. Every inode counts once: of several hard links the lexicographically smallest path holds the bytes. Folder figures are the whole subtree's, corrected for everything removed since the scan.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "name", "path", "bytes", "logical", "files", "dirs", "type", "mtime", "incomplete", "dataless", "hard_linked", "protected", "root"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["dir", "file", "all"] },
+        "id": {
+          "description": "Folder or file id, stable for the life of the store; folder and file ids are separate spaces. Null for kind 'all'.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "name": { "type": "string", "description": "A root's name is its full path." },
+        "path": { "type": "string" },
+        "bytes": { "$ref": "#/$defs/ByteCount" },
+        "logical": { "$ref": "#/$defs/ByteCount" },
+        "files": { "type": "integer", "minimum": 0, "description": "Files in the subtree; 1 for a file." },
+        "dirs": { "type": "integer", "minimum": 0, "description": "Folders below (not counting itself); 0 for a file." },
+        "type": {
+          "description": "A file's type; for a folder, the type holding most of its bytes.",
+          "$ref": "#/$defs/SpaceType"
+        },
+        "mtime": { "$ref": "#/$defs/EpochMillis", "description": "Files only; 0 for folders." },
+        "incomplete": {
+          "description": "Something at or below this folder could not be read (permission denied, a cloud-only folder, a path too long), so its figures are a lower bound. Always false for a file.",
+          "type": "boolean"
+        },
+        "dataless": {
+          "description": "Cloud placeholders (content not on disk, macOS): how many in a folder's subtree; 0 or 1 for a file.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "hard_linked": {
+          "description": "A file with other hard links: removing this path frees nothing while another link remains.",
+          "type": "boolean"
+        },
+        "protected": {
+          "description": "zdedupe_results_space_trash would refuse it: a protected location, or a folder holding one.",
+          "type": "boolean"
+        },
+        "root": { "type": "boolean", "description": "A scan root; never trashed whole." }
+      }
+    },
+
+    "SpaceRest": {
+      "description": "What a group did not list, summed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "bytes"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "bytes": { "$ref": "#/$defs/ByteCount" }
+      }
+    },
+
+    "SpaceGroup": {
+      "description": "One cluster of a disk-space map. key: 'all' (by folder), a SpaceType (by type), or a size band (by size: over_1g, 100m_1g, 10m_100m, 1m_10m, under_1m — lower bounds 1 GiB, 100 MiB, 10 MiB, 1 MiB, 0). bytes and files are the whole group's; items are its largest members, largest first; rest is the remainder.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "bytes", "files", "items", "rest"],
+      "properties": {
+        "key": { "type": "string" },
+        "bytes": { "$ref": "#/$defs/ByteCount" },
+        "files": { "type": "integer", "minimum": 0 },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/SpaceNode" } },
+        "rest": { "$ref": "#/$defs/SpaceRest" }
+      }
+    },
+
+    "SpaceTypeTotal": {
+      "description": "Bytes on disk of one type; files only where the answer counts them (the overview).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "bytes"],
+      "properties": {
+        "type": { "$ref": "#/$defs/SpaceType" },
+        "bytes": { "$ref": "#/$defs/ByteCount" },
+        "files": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "SpaceChildren": {
+      "description": "Response of zdedupe_results_space_children. types always lists all seven, in SpaceType order. Groups with no files are left out; by 'type' they come largest first, by 'size' in band order.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node", "types", "trail", "by", "groups"],
+      "properties": {
+        "node": { "$ref": "#/$defs/SpaceNode" },
+        "types": { "type": "array", "items": { "$ref": "#/$defs/SpaceTypeTotal" } },
+        "trail": {
+          "description": "From the scan root to the folder, for a breadcrumb. Empty for kind 'all'.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "name"],
+            "properties": {
+              "id": { "type": "integer", "minimum": 0 },
+              "name": { "type": "string" }
+            }
+          }
+        },
+        "by": { "type": "string", "enum": ["folder", "type", "size"] },
+        "groups": { "type": "array", "items": { "$ref": "#/$defs/SpaceGroup" } }
+      }
+    },
+
+    "SpaceLargest": {
+      "description": "Response of zdedupe_results_space_largest.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "items"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["files", "folders"] },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/SpaceNode" } }
+      }
+    },
+
+    "SpaceOverview": {
+      "description": "Response of zdedupe_results_space_overview. volume is as scanned (on macOS the APFS container's figures, as Finder shows them). files/dirs/bytes/logical/dataless_files and types are corrected for what was removed since; the rest are the scan's own counters.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["roots", "generated_at", "scan_time_ns", "volume", "files", "dirs", "bytes", "logical", "dataless_files", "dataless_logical", "hard_links", "excluded", "errors", "incomplete_dirs", "removed_count", "removed_bytes", "types"],
+      "properties": {
+        "roots": { "type": "array", "items": { "type": "string" } },
+        "generated_at": { "$ref": "#/$defs/EpochMillis" },
+        "scan_time_ns": { "type": "integer", "minimum": 0 },
+        "volume": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mount", "total", "free", "available"],
+          "properties": {
+            "mount": { "type": "string" },
+            "total": { "$ref": "#/$defs/ByteCount" },
+            "free": { "$ref": "#/$defs/ByteCount" },
+            "available": { "$ref": "#/$defs/ByteCount", "description": "Free to an unprivileged user." }
+          }
+        },
+        "files": { "type": "integer", "minimum": 0 },
+        "dirs": { "type": "integer", "minimum": 0 },
+        "bytes": { "$ref": "#/$defs/ByteCount" },
+        "logical": { "$ref": "#/$defs/ByteCount" },
+        "dataless_files": { "type": "integer", "minimum": 0, "description": "Cloud placeholders: listed, not on disk." },
+        "dataless_logical": { "$ref": "#/$defs/ByteCount", "description": "Their apparent size: what downloading them would take." },
+        "hard_links": { "type": "integer", "minimum": 0, "description": "Extra hard links, not counted again." },
+        "excluded": { "type": "integer", "minimum": 0, "description": "Entries the scan's scoping left out: other volumes, app libraries, credential stores, added excludes." },
+        "errors": { "type": "integer", "minimum": 0 },
+        "incomplete_dirs": { "type": "integer", "minimum": 0, "description": "Folders with something directly inside that could not be read." },
+        "removed_count": { "type": "integer", "minimum": 0 },
+        "removed_bytes": { "$ref": "#/$defs/ByteCount" },
+        "types": { "type": "array", "items": { "$ref": "#/$defs/SpaceTypeTotal" } }
+      }
+    },
+
+    "SpaceHistory": {
+      "description": "Response of zdedupe_results_space_history. entries: every recorded scan of this volume, oldest first (at most 30), used = total - free. growth (at most 30, largest first) and shrink (at most 15, largest drop first) compare this scan with `previous`, the latest earlier scan of the same roots, folder by folder down to three levels below a root. before is null when the earlier scan did not record the folder (new, or below its size threshold); id is the folder in the current results, or null when it is not in them (gone).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mount", "current", "previous", "entries", "growth", "shrink"],
+      "properties": {
+        "mount": { "type": "string" },
+        "current": { "$ref": "#/$defs/EpochMillis" },
+        "previous": { "type": ["integer", "null"], "minimum": 0 },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["generated_at", "roots", "total", "free", "used", "bytes", "files", "same_roots"],
+            "properties": {
+              "generated_at": { "$ref": "#/$defs/EpochMillis" },
+              "roots": { "type": "array", "items": { "type": "string" } },
+              "total": { "$ref": "#/$defs/ByteCount" },
+              "free": { "$ref": "#/$defs/ByteCount" },
+              "used": { "$ref": "#/$defs/ByteCount" },
+              "bytes": { "$ref": "#/$defs/ByteCount", "description": "What that scan's roots held on disk." },
+              "files": { "type": "integer", "minimum": 0 },
+              "same_roots": { "type": "boolean", "description": "Scanned the same roots as the current results." }
+            }
+          }
+        },
+        "growth": { "type": "array", "items": { "$ref": "#/$defs/SpaceChange" } },
+        "shrink": { "type": "array", "items": { "$ref": "#/$defs/SpaceChange" } }
+      }
+    },
+
+    "SpaceChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "id", "before", "now", "delta"],
+      "properties": {
+        "path": { "type": "string" },
+        "id": { "type": ["integer", "null"], "minimum": 0 },
+        "before": { "type": ["integer", "null"], "minimum": 0 },
+        "now": { "$ref": "#/$defs/ByteCount" },
+        "delta": { "type": "integer", "description": "now - (before or 0), signed." }
+      }
+    },
+
+    "SpaceTrashItems": {
+      "description": "The items_json document passed to zdedupe_results_space_trash (at most 10,000 items). The response is a DeleteReport.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "id"],
+            "properties": {
+              "kind": { "type": "string", "enum": ["dir", "file"] },
+              "id": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+
     "ScanProgress": {
-      "description": "Not part of the results session — zdedupe_get_progress fills a C struct during a scan, and the host serialises it. Included because a host's progress type drifts just as easily. phase: 0 idle, 1 finding files, 2 grouping by size, 3 comparing file beginnings, 4 comparing full contents, 5 analysing folders, 6 saving results, 7 done. Only phases 3 and 4 know how much work there is, so total is 0 elsewhere and a host must not render a percentage from it.",
+      "description": "Not part of the results session — zdedupe_get_progress fills a C struct during a scan, and the host serialises it. Included because a host's progress type drifts just as easily. phase: 0 idle, 1 finding files, 2 grouping by size, 3 comparing file beginnings, 4 comparing full contents, 5 analysing folders (a disk-space scan: adding up the tree), 6 saving results, 7 done. A disk-space scan goes 1, 5, 6, 7. Only phases 3 and 4 know how much work there is, so total is 0 elsewhere and a host must not render a percentage from it.",
       "type": "object",
       "additionalProperties": false,
       "required": ["phase", "files_found", "done", "total"],
