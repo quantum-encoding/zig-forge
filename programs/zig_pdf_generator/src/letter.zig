@@ -51,6 +51,7 @@ pub fn generateLetterFromJsonSeeded(allocator: std.mem.Allocator, json_str: []co
     if (parsed.value != .object) return error.InvalidJson;
 
     var in = letterInputFromObject(parsed.value.object);
+    in.images = try bodyImagesFromObject(parsed.arena.allocator(), parsed.value.object);
     in.seed = seed;
 
     return markdown.generateLetter(allocator, in) catch |err| switch (err) {
@@ -89,6 +90,23 @@ pub fn letterInputFromObject(o: std.json.ObjectMap) markdown.LetterInput {
     in.password = getStr(o, "password");
     in.owner_password = getStr(o, "owner_password");
     return in;
+}
+
+/// `"images": [{"name": "1-logo.png", "data": "<base64 or data: URL>"}]` →
+/// body images for `![alt](name)` lines. Entries without a string name and
+/// data are skipped. The result borrows from `o` and is allocated with `a`.
+pub fn bodyImagesFromObject(a: std.mem.Allocator, o: std.json.ObjectMap) error{OutOfMemory}![]const markdown.BodyImage {
+    const v = o.get("images") orelse return &.{};
+    if (v != .array) return &.{};
+    var out: std.ArrayList(markdown.BodyImage) = .empty;
+    for (v.array.items) |item| {
+        if (item != .object) continue;
+        const name = getStr(item.object, "name");
+        const data = getStr(item.object, "data");
+        if (name.len == 0 or data.len == 0) continue;
+        try out.append(a, .{ .name = name, .base64 = data });
+    }
+    return out.toOwnedSlice(a);
 }
 
 fn parseFit(s: []const u8) markdown.BackgroundFit {

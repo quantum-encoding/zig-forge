@@ -169,6 +169,7 @@ pub fn renderText(arena: std.mem.Allocator, json_str: []const u8, diag: *Diagnos
         .null => {},
         .object => |lo| {
             in = letter.letterInputFromObject(lo);
+            in.images = try letter.bodyImagesFromObject(arena, lo);
             inline for (text_fields) |field| {
                 const src = @field(in, field);
                 if (std.mem.indexOf(u8, src, legend.delims.open) != null) {

@@ -29,6 +29,7 @@ const proposal = @import("proposal.zig");
 const clean_quote = @import("clean_quote.zig");
 const letter = @import("letter.zig");
 const legend_letter = @import("legend_letter.zig");
+const docx_bridge = @import("docx_bridge.zig");
 const order_email = @import("order_email.zig");
 const beacon_solar_report = @import("beacon_solar_report.zig");
 const website_health_report = @import("website_health_report.zig");
@@ -226,6 +227,56 @@ export fn zigpdf_legend_describe(json_ptr: [*]const u8, json_len: usize, output_
     var diag = legend_letter.Diagnostic{};
     const out = legend_letter.describe(wasm_allocator, json_slice, &diag) catch |err| {
         setLegendError(err, &diag);
+        return null;
+    };
+    output_len.* = out.len;
+    return out.ptr;
+}
+
+// =============================================================================
+// Word documents — zig_docx's C API (zig_docx_*, see include/zig_docx.h) and
+// the letter bridges. Same (ptr, len, out_len) ABI; a NULL/0 letter frame
+// pointer means none.
+// =============================================================================
+
+comptime {
+    _ = @import("zig_docx").ffi;
+}
+
+fn setDocxError(err: docx_bridge.Error, diag: *const docx_bridge.Diagnostic) void {
+    var buf: [256]u8 = undefined;
+    const detail = if (diag.len > 0) diag.text() else @errorName(err);
+    setLastError(std.fmt.bufPrint(&buf, "DOCX: {s}", .{detail}) catch "DOCX error");
+}
+
+/// Word body laid out as a letter PDF, framed by the letter JSON (optional).
+export fn zigpdf_docx_to_letter(docx_ptr: [*]const u8, docx_len: usize, json_ptr: ?[*]const u8, json_len: usize, output_len: *usize) ?[*]u8 {
+    const frame: []const u8 = if (json_ptr) |p| p[0..json_len] else "";
+    var diag = docx_bridge.Diagnostic{};
+    const pdf = docx_bridge.docxToLetter(wasm_allocator, docx_ptr[0..docx_len], frame, &diag) catch |err| {
+        setDocxError(err, &diag);
+        return null;
+    };
+    output_len.* = pdf.len;
+    return pdf.ptr;
+}
+
+/// Word document → zig_legend template JSON {template, placeholders, legend_toml, images}.
+export fn zigpdf_docx_to_legend_template(docx_ptr: [*]const u8, docx_len: usize, output_len: *usize) ?[*]u8 {
+    var diag = docx_bridge.Diagnostic{};
+    const out = docx_bridge.docxToLegendTemplateJson(wasm_allocator, docx_ptr[0..docx_len], &diag) catch |err| {
+        setDocxError(err, &diag);
+        return null;
+    };
+    output_len.* = out.len;
+    return out.ptr;
+}
+
+/// Legend letter input → editable .docx bytes.
+export fn zigpdf_legend_letter_to_docx(json_ptr: [*]const u8, json_len: usize, output_len: *usize) ?[*]u8 {
+    var diag = docx_bridge.Diagnostic{};
+    const out = docx_bridge.legendLetterToDocx(wasm_allocator, json_ptr[0..json_len], &diag) catch |err| {
+        setDocxError(err, &diag);
         return null;
     };
     output_len.* = out.len;
