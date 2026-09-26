@@ -454,7 +454,7 @@ pub const ShareCertificateRenderer = struct {
                 } else {
                     // PNG: loadImage allocated fresh pixels; raw is no longer needed.
                     self.allocator.free(raw);
-                    try self.image_bufs.append(self.allocator, @constCast(doc_img.data));
+                    try self.image_bufs.append(self.allocator, image_mod.ownedPixels(doc_img));
                 }
                 return self.doc.addImage(doc_img) catch null;
             },

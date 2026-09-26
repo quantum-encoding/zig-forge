@@ -168,6 +168,8 @@ pub const LetterQuoteRenderer = struct {
     watermark_w: f32 = 0,
     watermark_h: f32 = 0,
     watermark_owned_bytes: ?[]u8 = null,
+    /// Decoded PNG watermark pixels (a JPEG watermark aliases the raw bytes).
+    watermark_pixels: ?[]u8 = null,
 
     pages: std.ArrayListUnmanaged(document.ContentStream),
     crypto_qr_pixels: ?[]u8 = null,
@@ -198,6 +200,7 @@ pub const LetterQuoteRenderer = struct {
 
     pub fn deinit(self: *LetterQuoteRenderer) void {
         if (self.watermark_owned_bytes) |b| self.allocator.free(b);
+        if (self.watermark_pixels) |p| self.allocator.free(p);
         if (self.crypto_qr_pixels) |p| self.allocator.free(p);
         for (self.pages.items) |*p| p.deinit();
         self.pages.deinit(self.allocator);
@@ -252,6 +255,7 @@ pub const LetterQuoteRenderer = struct {
             return;
         };
 
+        if (img.format != .jpeg) self.watermark_pixels = image_lib.ownedPixels(img);
         self.watermark_id = try self.doc.addImage(img);
 
         const opacity: f32 = if (self.data.watermark_opacity > 0)
