@@ -429,6 +429,12 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
         }
     }
 
+    // Pay-now button under the totals. The URL is kept as given; the
+    // renderer draws it only for an absolute http(s) URL.
+    data.pay_now_url = try dupeJsonString(allocator, obj, "pay_now_url");
+    data.pay_now_label = try dupeJsonString(allocator, obj, "pay_now_label") orelse try allocator.dupe(u8, "Pay now");
+    data.pay_now_note = try dupeJsonString(allocator, obj, "pay_now_note") orelse "";
+
     // Parse line items
     if (obj.get("items")) |items_val| {
         if (items_val == .array) {
@@ -617,6 +623,10 @@ pub fn freeInvoiceData(allocator: std.mem.Allocator, data: *const invoice.Invoic
         allocator.free(b.text_color);
     }
     if (data.payment_buttons.len > 0) allocator.free(data.payment_buttons);
+
+    if (data.pay_now_url) |s| allocator.free(s);
+    allocator.free(data.pay_now_label);
+    if (data.pay_now_note.len > 0) allocator.free(data.pay_now_note);
 
     if (data.notes.len > 0) allocator.free(data.notes);
     if (data.payment_terms.len > 0) allocator.free(data.payment_terms);
@@ -1292,4 +1302,23 @@ test "number_format parses, defaults to UK marks and ignores bad values" {
     defer freeInvoiceData(allocator, &long);
     try std.testing.expectEqualStrings(",", long.number_format.thousands);
     try std.testing.expectEqualStrings(".", long.number_format.decimal);
+}
+
+test "pay_now fields parse, default the label and free cleanly" {
+    const allocator = std.testing.allocator;
+    const with =
+        \\{"items": [{"description": "A", "quantity": 1, "unit_price": 10}],
+        \\ "pay_now_url": "https://pay.example.com/i/1", "pay_now_note": "Card, Apple Pay"}
+    ;
+    const data = try parseInvoiceJson(allocator, with);
+    defer freeInvoiceData(allocator, &data);
+    try std.testing.expectEqualStrings("https://pay.example.com/i/1", data.pay_now_url.?);
+    try std.testing.expectEqualStrings("Pay now", data.pay_now_label);
+    try std.testing.expectEqualStrings("Card, Apple Pay", data.pay_now_note);
+
+    const without = try parseInvoiceJson(allocator, "{\"pay_now_label\": \"Pagar\"}");
+    defer freeInvoiceData(allocator, &without);
+    try std.testing.expect(without.pay_now_url == null);
+    try std.testing.expectEqualStrings("Pagar", without.pay_now_label);
+    try std.testing.expectEqualStrings("", without.pay_now_note);
 }

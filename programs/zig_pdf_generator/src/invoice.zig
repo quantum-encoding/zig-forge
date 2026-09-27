@@ -370,6 +370,17 @@ pub const InvoiceData = struct {
     // single fields, so existing callers are unchanged.
     payment_buttons: []const PaymentButton = &[_]PaymentButton{},
 
+    // Pay-now button under the TOTAL (and balance due), filled with
+    // primary_color and linked to pay_now_url. Only an absolute http(s) URL is
+    // honoured (see isPayNowUrl); anything else draws nothing. Suppressed on
+    // quotes and whenever nothing is owed. The URL is also printed beneath the
+    // button, shortened when it is too long for the column, so a printed copy
+    // still carries it. pay_now_note is an optional small line between the two
+    // (e.g. "Card, Apple Pay, Google Pay").
+    pay_now_url: ?[]const u8 = null,
+    pay_now_label: []const u8 = "Pay now",
+    pay_now_note: []const u8 = "",
+
     // Encryption (AES-256 /V5 /R6). When `password` is non-empty the invoice PDF
     // is password-encrypted; `owner_password` falls back to `password` if blank.
     // `seed` is the 32 bytes of random material the file key / salts / IVs derive
@@ -418,6 +429,48 @@ pub const InvoiceData = struct {
     // Subject line under the title (minimal and letterhead themes).
     subject: []const u8 = "",
 };
+
+/// Longest pay_now_url the engine will link.
+pub const max_pay_now_url_len = 2048;
+
+/// True for an absolute http:// or https:// URL (scheme case-insensitive)
+/// with a non-empty host and only printable ASCII — non-ASCII must arrive
+/// percent-encoded. Every other scheme (javascript:, file:, mailto:, ...) and
+/// any relative reference is rejected, so a pay-now link can only open a web
+/// page.
+pub fn isPayNowUrl(url: []const u8) bool {
+    if (url.len > max_pay_now_url_len) return false;
+    const rest = if (std.ascii.startsWithIgnoreCase(url, "https://"))
+        url[8..]
+    else if (std.ascii.startsWithIgnoreCase(url, "http://"))
+        url[7..]
+    else
+        return false;
+    if (rest.len == 0) return false;
+    switch (rest[0]) {
+        '/', '?', '#', '@', ':' => return false,
+        else => {},
+    }
+    for (url) |c| {
+        if (c <= 0x20 or c >= 0x7F) return false;
+    }
+    return true;
+}
+
+/// Black or white, whichever contrasts more with `bg` (WCAG relative
+/// luminance; the crossover sits near L = 0.179).
+pub fn contrastInk(bg: document.Color) document.Color {
+    const lin = struct {
+        fn f(c: f32) f32 {
+            return if (c <= 0.04045) c / 12.92 else std.math.pow(f32, (c + 0.055) / 1.055, 2.4);
+        }
+    }.f;
+    const l = 0.2126 * lin(bg.r) + 0.7152 * lin(bg.g) + 0.0722 * lin(bg.b);
+    return if (l > 0.179) document.Color.fromHex("#111827") else document.Color.white;
+}
+
+/// Axis-aligned rectangle in PDF points, origin bottom-left.
+pub const Rect = struct { x: f32, y: f32, w: f32, h: f32 };
 
 /// 32 bytes of random material for the encryption seed. Native: from the OS
 /// CSPRNG. WASM has no CSPRNG here, so it returns zeros — and the engine
@@ -601,6 +654,8 @@ pub const InvoiceRenderer = struct {
     /// Wrap width for notes / payment terms; narrowed while the signature
     /// block occupies the right-hand column.
     section_width: ?f32 = null,
+    /// Where the pay-now button was drawn (also its link annotation's /Rect).
+    pay_now_rect: ?Rect = null,
     margin_left: f32 = 40,
     margin_right: f32 = 40,
     margin_top: f32 = 40,
@@ -780,6 +835,85 @@ pub const InvoiceRenderer = struct {
         if (self.data.paid_stamp) |p| return p;
         const paid = self.data.amount_paid orelse return false;
         return self.isReceipt() and balanceDue(self.data.total, paid) < 0.005;
+    }
+
+    /// The pay-now URL to draw, or null: no valid http(s) URL, a quote, a
+    /// PAID IN FULL document, or nothing left to pay.
+    fn payNowUrl(self: *const InvoiceRenderer) ?[]const u8 {
+        const url = self.data.pay_now_url orelse return null;
+        if (!isPayNowUrl(url)) return null;
+        if (self.isQuote() or self.showPaidStamp()) return null;
+        const owed = if (self.data.amount_paid) |paid| balanceDue(self.data.total, paid) else self.data.total;
+        if (owed < 0.005) return null;
+        return url;
+    }
+
+    /// Vertical space the pay-now block takes below the last totals row.
+    fn payNowHeight(self: *const InvoiceRenderer) f32 {
+        if (self.payNowUrl() == null) return 0;
+        return 12 + pay_now_button_h + 13 + (if (self.data.pay_now_note.len > 0) @as(f32, 10) else 0);
+    }
+
+    const pay_now_button_h: f32 = 26;
+
+    /// Draw the pay-now button spanning [x, right] with its top edge at `top`,
+    /// link it, then print the optional note and the URL under it. Rounded in
+    /// squircle/glass, square in classic/minimal/letterhead. Returns the
+    /// baseline of the last line drawn.
+    fn drawPayNow(self: *InvoiceRenderer, content: *document.ContentStream, url: []const u8, x: f32, right: f32, top: f32) !f32 {
+        const fill = document.Color.fromHex(self.data.primary_color);
+        const ink = contrastInk(fill);
+        const muted = document.Color.fromHex("#6B7280");
+        const bold = self.fontEnumBold();
+        const reg = self.fontEnumRegular();
+        const w = right - x;
+        const h = pay_now_button_h;
+        const y = top - h;
+
+        if (self.roundedLayout()) {
+            try content.drawRoundedRectEx(x, y, w, h, 7, fill, null, 1.0);
+        } else {
+            try content.drawRect(x, y, w, h, fill, null);
+        }
+        const label = if (self.data.pay_now_label.len > 0) self.data.pay_now_label else "Pay now";
+        var size: f32 = 11;
+        while (size > 7 and bold.measureText(label, size) > w - 16) size -= 0.5;
+        const lw = bold.measureText(label, size);
+        try content.drawText(label, x + (w - lw) / 2, y + (h - size) / 2 + size * 0.22, self.font_bold, size, ink);
+        try self.doc.addLinkAnnotation(x, y, x + w, y + h, url);
+        self.pay_now_rect = .{ .x = x, .y = y, .w = w, .h = h };
+
+        var line_y = y - 11;
+        if (self.data.pay_now_note.len > 0) {
+            const note_w = reg.measureText(self.data.pay_now_note, 7.5);
+            try content.drawText(self.data.pay_now_note, x + @max(0, (w - note_w) / 2), line_y, self.font_regular, 7.5, muted);
+            line_y -= 10;
+        }
+        var ub: [160]u8 = undefined;
+        const shown = displayUrl(&ub, url, reg, 7, w);
+        const uw = reg.measureText(shown, 7);
+        try content.drawText(shown, x + @max(0, (w - uw) / 2), line_y, self.font_regular, 7, muted);
+        return line_y;
+    }
+
+    /// `url` without its scheme, cut to fit `max_width` with a trailing
+    /// "..." when too long. The URL is printable ASCII (isPayNowUrl), so
+    /// byte slicing never splits a character.
+    fn displayUrl(buf: []u8, url: []const u8, font: document.Font, size: f32, max_width: f32) []const u8 {
+        const bare = if (std.mem.indexOf(u8, url, "://")) |i| url[i + 3 ..] else url;
+        if (font.measureText(bare, size) <= max_width and bare.len <= buf.len) return bare;
+        const dots = "...";
+        const budget = max_width - font.measureText(dots, size);
+        var n: usize = 0;
+        var width: f32 = 0;
+        while (n < bare.len and n + dots.len < buf.len) : (n += 1) {
+            const cw = font.measureText(bare[n .. n + 1], size);
+            if (width + cw > budget) break;
+            width += cw;
+        }
+        @memcpy(buf[0..n], bare[0..n]);
+        @memcpy(buf[n .. n + dots.len], dots);
+        return buf[0 .. n + dots.len];
     }
 
     fn showBank(self: *const InvoiceRenderer) bool {
@@ -1992,7 +2126,7 @@ pub const InvoiceRenderer = struct {
         var extra_rows: f32 = @floatFromInt(adjustments.len);
         if (!self.data.show_tax and adjustments.len > 0) extra_rows += 1;
         if (self.data.amount_paid != null) extra_rows += 3;
-        if (self.current_y < self.margin_bottom + 160 + extra_rows * 16) {
+        if (self.current_y < self.margin_bottom + 160 + extra_rows * 16 + self.payNowHeight()) {
             try self.startNewPage(content, false);
         }
 
@@ -2095,6 +2229,13 @@ pub const InvoiceRenderer = struct {
             try self.drawRightFit(content, self.money(&bb, balanceDue(self.data.total, paid)), amt_right, amt_width, self.current_y, self.font_bold, self.fontEnumBold(), 10, document.Color.black);
         }
 
+        if (self.payNowUrl()) |url| {
+            // Clear of the TOTAL bar's lower edge (baseline - 5) or the
+            // balance row's descenders.
+            const top = self.current_y - if (self.data.amount_paid != null) @as(f32, 12) else 17;
+            self.current_y = try self.drawPayNow(content, url, total_bar_x, table_right_edge, top);
+        }
+
         if (self.showPaidStamp()) try self.drawPaidStamp(content, self.margin_left, total_y + 6);
     }
 
@@ -2147,7 +2288,7 @@ pub const InvoiceRenderer = struct {
         if (self.data.show_tax) rows += 2;
         if (self.data.irpf_rate != 0 or self.data.irpf_amount != 0) rows += 1;
         if (self.data.amount_paid != null) rows += 3;
-        if (self.current_y - (rows * 17 + 50) < self.margin_bottom + 10) try self.startNewPage(content, false);
+        if (self.current_y - (rows * 17 + 50 + self.payNowHeight()) < self.margin_bottom + 10) try self.startNewPage(content, false);
 
         var y = self.current_y - 4;
         self.totals_top = y;
@@ -2216,6 +2357,10 @@ pub const InvoiceRenderer = struct {
             try content.drawText(bareLabel(self.data.labels.balance_due), lx, y, self.font_bold, 10, ink);
             try content.drawTextRightAligned(self.money(&mb, balanceDue(self.data.total, paid)), right, y, self.font_bold, bold, 10, bal_color);
             y -= 17;
+        }
+
+        if (self.payNowUrl()) |url| {
+            y = try self.drawPayNow(content, url, lx, right, y + 8) - 17;
         }
 
         if (self.showPaidStamp()) try self.drawPaidStamp(content, self.margin_left, total_y + 4);
@@ -3284,5 +3429,137 @@ test "every style draws grouped money; a Spanish number format swaps the marks" 
         try std.testing.expect(contains(es, "4.500,00"));
         try std.testing.expect(contains(es, "2,5 h"));
         try std.testing.expect(contains(es, "12,5%"));
+    }
+}
+
+/// Parse the "/Rect [x1 y1 x2 y2]" of the link annotation whose /URI is
+/// exactly `uri` (unencrypted output only).
+fn linkRectFor(pdf: []const u8, uri: []const u8) ?[4]f32 {
+    var needle_buf: [512]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "/URI ({s})", .{uri}) catch return null;
+    const at = std.mem.indexOf(u8, pdf, needle) orelse return null;
+    const annot = std.mem.lastIndexOf(u8, pdf[0..at], "/Rect [") orelse return null;
+    const close = std.mem.indexOfScalarPos(u8, pdf, annot, ']') orelse return null;
+    var it = std.mem.tokenizeScalar(u8, pdf[annot + 7 .. close], ' ');
+    var out: [4]f32 = undefined;
+    for (&out) |*v| v.* = std.fmt.parseFloat(f32, it.next() orelse return null) catch return null;
+    return out;
+}
+
+test "pay-now URLs: only absolute http(s) with a host" {
+    try std.testing.expect(isPayNowUrl("https://pay.example.com/i/42"));
+    try std.testing.expect(isPayNowUrl("HTTP://example.com"));
+    try std.testing.expect(!isPayNowUrl("javascript:alert(1)"));
+    try std.testing.expect(!isPayNowUrl("file:///etc/passwd"));
+    try std.testing.expect(!isPayNowUrl("mailto:a@b.c"));
+    try std.testing.expect(!isPayNowUrl("//example.com/x"));
+    try std.testing.expect(!isPayNowUrl("https://"));
+    try std.testing.expect(!isPayNowUrl("https:///path"));
+    try std.testing.expect(!isPayNowUrl("https://exa mple.com"));
+    try std.testing.expect(!isPayNowUrl("https://example.com/\n"));
+    try std.testing.expect(!isPayNowUrl("https://ex\xc3\xa4mple.com"));
+    try std.testing.expect(!isPayNowUrl(""));
+}
+
+test "contrastInk picks the legible label colour" {
+    const white = document.Color.white;
+    try std.testing.expectEqual(white, contrastInk(document.Color.fromHex("#1F2937")));
+    try std.testing.expectEqual(white, contrastInk(document.Color.fromHex("#635BFF")));
+    try std.testing.expect(contrastInk(document.Color.fromHex("#FDE68A")).r < 0.2);
+    try std.testing.expect(contrastInk(document.Color.white).r < 0.2);
+}
+
+test "pay-now button: link annotation with the exact URI over the drawn button in every style" {
+    const items = [_]LineItem{.{ .description = "Work", .quantity = 1, .unit_price = 500, .total = 500 }};
+    const url = "https://pay.example.com/i/INV-7?t=abc";
+    for ([_]Theme{ .classic, .squircle, .glass, .minimal, .letterhead }) |theme| {
+        var r = InvoiceRenderer.init(std.testing.allocator, .{
+            .items = &items,
+            .subtotal = 500,
+            .tax_amount = 100,
+            .total = 600,
+            .theme = theme,
+            .primary_color = "#0F766E",
+            .pay_now_url = url,
+            .pay_now_note = "Card, Apple Pay, Google Pay",
+        });
+        defer r.deinit();
+        const pdf = try r.render();
+
+        try std.testing.expect(contains(pdf, "/Subtype /Link"));
+        const rect = linkRectFor(pdf, url) orelse return error.TestExpectedAnnotation;
+        const drawn = r.pay_now_rect orelse return error.TestExpectedButton;
+        // The annotation is exactly the button (to the 2-decimal /Rect precision).
+        try std.testing.expectApproxEqAbs(drawn.x, rect[0], 0.01);
+        try std.testing.expectApproxEqAbs(drawn.y, rect[1], 0.01);
+        try std.testing.expectApproxEqAbs(drawn.x + drawn.w, rect[2], 0.01);
+        try std.testing.expectApproxEqAbs(drawn.y + drawn.h, rect[3], 0.01);
+        try std.testing.expect(drawn.w > 100 and drawn.h > 20);
+
+        // The fill is in the content stream at that rect: a plain `re` for the
+        // square styles, the rounded path's first point for squircle/glass.
+        var rb: [96]u8 = undefined;
+        const square = std.fmt.bufPrint(&rb, "{d:.2} {d:.2} {d:.2} {d:.2} re", .{ drawn.x, drawn.y, drawn.w, drawn.h }) catch unreachable;
+        const rounded = theme == .squircle or theme == .glass;
+        try std.testing.expectEqual(!rounded, contains(pdf, square));
+
+        try std.testing.expect(contains(pdf, "(Pay now) Tj"));
+        try std.testing.expect(contains(pdf, "(Card, Apple Pay, Google Pay) Tj"));
+        try std.testing.expect(contains(pdf, "(pay.example.com/i/INV-7?t=abc) Tj"));
+        // Below the TOTAL, inside the page.
+        try std.testing.expect(drawn.y > r.margin_bottom);
+    }
+}
+
+test "pay-now button: a long URL prints shortened but links in full" {
+    const items = [_]LineItem{.{ .description = "Work", .quantity = 1, .unit_price = 500, .total = 500 }};
+    const url = "https://checkout.example.com/c/pay/cs_live_a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0u1V2w3X4y5Z6#fidkdWxOYHwnPyd1blpxYHZxWjA0";
+    const pdf = try renderForTest(.{ .items = &items, .total = 500, .pay_now_url = url });
+    defer std.testing.allocator.free(pdf);
+    try std.testing.expect(linkRectFor(pdf, url) != null);
+    try std.testing.expect(contains(pdf, "(checkout.example.com/c/pay/"));
+    try std.testing.expect(contains(pdf, "...) Tj"));
+    try std.testing.expect(!contains(pdf, "(checkout.example.com/c/pay/cs_live_a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0u1V2w3X4y5Z6#fidkdWxOYHwnPyd1blpxYHZxWjA0) Tj"));
+}
+
+test "pay-now button: non-http URLs, quotes and paid documents draw nothing" {
+    const items = [_]LineItem{.{ .description = "Work", .quantity = 1, .unit_price = 500, .total = 500 }};
+    for ([_]Theme{ .classic, .squircle, .glass, .minimal, .letterhead }) |theme| {
+        for ([_][]const u8{ "javascript:alert(1)", "ftp://example.com/x", "file:///etc/passwd", "pay.example.com" }) |bad| {
+            var r = InvoiceRenderer.init(std.testing.allocator, .{ .items = &items, .total = 500, .theme = theme, .pay_now_url = bad });
+            defer r.deinit();
+            const pdf = try r.render();
+            try std.testing.expect(r.pay_now_rect == null);
+            try std.testing.expect(!contains(pdf, bad));
+            try std.testing.expect(!contains(pdf, "(Pay now) Tj"));
+        }
+
+        const url = "https://pay.example.com/i/1";
+        const Case = struct { data: InvoiceData };
+        const cases = [_]Case{
+            // PAID IN FULL receipt
+            .{ .data = .{ .document_type = "receipt", .items = &items, .total = 500, .amount_paid = 500, .theme = theme, .pay_now_url = url } },
+            // Forced PAID IN FULL mark on an invoice
+            .{ .data = .{ .items = &items, .total = 500, .paid_stamp = true, .theme = theme, .pay_now_url = url } },
+            // Invoice settled by the amount paid
+            .{ .data = .{ .items = &items, .total = 500, .amount_paid = 500, .theme = theme, .pay_now_url = url } },
+            // A quote asks for no payment
+            .{ .data = .{ .document_type = "quote", .items = &items, .total = 500, .theme = theme, .pay_now_url = url } },
+        };
+        for (cases) |c| {
+            var r = InvoiceRenderer.init(std.testing.allocator, c.data);
+            defer r.deinit();
+            const pdf = try r.render();
+            try std.testing.expect(r.pay_now_rect == null);
+            try std.testing.expect(linkRectFor(pdf, url) == null);
+            try std.testing.expect(!contains(pdf, "(Pay now) Tj"));
+        }
+
+        // A part-paid invoice still shows it, under the balance due.
+        var r = InvoiceRenderer.init(std.testing.allocator, .{ .items = &items, .total = 500, .amount_paid = 200, .theme = theme, .pay_now_url = url, .pay_now_label = "Pay balance" });
+        defer r.deinit();
+        const pdf = try r.render();
+        try std.testing.expect(linkRectFor(pdf, url) != null);
+        try std.testing.expect(contains(pdf, "(Pay balance) Tj"));
     }
 }

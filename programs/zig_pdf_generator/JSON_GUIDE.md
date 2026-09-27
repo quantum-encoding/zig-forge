@@ -287,6 +287,18 @@ Both honour `\n` line breaks (a blank line between paragraphs is kept).
 | `logo_banner` | bool | `false` | The logo **is** the identity block: drawn at `logo_width` x `logo_height` top-left with the company-name text suppressed (the banner usually contains it). Wins over `logo_inline` |
 | `logo_link_url` | string | none | Makes the logo clickable — a link annotation over its drawn bounds |
 
+### Pay-now Button (Totals Area)
+
+A single prominent button directly under the TOTAL (or Balance Due), filled with `primary_color`, label in black or white for contrast, rounded in `squircle`/`glass` and square in `classic`/`minimal`/`letterhead`. A link annotation covers the button exactly and the URL is printed underneath (shortened with `...` when too long) so printed copies still carry it.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `pay_now_url` | string | null | Absolute `http://` or `https://` URL; any other value draws nothing |
+| `pay_now_label` | string | `"Pay now"` | Button text |
+| `pay_now_note` | string | none | Small line under the button (e.g. `"Card, Apple Pay, Google Pay"`) |
+
+Not drawn for `document_type: "quote"`, under a PAID IN FULL mark, or when `amount_paid` covers the total.
+
 ### Payment Button (Clickable Link)
 
 Add a clickable payment button to your invoice that opens a URL when clicked. Works with any payment provider (Stripe, PayPal, GoCardless, etc.) or any URL.
