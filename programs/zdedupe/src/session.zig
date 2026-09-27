@@ -2100,6 +2100,23 @@ pub const Session = struct {
         return self.finishJson(&out);
     }
 
+    /// What could usually go: build output, cache entries, unfinished
+    /// downloads, large untouched files.
+    pub fn spaceSuggest(self: *Session, query_json: []const u8) ?[:0]const u8 {
+        const arena = self.beginCall();
+        const query = std.json.parseFromSliceLeaky(space_mod.SuggestQuery, arena, query_json, .{
+            .ignore_unknown_fields = true,
+        }) catch {
+            self.fail("suggestion query is not valid JSON", .{});
+            return null;
+        };
+        const view = self.spaceView(arena) orelse return null;
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        view.suggest(&json, query) catch |err| return self.spaceFailed(err);
+        return self.finishJson(&out);
+    }
+
     /// Record this scan in the volume's history under `dir` and describe it.
     pub fn spaceHistory(self: *Session, dir: []const u8) ?[:0]const u8 {
         const arena = self.beginCall();

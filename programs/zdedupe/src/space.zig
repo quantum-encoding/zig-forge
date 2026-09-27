@@ -1488,6 +1488,82 @@ pub const LargestQuery = struct {
     limit: usize = 100,
 };
 
+pub const SuggestQuery = struct {
+    /// Folders and files are suggested from below this folder (null with no
+    /// `path`: every scan root); the folder itself is never one.
+    node: ?u32 = null,
+    path: ?[]const u8 = null,
+    /// Items listed per kind, largest first; clamped to `max_suggest`.
+    limit: usize = 50,
+    /// Large and untouched: files not modified for this many days (0: off)
+    /// and holding at least `stale_min_bytes` on disk.
+    stale_days: u32 = 365,
+    stale_min_bytes: u64 = 100 << 20,
+    /// Seconds since the epoch to measure staleness from; null is now.
+    now: ?i64 = null,
+};
+
+/// The kinds a suggestion answer lists, in this order. Keys are part of the
+/// protocol. A folder or file belongs to at most one: the first rule that
+/// claims a folder takes everything below it.
+pub const SuggestKind = enum { build_output, caches, partial_downloads, stale_large_files };
+
+pub const max_suggest: usize = 200;
+
+/// Build output and dependency stores a project's tooling recreates.
+const build_dirs = [_][]const u8{
+    "node_modules", "bower_components", ".zig-cache",    "zig-cache",     "zig-out",
+    "DerivedData",  "__pycache__",      ".next",         ".nuxt",         ".svelte-kit",
+    ".turbo",       ".parcel-cache",    ".tox",          ".mypy_cache",   ".pytest_cache",
+    ".ruff_cache",
+};
+
+/// Build folders whose name is too common to trust alone: each counts only
+/// beside a manifest of the tool that writes it.
+const build_dirs_beside = [_]struct { name: []const u8, manifests: []const []const u8 }{
+    .{ .name = "target", .manifests = &.{ "Cargo.toml", "pom.xml" } },
+    .{ .name = ".build", .manifests = &.{"Package.swift"} },
+};
+
+/// Cache roots. They are suggested entry by entry, not whole: all of
+/// ~/.cache is too coarse a choice, and one entry is often most of it.
+const cache_dirs = [_][]const u8{ ".cache", ".npm", ".pnpm-store" };
+const cache_dirs_in = [_]struct { parent: []const u8, name: []const u8 }{
+    .{ .parent = "Library", .name = "Caches" },
+    .{ .parent = ".cargo", .name = "registry" },
+    .{ .parent = ".gradle", .name = "caches" },
+};
+
+/// Downloads a browser, model hub or torrent client left unfinished. Below
+/// `partial_min_bytes` a `.part` is far more often a program's atomic-write
+/// staging file (a transfer in flight) than an abandoned download.
+const partial_min_bytes: u64 = 1 << 20;
+const partial_suffixes = [_][]const u8{ ".incomplete", ".part", ".partial", ".crdownload", ".opdownload", ".!qb" };
+
+fn isPartialDownload(name: []const u8) bool {
+    for (partial_suffixes) |suffix| {
+        if (name.len > suffix.len and std.ascii.endsWithIgnoreCase(name, suffix)) return true;
+    }
+    return false;
+}
+
+/// Large untouched files worth a second look: installers, archives and disk
+/// images, packages, build files. Photos, videos and documents are what
+/// people keep for years on purpose, and system files are not theirs to
+/// delete, so age alone suggests none of those.
+fn staleCandidate(category: usize) bool {
+    return switch (@as(Category, @enumFromInt(category))) {
+        .archives, .applications, .code, .other => true,
+        .media, .documents, .system => false,
+    };
+}
+
+fn realtimeSeconds() i64 {
+    var ts: libc.timespec = undefined;
+    _ = libc.clock_gettime(.REALTIME, &ts);
+    return @intCast(ts.sec);
+}
+
 pub const max_children: usize = 500;
 pub const max_per_group: usize = 200;
 pub const max_depth: u8 = 3;
@@ -2052,6 +2128,159 @@ pub const View = struct {
             const rec = try self.r.dir(d);
             try self.writeDir(json, d, &rec, self.dirAgg(d, &rec));
         }
+    }
+
+    // --- suggestions -------------------------------------------------------
+
+    const Claim = enum { build, cache };
+
+    /// Whether folder `d` is build output or a cache root, by its name and,
+    /// for the ambiguous names, its parent.
+    fn claimOf(self: *const View, rec: *const DirRecord) !?Claim {
+        const name = try self.r.dirName(rec);
+        // zig-lens-ignore: EQL-FOR-SECRETS directory names, not secrets
+        for (build_dirs) |b| if (std.mem.eql(u8, name, b)) return .build;
+        for (cache_dirs) |c| if (std.mem.eql(u8, name, c)) return .cache;
+        if (rec.parent == no_parent) return null;
+        for (build_dirs_beside) |b| {
+            if (!std.mem.eql(u8, name, b.name)) continue;
+            for (b.manifests) |m| {
+                if (try self.r.directFileNamed(rec.parent, m) != null) return .build;
+            }
+        }
+        const parent = try self.r.dir(rec.parent);
+        const parent_name = try self.r.dirName(&parent);
+        for (cache_dirs_in) |c| {
+            if (std.mem.eql(u8, name, c.name) and std.mem.eql(u8, parent_name, c.parent)) return .cache;
+        }
+        return null;
+    }
+
+    /// One kind's findings: the largest `limit` and what all of them add up to.
+    const Found = struct {
+        heap: TopK,
+        count: u64 = 0,
+        bytes: u64 = 0,
+
+        /// Ids in the heap: 2 * folder, or 2 * file + 1.
+        fn offer(self: *Found, bytes: u64, id: u64) void {
+            self.count += 1;
+            self.bytes += bytes;
+            self.heap.offer(bytes, id);
+        }
+    };
+
+    fn offerDir(self: *const View, found: *Found, d: u32) !void {
+        if (self.removed.dirRemoved(d)) return;
+        const rec = try self.r.dir(d);
+        const bytes = self.dirAgg(d, &rec).bytes;
+        if (bytes == 0) return;
+        if (self.guard.guardsFolder(try self.r.dirPath(self.arena, d))) return;
+        found.offer(bytes, 2 * @as(u64, d));
+    }
+
+    fn offerFile(self: *const View, found: *Found, f: u64, rec: *const FileRecord) !void {
+        if (rec.bytes == 0) return;
+        if (self.guard.protects(try self.r.filePath(self.arena, f))) return;
+        found.offer(rec.bytes, 2 * f + 1);
+    }
+
+    /// Space a person can usually take back, found in one pre-order pass:
+    /// build output and dependency stores, cache entries, unfinished downloads,
+    /// and large files nobody has modified in a long time. What was removed,
+    /// what is protected, and the scan roots are never suggested. The kinds
+    /// never overlap, so their totals add up.
+    pub fn suggest(self: *const View, json: *std.json.Stringify, query: SuggestQuery) !void {
+        const dir = try self.resolve(query.node, query.path);
+        const s = try self.scope(dir);
+        const limit = @min(query.limit, max_suggest);
+        const now = query.now orelse realtimeSeconds();
+        const cutoff: ?i64 = if (query.stale_days == 0) null else now -| @as(i64, query.stale_days) * std.time.s_per_day;
+
+        var found: [std.meta.fields(SuggestKind).len]Found = undefined;
+        for (&found) |*f| f.* = .{ .heap = .{ .items = try self.arena.alloc(TopK.Entry, limit) } };
+        const built = &found[@intFromEnum(SuggestKind.build_output)];
+        const caches = &found[@intFromEnum(SuggestKind.caches)];
+        const partial = &found[@intFromEnum(SuggestKind.partial_downloads)];
+        const stale = &found[@intFromEnum(SuggestKind.stale_large_files)];
+
+        var c = s.dir_start;
+        while (c < s.dir_end) {
+            const rec = try self.r.dir(c);
+            if (self.removed.dirRemoved(c)) {
+                c = rec.subtree_end;
+                continue;
+            }
+            const candidate = rec.parent != no_parent and (s.dir == null or c != s.dir.?);
+            if (candidate) {
+                if (try self.claimOf(&rec)) |claim| {
+                    switch (claim) {
+                        .build => try self.offerDir(built, c),
+                        .cache => {
+                            var child = c + 1;
+                            while (child < rec.subtree_end) {
+                                try self.offerDir(caches, child);
+                                child = (try self.r.dir(child)).subtree_end;
+                            }
+                            for (rec.first_file..rec.first_file + rec.direct_files) |f| {
+                                if (self.removed.fileRemoved(f)) continue;
+                                const file = try self.r.file(f);
+                                try self.offerFile(caches, f, &file);
+                            }
+                        },
+                    }
+                    c = rec.subtree_end;
+                    continue;
+                }
+            }
+            for (rec.first_file..rec.first_file + rec.direct_files) |f| {
+                if (self.removed.fileRemoved(f)) continue;
+                const file = try self.r.file(f);
+                if (isPartialDownload(try self.r.fileName(&file))) {
+                    if (file.bytes >= partial_min_bytes) try self.offerFile(partial, f, &file);
+                } else if (cutoff) |before| {
+                    const untouched = file.mtime > 0 and file.mtime < before;
+                    if (untouched and staleCandidate(file.categoryIndex()) and file.bytes >= query.stale_min_bytes) {
+                        try self.offerFile(stale, f, &file);
+                    }
+                }
+            }
+            c += 1;
+        }
+
+        try json.beginObject();
+        try json.objectField("stale_days");
+        try json.write(query.stale_days);
+        try json.objectField("stale_min_bytes");
+        try json.write(query.stale_min_bytes);
+        try json.objectField("kinds");
+        try json.beginArray();
+        for (&found, 0..) |*f, k| {
+            try json.beginObject();
+            try json.objectField("key");
+            try json.write(@tagName(@as(SuggestKind, @enumFromInt(k))));
+            try json.objectField("count");
+            try json.write(f.count);
+            try json.objectField("bytes");
+            try json.write(f.bytes);
+            try json.objectField("items");
+            try json.beginArray();
+            for (f.heap.sorted()) |entry| {
+                if (entry.id & 1 == 0) {
+                    const d: u32 = @intCast(entry.id / 2);
+                    const rec = try self.r.dir(d);
+                    try self.writeDir(json, d, &rec, self.dirAgg(d, &rec));
+                } else {
+                    const id = entry.id / 2;
+                    const rec = try self.r.file(id);
+                    try self.writeFile(json, id, &rec);
+                }
+            }
+            try json.endArray();
+            try json.endObject();
+        }
+        try json.endArray();
+        try json.endObject();
     }
 
     // --- overview ------------------------------------------------------------
