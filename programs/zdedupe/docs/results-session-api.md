@@ -139,6 +139,36 @@ const char* zdedupe_results_bulk_summary(zdedupe_results* r, const char* filters
 the matching groups. Never sees the unticked list; the UI subtracts it.
 Reads no paths when nothing has been deleted and no text/facet filter is set.
 
+## Keep rules and protected locations
+
+"Every copy but the oldest" is right about content and blind to place: filtered
+to `~/Downloads`, it deletes the copy in `~/Documents` whenever the Downloads
+one is older. So which copy stays is a `KeepSpec` (schema `$defs/KeepSpec`),
+carried by the group query (`keep`, to show each row's keeper and targets),
+the bulk rule (`rule.keep`) and the review call:
+
+```c
+// { filters, excluded, keep, under, limit } -> { groups, files, bytes,
+//   locked, untouched, from: FacetPage }  — where the deleted copies are
+const char* zdedupe_results_bulk_plan(zdedupe_results* r, const char* query_json);
+```
+
+Per group: a pin (the user chose this copy) wins; else the first copy under the
+earliest `prefer_under`; else, with `delete_only_under`, a copy outside those
+folders survives and every copy inside them goes; else `fallback` (oldest,
+newest, shortest path) picks one unprotected copy, outside `avoid_under` while
+possible. `by_type` swaps the preference per extension (photos stay in
+Pictures, PDFs in Documents).
+
+Protected locations are never deleted from — by the rule, by a hand-ticked
+path, or as part of a folder — and the built-in list cannot be switched off:
+OS roots, per-user app data, repository stores (`.git` anywhere in a path),
+packages (`.app`, `.framework`, photo libraries) and game libraries. A host
+adds its own with `zdedupe_results_set_protected` and lists them all with
+`zdedupe_results_protected`. A protected copy only stands in for the survivor
+under `delete_only_under`; elsewhere a system copy does not make a project's
+own copy expendable. Code: `src/keep.zig`, `src/protect.zig`.
+
 ## Delete
 
 ```c

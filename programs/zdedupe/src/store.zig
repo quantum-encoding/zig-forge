@@ -24,6 +24,8 @@
 //!     OVERLAPS     Overlap[]       overlapping directory pairs
 //!     ONLY_PATHS   OnlyPath[]      "exists only on this side" paths
 //!     STRINGS      u8[]            path bytes, referenced as (offset, len)
+//!     SPACE        blob            a disk-space scan's folder tree (space.zig),
+//!                                  behind `Header.space`; absent otherwise
 //!
 //! String offsets are relative to the start of STRINGS. Record layouts are
 //! `extern struct`s with explicit padding and comptime-checked sizes, and are
@@ -44,6 +46,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("types.zig");
 const dirs = @import("dirs.zig");
+const space = @import("space.zig");
 const libc = std.c;
 
 comptime {
@@ -101,7 +104,10 @@ pub const Header = extern struct {
     dirs_incomplete: u64 = 0,
 
     sections: [section_count]Section = @splat(.{}),
-    reserved: [16]u8 = @splat(0),
+    /// A disk-space scan's tree (space.zig): offset and length in bytes, or
+    /// zeros when the scan was not one. Readers that predate it saw these
+    /// bytes as reserved zeros, which is still what a duplicate scan writes.
+    space: Section = .{},
 };
 
 pub const Group = extern struct {
@@ -198,6 +204,8 @@ pub const Source = struct {
     failed_paths: u64 = 0,
     analysis: ?*const dirs.Analysis = null,
     algorithm: types.Config.HashAlgorithm = .blake3,
+    /// A disk-space scan's tree, written after STRINGS.
+    space: ?*const space.Tree = null,
 };
 
 pub const WriteError = error{
@@ -381,6 +389,8 @@ fn writeAll(out: *FileWriter, source: Source) WriteError!void {
     if (out.offset - strings_start != strings.next) return error.WriteFailed;
     endSection(out, &header, .strings, strings.next);
 
+    if (source.space) |tree| header.space = try space.writeBlob(out, tree);
+
     try out.flush();
     header.file_size = out.offset;
     try out.rewriteHeader(std.mem.asBytes(&header));
@@ -447,14 +457,14 @@ fn nowSeconds() i64 {
 }
 
 /// Buffered, offset-tracking writer over a raw fd.
-const FileWriter = struct {
+pub const FileWriter = struct {
     fd: c_int,
     /// Logical offset: bytes accepted so far, buffered or not.
     offset: u64 = 0,
     used: usize = 0,
     buf: [64 * 1024]u8 = undefined,
 
-    fn write(self: *FileWriter, bytes: []const u8) WriteError!void {
+    pub fn write(self: *FileWriter, bytes: []const u8) WriteError!void {
         var rest = bytes;
         while (rest.len > 0) {
             if (self.used == self.buf.len) try self.flush();
@@ -466,13 +476,13 @@ const FileWriter = struct {
         self.offset += bytes.len;
     }
 
-    fn alignTo(self: *FileWriter, comptime alignment: u64) WriteError!void {
+    pub fn alignTo(self: *FileWriter, comptime alignment: u64) WriteError!void {
         const zeros: [alignment]u8 = @splat(0);
         const remainder = self.offset % alignment;
         if (remainder != 0) try self.write(zeros[0..@intCast(alignment - remainder)]);
     }
 
-    fn flush(self: *FileWriter) WriteError!void {
+    pub fn flush(self: *FileWriter) WriteError!void {
         var written: usize = 0;
         while (written < self.used) {
             const n = libc.write(self.fd, self.buf[written..].ptr, self.used - written);
@@ -488,10 +498,15 @@ const FileWriter = struct {
 
     /// Overwrite the header at offset 0. Call after `flush`.
     fn rewriteHeader(self: *FileWriter, bytes: []const u8) WriteError!void {
+        return self.rewriteAt(bytes, 0);
+    }
+
+    /// Overwrite bytes already written at `at`. Call after `flush`.
+    pub fn rewriteAt(self: *FileWriter, bytes: []const u8, at: u64) WriteError!void {
         std.debug.assert(self.used == 0);
         var written: usize = 0;
         while (written < bytes.len) {
-            const n = libc.pwrite(self.fd, bytes[written..].ptr, bytes.len - written, @intCast(written));
+            const n = libc.pwrite(self.fd, bytes[written..].ptr, bytes.len - written, @intCast(at + written));
             if (n < 0) {
                 if (libc.errno(n) == .INTR) continue;
                 return error.WriteFailed;
@@ -606,7 +621,27 @@ pub const Reader = struct {
                 return reject(why, .a_section_lies_outside_the_file);
             }
         }
+        if (header.space.count > 0) {
+            const offset = std.math.cast(usize, header.space.offset) orelse
+                return reject(why, .a_section_lies_outside_the_file);
+            const len = std.math.cast(usize, header.space.count) orelse
+                return reject(why, .a_section_lies_outside_the_file);
+            const end = std.math.add(usize, offset, len) catch
+                return reject(why, .a_section_lies_outside_the_file);
+            if (offset < header_size or offset % 8 != 0 or end > bytes.len) {
+                return reject(why, .a_section_lies_outside_the_file);
+            }
+        }
         return .{ .bytes = bytes, .header = header };
+    }
+
+    /// The disk-space blob, when the store holds one (validated by the caller
+    /// with `space.Reader.init`).
+    pub fn spaceBytes(self: *const Reader) ?[]const u8 {
+        const section = self.header.space;
+        if (section.count == 0) return null;
+        const start: usize = @intCast(section.offset);
+        return self.bytes[start..][0..@intCast(section.count)];
     }
 
     pub fn count(self: *const Reader, id: SectionId) usize {

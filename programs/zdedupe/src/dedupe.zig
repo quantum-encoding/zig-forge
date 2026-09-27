@@ -264,38 +264,7 @@ pub const DupeFinder = struct {
     /// copy. Compared by canonical path, so a symlinked spelling of a root is
     /// caught too. Caller frees the slice (not the strings).
     fn coveringRoots(self: *DupeFinder, paths: []const []const u8) ![]const []const u8 {
-        const canonical = try self.allocator.alloc(?[]u8, paths.len);
-        @memset(canonical, null);
-        defer {
-            for (canonical) |c| if (c) |owned| self.allocator.free(owned);
-            self.allocator.free(canonical);
-        }
-        for (paths, canonical) |path, *slot| {
-            slot.* = try canonicalPath(self.allocator, path);
-        }
-
-        var kept: std.ArrayListUnmanaged([]const u8) = .empty;
-        errdefer kept.deinit(self.allocator);
-
-        outer: for (paths, 0..) |path, i| {
-            // Unresolvable (missing, unreadable): keep it so the walk fails
-            // and the failure is counted where callers already look for it.
-            const mine = canonical[i] orelse {
-                try kept.append(self.allocator, path);
-                continue;
-            };
-            for (canonical, 0..) |maybe_other, j| {
-                const other = maybe_other orelse continue;
-                if (i == j) continue;
-                // zig-lens-ignore: EQL-FOR-SECRETS filesystem paths, not secrets
-                const same = std.mem.eql(u8, mine, other);
-                // Of two identical roots the first one wins.
-                if (same and j < i) continue :outer;
-                if (!same and isInside(mine, other)) continue :outer;
-            }
-            try kept.append(self.allocator, path);
-        }
-        return kept.toOwnedSlice(self.allocator);
+        return coveringRootsOf(self.allocator, paths);
     }
 
     const SizeGroup = struct {
@@ -578,6 +547,42 @@ pub const DupeFinder = struct {
 
 /// Canonical absolute form of `path` (symlinks resolved), or null if it cannot
 /// be resolved. Caller frees.
+/// See `DupeFinder.coveringRoots`; shared with the disk-space scan.
+pub fn coveringRootsOf(allocator: std.mem.Allocator, paths: []const []const u8) ![]const []const u8 {
+    const canonical = try allocator.alloc(?[]u8, paths.len);
+    @memset(canonical, null);
+    defer {
+        for (canonical) |c| if (c) |owned| allocator.free(owned);
+        allocator.free(canonical);
+    }
+    for (paths, canonical) |path, *slot| {
+        slot.* = try canonicalPath(allocator, path);
+    }
+
+    var kept: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer kept.deinit(allocator);
+
+    outer: for (paths, 0..) |path, i| {
+        // Unresolvable (missing, unreadable): keep it so the walk fails
+        // and the failure is counted where callers already look for it.
+        const mine = canonical[i] orelse {
+            try kept.append(allocator, path);
+            continue;
+        };
+        for (canonical, 0..) |maybe_other, j| {
+            const other = maybe_other orelse continue;
+            if (i == j) continue;
+            // zig-lens-ignore: EQL-FOR-SECRETS filesystem paths, not secrets
+            const same = std.mem.eql(u8, mine, other);
+            // Of two identical roots the first one wins.
+            if (same and j < i) continue :outer;
+            if (!same and isInside(mine, other)) continue :outer;
+        }
+        try kept.append(allocator, path);
+    }
+    return kept.toOwnedSlice(allocator);
+}
+
 fn canonicalPath(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);

@@ -26,6 +26,10 @@ pub const FileEntry = struct {
     /// Hard-link count from the walk (0 = unknown); decides which entries can
     /// share an inode.
     nlink: u32 = 0,
+    /// Bytes on disk (allocated blocks); see `pstat.Stat.allocated`.
+    allocated: u64 = 0,
+    /// A cloud placeholder whose content is not on disk (macOS).
+    dataless: bool = false,
 
     pub fn deinit(self: *FileEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
@@ -285,6 +289,14 @@ pub const Config = struct {
         ".s3cfg",
         ".env",
         ".envrc",
+        // AI agents keep API keys and OAuth tokens beside their session logs.
+        ".codex",
+        ".claude",
+        ".claude.json",
+        ".gemini",
+        // Shell history holds whatever secrets were ever typed on a command line.
+        ".zsh_history",
+        ".bash_history",
     };
 
     pub const HashAlgorithm = enum {

@@ -32,7 +32,10 @@ typedef struct zdedupe_ctx zdedupe_ctx;
  */
 typedef enum {
     ZDEDUPE_MODE_FIND_DUPLICATES = 0,
-    ZDEDUPE_MODE_COMPARE_FOLDERS = 1
+    ZDEDUPE_MODE_COMPARE_FOLDERS = 1,
+    /* Where the disk went: walk and size every folder, hash nothing. Result
+     * store only (zdedupe_run_to_file); see "Disk space" below. */
+    ZDEDUPE_MODE_DISK_SPACE = 2
 } zdedupe_mode;
 
 /* === Context Management === */
@@ -69,7 +72,8 @@ int zdedupe_add_path(zdedupe_ctx* ctx, const char* path);
  * Set operation mode
  *
  * @param ctx  Context handle
- * @param mode ZDEDUPE_MODE_FIND_DUPLICATES or ZDEDUPE_MODE_COMPARE_FOLDERS
+ * @param mode ZDEDUPE_MODE_FIND_DUPLICATES, ZDEDUPE_MODE_COMPARE_FOLDERS or
+ *             ZDEDUPE_MODE_DISK_SPACE. Any other value leaves the mode as it was.
  */
 void zdedupe_set_mode(zdedupe_ctx* ctx, zdedupe_mode mode);
 
@@ -270,6 +274,18 @@ void zdedupe_cancel(zdedupe_ctx* ctx);
  *
  * The file is created with mode 0600, written to "<path>.partial" and renamed
  * into place, so an existing store at `path` survives any failure.
+ *
+ * In ZDEDUPE_MODE_DISK_SPACE the store holds the scanned folder tree instead
+ * of duplicate groups (read it with the zdedupe_results_space_* calls). The
+ * walk keeps the duplicate scan's scoping - same volume, app libraries and
+ * Steam skipped, credential excludes and added excludes honoured, hidden
+ * files as set - but ignores zdedupe_use_default_excludes: build output and
+ * dependency folders are exactly what a disk-space view has to show. It opens
+ * no file, never follows a symlink, and on macOS never makes the system
+ * download an iCloud placeholder (a folder that is only in the cloud is
+ * reported unreadable). Scanning "/" on macOS also covers the Data volume
+ * behind the firmlinks (/Users, /Applications, ...), counted once. Progress
+ * phases: scanning, analyzing (building the tree), writing, done.
  *
  * @return 0 ok, 1 failed, 2 cancelled, 3 unsupported (compare-folders mode)
  */
@@ -504,18 +520,39 @@ const char* zdedupe_results_overview(zdedupe_results* r);
  * One page of duplicate groups.
  *
  * Query: { "offset": 0, "limit": 50, "sort": "savings"|"size"|"count",
- *          "filters": {...}, "bulk": {...} | null }
- * "limit" is clamped to 200. "bulk" is the select-all rule in force: the
+ *          "filters": {...}, "bulk": {...} | null, "keep": KeepSpec }
+ * "limit" is clamped to 200. "bulk" is the select-all rule's filters: the
  * rows it covers come back marked, so a UI shows them selected without ever
- * holding the selection as a list.
+ * holding the selection as a list. "keep" decides which copy of each group
+ * stays (see KeepSpec below); omitted, the oldest does.
  *
  * Page: { "rows": [GroupRow], "total": N, "offset": 0 }, where a GroupRow is
  * { "hash": "64 hex", "count": 3, "size": 1048576, "savings": 2097152,
- *   "files": ["/oldest", ...], "mtimes": [ms, ...], "bulk": false }
+ *   "files": ["/oldest", ...], "mtimes": [ms, ...], "keeper": "/path",
+ *   "locked": [bool, ...], "targets": [bool, ...], "bulk": false }
  *
  * "count" and "savings" are over the copies that are still ALIVE (the
- * removed overlay applied), "files" lists at most 50 of them oldest first -
- * index 0 is the keeper - and "bulk" is (alive >= 2 && the rule matches).
+ * removed overlay applied), "files" lists at most 50 of them oldest first,
+ * and "bulk" is (alive >= 2 && the rule matches). "keeper" is the copy
+ * "keep" leaves in place, which may lie past the listed 50. "locked" and
+ * "targets" run parallel to "files": a locked copy is in a protected
+ * location and is never deleted; a target is one the rule would delete.
+ *
+ * KeepSpec (every field optional):
+ *   { "prefer_under": ["/dir", ...],   kept: first copy under the earliest
+ *     "avoid_under": ["/dir", ...],    kept only if nothing else is left
+ *     "fallback": "oldest"|"newest"|"shortest_path",
+ *     "by_type": [{ "ext": ".jpg", "prefer_under": [...],
+ *                   "avoid_under": [...], "fallback": "..." }],
+ *     "pins": [{ "hash": "64 hex", "path": "/the/copy/to/keep" }],
+ *     "delete_only_under": ["/dir", ...] }
+ * Per group: a pinned copy is kept; else the first copy under the earliest
+ * prefer_under; else, with delete_only_under set, a copy outside those
+ * folders survives and every copy inside them is a target; else one
+ * unprotected copy is kept by fallback, outside avoid_under while possible.
+ * "by_type" replaces prefer_under/avoid_under/fallback for groups whose
+ * oldest copy has that extension. Protected copies are always kept; only
+ * under delete_only_under do they stand in for the survivor.
  * A group with fewer than two alive copies is not a row at all. Order:
  * "savings" is the store's own order until something has been deleted and
  * live savings after that; "size" and "count" descending. The sort is
@@ -527,9 +564,54 @@ const char* zdedupe_results_groups(zdedupe_results* r, const char* query_json);
  * What the select-all rule covers, as three numbers:
  * { "groups": N, "files": M, "bytes": B } - every copy but the oldest of
  * each matching group. This never sees the unticked list; subtract it in the
- * UI. Takes a bare filters object.
+ * UI. Takes a bare filters object. Protected copies are not counted.
  */
 const char* zdedupe_results_bulk_summary(zdedupe_results* r, const char* filters_json);
+
+/**
+ * What a delete carrying this rule would do, for review before it runs.
+ *
+ * Query: { "filters": {...}, "excluded": ["/unticked", ...],
+ *          "keep": KeepSpec, "under": "/dir" | null, "limit": 20 }
+ * "filters" is required. "under" is where the location breakdown starts;
+ * null starts at the scan root (or the roots, when there are several).
+ *
+ * Answer: { "groups": N, "files": M, "bytes": B, "locked": L,
+ *           "untouched": U, "from": FacetPage }
+ * "groups" lose at least one copy; "untouched" match but lose nothing;
+ * "locked" counts protected copies in the matching groups, all of which
+ * stay; "from" buckets the deleted copies by location, as
+ * zdedupe_results_facets does ("count" is copies, "bytes" their size).
+ */
+const char* zdedupe_results_bulk_plan(zdedupe_results* r, const char* query_json);
+
+/**
+ * Protected locations: nothing in them is deleted - not by a rule, not by a
+ * hand-ticked path, not as part of a folder. Built in, and not optional:
+ * operating-system roots (/System, /Applications, /usr, /etc, ...), per-user
+ * application data (~/Library, flatpak), repository stores (.git and the
+ * like, anywhere in a path), packages (.app, .framework, photo libraries -
+ * any directory so named above a file) and game launcher libraries.
+ *
+ * set_protected replaces the host's own additions with a JSON array of
+ * absolute folders; 0 ok, -1 invalid (see last_error). A folder delete is
+ * also refused when the folder holds a protected root.
+ *
+ * protected returns { "system": [...], "home": [...], "stores": [...],
+ * "packages": [...], "user": [...] } for a UI to show.
+ */
+int zdedupe_results_set_protected(zdedupe_results* r, const char* paths_json);
+
+/**
+ * The home directory whose Library (and other per-user roots) is protected.
+ * Defaults to the user database's entry, not $HOME: inside the macOS App
+ * Sandbox $HOME is the app's container. For a host that knows better, such
+ * as a test harness whose temporary files live in that container; the system
+ * roots, stores and packages stay protected whatever it says. 0 ok, -1 not
+ * an absolute path.
+ */
+int zdedupe_results_set_home(zdedupe_results* r, const char* path);
+const char* zdedupe_results_protected(zdedupe_results* r);
 
 /** Snapshot of a running delete. */
 typedef struct {
@@ -561,7 +643,8 @@ typedef int (*zdedupe_trash_fn)(void* user, const char* const* paths, size_t cou
  * thread and stop it with zdedupe_results_cancel_delete.
  *
  * selection_json:
- *   { "rule": { "filters": {...}, "excluded": ["/path", ...] } | null,
+ *   { "rule": { "filters": {...}, "excluded": ["/path", ...],
+ *               "keep": KeepSpec } | null,
  *     "extra": ["/hand/picked", ...] }
  *
  * use_trash = false deletes PERMANENTLY (unlink) and verifies by content;
@@ -578,11 +661,14 @@ typedef int (*zdedupe_trash_fn)(void* user, const char* const* paths, size_t cou
  * first, so ticking every copy of a group - the easiest mistake to make -
  * deletes none of them. Whatever fails is skipped and counted.
  *
- * Plan: for each group in the rule's order, the targets are every alive copy
- * after the oldest alive one, minus "excluded"; hand-picks merge into the
- * same group's targets before any judgement. A hand-picked path that is in
- * no group of these results fails with "not a duplicate in the current
- * results" and is never touched.
+ * Plan: for each group in the rule's order, the targets are the alive copies
+ * its KeepSpec does not keep (see zdedupe_results_groups; omitted, every
+ * copy but the oldest), minus "excluded"; hand-picks merge into the same
+ * group's targets before any judgement. A hand-picked path that is in no
+ * group of these results fails with "not a duplicate in the current
+ * results" and is never touched. A target in a protected location (see
+ * zdedupe_results_set_protected) fails with "is in a protected location",
+ * whether a rule or a hand put it there.
  *
  * Report: { "deleted": N, "freed_bytes": B, "skipped_changed": N,
  *           "failed_count": N, "failed": [["/path","reason"], ...] (<= 20),
@@ -640,15 +726,18 @@ const char* zdedupe_results_removed_status(zdedupe_results* r);
 /**
  * One page of identical sets, largest reclaimable first.
  *
- * Query: { "offset": 0, "limit": 50, "filters": {...} } - no sort, because
- * the store already holds them in that order; "limit" is clamped to 200. For
- * a set, filters' "min_bytes" is the size of ONE copy.
+ * Query: { "offset": 0, "limit": 50, "filters": {...},
+ *          "sort": "reclaim"|"size"|"count" } - descending and stable;
+ * "reclaim" (the default) is the store's own order until something is
+ * deleted, and live after that. "limit" is clamped to 200. For a set,
+ * filters' "min_bytes" is the size of ONE copy.
  *
  * Page: { "rows": [SetRow], "total": N, "offset": 0 }, where a SetRow is
  * { "index": 0, "digest": "64 hex", "count": 3, "common_parent": "/a",
  *   "file_count": 261, "bytes": 2086912, "reclaimable": 4173824,
  *   "dirs": [{ "path": "/a/proj", "newest_mtime": ms,
- *              "skipped_entries": 0 }, ...] }
+ *              "skipped_entries": 0, "locked": false }, ...] }
+ * ("locked": the folder is, or holds, a protected location.)
  *
  * "count" is the copies still ALIVE and "reclaimable" is bytes * (count - 1)
  * over those - an upper bound, since copies that are hard links of one
@@ -771,6 +860,96 @@ const char* zdedupe_results_delete_folders(zdedupe_results* r, const char* items
  * a person, not answers for a UI.
  */
 int zdedupe_results_export(zdedupe_results* r, const char* format, const char* path);
+
+/* === Disk space ===
+ *
+ * Over a store written in ZDEDUPE_MODE_DISK_SPACE. Every folder carries what
+ * its whole subtree adds up to; a host asks for one level at a time and gets
+ * the top N of it plus one "everything else" remainder, so a folder holding a
+ * million files costs the UI a few hundred rows. Shapes are in
+ * schema/results-session.schema.json ($defs/Space*); the calls fail (NULL, with
+ * last_error "these results are not a disk-space scan") on a duplicate store.
+ *
+ * Sizes: "bytes" is space on disk (allocated blocks) - a cloud placeholder
+ * counts ~0, a sparse file what it occupies; "logical" is the apparent size.
+ * Every inode counts once (of several hard links, the lexicographically
+ * smallest path holds the bytes). APFS clones are counted in full.
+ *
+ * Types: media, documents, code, archives, applications, system, other. The
+ * extension decides, except inside a folder that decides for everything it
+ * holds: an app bundle is applications, node_modules/.git/DerivedData and the
+ * like are code, OS trees and ~/Library/Caches|Logs are system.
+ *
+ * Folder and file ids are stable for the life of the store. Everything the
+ * removed overlay holds (see zdedupe_results_space_trash) is left out of every
+ * answer, and folder totals are corrected for it.
+ */
+
+/**
+ * The scan as a whole -> SpaceOverview: roots, volume (mount, total, free,
+ * available - as scanned; on macOS the APFS container's figures), totals
+ * (files, dirs, bytes, logical, cloud-only files, hard links, excluded
+ * entries, errors, unreadable folders), bytes and files per type.
+ */
+const char* zdedupe_results_space_overview(zdedupe_results* r);
+
+/**
+ * One folder's contents -> SpaceChildren. Query (SpaceChildrenQuery):
+ *   { "node": id | null, "path": "/abs" | null,
+ *     "by": "folder" | "type" | "size", "limit": 150, "per_group": 40,
+ *     "depth": 1, "nested_limit": 16 }
+ * No node and no path means the scan root (every root, as a node of kind
+ * "all", when there were several). "folder": one group, the folder's
+ * subfolders and files merged largest first, `limit` of them (<= 500).
+ * "type": every file below the folder grouped by type, largest group first;
+ * "size": grouped by size band (over_1g, 100m_1g, 10m_100m, 1m_10m,
+ * under_1m); each group lists its `per_group` (<= 200) largest files. With
+ * "depth" 2 or 3 (folder view), each folder item also carries "children" -
+ * its own `nested_limit` (<= 60) largest items - and "children_rest", nesting
+ * again while depth remains, for a map that draws folders inside folders; at
+ * most 3000 nested items per answer. Every
+ * group carries a "rest" {count, bytes} for what it did not list. "trail"
+ * leads from the root to the folder, for a breadcrumb. Fails when the folder
+ * is not in these results or was removed.
+ */
+const char* zdedupe_results_space_children(zdedupe_results* r, const char* query_json);
+
+/**
+ * Largest items below a folder -> SpaceLargest. Query (SpaceLargestQuery):
+ *   { "node"|"path" as above, "kind": "files" | "folders",
+ *     "type": "media" ... | null, "limit": 100 (<= 200) }
+ * Folders rank by their whole size and leave out wrappers: a folder whose
+ * largest subfolder holds 90% or more of it is represented by that subfolder.
+ */
+const char* zdedupe_results_space_largest(zdedupe_results* r, const char* query_json);
+
+/**
+ * Record this scan in its volume's history, kept as one JSON file per volume
+ * in `history_dir` (a folder the host owns; created files are 0600), and
+ * describe that history -> SpaceHistory: every recorded scan's totals, oldest
+ * first (at most 30), and - against the latest earlier scan of the same roots
+ * - the folders (down to three levels below a root) that grew most and
+ * shrank most. Idempotent: a scan is recorded once however often this is
+ * called. Uses the figures as scanned, not corrected for later removals.
+ */
+const char* zdedupe_results_space_history(zdedupe_results* r, const char* history_dir);
+
+/**
+ * Move folders and files to the Trash through `trash_fn` (the same host
+ * callback zdedupe_results_delete uses). There is no permanent delete here.
+ * items_json (SpaceTrashItems): { "items": [{"kind":"dir"|"file","id":N}, ...] }
+ * (at most 10,000). Each is checked first: a file must still be a regular
+ * file with the scanned size and modification time (else skipped_changed); a
+ * folder must still be a folder, not a link; nothing that is, or holds, a
+ * protected location goes (zdedupe_results_protected), and a scan root never
+ * goes whole. Anything inside a folder that goes is left to it. Blocks until
+ * done; progress and cancel as for zdedupe_results_delete. Returns a
+ * DeleteReport; freed_bytes counts space on disk, and 0 for a file with other
+ * hard links (they keep its blocks). What went joins the removed overlay, so
+ * every space answer corrects itself without a rescan.
+ */
+const char* zdedupe_results_space_trash(zdedupe_results* r, const char* items_json,
+                                        zdedupe_trash_fn trash_fn, void* user);
 
 /* === Utilities === */
 

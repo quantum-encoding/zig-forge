@@ -117,11 +117,16 @@ pub fn build(b: *std.Build) void {
         "src/compare.zig",
         "src/report.zig",
         "src/filters.zig",
+        "src/protect.zig",
+        "src/keep.zig",
         "src/removed.zig",
         "src/session.zig",
         // The results session end to end: the real engine into a real store,
         // then the session over it (see the file header).
         "src/session_test.zig",
+        // Disk-space scans end to end, the same way.
+        "src/space.zig",
+        "src/space_test.zig",
         "src/lib.zig",
         // External anchors + end-to-end contract tests (see file header).
         "src/tier1_anchors.zig",
