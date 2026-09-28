@@ -105,7 +105,8 @@ void zdedupe_set_include_hidden(zdedupe_ctx* ctx, bool include);
  * Set whether to follow symbolic links
  *
  * @param ctx    Context handle
- * @param follow true to follow symlinks (default: false)
+ * @param follow true to follow symlinks (default: false). Ignored on Windows,
+ *               where symlinks and junctions are never followed.
  */
 void zdedupe_set_follow_symlinks(zdedupe_ctx* ctx, bool follow);
 

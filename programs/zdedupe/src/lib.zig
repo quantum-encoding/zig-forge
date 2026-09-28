@@ -169,7 +169,9 @@ pub export fn zdedupe_set_include_hidden(ctx: ?*ZDedupeContext, include: bool) v
 pub export fn zdedupe_set_follow_symlinks(ctx: ?*ZDedupeContext, follow: bool) void {
     const c = ctx orelse return;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
-    internal.config.follow_symlinks = follow;
+    // Windows: links and junctions are never followed (see sys_windows.zig);
+    // their targets still count toward a folder's identity.
+    internal.config.follow_symlinks = follow and builtin.os.tag != .windows;
 }
 
 pub export fn zdedupe_set_threads(ctx: ?*ZDedupeContext, count: u32) void {

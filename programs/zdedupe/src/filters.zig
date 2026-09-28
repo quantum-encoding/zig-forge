@@ -398,7 +398,7 @@ test "roots and parents: drive and share roots on Windows" {
     try t.expectEqualStrings("C:/Users", parentDir("C:/Users/rich").?);
     try t.expect(parentDir("C:/") == null);
     try t.expectEqualStrings("C:/", trimSep("C:/"));
-    try t.expectEqual(@as(usize, 14), rootLen("//server/share/dir"));
+    try t.expectEqual(@as(usize, 15), rootLen("//server/share/dir"));
     try t.expectEqualStrings("//server/share/", parentDir("//server/share/dir").?);
     try t.expect(isAtOrUnder("C:/Users/rich", "C:/"));
     try t.expect(!isAtOrUnder("C:/Usersx", "C:/Users"));

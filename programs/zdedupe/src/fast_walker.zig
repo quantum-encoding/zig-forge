@@ -914,6 +914,10 @@ pub const FastWalker = struct {
                 const first = primary.get(.{ .dev = entry.dev, .ino = entry.inode }).?;
                 if (first != i) {
                     entry.link_of = first;
+                    // Two paths reach it, so it has at least two links. Where
+                    // the walk saw no link count (Windows, whose directory
+                    // records carry none), this is how the primary learns it.
+                    self.files.items[first].nlink = @max(self.files.items[first].nlink, 2);
                     self.stats.hard_links_skipped += 1;
                 }
             }

@@ -173,7 +173,11 @@ test "a file that cannot be opened is excluded, not grouped" {
 
 /// Filename containing every character that breaks naive JSON emission, plus
 /// an HTML payload. Both are legal on APFS and ext4.
-const hostile_name = "evil\" ,\"injected\":1, \\ <script>alert(1)<x>.txt";
+/// Everything that needs escaping in JSON, CSV and HTML. Windows forbids
+/// `"`, `\\`, `<` and `>` in names, so there the fixture carries what NTFS
+/// allows, and the assertions that need a quote or a tag run elsewhere.
+const hostile_name = if (is_windows) "evil' ,'injected'=1, amp&amp; {x};alert(1).txt" else "evil\" ,\"injected\":1, \\ <script>alert(1)<x>.txt";
+const is_windows = @import("builtin").os.tag == .windows;
 
 fn buildFixture(scratch: *Scratch) !void {
     // Two byte-identical files + one different, all above Config.min_size.
@@ -335,6 +339,9 @@ test "external contract: the compare JSON report parses" {
 }
 
 test "the HTML report escapes a filename carrying a script tag" {
+    // NTFS names cannot carry `<` or `>`; the escaping itself is platform
+    // independent and runs on Linux and macOS.
+    if (is_windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     var scratch = try Scratch.init(allocator, "html");
     defer scratch.deinit();
@@ -362,6 +369,8 @@ test "the HTML report escapes a filename carrying a script tag" {
 // ===========================================================================
 
 test "follow_symlinks reaches files behind a symlinked directory" {
+    // Windows never follows links (zdedupe_set_follow_symlinks is ignored there).
+    if (is_windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     var scratch = try Scratch.init(allocator, "symlink-follow");
     defer scratch.deinit();
@@ -909,7 +918,7 @@ test "external contract: the directories JSON section parses with the documented
     var scratch = try Scratch.init(allocator, "dirs-json");
     defer scratch.deinit();
 
-    const hostile_dir = "dir\" ,\"injected\":1, \\ <b>";
+    const hostile_dir = if (is_windows) "dir' ,'injected'=1, & {b}" else "dir\" ,\"injected\":1, \\ <b>";
     try buildProject(&scratch, "p");
     try buildProject(&scratch, "q");
     try buildProject(&scratch, hostile_dir);
@@ -1094,7 +1103,7 @@ test "the result store holds exactly what the JSON report of the same scan says"
     var scratch = try Scratch.init(allocator, "store");
     defer scratch.deinit();
 
-    const hostile_dir = "dir\" ,\"injected\":1, \\ <b>";
+    const hostile_dir = if (is_windows) "dir' ,'injected'=1, & {b}" else "dir\" ,\"injected\":1, \\ <b>";
     try buildProject(&scratch, "p");
     try buildProject(&scratch, "q");
     try buildProject(&scratch, hostile_dir);

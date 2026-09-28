@@ -926,6 +926,10 @@ test "an overflowed overlay asks for a rescan, through the session and after reo
 // ===========================================================================
 
 test "a name that is not UTF-8 pages, spells and deletes correctly" {
+    // Windows names are UTF-16, so no name there is a stray 0xE9 byte (the
+    // equivalent, an unpaired surrogate, arrives as WTF-8 and is not what
+    // this test builds).
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     if (@import("builtin").os.tag.isDarwin()) {
         // APFS validates file names and refuses invalid UTF-8, so the tree
         // this needs cannot be built here. The byte round trip that carries
@@ -1035,7 +1039,10 @@ test "export leaves out what was deleted, and escapes a hostile name" {
 
     // A name that breaks naive emission in all three formats at once. No
     // slash: it has to stay one path component.
-    const hostile = "evil\" ,\"injected\":1, \\ <script>alert(1)<x>.bin";
+    // Windows forbids `"`, `\\`, `<`, `>` in names: there the name carries
+    // what NTFS allows, and the checks that need a quote or a tag are skipped.
+    const on_windows = @import("builtin").os.tag == .windows;
+    const hostile = if (on_windows) "evil' ,'injected'=1, amp& {x};alert(1).bin" else "evil\" ,\"injected\":1, \\ <script>alert(1)<x>.bin";
     var fixture = try Fixture.init(gpa, "session-export-hostile", &.{});
     defer fixture.deinit();
     const payload = [_]u8{'h'} ** 700;
@@ -1068,14 +1075,16 @@ test "export leaves out what was deleted, and escapes a hostile name" {
     // The comma and quotes are inside one quoted field, so the row still has
     // five of them: a bare write would have split it.
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, csv, "\n"));
-    try testing.expect(std.mem.indexOf(u8, csv, "\"\"injected\"\"") != null);
+    if (!on_windows) try testing.expect(std.mem.indexOf(u8, csv, "\"\"injected\"\"") != null);
 
     const html_path = try fixture.out.join("hostile.html");
     defer gpa.free(html_path);
     try testing.expect(s.exportTo("html", html_path));
     const html = try readFile(a, html_path);
-    try testing.expect(std.mem.indexOf(u8, html, "<script>") == null);
-    try testing.expect(std.mem.indexOf(u8, html, "&lt;script&gt;") != null);
+    if (!on_windows) {
+        try testing.expect(std.mem.indexOf(u8, html, "<script>") == null);
+        try testing.expect(std.mem.indexOf(u8, html, "&lt;script&gt;") != null);
+    }
 
     // After a delete the group is down to one copy and drops out entirely.
     _ = try parse(a, s.delete("{\"rule\":{\"filters\":{}}}", false, null, null));

@@ -230,6 +230,7 @@ extern "kernel32" fn CreateHardLinkW(link: [*:0]const WCHAR, existing: [*:0]cons
 extern "kernel32" fn CreateSymbolicLinkW(link: [*:0]const WCHAR, target: [*:0]const WCHAR, flags: DWORD) callconv(.winapi) u8;
 extern "kernel32" fn SetEnvironmentVariableW(name: [*:0]const WCHAR, value: ?[*:0]const WCHAR) callconv(.winapi) BOOL;
 extern "kernel32" fn SetFileTime(h: HANDLE, created: ?*const FILETIME, accessed: ?*const FILETIME, written: ?*const FILETIME) callconv(.winapi) BOOL;
+extern "kernel32" fn DeviceIoControl(h: HANDLE, code: DWORD, in_buf: ?*const anyopaque, in_size: DWORD, out_buf: ?*anyopaque, out_size: DWORD, returned: ?*DWORD, ov: ?*OVERLAPPED) callconv(.winapi) BOOL;
 extern "kernel32" fn GetEnvironmentVariableW(name: [*:0]const WCHAR, buf: ?[*]WCHAR, size: DWORD) callconv(.winapi) DWORD;
 
 // ---------------------------------------------------------------------------
@@ -620,12 +621,54 @@ pub fn pread(fd: c_int, buf: [*]u8, n: usize, offset: i64) isize {
     return got;
 }
 
+const FSCTL_GET_REPARSE_POINT: DWORD = 0x000900A8;
+const MAXIMUM_REPARSE_DATA_BUFFER_SIZE = 16 * 1024;
+
+/// Where a symlink or junction points, as stored (its print name, else its
+/// substitute name without the `\\??\\` prefix), in the core's path form.
+/// Links are never followed on Windows; the target still matters because it
+/// is part of a folder's identity. -1 with INVAL for anything but a link.
 pub fn readlink(path: [*:0]const u8, buf: [*]u8, size: usize) isize {
-    // Links are never followed on Windows, so nothing needs their targets.
-    _ = path;
-    _ = buf;
-    _ = size;
-    return failWith(.INVAL);
+    const w = toWide(&wide_buf, std.mem.span(path)) orelse return failWith(.NAMETOOLONG);
+    const h = CreateFileW(w, FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, null, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, null);
+    if (h == INVALID_HANDLE_VALUE) return failLast();
+    defer _ = CloseHandle(h);
+    var data: [MAXIMUM_REPARSE_DATA_BUFFER_SIZE]u8 align(4) = undefined;
+    var got: DWORD = 0;
+    if (DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, null, 0, &data, data.len, &got, null) == 0) {
+        const err = GetLastError();
+        // Not a reparse point at all: not a link.
+        return failWith(if (err == 4390) .INVAL else mapWin32(err));
+    }
+    const tag = std.mem.readInt(u32, data[0..4], .little);
+    // SymbolicLinkReparseBuffer has a Flags word before the names;
+    // MountPointReparseBuffer does not.
+    const names_at: usize = switch (tag) {
+        IO_REPARSE_TAG_SYMLINK => 20,
+        IO_REPARSE_TAG_MOUNT_POINT => 16,
+        else => return failWith(.INVAL),
+    };
+    const sub_off = std.mem.readInt(u16, data[8..10], .little);
+    const sub_len = std.mem.readInt(u16, data[10..12], .little);
+    const print_off = std.mem.readInt(u16, data[12..14], .little);
+    const print_len = std.mem.readInt(u16, data[14..16], .little);
+    const use_print = print_len > 0;
+    const off = names_at + @as(usize, if (use_print) print_off else sub_off);
+    const len = @as(usize, if (use_print) print_len else sub_len);
+    if (off + len > got) return failWith(.INVAL);
+    var name16: [MAXIMUM_REPARSE_DATA_BUFFER_SIZE / 2]WCHAR = undefined;
+    const units = len / 2;
+    for (0..units) |i| name16[i] = std.mem.readInt(u16, data[off + 2 * i ..][0..2], .little);
+    var target = name16[0..units];
+    const nt_prefix = [_]WCHAR{ '\\', '?', '?', '\\' };
+    if (std.mem.startsWith(WCHAR, target, &nt_prefix)) target = target[nt_prefix.len..];
+    if (target.len * 3 > size) return failWith(.NAMETOOLONG);
+    const n = unicode.wtf16LeToWtf8(buf[0..size], target);
+    for (buf[0..n]) |*ch| {
+        if (ch.* == '\\') ch.* = '/';
+    }
+    if (n >= 2 and buf[1] == ':') buf[0] = std.ascii.toUpper(buf[0]);
+    return @intCast(n);
 }
 
 // ---------------------------------------------------------------------------
@@ -948,7 +991,8 @@ pub fn statFd(fd: c_int) ?StatInfo {
 /// `lstat` of `name` inside the directory `dir_fd`. When a DIR stream on that
 /// descriptor has just returned `name`, its directory record answers with no
 /// system call. The record carries no link count, so a file seen this way
-/// reports one link: hard links are not detected on this path.
+/// reports 0 ("not reported"): the walker then checks its file id against
+/// every other file's, which is what finds hard links.
 pub fn statAt(dir_fd: c_int, name: [*:0]const u8) ?StatInfo {
     if (getSlot(dir_fd)) |slot| {
         if (slot.dir) |dir| {
@@ -961,7 +1005,7 @@ pub fn statAt(dir_fd: c_int, name: [*:0]const u8) ?StatInfo {
                     .mode = modeOf(e.attributes, e.reparse_tag),
                     .size = e.size,
                     .mtime_sec = e.mtime,
-                    .nlink = 1,
+                    .nlink = 0,
                     .allocated = e.allocated,
                     .dataless = isDataless(e.attributes),
                 };

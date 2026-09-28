@@ -23,8 +23,20 @@ pub const Scratch = struct {
     /// Create a uniquely-named scratch directory. `label` is only for humans
     /// reading a leftover directory after a crash.
     pub fn init(allocator: std.mem.Allocator, label: []const u8) !Scratch {
-        // Windows has no /tmp: its temporary folder is %TEMP%.
-        const base: []const u8 = if (libc.getenv(if (builtin.os.tag == .windows) "TEMP" else "TMPDIR")) |tmpdir|
+        // Windows has no /tmp, and %TEMP% sits inside AppData, which the core
+        // protects from deletes: scratch trees there could never be cleaned
+        // by the code under test. They go to ZDEDUPE_TEST_TMP, else
+        // C:/zdedupe-tests.
+        const base: []const u8 = if (builtin.os.tag == .windows) blk: {
+            const dir = if (libc.getenv("ZDEDUPE_TEST_TMP")) |d| std.mem.span(d) else "C:/zdedupe-tests";
+            var z_buf: [1024]u8 = undefined;
+            if (dir.len < z_buf.len) {
+                @memcpy(z_buf[0..dir.len], dir);
+                z_buf[dir.len] = 0;
+                _ = libc.mkdir(@ptrCast(&z_buf), 0o700);
+            }
+            break :blk dir;
+        } else if (libc.getenv("TMPDIR")) |tmpdir|
             std.mem.span(tmpdir)
         else
             "/tmp";
@@ -168,7 +180,9 @@ test "hostile filenames survive the scratch helper" {
     var scratch = try Scratch.init(allocator, "hostile");
     defer scratch.deinit();
 
-    const name = "quote\" backslash\\ tag<script>.txt";
+    // Characters that need escaping in the reports; Windows forbids `"`, `\\`,
+    // `<` and `>` in names, so there the hostile set is what NTFS allows.
+    const name = if (builtin.os.tag == .windows) "quote' amp& pct% tag[script] {x}.txt" else "quote\" backslash\\ tag<script>.txt";
     try scratch.writeFile(name, "payload");
     try std.testing.expect(try scratch.exists(name));
 }
