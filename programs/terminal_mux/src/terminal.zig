@@ -250,6 +250,10 @@ pub const Grid = struct {
     cols: u16,
     /// Physical index of logical row 0. Advanced on scroll; never memcpy.
     row_offset: usize = 0,
+    /// A row of `blank_template` cells, so clearing a row (every scroll) is
+    /// one memcpy. Allocated on first use; rebuilt when the template changes.
+    blank: []Cell = &.{},
+    blank_template: ?Cell = null,
 
     const Self = @This();
 
@@ -275,6 +279,24 @@ pub const Grid = struct {
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.cells);
         self.allocator.free(self.wrapped);
+        if (self.blank.len > 0) self.allocator.free(self.blank);
+        self.blank = &.{};
+    }
+
+    /// `len` cells of `template`, from the cached blank row; null when the
+    /// cache cannot be allocated (the caller fills directly).
+    fn blankCells(self: *Self, template: Cell, len: usize) ?[]const Cell {
+        if (self.blank.len < len) {
+            const fresh = self.allocator.alloc(Cell, @max(len, self.cols)) catch return null;
+            if (self.blank.len > 0) self.allocator.free(self.blank);
+            self.blank = fresh;
+            self.blank_template = null;
+        }
+        if (self.blank_template == null or !std.meta.eql(self.blank_template.?, template)) {
+            fillCells(self.blank, template);
+            self.blank_template = template;
+        }
+        return self.blank[0..len];
     }
 
     /// Whether logical row `row` was soft-wrapped (autowrap continuation follows).
@@ -313,12 +335,31 @@ pub const Grid = struct {
         return &self.cells[idx];
     }
 
+    /// Fill `dst` with `template`: one store, then doubling copies. A memset
+    /// of a 16-byte struct compiles to a per-element store loop; memcpy of
+    /// the growing prefix is vectorised.
+    fn fillCells(dst: []Cell, template: Cell) void {
+        if (dst.len == 0) return;
+        dst[0] = template;
+        var filled: usize = 1;
+        while (filled < dst.len) {
+            const n = @min(filled, dst.len - filled);
+            @memcpy(dst[filled..][0..n], dst[0..n]);
+            filled += n;
+        }
+    }
+
     pub fn clearRegion(self: *Self, top: u16, left: u16, bottom: u16, right: u16, template: Cell) void {
+        // A row is contiguous in the ring, so each row's span is one memcpy
+        // from the cached blank row rather than a per-cell store through
+        // getCell's ring mapping. This runs for the new bottom row of EVERY
+        // scroll: per-cell it was 55% of a short-line stream's time (callgrind).
+        const last: usize = @min(@as(usize, right), @as(usize, self.cols) -| 1);
         var r = top;
         while (r <= bottom and r < self.rows) : (r += 1) {
-            var c = left;
-            while (c <= right and c < self.cols) : (c += 1) {
-                self.getCell(r, c).* = template;
+            if (left <= last and left < self.cols) {
+                const dst = self.rowSlice(r)[left .. last + 1];
+                if (self.blankCells(template, dst.len)) |src| @memcpy(dst, src) else fillCells(dst, template);
             }
             // Clearing through the last column removes whatever filled it, so any
             // recorded soft-wrap for this row no longer holds — drop it.
@@ -678,10 +719,23 @@ pub const Terminal = struct {
         if (self.graphics_pending) |*p| p.data.deinit(self.allocator);
     }
 
+    /// The lowest code point in each table below; the fast paths depend on
+    /// them, and a test holds each table to them.
+    const WIDE_MIN: u21 = 0x1100;
+    const ZERO_WIDTH_MIN: u21 = 0x0300;
+
     /// Check if a character is wide (occupies 2 columns).
     /// Anchor: Unicode 15 EastAsianWidth.txt `W`/`F` entries (UAX #11) — the
     /// same table libc wcwidth follows, so cursor math agrees with the shell.
     fn isWideChar(char: u21) bool {
+        // Nothing below U+1100 is wide: ASCII and Latin skip the ranges below.
+        // (Every character of plain output passes here: 21% of a short-line
+        // stream's time went to this switch and isZeroWidth's before.)
+        if (char < WIDE_MIN) return false;
+        return wideTable(char);
+    }
+
+    fn wideTable(char: u21) bool {
         return switch (char) {
             // Emoji & pictographs outside the CJK blocks (EAW `W`):
             0x231A...0x231B => true, // watch, hourglass
@@ -748,6 +802,11 @@ pub const Terminal = struct {
     /// single-codepoint Cell, so they are dropped — per esctest, the one thing
     /// they must never do is advance the cursor.
     fn isZeroWidth(char: u21) bool {
+        if (char < ZERO_WIDTH_MIN) return false; // nothing below U+0300 is
+        return zeroWidthTable(char);
+    }
+
+    fn zeroWidthTable(char: u21) bool {
         return switch (char) {
             0x0300...0x036F => true, // combining diacriticals
             0x0483...0x0489 => true, // Cyrillic combining
@@ -1609,6 +1668,73 @@ fn decodeBase64(allocator: std.mem.Allocator, src: []const u8) ?[]u8 {
 
 test "cell attrs packed size" {
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(CellAttrs));
+}
+
+test "clearRegion matches the per-cell definition (rotated ring, changing templates)" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x5eed_c1ea);
+    const rnd = prng.random();
+    var a = try Grid.init(allocator, 7, 11);
+    defer a.deinit();
+    var b = try Grid.init(allocator, 7, 11);
+    defer b.deinit();
+    // Templates change between rounds, as the erase colour does (SGR then
+    // ED/EL, or a scroll after a colour change): the cached blank row must
+    // follow, including a change of colour alone.
+    const templates = [_]Cell{
+        .{ .char = '.' },
+        .{ .char = '.', .bg = .{ .indexed = 4 } },
+        .{ .char = ',' },
+    };
+    for (0..2000) |round| {
+        const blank = templates[rnd.uintLessThan(usize, templates.len)];
+        // Same contents, same ring rotation and wrap flags in both grids.
+        const off = rnd.uintLessThan(usize, 7);
+        a.row_offset = off;
+        b.row_offset = off;
+        for (a.cells, b.cells, 0..) |*ca, *cb, i| {
+            const ch: u21 = 'A' + @as(u21, @intCast((i + round) % 26));
+            ca.* = .{ .char = ch };
+            cb.* = ca.*;
+        }
+        for (a.wrapped, b.wrapped) |*wa, *wb| {
+            wa.* = rnd.boolean();
+            wb.* = wa.*;
+        }
+        // Regions include out-of-range and inverted bounds on purpose.
+        const top = rnd.uintLessThan(u16, 9);
+        const bottom = rnd.uintLessThan(u16, 9);
+        const left = rnd.uintLessThan(u16, 13);
+        const right = rnd.uintLessThan(u16, 13);
+        a.clearRegion(top, left, bottom, right, blank);
+        // The definition: every in-range cell of the rectangle, one by one.
+        var r = top;
+        while (r <= bottom and r < b.rows) : (r += 1) {
+            var c = left;
+            while (c <= right and c < b.cols) : (c += 1) b.getCell(r, c).* = blank;
+            if (right >= b.cols - 1) b.setRowWrapped(r, false);
+        }
+        for (a.cells, b.cells) |ca, cb| try std.testing.expect(std.meta.eql(cb, ca));
+        try std.testing.expectEqualSlices(bool, b.wrapped, a.wrapped);
+    }
+}
+
+test "the width fast paths agree with the tables they skip" {
+    // The TABLES (not the fast-pathed functions, which would agree with
+    // themselves) have no entry below each threshold, and the threshold is
+    // their first entry. A threshold set too high fails here.
+    var cp: u21 = 0;
+    while (cp < Terminal.WIDE_MIN) : (cp += 1) try std.testing.expect(!Terminal.wideTable(cp));
+    cp = 0;
+    while (cp < Terminal.ZERO_WIDTH_MIN) : (cp += 1) try std.testing.expect(!Terminal.zeroWidthTable(cp));
+    try std.testing.expect(Terminal.wideTable(Terminal.WIDE_MIN));
+    try std.testing.expect(Terminal.zeroWidthTable(Terminal.ZERO_WIDTH_MIN));
+    // And the fast-pathed functions answer exactly as the tables do.
+    cp = 0;
+    while (cp < 0x20000) : (cp += 1) {
+        try std.testing.expectEqual(Terminal.wideTable(cp), Terminal.isWideChar(cp));
+        try std.testing.expectEqual(Terminal.zeroWidthTable(cp), Terminal.isZeroWidth(cp));
+    }
 }
 
 test "grid basic operations" {

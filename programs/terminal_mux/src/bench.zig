@@ -20,7 +20,9 @@
 //! receive the command this benchmark types, and its start-up time would be
 //! measured as zterm's.
 //!
-//! Usage:  zterm-bench [--json] [--repeat N] [--feed-mib M] [--pty-mib M] [--shell PATH]
+//! Usage:  zterm-bench [--json] [--repeat N] [--feed-mib M] [--pty-mib M] [--shell PATH] [--only INPUT]
+//!   --only   one feed input (mixed|plain|cjk|redraw|lines) and nothing else:
+//!            for profiling a single path (e.g. under valgrind --tool=callgrind)
 //!   --json   the report as JSON on stdout (the table always goes to stderr)
 
 const std = @import("std");
@@ -122,6 +124,7 @@ const Config = struct {
     pty_mib: usize = 16,
     shell: [:0]const u8 = "/bin/sh",
     json: bool = false,
+    only: ?[]const u8 = null,
 };
 
 // ── Stages ──────────────────────────────────────────────────────────────────
@@ -232,6 +235,8 @@ fn parseArgs(alloc: std.mem.Allocator, args: []const []const u8) !Config {
             cfg.feed_mib = std.math.clamp(try std.fmt.parseInt(usize, v, 10), 1, 4096);
         } else if (std.mem.eql(u8, a, "--pty-mib")) {
             cfg.pty_mib = std.math.clamp(try std.fmt.parseInt(usize, v, 10), 1, 1024);
+        } else if (std.mem.eql(u8, a, "--only")) {
+            cfg.only = v;
         } else if (std.mem.eql(u8, a, "--shell")) {
             cfg.shell = try alloc.dupeZ(u8, v);
         } else return error.UnknownFlag;
@@ -248,7 +253,7 @@ pub fn main(init: std.process.Init) !void {
     var arena: std.heap.ArenaAllocator = .init(alloc);
     defer arena.deinit();
     const cfg = parseArgs(arena.allocator(), arg_list.items) catch |e| {
-        std.debug.print("zterm-bench: {s}\nusage: zterm-bench [--json] [--repeat N] [--feed-mib M] [--pty-mib M] [--shell PATH]\n", .{@errorName(e)});
+        std.debug.print("zterm-bench: {s}\nusage: zterm-bench [--json] [--repeat N] [--feed-mib M] [--pty-mib M] [--shell PATH] [--only INPUT]\n", .{@errorName(e)});
         std.process.exit(2);
     };
 
@@ -283,6 +288,7 @@ pub fn main(init: std.process.Init) !void {
     });
 
     for (inputs, 0..) |in, k| {
+        if (cfg.only) |o| if (!std.mem.eql(u8, o, in.key)) continue;
         const len = in.build(chunk);
         if (len == 0) {
             std.debug.print("zterm-bench: the {s} input could not be built\n", .{in.key});
@@ -292,6 +298,11 @@ pub fn main(init: std.process.Init) !void {
         checksums[k] = fnv1a64(input);
         _ = feedOnce(input, @max(1, cfg.feed_mib / 8), cfg.shell); // warm-up
         for (0..cfg.repeat) |_| try record(&metrics[k], alloc, feedOnce(input, cfg.feed_mib, cfg.shell));
+    }
+    if (cfg.only != null) {
+        bs.printHeader();
+        for (&metrics) |*m| if (m.samples.items.len > 0) try m.printRow(alloc);
+        return;
     }
     _ = ptyOnce(1, cfg.shell); // warm-up
     for (0..cfg.repeat) |_| try record(&metrics[5], alloc, ptyOnce(cfg.pty_mib, cfg.shell));

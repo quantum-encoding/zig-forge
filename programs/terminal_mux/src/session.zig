@@ -220,38 +220,7 @@ pub const Pane = struct {
             self.boot_len = 0;
             self.sendInput(self.boot_cmd[0..n]) catch {};
         }
-
-        const V = @Vector(16, u8);
-        const lo: V = @splat(0x20); // first printable
-        const hi: V = @splat(0x7F); // DEL — exclusive upper bound
-
-        var i: usize = 0;
-        while (i < data.len) {
-            if (self.parser.state == .ground and i + 16 <= data.len) {
-                const chunk: V = data[i..][0..16].*;
-                // All bytes in [0x20, 0x7F) ⇒ printable, width-1 ASCII.
-                if (@reduce(.And, chunk >= lo) and @reduce(.And, chunk < hi)) {
-                    // Greedily extend the printable run across further 16-byte chunks, then a scalar tail,
-                    // so the WHOLE run is a single putPrintableRun call — amortizing the per-call wrap
-                    // resolution + dispatch over the whole run instead of paying it every 16 bytes.
-                    var end = i + 16;
-                    while (end + 16 <= data.len) {
-                        const c2: V = data[end..][0..16].*;
-                        if (@reduce(.And, c2 >= lo) and @reduce(.And, c2 < hi)) {
-                            end += 16;
-                        } else break;
-                    }
-                    while (end < data.len and data[end] >= 0x20 and data[end] < 0x7F) end += 1;
-                    self.terminal.putPrintableRun(data[i..end]);
-                    i = end;
-                    continue;
-                }
-            }
-
-            const action = self.parser.feed(data[i]);
-            parser_mod.applyAction(&self.terminal, action);
-            i += 1;
-        }
+        feedOutput(&self.parser, &self.terminal, data);
     }
 
     /// Answer the terminal queries this pane's application asked (DA1/DA2,
@@ -822,6 +791,97 @@ pub const SessionManager = struct {
 // =============================================================================
 // Tests
 // =============================================================================
+
+/// Feed application output to an emulator — `processOutput`'s loop, apart
+/// from the Pane so it can be tested against the plain state machine.
+///
+/// In ground state, printable ASCII (0x20..0x7E) never goes through the
+/// parser: runs of 16+ are found with SIMD, shorter ones (a short line:
+/// `seq`, logs, `ls -1`) with a scalar scan, and each run is one
+/// putPrintableRun. Every other byte, and every byte outside ground state,
+/// takes the state machine. Equivalent to feeding each byte to the parser:
+/// in ground state it maps printable ASCII straight to putChar, which
+/// putPrintableRun matches (the test below holds all three together).
+pub fn feedOutput(parser: *Parser, term: *Terminal, data: []const u8) void {
+    const V = @Vector(16, u8);
+    const lo: V = @splat(0x20); // first printable
+    const hi: V = @splat(0x7F); // DEL — exclusive upper bound
+
+    var i: usize = 0;
+    while (i < data.len) {
+        if (parser.state == .ground) {
+            var end = i;
+            // Whole 16-byte chunks of printable ASCII first, then a scalar tail.
+            while (end + 16 <= data.len) {
+                const chunk: V = data[end..][0..16].*;
+                if (@reduce(.And, chunk >= lo) and @reduce(.And, chunk < hi)) {
+                    end += 16;
+                } else break;
+            }
+            while (end < data.len and data[end] >= 0x20 and data[end] < 0x7F) end += 1;
+            if (end > i) {
+                term.putPrintableRun(data[i..end]);
+                i = end;
+                continue;
+            }
+        }
+        parser_mod.applyAction(term, parser.feed(data[i]));
+        i += 1;
+    }
+}
+
+test "feedOutput's bulk paths leave the emulator exactly as the per-byte parser does" {
+    const alloc = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xfeed_0417);
+    const rnd = prng.random();
+    // Pieces a real stream is made of, short printable runs above all.
+    const pieces = [_][]const u8{
+        "1",          "42",                 "hello",             "0123456789abcdef0123", "\n",      "\r\n", "\r",
+        "\t",         "\x1b[31m",           "\x1b[0m",           "\x1b[2J",              "\x1b[H",  "\x1b[5;7H",
+        "\x1b[K",     "\x1b[3A",            "\x1b]0;title\x07",  "日本",                 "é",       "\x08",
+        "\x1b[?7l",   "\x1b[?7h",           "\x1b[2;5r",         "\x1bM",                "\x1b[4h", "\x1b[1@",
+        "\x1b(0qqq",  "\x1b(B",             "\x0e",              "\x0f",                 "~",       " ",
+        "ab\x7fcd",
+    };
+    for (0..300) |round| {
+        var a = try Terminal.init(alloc, 6, 13, 50);
+        defer a.deinit();
+        var b = try Terminal.init(alloc, 6, 13, 50);
+        defer b.deinit();
+        var pa = Parser.init();
+        var pb = Parser.init();
+        var stream: std.ArrayList(u8) = .empty;
+        defer stream.deinit(alloc);
+        for (0..60) |_| try stream.appendSlice(alloc, pieces[rnd.uintLessThan(usize, pieces.len)]);
+        // Delivered in random chunk sizes, as reads from a PTY are.
+        var off: usize = 0;
+        while (off < stream.items.len) {
+            const n = @min(stream.items.len - off, 1 + rnd.uintLessThan(usize, 40));
+            feedOutput(&pa, &a, stream.items[off .. off + n]);
+            off += n;
+        }
+        for (stream.items) |byte| parser_mod.applyAction(&b, pb.feed(byte));
+
+        errdefer std.debug.print("round {d}: stream {any}\n", .{ round, stream.items });
+        try std.testing.expectEqual(b.cursor.row, a.cursor.row);
+        try std.testing.expectEqual(b.cursor.col, a.cursor.col);
+        try std.testing.expectEqual(b.pending_wrap, a.pending_wrap);
+        try std.testing.expectEqual(b.scrollback.len, a.scrollback.len);
+        var r: u16 = 0;
+        while (r < a.grid.rows) : (r += 1) {
+            try std.testing.expectEqual(b.grid.isRowWrapped(r), a.grid.isRowWrapped(r));
+            var c: u16 = 0;
+            while (c < a.grid.cols) : (c += 1) {
+                const ca = a.grid.getCellConst(r, c);
+                const cb = b.grid.getCellConst(r, c);
+                try std.testing.expectEqual(cb.char, ca.char);
+                try std.testing.expectEqual(cb.width, ca.width);
+                try std.testing.expect(std.meta.eql(cb.fg, ca.fg));
+                try std.testing.expect(std.meta.eql(cb.attrs, ca.attrs));
+            }
+        }
+    }
+}
 
 test "rect split horizontal" {
     const rect = Rect{ .x = 0, .y = 0, .width = 80, .height = 24 };
