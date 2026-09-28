@@ -6,6 +6,8 @@
 //! touch the user's real Trash.
 
 const std = @import("std");
+/// The platform C library (std.c on Linux and macOS; see sys.zig).
+const sysc = @import("sys.zig").c;
 const lib = @import("lib.zig");
 const session = @import("session.zig");
 const space = @import("space.zig");
@@ -40,7 +42,7 @@ const Fixture = struct {
     fn init(gpa: Allocator) !Fixture {
         // Scratch trees default to $TMPDIR, which on macOS is under /var — a
         // system tree, where every file would be categorised `system`.
-        _ = setenv("TMPDIR", "/tmp", 1);
+        if (@import("builtin").os.tag != .windows) _ = setenv("TMPDIR", "/tmp", 1);
         var tree = try Scratch.init(gpa, "space");
         errdefer tree.deinit();
         var out = try Scratch.init(gpa, "space-store");
@@ -103,8 +105,11 @@ const Fixture = struct {
     }
 };
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn rename(old: [*:0]const u8, new: [*:0]const u8) c_int;
+// Windows: the platform layer; elsewhere libc's own (std.c declares none).
+const setenv = if (@import("builtin").os.tag == .windows) sysc.setenv else struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+}.setenv;
+const rename = @import("sys.zig").c.rename;
 
 fn parse(arena: Allocator, json: ?[:0]const u8) !Value {
     const text = json orelse return error.CallFailed;
@@ -362,7 +367,7 @@ test "trash: verified, protected roots refused, changes skipped, totals correcte
     // roots come from the tree itself.
     const sidecar = try std.fmt.allocPrintSentinel(arena, "{s}", .{fx.store_path}, 0);
     const roots_sidecar = try std.fmt.allocPrintSentinel(arena, "{s}.roots.json", .{sidecar[0 .. sidecar.len - ".zds".len]}, 0);
-    _ = std.c.unlink(roots_sidecar.ptr);
+    _ = sysc.unlink(roots_sidecar.ptr);
     const again = try fx.open(false);
     defer again.close();
     const reopened = try parse(arena, again.spaceOverview());
@@ -394,8 +399,8 @@ test "history records each scan once and reports what grew" {
     }
 
     // Scan times have one-second resolution.
-    const pause: std.c.timespec = .{ .sec = 1, .nsec = 100_000_000 };
-    _ = std.c.nanosleep(&pause, null);
+    const pause: sysc.timespec = .{ .sec = 1, .nsec = 100_000_000 };
+    _ = sysc.nanosleep(&pause, null);
     try fx.write("media/new.mov", 3 << 20);
     try fx.scan();
     const s = try fx.open(true);
@@ -463,19 +468,19 @@ fn readAll(gpa: Allocator, path: [:0]const u8) ![]u8 {
 }
 
 fn writeAll(path: [:0]const u8, bytes: []const u8) !void {
-    const fd = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .TRUNC = true }, @as(std.c.mode_t, 0));
+    const fd = sysc.open(path.ptr, .{ .ACCMODE = .WRONLY, .TRUNC = true }, @as(sysc.mode_t, 0));
     if (fd < 0) return error.OpenFailed;
-    defer _ = std.c.close(fd);
+    defer _ = sysc.close(fd);
     var written: usize = 0;
     while (written < bytes.len) {
-        const n = std.c.write(fd, bytes.ptr + written, bytes.len - written);
+        const n = sysc.write(fd, bytes.ptr + written, bytes.len - written);
         if (n <= 0) return error.WriteFailed;
         written += @intCast(n);
     }
 }
 
 test "an unreadable folder marks everything above it incomplete" {
-    if (std.c.getuid() == 0) return error.SkipZigTest;
+    if (sysc.getuid() == 0) return error.SkipZigTest;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -485,8 +490,8 @@ test "an unreadable folder marks everything above it incomplete" {
     try fx.write("docs/locked/secret.bin", 9_000);
     const locked = try fx.tree.joinZ("docs/locked");
     defer testing.allocator.free(locked);
-    try testing.expectEqual(@as(c_int, 0), std.c.chmod(locked.ptr, 0));
-    defer _ = std.c.chmod(locked.ptr, 0o700);
+    try testing.expectEqual(@as(c_int, 0), sysc.chmod(locked.ptr, 0));
+    defer _ = sysc.chmod(locked.ptr, 0o700);
 
     try fx.scan();
     const s = try fx.open(true);

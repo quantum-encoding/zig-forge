@@ -11,7 +11,8 @@
 //! feed raw NUL-terminated paths straight into the walkers.
 
 const std = @import("std");
-const libc = std.c;
+const libc = @import("sys.zig").c;
+const builtin = @import("builtin");
 const pstat = @import("pstat.zig");
 
 pub const Scratch = struct {
@@ -22,7 +23,8 @@ pub const Scratch = struct {
     /// Create a uniquely-named scratch directory. `label` is only for humans
     /// reading a leftover directory after a crash.
     pub fn init(allocator: std.mem.Allocator, label: []const u8) !Scratch {
-        const base: []const u8 = if (libc.getenv("TMPDIR")) |tmpdir|
+        // Windows has no /tmp: its temporary folder is %TEMP%.
+        const base: []const u8 = if (libc.getenv(if (builtin.os.tag == .windows) "TEMP" else "TMPDIR")) |tmpdir|
             std.mem.span(tmpdir)
         else
             "/tmp";

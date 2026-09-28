@@ -22,6 +22,8 @@
 //!   * `std.json` as an independent parser for the emitted report.
 
 const std = @import("std");
+/// The platform C library (std.c on Linux and macOS; see sys.zig).
+const sysc = @import("sys.zig").c;
 const hasher = @import("hasher.zig");
 const types = @import("types.zig");
 const dedupe = @import("dedupe.zig");
@@ -739,7 +741,9 @@ test "no finding points inside .git, yet .git still decides project identity" {
     for (overlap.b.only) |path| try testing.expect(std.mem.indexOf(u8, path, "/.git/") != null);
 }
 
-extern "c" fn geteuid() c_uint;
+/// Windows has no permission bits to deny, so the tests that need a
+/// permission failure skip there as they do under root.
+const geteuid = @import("sys.zig").c.geteuid;
 
 test "an unreadable subdirectory blocks every safety verdict" {
     // root reads through mode 000, so the fixture would not be unreadable.
@@ -754,9 +758,9 @@ test "an unreadable subdirectory blocks every safety verdict" {
 
     const locked = try scratch.joinZ("q/src/util");
     defer allocator.free(locked);
-    if (std.c.chmod(locked.ptr, 0) != 0) return error.SkipZigTest;
+    if (sysc.chmod(locked.ptr, 0) != 0) return error.SkipZigTest;
     // Restore before Scratch.deinit, or the tree cannot be cleaned up.
-    defer _ = std.c.chmod(locked.ptr, 0o700);
+    defer _ = sysc.chmod(locked.ptr, 0o700);
 
     var finder = dedupe.DupeFinder.init(allocator, .{ .analyze_dirs = true });
     defer finder.deinit();
@@ -1033,14 +1037,14 @@ const StoreView = struct {
 };
 
 fn readWholeFile(allocator: std.mem.Allocator, path: [:0]const u8) ![]u8 {
-    const fd = std.c.open(path.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    const fd = sysc.open(path.ptr, .{ .ACCMODE = .RDONLY }, @as(sysc.mode_t, 0));
     if (fd < 0) return error.OpenFailed;
-    defer _ = std.c.close(fd);
+    defer _ = sysc.close(fd);
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
     var buf: [16 * 1024]u8 = undefined;
     while (true) {
-        const n = std.c.read(fd, &buf, buf.len);
+        const n = sysc.read(fd, &buf, buf.len);
         if (n < 0) return error.ReadFailed;
         if (n == 0) break;
         try out.appendSlice(allocator, buf[0..@intCast(n)]);
@@ -1051,11 +1055,11 @@ fn readWholeFile(allocator: std.mem.Allocator, path: [:0]const u8) ![]u8 {
 fn setMtime(scratch: *const Scratch, sub_path: []const u8, seconds: i64) !void {
     const full = try scratch.joinZ(sub_path);
     defer scratch.allocator.free(full);
-    const times = [2]std.c.timespec{
+    const times = [2]sysc.timespec{
         .{ .sec = seconds, .nsec = 0 },
         .{ .sec = seconds, .nsec = 0 },
     };
-    if (std.c.utimensat(std.c.AT.FDCWD, full.ptr, &times, 0) != 0) return error.SetMtimeFailed;
+    if (sysc.utimensat(sysc.AT.FDCWD, full.ptr, &times, 0) != 0) return error.SetMtimeFailed;
 }
 
 test "duplicate groups list the oldest file first, whatever order the walk found them in" {

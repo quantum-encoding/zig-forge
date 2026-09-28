@@ -225,6 +225,11 @@ extern "kernel32" fn UnmapViewOfFile(base: *const anyopaque) callconv(.winapi) B
 extern "kernel32" fn GetFinalPathNameByHandleW(h: HANDLE, buf: [*]WCHAR, len: DWORD, flags: DWORD) callconv(.winapi) DWORD;
 extern "kernel32" fn GetVolumePathNameW(path: [*:0]const WCHAR, buf: [*]WCHAR, len: DWORD) callconv(.winapi) BOOL;
 extern "kernel32" fn GetDiskFreeSpaceExW(dir: [*:0]const WCHAR, avail: ?*u64, total: ?*u64, free: ?*u64) callconv(.winapi) BOOL;
+extern "kernel32" fn CreateDirectoryW(path: [*:0]const WCHAR, attrs: ?*anyopaque) callconv(.winapi) BOOL;
+extern "kernel32" fn CreateHardLinkW(link: [*:0]const WCHAR, existing: [*:0]const WCHAR, attrs: ?*anyopaque) callconv(.winapi) BOOL;
+extern "kernel32" fn CreateSymbolicLinkW(link: [*:0]const WCHAR, target: [*:0]const WCHAR, flags: DWORD) callconv(.winapi) u8;
+extern "kernel32" fn SetEnvironmentVariableW(name: [*:0]const WCHAR, value: ?[*:0]const WCHAR) callconv(.winapi) BOOL;
+extern "kernel32" fn SetFileTime(h: HANDLE, created: ?*const FILETIME, accessed: ?*const FILETIME, written: ?*const FILETIME) callconv(.winapi) BOOL;
 extern "kernel32" fn GetEnvironmentVariableW(name: [*:0]const WCHAR, buf: ?[*]WCHAR, size: DWORD) callconv(.winapi) DWORD;
 
 // ---------------------------------------------------------------------------
@@ -1169,4 +1174,152 @@ pub fn pthread_cond_signal(cond: *pthread_cond_t) c_int {
 pub fn pthread_cond_broadcast(cond: *pthread_cond_t) c_int {
     WakeAllConditionVariable(cond);
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// What the test suites use to build their scratch trees
+// ---------------------------------------------------------------------------
+
+pub fn mkdir(path: [*:0]const u8, mode: mode_t) c_int {
+    _ = mode;
+    const w = toWide(&wide_buf, std.mem.span(path)) orelse return failWith(.NAMETOOLONG);
+    return if (CreateDirectoryW(w, null) != 0) 0 else failLast();
+}
+
+pub fn link(existing: [*:0]const u8, new: [*:0]const u8) c_int {
+    const w_existing = toWide(&wide_buf, std.mem.span(existing)) orelse return failWith(.NAMETOOLONG);
+    const w_new = toWide(&wide_buf2, std.mem.span(new)) orelse return failWith(.NAMETOOLONG);
+    return if (CreateHardLinkW(w_new, w_existing, null) != 0) 0 else failLast();
+}
+
+/// A symlink at `link_path` to `target` (relative to the link's folder, as
+/// POSIX has it). Needs Developer Mode or an administrator; a directory
+/// target gets a directory link, which Windows requires.
+pub fn symlink(target: [*:0]const u8, link_path: [*:0]const u8) c_int {
+    const SYMBOLIC_LINK_FLAG_DIRECTORY: DWORD = 0x1;
+    const SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE: DWORD = 0x2;
+    const t = std.mem.span(target);
+    const l = std.mem.span(link_path);
+    const resolved = if (filtersRootLen(t) > 0)
+        allocator.dupe(u8, t) catch return failWith(.NOMEM)
+    else blk: {
+        const parent = l[0 .. std.mem.lastIndexOfScalar(u8, l, '/') orelse 0];
+        break :blk joinPath(parent, t) orelse return failWith(.NOMEM);
+    };
+    defer allocator.free(resolved);
+    const w_res = toWide(&wide_buf, resolved) orelse return failWith(.NAMETOOLONG);
+    const attrs = GetFileAttributesW(w_res);
+    var flags: DWORD = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+    if (attrs != 0xFFFFFFFF and attrs & FILE_ATTRIBUTE_DIRECTORY != 0) flags |= SYMBOLIC_LINK_FLAG_DIRECTORY;
+    const w_link = toWide(&wide_buf2, l) orelse return failWith(.NAMETOOLONG);
+    // A relative target stays relative: convert it without the device prefix.
+    var target_buf: [max_wide + 1]WCHAR = undefined;
+    const n = unicode.wtf8ToWtf16Le(target_buf[0..max_wide], t) catch return failWith(.INVAL);
+    for (target_buf[0..n]) |*ch| {
+        if (ch.* == '/') ch.* = '\\';
+    }
+    target_buf[n] = 0;
+    const w_target: [*:0]const WCHAR = if (filtersRootLen(t) > 0) toWide(&wide_buf, t) orelse return failWith(.NAMETOOLONG) else @ptrCast(&target_buf);
+    return if (CreateSymbolicLinkW(w_link, w_target, flags) != 0) 0 else failLast();
+}
+
+fn filtersRootLen(path: []const u8) usize {
+    if (path.len >= 3 and std.ascii.isAlphabetic(path[0]) and path[1] == ':' and isSep(path[2])) return 3;
+    if (path.len >= 2 and isSep(path[0]) and isSep(path[1])) return 2;
+    return 0;
+}
+
+var random_counter = std.atomic.Value(u64).init(0);
+
+/// Bytes for scratch-folder names in the tests: unique, not secret. The
+/// high-resolution clock and a counter, mixed.
+pub fn arc4random_buf(buf: [*]u8, len: usize) void {
+    var count: i64 = 0;
+    _ = QueryPerformanceCounter(&count);
+    var seed = std.hash.Wyhash.hash(random_counter.fetchAdd(1, .monotonic), std.mem.asBytes(&count));
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        if (i % 8 == 0) seed = std.hash.Wyhash.hash(seed, std.mem.asBytes(&i));
+        buf[i] = @truncate(seed >> @intCast((i % 8) * 8));
+    }
+}
+
+fn setEnvWide(name: [*:0]const u8, value: ?[*:0]const u8) c_int {
+    const key = std.mem.span(name);
+    const lookup = if (std.mem.eql(u8, key, "HOME")) "USERPROFILE" else key;
+    var wname: [256]WCHAR = undefined;
+    const wlen = unicode.wtf8ToWtf16Le(wname[0 .. wname.len - 1], lookup) catch return failWith(.INVAL);
+    wname[wlen] = 0;
+    var ok: BOOL = undefined;
+    if (value) |v| {
+        const wv = toWide(&wide_buf, std.mem.span(v)) orelse return failWith(.NAMETOOLONG);
+        ok = SetEnvironmentVariableW(@ptrCast(&wname), wv);
+    } else {
+        ok = SetEnvironmentVariableW(@ptrCast(&wname), null);
+    }
+    if (ok == 0) return failLast();
+    // getenv caches what it returns; a changed variable must be read afresh.
+    env_lock.lock();
+    defer env_lock.unlock();
+    _ = env_cache.remove(key);
+    return 0;
+}
+
+pub fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int {
+    if (overwrite == 0 and getenv(name) != null) return 0;
+    return setEnvWide(name, value);
+}
+
+pub fn unsetenv(name: [*:0]const u8) c_int {
+    return setEnvWide(name, null);
+}
+
+/// Set a file's modification (and access) time, as `utimes` does.
+pub fn utimes(path: [*:0]const u8, times: ?*const [2]timeval) c_int {
+    const FILE_WRITE_ATTRIBUTES: DWORD = 0x0100;
+    const w = toWide(&wide_buf, std.mem.span(path)) orelse return failWith(.NAMETOOLONG);
+    const h = CreateFileW(w, FILE_WRITE_ATTRIBUTES, FILE_SHARE_ALL, null, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, null);
+    if (h == INVALID_HANDLE_VALUE) return failLast();
+    defer _ = CloseHandle(h);
+    const t = times orelse return 0;
+    const toFt = struct {
+        fn f(tv: timeval) FILETIME {
+            const ticks: u64 = @intCast(tv.sec * 10_000_000 + @divFloor(tv.usec, 1) * 10 + 116444736000000000);
+            return .{ .dwLowDateTime = @truncate(ticks), .dwHighDateTime = @truncate(ticks >> 32) };
+        }
+    }.f;
+    const accessed = toFt(t[0]);
+    const written = toFt(t[1]);
+    return if (SetFileTime(h, null, &accessed, &written) != 0) 0 else failLast();
+}
+
+pub fn geteuid() c_uint {
+    return 0;
+}
+
+extern "kernel32" fn Sleep(ms: DWORD) callconv(.winapi) void;
+
+pub fn nanosleep(req: *const timespec, rem: ?*timespec) c_int {
+    _ = rem;
+    const ms = req.sec * 1000 + @divFloor(req.nsec, 1_000_000);
+    Sleep(@intCast(@max(ms, 0)));
+    return 0;
+}
+
+/// No permission bits to change on Windows; callers that need a permission
+/// failure skip there (getuid is 0).
+pub fn chmod(path: [*:0]const u8, mode: mode_t) c_int {
+    _ = path;
+    _ = mode;
+    return failWith(.OPNOTSUPP);
+}
+
+pub fn utimensat(dir_fd: c_int, path: [*:0]const u8, times: *const [2]timespec, flags: c_int) c_int {
+    _ = flags;
+    if (dir_fd != AT.FDCWD) return failWith(.INVAL);
+    const tv = [2]timeval{
+        .{ .sec = times[0].sec, .usec = @divFloor(times[0].nsec, 1000) },
+        .{ .sec = times[1].sec, .usec = @divFloor(times[1].nsec, 1000) },
+    };
+    return utimes(path, &tv);
 }
