@@ -139,6 +139,22 @@ try:
     srv2 = subprocess.Popen([Z, "server"], env=dict(env, ZTERM_SOCKET=f"{base}/c2.sock"), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     time.sleep(1.5); srv2.terminate(); err2 = srv2.communicate(timeout=10)[1]
     check("second server leaves the live runner door alone", "not taking the runner door" in err2 and J(runner_sock, {"verb": "hello"})["pid"] == srv.pid, err2)
+    # ── an OLDER server exiting must not unlink the control socket a NEWER
+    # server has since bound there (newest binder wins by design). Before the
+    # fix the old server's shutdown deleted it and the new one ran on,
+    # unreachable.
+    alt = f"{base}/c3.sock"; alt_env = dict(env, ZTERM_SOCKET=alt)
+    old = subprocess.Popen([Z, "server", "--no-runner"], env=alt_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    wait_for(lambda: os.path.exists(alt), 10)
+    new = subprocess.Popen([Z, "server", "--no-runner"], env=alt_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(1.0)
+    old.terminate(); old.wait(timeout=10); time.sleep(0.2)
+    try:
+        reachable = isinstance(json.loads(req(alt, {"cmd": "list"})), list)
+    except OSError:
+        reachable = False
+    new.terminate(); new.wait(timeout=10)
+    check("an older server's exit leaves a newer server's socket alone", reachable)
 finally:
     srv.terminate()
     try: srv.wait(timeout=10)

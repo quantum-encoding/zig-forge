@@ -434,7 +434,39 @@ const Submit = struct {
     written: usize = 0,
 };
 
-const Listener = struct { fd: c.fd_t, path: [:0]u8, kind: enum { control, runner } };
+/// A bound socket. `ident` is the (dev, inode) of the path as bound, so
+/// shutdown can tell whether the path is still OURS: the control path is
+/// newest-binder-wins by design, and an older server exiting must not unlink
+/// the socket a newer one has since bound there — that leaves the newer
+/// server running and unreachable.
+const Listener = struct { fd: c.fd_t, path: [:0]u8, kind: enum { control, runner }, ident: ?PathIdent };
+
+const PathIdent = struct { dev: u64, ino: u64 };
+
+fn pathIdent(path: [*:0]const u8) ?PathIdent {
+    // Zig 0.16 declares no std.c.fstatat for Linux (it routes through
+    // statx); Darwin and the BSDs get the right $INODE64 symbol from std.c.
+    if (comptime is_linux) {
+        var stx: std.os.linux.Statx = undefined;
+        if (c.statx(c.AT.FDCWD, path, c.AT.SYMLINK_NOFOLLOW, .{ .INO = true }, &stx) != 0) return null;
+        return .{ .dev = (@as(u64, stx.dev_major) << 32) | stx.dev_minor, .ino = stx.ino };
+    }
+    var st: c.Stat = undefined;
+    if (c.fstatat(c.AT.FDCWD, path, &st, c.AT.SYMLINK_NOFOLLOW) != 0) return null;
+    // dev_t is signed on Darwin/BSD: reinterpret, never @intCast — it is an
+    // identity key, not a number (same rule as zdedupe/src/pstat.zig).
+    return .{ .dev = @bitCast(@as(i64, st.dev)), .ino = @intCast(st.ino) };
+}
+
+/// Unlink `l.path` only while it still names the socket `l` bound. The check
+/// and the unlink are two steps, so a successor binding in between can still
+/// lose its path; that window is microseconds wide, where the old behaviour
+/// lost it every time an older server exited.
+fn unlinkIfOurs(l: Listener) void {
+    const mine = l.ident orelse return;
+    const now = pathIdent(l.path.ptr) orelse return;
+    if (now.dev == mine.dev and now.ino == mine.ino) _ = c.unlink(l.path.ptr);
+}
 
 pub const ServerOptions = struct {
     /// false = never bind a runner door (`--no-runner`).
@@ -458,6 +490,13 @@ const Server = struct {
     agent_env: ?[]const u8,
 
     fn deinit(self: *Server) void {
+        // Doors first: once the loop has stopped nothing answers them, and a
+        // pane teardown that stalls or dies must not leave a dead door that
+        // callers keep probing.
+        for (self.listeners.items) |l| {
+            pclose(l.fd);
+            unlinkIfOurs(l);
+        }
         for (self.submits.items) |*s| self.finishSubmit(s, false, "zterm server is shutting down");
         self.submits.deinit(self.alloc);
         for (self.attaches.items) |a| if (a.conn >= 0) pclose(a.conn);
@@ -467,11 +506,7 @@ const Server = struct {
             if (p.name) |n| self.alloc.free(n);
         }
         self.panes.deinit(self.alloc);
-        for (self.listeners.items) |l| {
-            pclose(l.fd);
-            _ = c.unlink(l.path.ptr);
-            self.alloc.free(l.path);
-        }
+        for (self.listeners.items) |l| self.alloc.free(l.path);
         self.listeners.deinit(self.alloc);
     }
 
@@ -492,7 +527,7 @@ const Server = struct {
         // spawn shells and type into them.
         _ = c.chmod(path.ptr, 0o600);
         if (c.listen(lfd, 16) < 0) return error.ListenFailed;
-        try self.listeners.append(self.alloc, .{ .fd = lfd, .path = path, .kind = kind });
+        try self.listeners.append(self.alloc, .{ .fd = lfd, .path = path, .kind = kind, .ident = pathIdent(path.ptr) });
     }
 
     /// Is a server already answering at `path`? A connect is the whole test —
