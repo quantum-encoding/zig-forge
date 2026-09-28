@@ -465,7 +465,11 @@ fn pathIdent(path: [*:0]const u8) ?PathIdent {
 fn unlinkIfOurs(l: Listener) void {
     const mine = l.ident orelse return;
     const now = pathIdent(l.path.ptr) orelse return;
-    if (now.dev == mine.dev and now.ino == mine.ino) _ = c.unlink(l.path.ptr);
+    if (now.dev != mine.dev or now.ino != mine.ino) return;
+    if (c.unlink(l.path.ptr) != 0) {
+        // Say so: a door left on disk makes the NEXT server's bind fail.
+        std.debug.print("zterm server: could not remove {s} ({s}); the next server cannot bind it until it is removed\n", .{ l.path, @tagName(posix.errno(-1)) });
+    }
 }
 
 pub const ServerOptions = struct {
@@ -517,7 +521,16 @@ const Server = struct {
             std.debug.print("zterm server: socket path is {d} bytes, longer than sun_path allows: {s}\n", .{ path.len, path });
             return e;
         };
-        _ = c.unlink(path.ptr); // clear a stale socket (path is sentinel-terminated)
+        // Clear a stale socket. A refusal here (EPERM from a filesystem
+        // policy such as Guardian Shield) would otherwise surface as an
+        // opaque BindFailed; name it instead.
+        if (c.unlink(path.ptr) != 0) switch (posix.errno(-1)) {
+            .NOENT => {},
+            else => |e| {
+                std.debug.print("zterm server: a stale socket at {s} cannot be removed ({s}); remove it and restart\n", .{ path, @tagName(e) });
+                return error.StaleSocketUnremovable;
+            },
+        };
         const lfd = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
         if (lfd < 0) return error.SocketCreateFailed;
         errdefer pclose(lfd);
@@ -1489,7 +1502,12 @@ fn runServer(alloc: std.mem.Allocator, opts: ServerOptions) !void {
         return e;
     };
     std.debug.print("zterm server: listening on {s}\n", .{path});
-    try srv.bindRunnerDoor(opts);
+    // The runner door is an addition to the control socket, not a condition
+    // of serving: without it baton cannot SEE this pool, but every pane verb
+    // still works. Degrade loudly rather than refuse to start.
+    srv.bindRunnerDoor(opts) catch |e| {
+        std.debug.print("zterm server: serving WITHOUT a runner door ({s}) — `baton runner list` will not show this server\n", .{@errorName(e)});
+    };
 
     // SIGINT/SIGTERM end the loop so both sockets are unlinked and the panes'
     // shells are hung up, instead of leaving a dead door for baton to probe.
