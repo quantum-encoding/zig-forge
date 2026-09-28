@@ -255,7 +255,10 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "feed_redraw_mibs", .unit = "MiB/s", .higher_is_better = true },
         .{ .name = "pty_ingest_mibs", .unit = "MiB/s", .higher_is_better = true },
         .{ .name = "create_destroy_us", .unit = "us/op", .higher_is_better = false },
-        .{ .name = "attach_detach_us", .unit = "us/op", .higher_is_better = false },
+        // ~15 ns: a registry lookup. Its samples within a run are identical,
+        // but between runs it moves 2x with the core and clock the process
+        // lands on (measured: same commit, 0.013 vs 0.027) — shown, not judged.
+        .{ .name = "attach_detach_us", .unit = "us/op", .higher_is_better = false, .trend_only = true },
     };
     defer for (&metrics) |*m| m.deinit(alloc);
     var checksums: [inputs.len]u64 = undefined;

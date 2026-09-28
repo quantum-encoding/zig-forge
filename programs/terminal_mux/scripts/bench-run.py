@@ -111,7 +111,10 @@ def context(cpus):
     for line in read("/proc/meminfo").splitlines():
         if line.startswith("MemTotal:"):
             mem_kb = int(line.split()[1])
-    status = out(["git", "-C", ROOT, "status", "--porcelain", "--", "."])
+    # Dirty = the CODE differs from the commit. This script's own outputs do
+    # not count, or every run after the first would be marked dirty.
+    status = out(["git", "-C", ROOT, "status", "--porcelain", "--", ".",
+                  ":(exclude)BENCH.md", ":(exclude)bench/runs"])
     return {
         "commit": out(["git", "-C", ROOT, "rev-parse", "--short", "HEAD"], "unknown"),
         "dirty": bool(status),
