@@ -86,6 +86,18 @@ pub fn build(b: *std.Build) void {
     const loader_step = b.step("loader", "Build the userspace loader");
     loader_step.dependOn(&b.addInstallArtifact(loader, .{}).step);
 
+    // Unit tests for the bounded, hash-chained event log (evidence_log.zig).
+    const evlog_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("evidence_log.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    const test_step = b.step("test", "Run the evidence-log unit tests");
+    test_step.dependOn(&b.addRunArtifact(evlog_tests).step);
+
     // ---------------------------------------------------------------
     // External-vector bypass test harness (C, links liburing).
     // ---------------------------------------------------------------
