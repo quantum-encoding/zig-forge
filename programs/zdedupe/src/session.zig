@@ -546,8 +546,7 @@ pub const Session = struct {
     fn normalizedRoots(self: *Session, arena: Allocator) ![]const []const u8 {
         const out = try arena.alloc([]const u8, self.roots.len);
         for (self.roots, out) |root, *slot| {
-            const trimmed = std.mem.trimEnd(u8, root, "/");
-            slot.* = if (trimmed.len == 0) "/" else trimmed;
+            slot.* = filters_mod.trimSep(root);
         }
         return out;
     }
@@ -601,7 +600,7 @@ pub const Session = struct {
             return false;
         };
         for (paths) |path| {
-            if (path.len == 0 or path[0] != '/') {
+            if (!filters_mod.isAbsolute(path)) {
                 self.fail("protected location \"{s}\" is not an absolute path", .{path});
                 return false;
             }
@@ -612,8 +611,7 @@ pub const Session = struct {
         };
         var filled: usize = 0;
         for (paths, owned) |path, *slot| {
-            const trimmed = std.mem.trimEnd(u8, path, "/");
-            slot.* = self.gpa.dupe(u8, if (trimmed.len == 0) "/" else trimmed) catch {
+            slot.* = filters_mod.normalizeOwned(self.gpa, path) catch {
                 for (owned[0..filled]) |p| self.gpa.free(p);
                 self.gpa.free(owned);
                 self.fail("out of memory", .{});
@@ -633,12 +631,11 @@ pub const Session = struct {
     /// protection off: the system roots, stores and packages stay in force.
     pub fn setHome(self: *Session, path: []const u8) bool {
         _ = self.beginCall();
-        const trimmed = std.mem.trimEnd(u8, path, "/");
-        if (trimmed.len == 0 or trimmed[0] != '/') {
+        if (!filters_mod.isAbsolute(path)) {
             self.fail("home \"{s}\" is not an absolute path", .{path});
             return false;
         }
-        const owned = self.gpa.dupe(u8, trimmed) catch {
+        const owned = filters_mod.normalizeOwned(self.gpa, path) catch {
             self.fail("out of memory", .{});
             return false;
         };
@@ -2114,7 +2111,7 @@ pub const Session = struct {
     /// Record this scan in the volume's history under `dir` and describe it.
     pub fn spaceHistory(self: *Session, dir: []const u8) ?[:0]const u8 {
         const arena = self.beginCall();
-        if (dir.len == 0 or dir[0] != '/') {
+        if (!filters_mod.isAbsolute(dir)) {
             self.fail("history folder \"{s}\" is not an absolute path", .{dir});
             return null;
         }
@@ -2596,8 +2593,7 @@ const MemberKind = enum { files, folders };
 /// The folder holding `path`: everything before its last slash ("/" for a
 /// file at the top).
 fn parentOf(path: []const u8) []const u8 {
-    const i = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
-    return if (i == 0) "/" else path[0..i];
+    return filters_mod.parentDir(path) orelse path;
 }
 
 /// Counts findings per facet. A finding contributes once to each distinct
@@ -2697,8 +2693,8 @@ fn folderKind(path: [*:0]const u8) ?[]const u8 {
 /// content. Null means it may go on to be compared with its keepers.
 fn folderRefusal(item: FolderItem, path: [*:0]const u8) ?[]const u8 {
     // An absolute path with a parent: never a relative path, and never "/".
-    if (item.path.len == 0 or item.path[0] != '/') return "not an absolute folder path";
-    if (std.mem.eql(u8, item.path, "/")) return "not an absolute folder path";
+    if (!filters_mod.isAbsolute(item.path)) return "not an absolute folder path";
+    if (filters_mod.isRoot(item.path)) return "not an absolute folder path";
     // A symlink to a folder: removing "it" is not what was verified.
     if (folderKind(path)) |reason| return reason;
     if (item.keepers.len == 0) return "no surviving copy was named";
@@ -2843,8 +2839,7 @@ fn millis(seconds: i64) i64 {
 
 /// Shrink `common` until it contains the parent directory of `path`.
 fn narrowToCommonDir(common: *?[]const u8, path: []const u8) void {
-    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return;
-    const dir = if (slash == 0) path[0..1] else path[0..slash];
+    const dir = filters_mod.parentDir(path) orelse return;
     const current = common.* orelse {
         common.* = dir;
         return;

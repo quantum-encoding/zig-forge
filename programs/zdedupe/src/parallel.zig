@@ -30,8 +30,7 @@ const run_max_files = 64;
 const run_max_bytes: u64 = 64 * 1024 * 1024;
 
 fn parentOf(path: []const u8) ?[]const u8 {
-    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return null;
-    return if (slash == 0) path[0..1] else path[0..slash];
+    return @import("filters.zig").parentDir(path);
 }
 
 /// Parallel hasher using a thread pool

@@ -132,7 +132,8 @@ pub export fn zdedupe_add_path(ctx: ?*ZDedupeContext, path: [*:0]const u8) c_int
     const c = ctx orelse return -1;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     const alloc = core_alloc;
-    const owned = alloc.dupe(u8, std.mem.span(path)) catch return -1;
+    // The core's path form (Windows: `C:\\x` becomes `C:/x`).
+    const owned = filters.normalizeOwned(alloc, std.mem.span(path)) catch return -1;
     internal.paths.append(alloc, owned) catch {
         alloc.free(owned);
         return -1;
@@ -253,11 +254,11 @@ pub export fn zdedupe_add_exclude_path(ctx: ?*ZDedupeContext, path: [*:0]const u
 
     // Matched against the walk's absolute paths, which carry no trailing
     // slash; a relative path could never match.
-    var span: []const u8 = std.mem.span(path);
-    while (span.len > 1 and span[span.len - 1] == '/') span = span[0 .. span.len - 1];
-    if (span.len < 2 or span[0] != '/') return -1;
-
-    const owned = alloc.dupe(u8, span) catch return -1;
+    const owned = filters.normalizeOwned(alloc, std.mem.span(path)) catch return -1;
+    if (!filters.isAbsolute(owned) or filters.isRoot(owned)) {
+        alloc.free(owned);
+        return -1;
+    }
     internal.exclude_paths.append(alloc, owned) catch {
         alloc.free(owned);
         return -1;

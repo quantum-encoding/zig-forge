@@ -479,9 +479,7 @@ fn rank(c: u8) u16 {
 }
 
 fn parentPath(path: []const u8) ?[]const u8 {
-    if (path.len <= 1) return null;
-    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return null;
-    return if (slash == 0) "/" else path[0..slash];
+    return filters.parentDir(path);
 }
 
 pub const BuildInput = struct {
@@ -1215,7 +1213,9 @@ pub const Reader = struct {
 
     fn locateUnder(self: *const Reader, root: u32, root_name: []const u8, path: []const u8) ReadError!?Located {
         if (path.len == root_name.len) return .{ .dir = root };
-        const rest = if (std.mem.eql(u8, root_name, "/")) path[1..] else path[root_name.len + 1 ..];
+        // A root's name ends in its separator ("/", "C:/"); any other folder's
+        // name is followed by one.
+        const rest = if (root_name.len > 0 and root_name[root_name.len - 1] == '/') path[root_name.len..] else path[root_name.len + 1 ..];
         var current = root;
         var parts = std.mem.splitScalar(u8, rest, '/');
         while (parts.next()) |part| {

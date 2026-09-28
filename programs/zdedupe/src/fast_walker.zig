@@ -54,6 +54,7 @@ const dirfd = if (builtin.os.tag == .windows) libc.dirfd else struct {
 
 // Stat comes from pstat.zig: std.c ($INODE64-correct) on Darwin, statx on Linux.
 const pstat = @import("pstat.zig");
+const filters = @import("filters.zig");
 const Stat = pstat.Stat;
 
 /// File identifier for hard link detection
@@ -428,8 +429,9 @@ const Worker = struct {
     }
 
     fn join(self: *Worker, dir_path: []const u8, name: []const u8) ![]const u8 {
-        // Under the filesystem root the separator is already there: "/x", not "//x".
-        const base = if (dir_path.len == 1 and dir_path[0] == '/') "" else dir_path;
+        // Under a root the separator is already there: "/x" and "C:/x", not
+        // "//x" and "C://x".
+        const base = if (dir_path.len > 0 and dir_path[dir_path.len - 1] == '/') dir_path[0 .. dir_path.len - 1] else dir_path;
         const out = try self.strings().alloc(u8, base.len + 1 + name.len);
         @memcpy(out[0..base.len], base);
         out[base.len] = '/';
@@ -548,8 +550,7 @@ const Worker = struct {
 
     fn markParent(self: *Worker, child_path: []const u8, kind: MarkKind) !void {
         if (!self.shared.walker.record_tree) return;
-        const slash = std.mem.lastIndexOfScalar(u8, child_path, '/') orelse return;
-        const parent = if (slash == 0) child_path[0..1] else child_path[0..slash];
+        const parent = filters.parentDir(child_path) orelse return;
         try self.marks.append(self.scratch(), .{ .path = parent, .kind = kind });
     }
 };

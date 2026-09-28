@@ -596,7 +596,7 @@ fn canonicalPath(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
 /// True if canonical path `inner` lies strictly inside canonical path `outer`.
 fn isInside(inner: []const u8, outer: []const u8) bool {
     // zig-lens-ignore: EQL-FOR-SECRETS filesystem paths, not secrets
-    if (std.mem.eql(u8, outer, "/")) return inner.len > 1;
+    if (@import("filters.zig").isRoot(outer)) return inner.len > outer.len and std.mem.startsWith(u8, inner, outer);
     return inner.len > outer.len + 1 and
         inner[outer.len] == '/' and
         std.mem.startsWith(u8, inner, outer);

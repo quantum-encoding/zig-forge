@@ -134,9 +134,9 @@ pub const Removed = struct {
         var current = path;
         while (true) {
             if (self.paths.contains(current)) return true;
-            const slash = std.mem.lastIndexOfScalar(u8, current, '/') orelse return false;
-            if (slash == 0) return false;
-            current = current[0..slash];
+            const up = @import("filters.zig").parentDir(current) orelse return false;
+            if (@import("filters.zig").isRoot(up)) return false;
+            current = up;
         }
     }
 
