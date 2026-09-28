@@ -21,6 +21,10 @@ Asserts two invariants a screenshot-level regression would violate:
 
 Covers along the way: startup, 2500+ streamed lines, wide chars, a mid-run
 SIGWINCH resize, split + spawn, pane focus cycling, new window + switching.
+
+Hermetic, like the other two harnesses: a temp HOME and /bin/sh panes, so no
+personal shell startup file runs — one that prompts (for a passphrase, say)
+would otherwise receive every readiness probe this harness types.
 """
 import errno
 import fcntl
@@ -33,6 +37,13 @@ import tempfile
 import termios
 import time
 import unicodedata
+
+# Inherited by every mux this harness forks, and so by its panes' shells.
+os.environ["HOME"] = tempfile.mkdtemp(prefix="muxqa-home-")
+os.environ["SHELL"] = "/bin/sh"
+os.environ.pop("ZDOTDIR", None)
+os.environ.pop("ENV", None)
+os.environ.pop("BASH_ENV", None)
 
 MUX = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "zig-out", "bin", "zterm")

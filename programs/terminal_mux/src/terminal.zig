@@ -1275,6 +1275,18 @@ pub const Terminal = struct {
 
     /// Resize terminal
     pub fn resize(self: *Self, rows: u16, cols: u16) !void {
+        // Losing rows below the cursor drops blank space; losing rows the
+        // cursor sits on or above would drop the lines the application just
+        // wrote (and the prompt). Like xterm, scroll the top of the primary
+        // screen into scrollback instead, so the cursor's line stays on
+        // screen. The alternate screen is the application's to redraw.
+        if (rows > 0 and rows < self.grid.rows and self.cursor.row >= rows and !self.modes.alt_screen) {
+            const excess: u16 = self.cursor.row - rows + 1;
+            self.scroll_region = .{ .top = 0, .bottom = self.grid.rows - 1 };
+            self.scrollUp(excess);
+            self.cursor.row -= excess;
+            if (self.saved_cursor) |*sc| sc.row -|= excess;
+        }
         try self.grid.resize(rows, cols);
         if (self.alt_grid) |*g| {
             try g.resize(rows, cols);
@@ -1666,6 +1678,49 @@ test "full-screen scroll rotates the ring and preserves logical order" {
     try std.testing.expectEqual(@as(u21, ' '), term.grid.getCellConst(0, 0).char);
     try std.testing.expectEqual(@as(u21, '1'), term.grid.getCellConst(1, 0).char);
     try std.testing.expectEqual(@as(u21, '2'), term.grid.getCellConst(2, 0).char);
+}
+
+test "shrinking rows scrolls the top into history and keeps the cursor line" {
+    const allocator = std.testing.allocator;
+
+    var term = try Terminal.init(allocator, 6, 8, 100);
+    defer term.deinit();
+
+    // Rows '0'..'4', cursor on row 5 (a prompt) — the bottom of the screen.
+    var r: u16 = 0;
+    while (r < 5) : (r += 1) {
+        term.setCursorPos(r, 0);
+        term.putChar('0' + @as(u21, r));
+    }
+    term.setCursorPos(5, 0);
+    term.putChar('$');
+    const top_before = term.graphics.epoch;
+
+    try term.resize(3, 8);
+
+    // The last three lines survive, the first three are history.
+    try std.testing.expectEqual(@as(u21, '3'), term.grid.getCellConst(0, 0).char);
+    try std.testing.expectEqual(@as(u21, '4'), term.grid.getCellConst(1, 0).char);
+    try std.testing.expectEqual(@as(u21, '$'), term.grid.getCellConst(2, 0).char);
+    try std.testing.expectEqual(@as(u16, 2), term.cursor.row);
+    try std.testing.expectEqual(@as(usize, 3), term.scrollback.len);
+    try std.testing.expectEqual(top_before + 3, term.graphics.epoch);
+
+    // Growing back adds blank rows below; nothing moves.
+    try term.resize(6, 8);
+    try std.testing.expectEqual(@as(u21, '$'), term.grid.getCellConst(2, 0).char);
+    try std.testing.expectEqual(@as(u16, 2), term.cursor.row);
+}
+
+test "shrinking rows with the cursor high up only drops blank rows below" {
+    const allocator = std.testing.allocator;
+
+    var term = try Terminal.init(allocator, 6, 8, 100);
+    defer term.deinit();
+    term.putChar('a');
+    try term.resize(3, 8);
+    try std.testing.expectEqual(@as(u21, 'a'), term.grid.getCellConst(0, 0).char);
+    try std.testing.expectEqual(@as(usize, 0), term.scrollback.len);
 }
 
 test "putPrintableRun matches byte-by-byte putChar (incl. autowrap)" {
