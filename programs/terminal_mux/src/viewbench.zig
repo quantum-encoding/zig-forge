@@ -38,7 +38,11 @@ const ms_ns = std.time.ns_per_ms;
 
 const ROWS: u16 = 40;
 const COLS: u16 = 120;
-const SCHEMA: u32 = 1;
+/// 2: the default stream grew from 500k to 3M lines (~23 MB). At 500k the
+/// faster emulator finished in ~0.2 s, a quarter of it inside the 50 ms of
+/// unpaced frames that answer the typed command — it measured start-up, not
+/// the paced steady state. Schema-1 view numbers are not comparable.
+const SCHEMA: u32 = 2;
 /// The marker a stream ends with. The command that prints it computes the
 /// number (`$((6*7))`), so the typed command line never matches it.
 const DONE = "BENCH-42-DONE";
@@ -400,7 +404,7 @@ const Config = struct {
     json: bool = false,
     keys: usize = 500,
     repeat: usize = 3,
-    seq: u64 = 500_000,
+    seq: u64 = 3_000_000,
 };
 
 fn parseArgs(args: []const []const u8) !Config {

@@ -149,15 +149,20 @@ try:
     check("…and the reading viewer keeps up", fast.until(lambda: "FLOOD-DONE" in fast.text(), 60))
     # Pacing: one frame per 8 ms at most (the default --frame-ms), however
     # many reads the flood took. The flood was started by typed input, whose
-    # first 50 ms is unpaced by design (the echo is never held), so only the
-    # frames after that window count. 190/s leaves room for timer slack;
-    # unpaced this was 2000-5000/s.
+    # answering frame is never held, so frames from the first 100 ms are not
+    # counted. 190/s leaves room for timer slack; unpaced this was 2000-5000/s.
     paced_from = flood_t0 + 0.1
     paced = [f["_rx"] for f in fast.frames() if f["_rx"] > paced_from]
     span = (paced[-1] - paced_from) if paced else 0
     check("frames are paced while a pane streams (<= ~120/s)",
           len(paced) >= 5 and span > 0 and len(paced) / span <= 190,
           f"{len(paced)} frames in {span:.2f}s after the input window")
+    # Only the FIRST frame after the typed command is exempt: a command that
+    # floods on Enter must not get a frame per PTY read until a window closes
+    # (a 50 ms window sent ~300 frames there once the emulator got faster).
+    early = [f for f in fast.frames() if flood_t0 <= f["_rx"] < flood_t0 + 0.1]
+    check("a flood started by input is paced after its first frame",
+          len(early) <= 25, f"{len(early)} frames in the first 100 ms")
     check("…and the stalled viewer converges on the final screen once it reads",
           slow.until(lambda: "FLOOD-DONE" in slow.text(), 30), slow.text()[-120:])
 

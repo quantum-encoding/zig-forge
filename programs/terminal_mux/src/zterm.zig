@@ -404,13 +404,13 @@ const Pane = struct {
     /// When `hup` was first seen (monotonic ms), to bound the wait for the
     /// child to be reaped before viewers are told it exited.
     hup_ms: i64 = 0,
-    /// When a client's input, focus change or resize last reached this pane
-    /// (monotonic ms). Its frames are unpaced for INPUT_UNPACED_MS after it:
-    /// someone is waiting to see the result.
-    input_ms: i64 = 0,
+    /// Counts the inputs, focus changes and resizes clients have sent this
+    /// pane. A viewer whose last frame predates the latest one is owed an
+    /// unpaced frame: someone is waiting to see the result.
+    input_seq: u64 = 0,
 
     fn noteInput(self: *Pane) void {
-        self.input_ms = @import("terminal.zig").monotonicMs();
+        self.input_seq +%= 1;
     }
 
     fn spane(self: *const Pane) *session.Pane {
@@ -469,6 +469,8 @@ const Viewer = struct {
     /// When this client's last frame was built (monotonic ms; 0 = never), for
     /// frame pacing (`Server.frame_ms`).
     last_frame_ms: i64 = 0,
+    /// The pane's `input_seq` when this client's last frame was built.
+    answered_input: u64 = 0,
 
     /// Close and release. Idempotent: a viewer can die where it is found
     /// dead and again at the sweep.
@@ -573,12 +575,6 @@ pub const ServerOptions = struct {
 /// instead of one per PTY read (2000-5000/s measured: bench/runs).
 pub const DEFAULT_FRAME_MS: u32 = 8;
 
-/// How long after input a pane's frames go out unpaced. Long enough to cover
-/// an echo and an application's reply to a key (a TUI redrawing in several
-/// writes); short enough that typing into a flooding pane only briefly
-/// restores the unpaced rate. Measured without it: pacing added the whole
-/// interval to every keystroke typed within 8 ms of the previous frame.
-const INPUT_UNPACED_MS: i64 = 50;
 
 var stop_requested = std.atomic.Value(bool).init(false);
 fn onStopSignal(_: c_int) callconv(.c) void {
@@ -1489,7 +1485,12 @@ const Server = struct {
                 continue;
             }
             const since = now - v.last_frame_ms;
-            const answering_input = now - p.input_ms < INPUT_UNPACED_MS;
+            // The first frame after input is never held (without this, pacing
+            // added the whole interval to every key typed within 8 ms of the
+            // previous frame). Only the first: a 50 ms unpaced window let a
+            // command that floods on Enter send a frame per PTY read — ~300
+            // frames in 50 ms once the emulator got faster (bench/runs).
+            const answering_input = v.answered_input != p.input_seq;
             if ((v.changed or v.full) and v.last_frame_ms != 0 and since < self.frame_ms and !answering_input) {
                 soon(&wake, self.frame_ms - since);
                 continue;
@@ -1505,6 +1506,7 @@ const Server = struct {
             if (v.changed or v.full or !p.hup) {
                 self.writeFrame(v, p) catch {};
                 v.last_frame_ms = now;
+                v.answered_input = p.input_seq;
             }
             if ((reaped or gave_up) and !v.exit_sent) {
                 const st = if (reaped) p.spane().exitStatus() else null;
