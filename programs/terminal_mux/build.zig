@@ -65,8 +65,21 @@ pub fn build(b: *std.Build) void {
 
     const bench_cmd = b.addRunArtifact(bench);
     bench_cmd.step.dependOn(b.getInstallStep());
-    const bench_step = b.step("bench", "Run the C ABI throughput benchmark");
+    const bench_step = b.step("bench", "Run the C ABI throughput benchmark (a recorded run: scripts/bench-run.py)");
     bench_step.dependOn(&bench_cmd.step);
+
+    // The view-protocol benchmark: a client of a running `zterm server`,
+    // timing what a front end sees. scripts/bench-run.py starts the server.
+    const viewbench = b.addExecutable(.{
+        .name = "zterm-viewbench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/viewbench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    viewbench.root_module.link_libc = true;
+    b.installArtifact(viewbench);
 
     // ==========================================================================
     // zterm — THE executable: bare it is the visible multiplexer; `server`,
@@ -113,6 +126,9 @@ pub fn build(b: *std.Build) void {
     qa_step.dependOn(&zterm_qa_cmd.step);
     // The view protocol (docs/VIEW-PROTOCOL.md) and `zterm attach`, its
     // first client: frames, input, resize, history, exit, state-sync.
+    const bench_compare_cmd = b.addSystemCommand(&.{ "python3", "tests/bench_compare_test.py" });
+    qa_step.dependOn(&bench_compare_cmd.step);
+
     const view_qa_cmd = b.addSystemCommand(&.{ "python3", "tests/zterm_view_qa.py" });
     view_qa_cmd.step.dependOn(b.getInstallStep());
     qa_step.dependOn(&view_qa_cmd.step);
@@ -175,7 +191,24 @@ pub fn build(b: *std.Build) void {
     zterm_tests.root_module.link_libc = true;
     const run_zterm_tests = b.addRunArtifact(zterm_tests);
 
+    // The benchmarks' own logic: statistics, fixed inputs, byte accounting.
+    const bench_test_step = b.step("test-bench", "Unit-test the benchmark helpers");
+    for ([_][]const u8{ "src/benchstat.zig", "src/bench.zig", "src/viewbench.zig" }) |root| {
+        const t = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(root),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .use_llvm = use_llvm,
+            .use_lld = use_lld,
+        });
+        t.root_module.link_libc = true;
+        bench_test_step.dependOn(&b.addRunArtifact(t).step);
+    }
+
     const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(bench_test_step);
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_capi_tests.step);
     test_step.dependOn(&run_zterm_tests.step);

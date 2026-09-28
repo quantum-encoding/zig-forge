@@ -27,7 +27,26 @@ throughput. A 16→12B shrink (−25%) can therefore not pay for its churn.
 parser throughput several-fold; re-run this A/B (pad probe is a 2-line diff in
 `Cell`) before believing any future "cells are the bottleneck" claim.
 
-## results.csv
+## Recording runs (2026-09-28)
+
+`scripts/bench-run.py` is how a run is recorded: it builds ReleaseFast, runs
+`zterm-bench` (core) and `zterm-viewbench` (through a hermetic `zterm server`,
+as a front end sees it), and writes `BENCH.md` + `bench/runs/<date>-<label>/`
+in the layout the Experiments panel reads. Every metric keeps all its samples
+and the machine state (power profile, AC, governor, load before/after).
+
+Comparing: a change is called better/WORSE only with n >= 5 on both runs, a
+median change above 5%, and non-overlapping min..max ranges. On this desktop
+two runs of the SAME commit differed by 10-25% on most timings (load ~5), so
+anything weaker reports regressions that are noise. For a comparison you will
+act on, record both runs back to back on an idle machine on AC, same `--cpus`.
+
+## results.csv (schema 1, superseded)
+
+Not comparable with bench-run.py: its PTY figure included two 1-second idle
+pumps (57.7 MiB/s measured to the last byte vs 5.7 recorded), and its
+create/attach figures spawned the user's login shell, not /bin/sh.
+
 
 `scripts/bench-track.sh [runs]` appends best-of-N rows here with the git rev
 and fails (exit 1) on >10% regressions vs the previous row. Record the
