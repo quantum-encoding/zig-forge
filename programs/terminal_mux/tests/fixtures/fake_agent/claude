@@ -1,0 +1,23 @@
+#!/usr/bin/python3
+"""Stand-in agent for tests/zterm_runner_qa.py.
+
+Named `claude` so the zterm runner sees an agent in the pane's foreground
+(the direct interpreter shebang keeps /proc/<pid>/comm == "claude"; an
+`env` shebang would re-exec and read as "python3"). Like a real TUI it turns
+on bracketed paste, then logs every byte it receives, raw, so the test can
+assert on the exact paste brackets and the submitting CR.
+"""
+import os
+import sys
+import tty
+
+log = sys.argv[1]
+tty.setraw(0)
+os.write(1, b"\x1b[?2004hfake-claude ready> ")
+with open(log, "ab", buffering=0) as f:
+    while True:
+        b = os.read(0, 65536)
+        if not b:
+            break
+        f.write(b)
+        os.write(1, b.replace(b"\x1b[200~", b"").replace(b"\x1b[201~", b"").replace(b"\r", b"\r\n"))

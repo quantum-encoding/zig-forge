@@ -204,6 +204,22 @@ pub const Pty = struct {
     /// array makes execve dereference stack garbage as argv[1], which fails
     /// with EFAULT on Darwin).
     pub fn spawn(self: *Self, path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) !void {
+        return self.spawnIn(path, argv, envp, null);
+    }
+
+    /// `spawn`, with the child starting in `cwd` (null = inherit the caller's).
+    /// The chdir happens in the child, after fork, so the caller's own working
+    /// directory is never touched — a multi-pane server must not change its
+    /// cwd per spawn. A chdir failure exits the child with 126 (the shell
+    /// convention for "found but could not run"); callers that need a clean
+    /// error should validate the directory before spawning.
+    pub fn spawnIn(
+        self: *Self,
+        path: [*:0]const u8,
+        argv: [*:null]const ?[*:0]const u8,
+        envp: [*:null]const ?[*:0]const u8,
+        cwd: ?[*:0]const u8,
+    ) !void {
         const pid = c.fork();
 
         if (pid < 0) {
@@ -213,6 +229,9 @@ pub const Pty = struct {
             self.setupChild() catch {
                 std.c._exit(1);
             };
+            if (cwd) |dir| {
+                if (c.chdir(dir) != 0) std.c._exit(126);
+            }
 
             // `path` is absolute; execve does no PATH search.
             _ = c.execve(path, argv, envp);

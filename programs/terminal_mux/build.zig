@@ -17,6 +17,15 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    // Everything below that LINKS against the system libc is pinned to LLVM +
+    // LLD on ELF targets. Zig 0.16's self-hosted ELF linker (the Debug default
+    // on x86_64) rejects the R_X86_64_PC64 relocations in the `.sframe` section
+    // glibc >= 2.44 / binutils >= 2.47 put in crt1.o, so Debug builds and
+    // `zig build test` die at link time on current rolling distros. LLD cannot
+    // link Mach-O, so Apple targets keep Zig's defaults (null = unchanged).
+    const elf_link = !target.result.os.tag.isDarwin();
+    const use_llvm: ?bool = if (elf_link) true else null;
+    const use_lld: ?bool = if (elf_link) true else null;
 
     // ==========================================================================
     // C ABI Static Library (libterminal_mux) — the embedding surface.
@@ -48,6 +57,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
+        .use_llvm = use_llvm,
+        .use_lld = use_lld,
     });
     exe.root_module.link_libc = true;
     b.installArtifact(exe);
@@ -91,6 +102,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
+        .use_llvm = use_llvm,
+        .use_lld = use_lld,
     });
     zterm.root_module.link_libc = true;
     b.installArtifact(zterm);
@@ -109,8 +122,13 @@ pub fn build(b: *std.Build) void {
     // ==========================================================================
     const qa_cmd = b.addSystemCommand(&.{ "python3", "tests/mux_qa.py" });
     qa_cmd.step.dependOn(b.getInstallStep());
-    const qa_step = b.step("qa", "Run the end-to-end PTY QA harness (needs python3)");
+    // zterm's headless server as a baton runner: control protocol + runner
+    // contract against real PTYs and a stand-in agent.
+    const zterm_qa_cmd = b.addSystemCommand(&.{ "python3", "tests/zterm_runner_qa.py" });
+    zterm_qa_cmd.step.dependOn(b.getInstallStep());
+    const qa_step = b.step("qa", "Run the end-to-end PTY QA harnesses (needs python3)");
     qa_step.dependOn(&qa_cmd.step);
+    qa_step.dependOn(&zterm_qa_cmd.step);
 
     // ==========================================================================
     // Tests
@@ -121,6 +139,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
+        .use_llvm = use_llvm,
+        .use_lld = use_lld,
     });
     lib_tests.root_module.link_libc = true;
     // The graphics recorded-stream anchor @embedFile's this committed fixture;
@@ -148,11 +168,28 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
+        .use_llvm = use_llvm,
+        .use_lld = use_lld,
     });
     capi_tests.root_module.link_libc = true;
     const run_capi_tests = b.addRunArtifact(capi_tests);
 
+    // zterm's protocol logic (runner-socket resolution, paste scrubbing,
+    // settle/evidence, designations) plus ctl.zig's socket-path guard.
+    const zterm_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/zterm.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .use_llvm = use_llvm,
+        .use_lld = use_lld,
+    });
+    zterm_tests.root_module.link_libc = true;
+    const run_zterm_tests = b.addRunArtifact(zterm_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_capi_tests.step);
+    test_step.dependOn(&run_zterm_tests.step);
 }

@@ -156,6 +156,21 @@ pub const Pane = struct {
 
     /// Spawn a shell in this pane
     pub fn spawn(self: *Self, shell: []const u8, env: [*:null]const ?[*:0]const u8) !void {
+        return self.spawnIn(shell, env, null);
+    }
+
+    /// Spawn a shell in this pane, starting in `cwd` (null = inherit). The
+    /// directory is recorded as the pane's cwd, which is what `list` reports
+    /// where the platform cannot read a live one.
+    pub fn spawnIn(self: *Self, shell: []const u8, env: [*:null]const ?[*:0]const u8, cwd: ?[]const u8) !void {
+        var cwd_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+        const cwd_z: ?[*:0]const u8 = if (cwd) |d| blk: {
+            if (d.len == 0 or d.len > std.fs.max_path_bytes) return error.CwdTooLong;
+            @memcpy(cwd_buf[0..d.len], d);
+            cwd_buf[d.len] = 0;
+            break :blk @ptrCast(&cwd_buf);
+        } else null;
+
         var pty = try Pty.create();
         errdefer pty.close();
 
@@ -180,9 +195,13 @@ pub const Pane = struct {
         name_buf[1 + base.len] = 0;
 
         const argv = [_:null]?[*:0]const u8{&name_buf};
-        try pty.spawn(&shell_buf, &argv, env);
+        try pty.spawnIn(&shell_buf, &argv, env, cwd_z);
 
         self.pty = pty;
+        if (cwd) |d| {
+            @memcpy(self.cwd[0..d.len], d);
+            self.cwd_len = d.len;
+        }
     }
 
     /// Process input data from the PTY.

@@ -193,6 +193,15 @@ pub export fn tmux_version() [*:0]const u8 {
 /// non-NULL). Returns the handle, or NULL on failure. rows/cols of 0 default
 /// to 24/80.
 pub export fn tmux_create(rows: u16, cols: u16, shell: ?[*:0]const u8, out_id: ?*u64) ?*TmuxSession {
+    return createIn(rows, cols, if (shell) |s| std.mem.sliceTo(s, 0) else null, null, out_id);
+}
+
+/// `tmux_create`, with the shell started in `cwd` (null = inherit this
+/// process's). Zig-only — the headless `zterm server` needs a per-pane start
+/// directory; the C ABI is unchanged. The caller validates `cwd`: a directory
+/// the child cannot enter makes the shell exit 126 immediately (see
+/// `Pty.spawnIn`), which is a live-but-dead pane rather than a clean error.
+pub fn createIn(rows: u16, cols: u16, shell: ?[]const u8, cwd: ?[]const u8, out_id: ?*u64) ?*TmuxSession {
     const r: u16 = if (rows == 0) 24 else rows;
     const co: u16 = if (cols == 0) 80 else cols;
     const rect = session.Rect{ .x = 0, .y = 0, .width = co, .height = r };
@@ -200,8 +209,8 @@ pub export fn tmux_create(rows: u16, cols: u16, shell: ?[*:0]const u8, out_id: ?
     const sess = session.Session.init(alloc, "0", rect, DEFAULT_SCROLLBACK) catch return null;
 
     const pane = sess.getActiveWindow().getActivePane();
-    const shell_path: []const u8 = if (shell) |s| std.mem.sliceTo(s, 0) else defaultShell();
-    pane.spawn(shell_path, childEnviron()) catch {
+    const shell_path: []const u8 = shell orelse defaultShell();
+    pane.spawnIn(shell_path, childEnviron(), cwd) catch {
         sess.deinit();
         return null;
     };

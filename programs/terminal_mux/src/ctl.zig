@@ -45,12 +45,39 @@ pub fn socketPath(alloc: std.mem.Allocator) ![:0]u8 {
     return std.fmt.allocPrintSentinel(alloc, "/tmp/zterm-{d}.sock", .{c.getuid()}, 0);
 }
 
-fn fillAddr(path: []const u8) c.sockaddr.un {
+/// Build a sockaddr_un for `path`, REFUSING a path that does not fit.
+///
+/// `sun_path` is 108 bytes on Linux and 104 on macOS, including the NUL. The
+/// old version truncated silently, which is worse than failing: bind() lands
+/// on a different (often nonexistent-directory) path and reports only
+/// BindFailed, and a client whose truncated path happens to exist connects to
+/// the WRONG socket — typing into somebody else's mux. A long $ZTERM_SOCKET
+/// (a deep scratch or $TMPDIR) is the realistic way to hit this.
+pub fn fillAddr(path: []const u8) error{SocketPathTooLong}!c.sockaddr.un {
     var addr: c.sockaddr.un = .{ .family = c.AF.UNIX, .path = undefined };
     @memset(&addr.path, 0);
-    const n = @min(path.len, addr.path.len - 1);
-    @memcpy(addr.path[0..n], path[0..n]);
+    if (path.len == 0 or path.len >= addr.path.len) return error.SocketPathTooLong;
+    @memcpy(addr.path[0..path.len], path);
     return addr;
+}
+
+test "fillAddr refuses a path that would be truncated" {
+    var ok_buf: [64]u8 = undefined;
+    @memset(&ok_buf, 'a');
+    ok_buf[0] = '/';
+    const a = try fillAddr(&ok_buf);
+    try std.testing.expectEqualSlices(u8, &ok_buf, a.path[0..ok_buf.len]);
+    try std.testing.expectEqual(@as(u8, 0), a.path[ok_buf.len]);
+
+    const max = @as(c.sockaddr.un, undefined).path.len;
+    var long_buf: [256]u8 = undefined;
+    @memset(&long_buf, 'b');
+    // Exactly one byte short of the array fits (room for the NUL)...
+    _ = try fillAddr(long_buf[0 .. max - 1]);
+    // ...a path filling the array (no NUL room) and anything longer do not.
+    try std.testing.expectError(error.SocketPathTooLong, fillAddr(long_buf[0..max]));
+    try std.testing.expectError(error.SocketPathTooLong, fillAddr(long_buf[0 .. max + 40]));
+    try std.testing.expectError(error.SocketPathTooLong, fillAddr(""));
 }
 
 /// Bind + listen. Errors are the caller's to swallow — a mux without a control
@@ -66,7 +93,7 @@ pub fn bind(alloc: std.mem.Allocator) !Ctl {
     // see accept()): a child holding a conn open means the CLI never sees EOF
     // and hangs after `split`/`new-window`.
     _ = c.fcntl(fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
-    var addr = fillAddr(path);
+    var addr = try fillAddr(path);
     if (c.bind(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) < 0) return error.BindFailed;
     // Owner-only: this socket types into the user's shell — default umask
     // leaves it 0755 and any LOCAL user could drive the terminal.
@@ -181,7 +208,7 @@ fn handle(
         return false;
     } else if (std.mem.eql(u8, cmd, "split")) {
         const dir = it.next() orelse "h";
-        return doSplit(conn, sess, shell, env, dir, null);
+        return doSplit(conn, sess, shell, env, dir, null, alloc);
     } else if (std.mem.eql(u8, cmd, "new-window")) {
         const new_win = sess.createWindow() catch {
             cwrite(conn, "{\"ok\":false,\"error\":\"create failed\"}\n");
@@ -192,8 +219,7 @@ fn handle(
             cwrite(conn, "{\"ok\":false,\"error\":\"spawn failed\"}\n");
             return true;
         };
-        var b: [64]u8 = undefined;
-        cwrite(conn, std.fmt.bufPrint(&b, "{{\"ok\":true,\"pane\":{d}}}\n", .{flatIndexOf(sess, new_win.getActivePane()) orelse 0}) catch "{\"ok\":true}\n");
+        writePaneOk(conn, alloc, flatIndexOf(sess, new_win.getActivePane()) orelse 0);
         return true;
     } else if (std.mem.eql(u8, cmd, "focus")) {
         const id = std.fmt.parseInt(usize, it.next() orelse "", 10) catch return false;
@@ -276,6 +302,7 @@ fn doSplit(
     env: [*:null]const ?[*:0]const u8,
     dir: []const u8,
     run: ?[]const u8,
+    alloc: std.mem.Allocator,
 ) bool {
     const d: session.SplitDirection = if (dir.len > 0 and (dir[0] == 'v' or dir[0] == 'V'))
         .vertical
@@ -291,9 +318,19 @@ fn doSplit(
         return true;
     };
     if (run) |r| if (r.len > 0) new_pane.setBootCommand(r);
-    var b: [64]u8 = undefined;
-    cwrite(conn, std.fmt.bufPrint(&b, "{{\"ok\":true,\"pane\":{d}}}\n", .{flatIndexOf(sess, new_pane) orelse 0}) catch "{\"ok\":true}\n");
+    writePaneOk(conn, alloc, flatIndexOf(sess, new_pane) orelse 0);
     return true;
+}
+
+/// `{"ok":true,"pane":N}` — serialized, never hand-formatted (JSON-IN-FMT).
+fn writePaneOk(conn: c.fd_t, alloc: std.mem.Allocator, pane: usize) void {
+    const json = std.json.Stringify.valueAlloc(alloc, .{ .ok = true, .pane = pane }, .{}) catch {
+        cwrite(conn, "{\"ok\":true}\n");
+        return;
+    };
+    defer alloc.free(json);
+    cwrite(conn, json);
+    cwrite(conn, "\n");
 }
 
 /// JSON front-end: {"cmd":"send","pane":1,"text":"line1\nline2"},
@@ -338,7 +375,7 @@ fn handleJson(
         cwrite(conn, "{\"ok\":true}\n");
         return false;
     } else if (std.mem.eql(u8, cmd, "split")) {
-        return doSplit(conn, sess, shell, env, jsonStr(v, "dir") orelse "h", jsonStr(v, "run"));
+        return doSplit(conn, sess, shell, env, jsonStr(v, "dir") orelse "h", jsonStr(v, "run"), alloc);
     } else if (std.mem.eql(u8, cmd, "capture")) {
         const ref = nthPane(sess, pane_idx) orelse {
             cwrite(conn, "{\"ok\":false,\"error\":\"no such pane\"}\n");
@@ -444,7 +481,7 @@ fn flatIndexOf(sess: *session.Session, pane: *session.Pane) ?usize {
 /// re-emits SGR at every style change so colors/attrs survive the capture
 /// (wezterm's `get-text --escapes`). Skips wide-glyph continuation cells
 /// (char 0 / width 0) — they'd emit NULs.
-fn appendRow(
+pub fn appendRow(
     out: *std.ArrayList(u8),
     alloc: std.mem.Allocator,
     cells: []const terminal.Cell,
@@ -507,7 +544,7 @@ fn appendSgr(out: *std.ArrayList(u8), alloc: std.mem.Allocator, cell: *const ter
 
 /// The pane's content as text: the last `hist_lines` scrollback rows, then the
 /// live grid. `escapes` preserves colors/attrs as SGR.
-fn writeCapture(conn: c.fd_t, pane: *session.Pane, alloc: std.mem.Allocator, hist_lines: usize, escapes: bool) !void {
+pub fn writeCapture(conn: c.fd_t, pane: *session.Pane, alloc: std.mem.Allocator, hist_lines: usize, escapes: bool) !void {
     const term = &pane.terminal;
     const grid = term.getCurrentGrid();
     var out: std.ArrayList(u8) = .empty;
