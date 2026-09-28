@@ -17,6 +17,7 @@
 // Build: see build.zig (targets glibc 2.39, links -lbpf, _FORTIFY_SOURCE=0).
 
 const std = @import("std");
+const evlog = @import("evidence_log.zig");
 
 const c = @cImport({
     @cInclude("bpf/libbpf.h");
@@ -264,20 +265,36 @@ const RawConfig = struct {
     enforce_egress: bool = true,
     pin_dir: []const u8 = "/sys/fs/bpf/guardian_shield",
     log_file: []const u8 = "/var/log/guardian_shield.jsonl",
+    // Bounded logging (evidence_log.zig). `log_file` stays the world-readable
+    // live feed `baton shield` tails, now capped; the complete, hash-chained
+    // record goes to `evidence_dir`, which must be on its own filesystem.
+    feed_max_bytes: u64 = 64 << 20,
+    evidence_dir: []const u8 = "",
+    evidence_segment_bytes: u64 = 256 << 20,
+    evidence_min_free_bytes: u64 = 1 << 30,
+    // Only for a DEDICATED evidence volume: refuse evidence writes while its
+    // mount is absent, instead of writing into the bare mount point on /.
+    evidence_require_mount: bool = false,
+    repeat_window_s: u32 = 30,
 };
 
 // ===================================================================
 // Globals for the C-ABI ring buffer callbacks
 // ===================================================================
 
-var g_log_fd: c_int = -1;
+/// The event sink: repeat suppression, capped feed, chained evidence record.
+/// A global because the ring-buffer callbacks are C-ABI with no context.
+var g_sink: evlog.Sink = undefined;
+var g_sink_ready = false;
 const g_alloc = std.heap.c_allocator;
 
 const MAX_PATH_BYTES = 4096;
 
-fn logWrite(bytes: []const u8) void {
-    if (g_log_fd < 0) return;
-    _ = c.write(g_log_fd, bytes.ptr, bytes.len);
+/// Hand one event to the sink. Returns true if it was written (first sighting
+/// in its window), false if it was counted as a repeat.
+fn logRecord(key: u64, json: []const u8) bool {
+    if (!g_sink_ready) return true;
+    return g_sink.record(key, json, monotonicNs());
 }
 
 // ===================================================================
@@ -290,6 +307,7 @@ const Args = struct {
     unpin: bool = false,
     verbose: bool = false,
     status: bool = false,
+    verify_evidence: bool = false,
 };
 
 /// Print the enforcement verdict and exit non-zero when it is not ENFORCING.
@@ -369,6 +387,8 @@ pub fn main(init: std.process.Init) !void {
             expect_obj = false;
         } else if (std.mem.eql(u8, a, "--status")) {
             args.status = true;
+        } else if (std.mem.eql(u8, a, "--verify-evidence")) {
+            args.verify_evidence = true;
         } else if (std.mem.eql(u8, a, "--unpin")) {
             args.unpin = true;
         } else if (std.mem.eql(u8, a, "--verbose")) {
@@ -401,6 +421,20 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(rc);
     }
 
+    if (args.verify_evidence) {
+        if (cfg.evidence_dir.len == 0) return fail("no evidence_dir in the config");
+        const r = evlog.verifyDir(g_alloc, cfg.evidence_dir) catch |e| {
+            std.log.err("cannot read evidence in '{s}': {t}", .{ cfg.evidence_dir, e });
+            std.process.exit(2);
+        };
+        if (r.bad_segment) |seg| {
+            std.debug.print("evidence    : CHAIN BROKEN at {s} line {d} ({d} lines verified before it, {d} segments)\n", .{ seg, r.bad_line, r.lines, r.segments });
+            std.process.exit(1);
+        }
+        std.debug.print("evidence    : INTACT - {d} lines across {d} segments, hash chain verified\n", .{ r.lines, r.segments });
+        std.process.exit(0);
+    }
+
     if (args.unpin) {
         try teardown(cfg.pin_dir);
         std.log.info("Guardian Shield v9: unpinned and detached.", .{});
@@ -431,10 +465,17 @@ pub fn main(init: std.process.Init) !void {
         cfg.enforce_fs, cfg.enforce_mem, cfg.enforce_priv, cfg.log_only,
     });
 
-    openLog(cfg.log_file);
-    defer if (g_log_fd >= 0) {
-        _ = c.close(g_log_fd);
-    };
+    g_sink.init(.{
+        .feed_path = cfg.log_file,
+        .feed_max_bytes = cfg.feed_max_bytes,
+        .evidence_dir = cfg.evidence_dir,
+        .segment_max_bytes = cfg.evidence_segment_bytes,
+        .min_free_bytes = cfg.evidence_min_free_bytes,
+        .require_mount = cfg.evidence_require_mount,
+        .repeat_window_ns = @as(u64, cfg.repeat_window_s) * std.time.ns_per_s,
+    }, monotonicNs());
+    g_sink_ready = true;
+    defer g_sink.deinit(monotonicNs());
 
     // Note: no SIGINT handler is installed. On termination the pinned LSM links
     // PERSIST (that is the whole point); use `--unpin` to remove enforcement.
@@ -445,7 +486,7 @@ pub fn main(init: std.process.Init) !void {
 
 fn fail(msg: []const u8) error{InvalidArgs} {
     std.log.err("{s}", .{msg});
-    std.log.err("usage: guardian_shield_loader <config.json> [--obj <path>] [--verbose] [--unpin] [--status]", .{});
+    std.log.err("usage: guardian_shield_loader <config.json> [--obj <path>] [--verbose] [--unpin] [--status] [--verify-evidence]", .{});
     return error.InvalidArgs;
 }
 
@@ -1096,6 +1137,7 @@ const Loader = struct {
                 std.log.err("ring_buffer__poll error rc={d}", .{rc});
                 return error.PollFailed;
             }
+            if (g_sink_ready) g_sink.tick(monotonicNs());
             ticks += 1;
             if (ticks >= snapshot_every) {
                 ticks = 0;
@@ -1555,8 +1597,20 @@ fn handleViolation(_: ?*anyopaque, data: ?*anyopaque, size: usize) callconv(.c) 
     const json = std.json.Stringify.valueAlloc(g_alloc, record, .{}) catch return 0;
     defer g_alloc.free(json);
 
-    logWrite(json);
-    logWrite("\n");
+    // "The same event" is every field except the timestamp and the thread.
+    var h = std.hash.Wyhash.init(0x6755_6172_6469_616e);
+    h.update(std.mem.asBytes(&ev.pid));
+    h.update(std.mem.asBytes(&ev.uid));
+    h.update(std.mem.asBytes(&ev.target_pid));
+    h.update(&[_]u8{ ev.event_type, ev.tag, ev.enforced });
+    h.update(cstr(&ev.comm));
+    h.update(&[_]u8{0});
+    h.update(cstr(&ev.path));
+    h.update(&[_]u8{0});
+    h.update(cstr(&ev.target_path));
+    // A repeat is counted, not printed: the journal must not amplify a
+    // flood the file log no longer does.
+    if (!logRecord(h.final(), json)) return 0;
     std.debug.print("[guardian] {s} {s} pid={d} tag={d} path={s}\n", .{
         if (ev.enforced != 0) "BLOCKED" else "AUDIT",
         eventName(ev.event_type),
@@ -1579,25 +1633,17 @@ fn handleExec(_: ?*anyopaque, data: ?*anyopaque, size: usize) callconv(.c) c_int
     };
     const json = std.json.Stringify.valueAlloc(g_alloc, record, .{}) catch return 0;
     defer g_alloc.free(json);
-    logWrite(json);
-    logWrite("\n");
+    var h = std.hash.Wyhash.init(0x6578_6563);
+    h.update(std.mem.asBytes(&ev.pid));
+    h.update(std.mem.asBytes(&ev.tag));
+    h.update(cstr(&ev.filename));
+    _ = logRecord(h.final(), json);
     return 0;
 }
 
 // ===================================================================
 // Misc
 // ===================================================================
-
-fn openLog(path: []const u8) void {
-    var zbuf: [MAX_PATH_BYTES]u8 = undefined;
-    const zpath = std.fmt.bufPrintZ(&zbuf, "{s}", .{path}) catch return;
-    const fd = c.open(zpath.ptr, c.O_WRONLY | c.O_CREAT | c.O_APPEND, @as(c_uint, 0o644));
-    if (fd < 0) {
-        std.log.warn("cannot open log '{s}' (continuing without file log)", .{path});
-        return;
-    }
-    g_log_fd = fd;
-}
 
 fn loadConfig(path: []const u8) !std.json.Parsed(RawConfig) {
     var zbuf: [MAX_PATH_BYTES]u8 = undefined;

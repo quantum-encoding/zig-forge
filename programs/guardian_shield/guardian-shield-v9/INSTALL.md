@@ -211,6 +211,58 @@ trusts itself by exe inode, so `--unpin` works however it is invoked).
 
 ---
 
+## Event log and evidence record
+
+The loader writes two outputs:
+
+| | Path (config key) | Who reads it | Bounded by |
+|---|---|---|---|
+| **Live feed** | `log_file` (default `/var/log/guardian_shield.jsonl`) | anyone — `baton shield` tails it | `feed_max_bytes` (64 MiB), one rotated `.1` copy |
+| **Evidence record** | `evidence_dir` (empty = off) | root, plus a group you choose | its own filesystem; `evidence_min_free_bytes` reserve |
+
+**Repeats are counted, not written.** An event identical to one already seen in the
+current `repeat_window_s` (30 s) — same event, verdict, pid, comm, paths and target —
+is suppressed, and each window ends in one `{"event":"repeat","count":N,…,"of":{…}}`
+summary. A process retrying a denied operation thousands of times a second costs a
+couple of lines per window instead of filling the disk. (That exact failure — a zsh
+retrying a denied `unlink` of `~/.zsh_history.LOCK` for two hours — once grew the old
+unbounded log to 34 GB and filled `/`.)
+
+**The evidence record is tamper-evident.** Every line gets `seq`, `wall_ms` and
+`prev` (SHA-256 of the previous line, as written); the chain runs across segment
+rotation and loader restarts. Check it with:
+
+```bash
+/opt/guardian-shield/guardian_shield_loader /opt/guardian-shield/config.json --verify-evidence
+```
+
+A cut, edited, reordered or missing line is reported as the first line where the
+chain breaks.
+
+**A flood cannot fill the disk, wherever the evidence lives.** Below
+`evidence_min_free_bytes` (1 GiB) free on the filesystem holding `evidence_dir` — `/`
+on a single-disk machine — full events are withheld and only counted.
+
+**Optional: a dedicated evidence volume.** Keeping evidence on its own filesystem means
+a flood that does reach the reserve costs that volume, not `/`. Set
+`"evidence_require_mount": true` there: if the volume is not mounted, the loader then
+refuses evidence writes (retrying every 10 s) instead of writing into the bare mount
+point on `/`. Mount it with `nofail` so a dead disk never blocks boot, and order the
+service after it (`After=`/`Wants=` the mount unit — never `Requires=`: a missing log
+disk must not stop enforcement).
+
+**Gaps are recorded.** Failed or short writes are counted and reported by a
+`log_gap` record as soon as writing works again; below the free-space reserve, full
+events are withheld and an `evidence_withheld` count is written instead. The loader
+never deletes evidence — retention is yours.
+
+**Letting the human read it, but not agents.** File permissions cannot tell your
+desktop from an agent running as you. Guardian can: put the evidence volume in
+`credential_paths`, and agent-tagged or build-tainted processes are denied any open
+of it, while your group membership lets your own shell and apps read it. Residual:
+processes started from `exempt_exes` (e.g. `git`) drop the agent tag, so an agent
+can read through them — the same property every `credential_paths` entry has.
+
 ## Residual risks — read this honestly
 
 From the engineering status doc (`V9_STATUS.md`), which is the authority:

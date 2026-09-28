@@ -470,3 +470,119 @@ The Inquisitor struct exposes `setEnforcementMode(true/false)` and `addBlacklist
 1. **CRIT-02 + CRIT-08 (PID kill safety):** switch to `pidfd_open` + `pidfd_send_signal`, validate PID range. Without this, the daemon is a remote-mass-kill primitive any time it processes a malformed event.
 2. **CRIT-01 + CRIT-08 (BPF path):** absolute path, `O_NOFOLLOW`, owner check. Loading a BPF program is a kernel-privileged action; treat the object file like the kernel module it morally is.
 3. **CRIT-03 + CRIT-04 (libwarden bypass):** drop the env-var bypass, move the magic file under root-only paths, identify processes by exe inode not comm. Until this lands, libwarden is theatre against any attacker who reads the source.
+
+---
+
+# v9 BPF-LSM field findings (2026-09-27)
+
+These concern the **live v9 enforcer** (`guardian-shield-v9/`, systemd `guardian-shield.service`,
+policy `/opt/guardian-shield/config.json`), not libwarden. On this box libwarden is not preloaded
+(`/etc/ld.so.preload` absent); every denial below is logged by the v9 loader to
+`/var/log/guardian_shield.jsonl`.
+
+## V9-01 — Stale Unix sockets under `~/.baton/var` cannot be cleared by an agent-launched app (working as designed; fix is app-side)
+
+**Symptom.** Cosmic Duck (`crates/duck-baton/src/runner.rs` `serve_with`) does
+`remove_file(sock)` then `UnixListener::bind(sock)`. After a kill, the next start fails with
+`EADDRINUSE`; `mv` and `sudo rm` of the socket both fail with `EPERM`.
+
+**Evidence** (`/var/log/guardian_shield.jsonl`, all `tag:1` = `TAG_AGENT`, `enforced:true`):
+```
+unlink comm=tokio-rt-worker uid=1000 path=/home/founder/.baton/var/cosmic-duck.sock          (the app itself)
+rename comm=mv  uid=1000 path=…/cosmic-duck.sock target=…/backups/stale-sockets/… aux=1       (guard escape)
+unlink comm=rm  uid=0    path=/home/founder/.baton/var/cosmic-duck.sock                        (sudo rm)
+```
+
+**Which rule, exactly.**
+1. **Policy:** `/opt/guardian-shield/config.json` `protected_paths[0]` =
+   `{"path":"/home/founder","block":["unlink","rmdir"]}`. `~/.baton/var` has no hole, so it is
+   GUARDED. (The repo template `guardian-shield-v9/config.template.json` ships empty
+   `protected_paths`; this rule is operator policy.)
+2. **unlink denial:** `bpf/guardian_shield.bpf.c:878` `path_is_protected(…, EV_UNLINK)` inside
+   `fs_guard_dentry`, reached from `gs_path_unlink` (`:1102`). Restriction applies because
+   `is_restricted()` (`:511`) is true for `TAG_AGENT`.
+3. **`mv` to `~/backups` denial:** the guard-integrity rule at `bpf/guardian_shield.bpf.c:933`
+   (`src_ops & ~dst_ops`, `aux=1` = `GS_AUX_GUARD_ESCAPE`). `~/backups` is an explicit
+   `{"block":[]}` hole, so moving a GUARDED file there sheds `unlink`. This is the rule from
+   commit ffaedfb working as intended; "move it to ~/backups" is no longer a valid workaround
+   inside an agent subtree.
+4. **Why `sudo rm` also fails:** the decision is by **process-tree tag, not uid**. `sudo` is
+   forked from the agent's shell, so `gs_fork` copies `TAG_AGENT` (`:1079`) and `gs_exec` keeps it
+   across the setuid exec of `sudo` and `rm` (`:1060`, "inherited tag stays"). uid 0 in an agent
+   subtree is still an agent. This is intended (otherwise `sudo` is a one-word escape).
+5. **Why the app is affected at all:** the app was started from an agent session (`tauri dev`
+   under `claude`), so it is `TAG_AGENT` too. Launched from the desktop it is untagged and
+   `remove_file` succeeds. The operator cleared the file from an untagged shell.
+
+**Assessment.** No shield bug. The policy denies "destroy a file under `$HOME`" to agent
+subtrees, and a socket inode is a file.
+
+**Policy options considered and rejected:**
+- *Hole `{"path":"~/.baton/var","block":[]}`.* Rejected. `~/.baton/var` is not pure runtime
+  state: it holds `door-audit.log` and `browser-audit.log`, which an agent must not be able to
+  erase.
+- *Allow owner-uid unlink of `S_IFSOCK` with no listener.* Checking for a listener from BPF
+  means either reading the kernel's static `bsd_socket_buckets` (not BTF-visible, fragile) or
+  keeping a live-socket map via `socket_listen`/`sk_free_security`. That map misses bound
+  `SOCK_DGRAM` servers, which never call `listen`, and it fails open when full. Without the
+  listener check, "unlink any socket" lets an agent unlink a **live** daemon socket (for example
+  `batond`'s) and bind its own in its place, so it can intercept operator clients. The uid
+  condition adds nothing because agents run as the owning uid. Not clearly scoped; not
+  implemented.
+- *Abstract-namespace sockets.* Rejected for this use. They have no filesystem permissions, so
+  the 0600 gate on a socket that starts agents is lost (every peer would need an
+  `SO_PEERCRED` check). They are also Linux-only, and baton runs on macOS too.
+
+**Recommended fix (app-side, works under the current policy, verified live):** bind a
+per-pid temp path, set its mode, `listen`, then `rename(2)` it **over** the canonical path.
+Rename is deliberately allowed (atomic replace in place, see `_zones_comment`). Guarded-to-guarded
+sheds no ops, so the guard-escape rule does not fire. The stale inode is dropped by the rename.
+```
+connect(canon) succeeds?            -> another instance is live: refuse (unchanged)
+bind(canon + ".<pid>")               -> mknod under $HOME: allowed (create not in the op mask)
+chmod 0600; listen
+rename(canon + ".<pid>", canon)      -> atomic replace; clients never see a missing or 0755 path
+```
+It also closes the existing bind-then-`chmod` window in `serve_with`. On shutdown the app still
+cannot unlink its socket as an agent-tagged process, and it does not need to. The next start
+renames over it. Residue appears only if the app dies between `bind` and `rename`, and then it
+is one `*.sock.<pid>` file.
+
+Live probe (as `claude`, `TAG_AGENT`, 2026-09-27, python `AF_UNIX`, `~/.baton/var/gs-probe.sock`):
+```
+stale is socket: True
+unlink: EPERM
+bind canon: EADDRINUSE
+rename-over: OK; tmp left: False
+connect via canonical path: b'ping'
+```
+(It left `~/.baton/var/gs-probe.sock`, a dead 0-byte socket. An agent cannot remove it; clear it
+from an untagged shell.)
+
+The same recipe applies to every socket or lease under `~/.baton/var`. The leftover
+`batond.lease.tmp.<pid>` files there suggest `batond`'s lease writer already hits this.
+
+## V9-02 — Rename-over is an unguarded replace primitive, including for live sockets (pre-existing, by design; document it)
+
+`rename` is outside the `/home/founder` op mask, so an agent can `rename(x, target)` over any
+GUARDED file in the same zone. That destroys the target's old content without an `unlink`. For
+Unix sockets this lets an agent **replace a live daemon's socket path** with its own listener.
+The guard-escape rule does not apply because protection does not decrease. V9-01's fix uses
+this allowance legitimately. The same allowance means the unlink guard stops runaway `rm -rf`,
+not a deliberate adversary. `privileged_sockets` (connect-deny for docker, containerd and
+podman) is the control for root-acting sockets. `batond` and `cosmic-duck` sockets under
+`~/.baton/var` are not in that set and not rename-protected. This is inferred from the hook
+logic plus the V9-01 probe; a live-socket hijack was not exercised.
+Option: a `rename` block on a narrow `~/.baton/var/*.sock` zone would stop this, but it also
+breaks V9-01's fix. Decide on it together with any change to the socket-path convention.
+
+## V9-03 — Violation log grows without bound (operational)
+
+`/var/log/guardian_shield.jsonl` is **10.2 GB** (2026-09-27). It is opened `O_APPEND` with no
+rotation (`guardian_shield_loader.zig:1594`) and there is no `/etc/logrotate.d` entry. `/` is
+88% full. Largest recent source: repeated denied unlinks of
+`~/.baton/var/chronos/presence/claude-*.json`, about 6.8k in the last 50 MB of log. An
+agent-tagged chronos process retries a cleanup it can never perform. Fixes: a logrotate entry
+(`copytruncate`, or reopen on SIGHUP); per-(pid, path) deny de-duplication in the loader; and
+the V9-01 rename-over pattern (or a presence writer that is not agent-tagged) for the presence
+files.

@@ -72,6 +72,13 @@
     "gradle"
   ],
   "credential_paths": [],
+  "_evidence_comment": "BOUNDED LOGGING (evidence_log.zig). log_file is the live feed baton shield tails: world-readable, capped at feed_max_bytes with ONE rotated copy (.1). Identical events inside repeat_window_s are counted, not written - one 'repeat' summary per window - so a looping process cannot flood the log. evidence_dir (empty = off) receives the COMPLETE record: 0640 segments of evidence_segment_bytes, every line hash-chained (seq, wall_ms, prev = SHA-256 of the previous line; verify with --verify-evidence). It may live on any filesystem, including /: below evidence_min_free_bytes free on that filesystem it withholds full events and records only counts, so a flood stops a reserve short of full on any machine. On a machine with a DEDICATED evidence volume, set evidence_require_mount=true so an unmounted volume is noticed (writes refused, retried every 10s) instead of written through into the bare mount point on /. The loader never deletes evidence. To keep agents out of it while the human can read it: give the dir a group the human belongs to, and add the volume to credential_paths.",
+  "evidence_dir": "",
+  "feed_max_bytes": 67108864,
+  "evidence_segment_bytes": 268435456,
+  "evidence_min_free_bytes": 1073741824,
+  "evidence_require_mount": false,
+  "repeat_window_s": 30,
   "_egress_comment": "EXFIL BLOCK (supply-chain, for TAINTED build-tool and AGENT subtrees). A tainted/agent process connecting to a non-allowlisted PUBLIC IP is logged (EV_TAINTED_CONNECT) and, if enforce_egress=true, denied with -EPERM before the connect completes. The loader ALWAYS seeds loopback + RFC1918 private + link-local + CGNAT, so LAN/localhost work; egress_allow adds operator public CIDRs (IPv4 only in v1). DEFAULT IS false (LOG-ONLY) in this template - deliberately: agent_exes includes claude and quantum-diary, and those agents MUST reach their AI provider's public API (api.anthropic.com etc.) to function; enabling enforcement without allowlisting those CIDRs bricks the very app this integrates with, and a tainted `npm install` could not reach a public registry either. Discipline: run log-only, review EV_TAINTED_CONNECT events, allowlist what legitimate traffic needs, THEN set true.",
   "egress_allow": [],
   "enforce_fs": true,
