@@ -62,6 +62,19 @@ fn buildPlain(buf: []u8) usize {
     return tile(buf, "the quick brown fox jumps over the lazy dog 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnop\n");
 }
 
+/// Short lines, `seq`-style: seven bytes and a scroll each — output whose
+/// cost is the scroll, not the characters (logs, `seq`, `find`). The
+/// view benchmark streams exactly this through a server.
+fn buildLines(buf: []u8) usize {
+    var i: usize = 0;
+    var n: usize = 100_000;
+    while (i + 8 <= buf.len) : (n += 1) {
+        const w = std.fmt.bufPrint(buf[i..], "{d}\n", .{n}) catch break;
+        i += w.len;
+    }
+    return i;
+}
+
 /// Double-width cells: CJK and emoji between ASCII, every line.
 fn buildCjk(buf: []u8) usize {
     return tile(buf, "日本語のテキスト 中文字符 한국어 \xf0\x9f\x98\x80\xf0\x9f\x8e\x89 mixed ascii 0123 \x1b[33m黄色\x1b[0m\r\n");
@@ -244,6 +257,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .key = "plain", .build = buildPlain },
         .{ .key = "cjk", .build = buildCjk },
         .{ .key = "redraw", .build = buildRedraw },
+        .{ .key = "lines", .build = buildLines },
     };
     const chunk = try alloc.alloc(u8, 1 << 20);
     defer alloc.free(chunk);
@@ -253,6 +267,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "feed_plain_mibs", .unit = "MiB/s", .higher_is_better = true },
         .{ .name = "feed_cjk_mibs", .unit = "MiB/s", .higher_is_better = true },
         .{ .name = "feed_redraw_mibs", .unit = "MiB/s", .higher_is_better = true },
+        .{ .name = "feed_lines_mibs", .unit = "MiB/s", .higher_is_better = true },
         .{ .name = "pty_ingest_mibs", .unit = "MiB/s", .higher_is_better = true },
         .{ .name = "create_destroy_us", .unit = "us/op", .higher_is_better = false },
         // ~15 ns: a registry lookup. Its samples within a run are identical,
@@ -279,11 +294,11 @@ pub fn main(init: std.process.Init) !void {
         for (0..cfg.repeat) |_| try record(&metrics[k], alloc, feedOnce(input, cfg.feed_mib, cfg.shell));
     }
     _ = ptyOnce(1, cfg.shell); // warm-up
-    for (0..cfg.repeat) |_| try record(&metrics[4], alloc, ptyOnce(cfg.pty_mib, cfg.shell));
+    for (0..cfg.repeat) |_| try record(&metrics[5], alloc, ptyOnce(cfg.pty_mib, cfg.shell));
     _ = createOnce(cfg.shell);
-    for (0..cfg.repeat) |_| try record(&metrics[5], alloc, createOnce(cfg.shell));
+    for (0..cfg.repeat) |_| try record(&metrics[6], alloc, createOnce(cfg.shell));
     _ = attachOnce(cfg.shell);
-    for (0..cfg.repeat) |_| try record(&metrics[6], alloc, attachOnce(cfg.shell));
+    for (0..cfg.repeat) |_| try record(&metrics[7], alloc, attachOnce(cfg.shell));
 
     // The table, always on stderr.
     bs.printHeader();
