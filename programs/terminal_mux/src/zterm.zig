@@ -605,7 +605,16 @@ const Server = struct {
             why.* = "out of memory";
             return null;
         };
-        if (o.run) |r| if (r.len > 0) h.sess.getActiveWindow().getActivePane().setBootCommand(r);
+        const sp = h.sess.getActiveWindow().getActivePane();
+        if (o.cwd == null) {
+            // Inherited: record where the shell actually started, so `list`
+            // has an answer where the live cwd cannot be read (no /proc on
+            // Darwin; /proc/<pid>/cwd can be denied by policy on Linux).
+            if (c.getcwd(&sp.cwd, sp.cwd.len)) |_| {
+                sp.cwd_len = std.mem.indexOfScalar(u8, &sp.cwd, 0) orelse 0;
+            }
+        }
+        if (o.run) |r| if (r.len > 0) sp.setBootCommand(r);
         return id;
     }
 

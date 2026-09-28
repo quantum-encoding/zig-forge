@@ -45,6 +45,18 @@ def req(path, obj_or_line, timeout=10):
     s.close(); return out.decode()
 def J(path, obj): return json.loads(req(path, obj))
 def capture(p): return req(ctl_sock, {"cmd": "capture", "pane": p})
+def cpu_seconds(pid):
+    """User+system CPU seconds consumed by `pid` so far."""
+    try:
+        f = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()
+        return (int(f[11]) + int(f[12])) / os.sysconf("SC_CLK_TCK")
+    except FileNotFoundError:  # no /proc (macOS): ps prints [[dd-]hh:]mm:ss.cc
+        t = subprocess.run(["ps", "-o", "time=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+        days, _, clock = t.rpartition("-")
+        secs = 0.0
+        for part in clock.split(":"):
+            secs = secs * 60 + float(part)
+        return secs + (int(days) * 86400 if days else 0)
 def wait_for(pred, t=20):
     end = time.time() + t
     while time.time() < end:
@@ -105,6 +117,17 @@ try:
     check("two concurrent sends: each pasted then submitted, never merged", all(r["receipt"] == "written" for r in res) and got.count(b"\x1b[201~\r") == 3, got[-120:])
     st = J(runner_sock, {"verb": "status"})
     check("status counts the busy agent", st["busy"] == 1 and st["sessions"] == 2, st)
+    # ── a pane whose shell EXITS must not spin the server. The pre-fix loop
+    # kept polling the dead master, got POLLHUP every time, and burned a full
+    # core forever (measured 2.99s CPU per 3s wall). Measured, not assumed:
+    # the busy-loop is invisible in every functional check above.
+    ex = J(ctl_sock, {"cmd": "spawn"})["pane"]
+    J(ctl_sock, {"cmd": "send", "pane": ex, "text": "exit", "enter": True})
+    check("an exited pane is reported dead", wait_for(lambda: not [r for r in J(ctl_sock, {"cmd": "list"}) if r["pane"] == ex][0]["alive"], 20))
+    c0 = cpu_seconds(srv.pid); time.sleep(3.0); c1 = cpu_seconds(srv.pid)
+    check("server stays idle after a pane's shell exits (no POLLHUP spin)", c1 - c0 < 0.5, f"{c1 - c0:.2f}s CPU in 3.0s")
+    inherited = [r for r in J(ctl_sock, {"cmd": "list"}) if r["pane"] == 1][0]
+    check("a pane spawned without cwd still reports one", inherited["cwd"] != "", inherited)
     # ── stop, and a pane that exits
     check("stop ends the session", J(runner_sock, {"verb": "stop", "to": "scribe"})["ok"] and "scribe" not in [s["designation"] for s in J(runner_sock, {"verb": "list"})["sessions"]])
     check("send to a stopped session fails by name", "no session called 'scribe'" in J(runner_sock, {"verb": "send", "to": "scribe", "text": "x"})["error"])
