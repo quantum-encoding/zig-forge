@@ -79,6 +79,22 @@ remote="${1:-origin}"
 branch="${2:-$(git symbolic-ref --short -q HEAD || true)}"
 [ -n "$branch" ] || { echo "chronos-push: detached HEAD — specify a branch" >&2; exit 1; }
 
+# The first positional is the REMOTE, not the message. `chronos-push "my message"`
+# therefore folds the ticks and only fails at the very end, where git reports the
+# generic "make sure you have the correct access rights", which reads like a
+# credential fault and is not one. Refuse before any history is touched, and name
+# the likely mistake.
+if ! git remote get-url -- "$remote" >/dev/null 2>&1; then
+    printf 'chronos-push: "%s" is not a configured remote.\n' "$remote" >&2
+    case $remote in
+        *[[:space:]]*|-m*)
+            printf '  That looks like a commit message. Did you mean:\n' >&2
+            printf '      chronos-push -m "%s"\n' "$remote" >&2 ;;
+    esac
+    printf '  configured remotes: %s\n' "$(git remote | tr '\n' ' ')" >&2
+    exit 2
+fi
+
 # Protect uncommitted work: the rewrite ends in `git reset --soft`, but refuse if
 # the tree is dirty so nothing can be lost by surprise.
 if ! git diff --quiet || ! git diff --cached --quiet; then
