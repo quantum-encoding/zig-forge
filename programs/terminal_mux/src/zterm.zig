@@ -535,7 +535,10 @@ const Server = struct {
         if (lfd < 0) return error.SocketCreateFailed;
         errdefer pclose(lfd);
         setCloexec(lfd); // shells spawned later must not inherit the listen socket
-        if (c.bind(lfd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) < 0) return error.BindFailed;
+        if (c.bind(lfd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) < 0) {
+            std.debug.print("zterm server: cannot bind {s} ({s})\n", .{ path, @tagName(posix.errno(-1)) });
+            return error.BindFailed;
+        }
         // Owner-only (matches ctl.zig): any local user on a 0755 socket could
         // spawn shells and type into them.
         _ = c.chmod(path.ptr, 0o600);
@@ -641,7 +644,7 @@ const Server = struct {
             return null;
         }) else null;
         var id: u64 = 0;
-        const h = capi.createIn(o.rows, o.cols, null, o.cwd, &id) orelse {
+        const h = capi.createIn(o.rows, o.cols, null, o.cwd, true, &id) orelse {
             if (name_copy) |n| self.alloc.free(n);
             why.* = "could not start a shell in a new PTY";
             return null;

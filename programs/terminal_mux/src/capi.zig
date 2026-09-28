@@ -78,6 +78,15 @@ fn defaultShell() []const u8 {
         const slice = std.mem.sliceTo(s, 0);
         if (slice.len > 0) return slice;
     }
+    // A service (systemd --user, launchd) need not carry $SHELL; the user's
+    // login shell is still on record. Without this a zterm started as a
+    // service would hand every pane /bin/bash regardless of the account.
+    if (std.c.getpwuid(std.c.getuid())) |pw| {
+        if (pw.shell) |sh| {
+            const slice = std.mem.sliceTo(sh, 0);
+            if (slice.len > 0 and slice[0] == '/') return slice;
+        }
+    }
     // Sensible fallbacks: zsh is the macOS default login shell since 10.15.
     return if (builtin.os.tag.isDarwin()) "/bin/zsh" else "/bin/bash";
 }
@@ -193,27 +202,94 @@ pub export fn tmux_version() [*:0]const u8 {
 /// non-NULL). Returns the handle, or NULL on failure. rows/cols of 0 default
 /// to 24/80.
 pub export fn tmux_create(rows: u16, cols: u16, shell: ?[*:0]const u8, out_id: ?*u64) ?*TmuxSession {
-    return createIn(rows, cols, if (shell) |s| std.mem.sliceTo(s, 0) else null, null, out_id);
+    return createIn(rows, cols, if (shell) |s| std.mem.sliceTo(s, 0) else null, null, false, out_id);
 }
+
+/// Pane-identity variables a child must not inherit from whatever started
+/// this process: a stale one names somebody else's pane.
+const PANE_ENV_KEYS = [_][]const u8{ "ZTERM_PANE=", "WEZTERM_PANE=" };
+
+/// The environment for ONE spawn that exports `ZTERM_PANE=<id>`: the shared
+/// child environment minus any inherited pane identity, plus this pane's.
+/// The parent may free it as soon as the spawn returns: fork gave the child
+/// its own copy before execve read it.
+const SpawnEnv = struct {
+    env: [:null]?[*:0]const u8,
+    own: [:0]u8,
+
+    fn init(id: u64) ?SpawnEnv {
+        const base = childEnviron();
+        var n: usize = 0;
+        while (base[n] != null) : (n += 1) {}
+        const own = std.fmt.allocPrintSentinel(alloc, "ZTERM_PANE={d}", .{id}, 0) catch return null;
+        // n inherited + ours; allocSentinel adds the terminating null.
+        const env = alloc.allocSentinel(?[*:0]const u8, n + 1, null) catch {
+            alloc.free(own);
+            return null;
+        };
+        var i: usize = 0;
+        outer: for (0..n) |j| {
+            const entry = std.mem.sliceTo(base[j].?, 0);
+            for (PANE_ENV_KEYS) |k| if (std.mem.startsWith(u8, entry, k)) continue :outer;
+            env[i] = base[j];
+            i += 1;
+        }
+        env[i] = own.ptr;
+        i += 1;
+        // Dropped inherited entries leave slots; null them so execve stops at the first.
+        while (i < env.len) : (i += 1) env[i] = null;
+        return .{ .env = env, .own = own };
+    }
+
+    fn deinit(self: SpawnEnv) void {
+        alloc.free(self.env);
+        alloc.free(self.own);
+    }
+};
 
 /// `tmux_create`, with the shell started in `cwd` (null = inherit this
 /// process's). Zig-only — the headless `zterm server` needs a per-pane start
 /// directory; the C ABI is unchanged. The caller validates `cwd`: a directory
 /// the child cannot enter makes the shell exit 126 immediately (see
 /// `Pty.spawnIn`), which is a live-but-dead pane rather than a clean error.
-pub fn createIn(rows: u16, cols: u16, shell: ?[]const u8, cwd: ?[]const u8, out_id: ?*u64) ?*TmuxSession {
+///
+/// `export_pane_id` puts `ZTERM_PANE=<id>` in the shell's environment (and
+/// drops any inherited ZTERM_PANE / WEZTERM_PANE), so a program in the pane —
+/// an agent's SessionStart hook registering itself — knows which pane it is.
+/// Only the zterm server asks for it: a host app embedding this library has
+/// its own addressing, and its terminals must not claim to be zterm panes.
+pub fn createIn(rows: u16, cols: u16, shell: ?[]const u8, cwd: ?[]const u8, export_pane_id: bool, out_id: ?*u64) ?*TmuxSession {
     const r: u16 = if (rows == 0) 24 else rows;
     const co: u16 = if (cols == 0) 80 else cols;
     const rect = session.Rect{ .x = 0, .y = 0, .width = co, .height = r };
 
     const sess = session.Session.init(alloc, "0", rect, DEFAULT_SCROLLBACK) catch return null;
 
+    // The id is reserved BEFORE the spawn so the shell can be told it. A
+    // failed spawn burns one id; ids only ever need to be unique.
+    registry_mutex.lock();
+    const id = next_id;
+    next_id += 1;
+    registry_mutex.unlock();
+
     const pane = sess.getActiveWindow().getActivePane();
     const shell_path: []const u8 = shell orelse defaultShell();
-    pane.spawnIn(shell_path, childEnviron(), cwd) catch {
-        sess.deinit();
-        return null;
-    };
+    if (export_pane_id) {
+        const se = SpawnEnv.init(id) orelse {
+            sess.deinit();
+            return null;
+        };
+        defer se.deinit();
+        pane.spawnIn(shell_path, se.env.ptr, cwd) catch {
+            sess.deinit();
+            return null;
+        };
+    } else {
+        pane.spawnIn(shell_path, childEnviron(), cwd) catch {
+            sess.deinit();
+            return null;
+        };
+    }
 
     const handle = alloc.create(TmuxSession) catch {
         sess.deinit();
@@ -223,14 +299,12 @@ pub fn createIn(rows: u16, cols: u16, shell: ?[]const u8, cwd: ?[]const u8, out_
     registry_mutex.lock();
     defer registry_mutex.unlock();
 
-    const id = next_id;
     handle.* = .{ .id = id, .sess = sess, .attached = true };
     registry.put(alloc, id, handle) catch {
         alloc.destroy(handle);
         sess.deinit();
         return null;
     };
-    next_id += 1;
     if (out_id) |o| o.* = id;
     return handle;
 }

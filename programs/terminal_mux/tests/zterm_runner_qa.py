@@ -29,6 +29,7 @@ runner_sock = f"{bh}/var/zterm.sock"
 env = dict(os.environ, HOME=home, SHELL="/bin/sh", ZTERM_SOCKET=ctl_sock, BATON_HOME=bh,
            PATH=os.path.join(HERE, "fixtures", "fake_agent") + ":" + os.environ["PATH"])
 env.pop("BATON_AGENT_EXES", None)
+env["WEZTERM_PANE"] = "77"; env["ZTERM_PANE"] = "88"   # must NOT reach any pane
 srv = subprocess.Popen([Z, "server"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 fails = []
 def check(name, ok, detail=""):
@@ -81,6 +82,12 @@ try:
     r = subprocess.run([Z, "cli", "send", str(pane), "--", "pwd", ">", wd + "/pwd.txt"], env=env, capture_output=True, text=True)
     check("`zterm cli send -- …` works against the headless server", wait_for(lambda: os.path.exists(wd + "/pwd.txt")), r.stdout + r.stderr)
     check("pane started in the requested cwd", open(wd + "/pwd.txt").read().strip() == wd if os.path.exists(wd + "/pwd.txt") else False)
+    # Each pane knows its own id (an agent's SessionStart hook registers with
+    # it), and never inherits a pane identity from whatever started the server.
+    J(ctl_sock, {"cmd": "send", "pane": pane, "text": f"echo \"$ZTERM_PANE|$WEZTERM_PANE\" > {wd}/ids.txt", "enter": True})
+    check("pane env carries ZTERM_PANE=<own id> and no WEZTERM_PANE",
+          wait_for(lambda: os.path.exists(wd + "/ids.txt") and open(wd + "/ids.txt").read().strip() == f"{pane}|"),
+          open(wd + "/ids.txt").read() if os.path.exists(wd + "/ids.txt") else "no file")
     row = [x for x in J(ctl_sock, {"cmd": "list"}) if x["pane"] == pane][0]
     check("list reports live cwd, name, tty", row["cwd"] == wd and row["name"] == "scribe" and row["tty"].startswith("/dev/"), row)
     # ── runner list: a shell pane is NOT addressable
@@ -139,6 +146,20 @@ try:
     srv2 = subprocess.Popen([Z, "server"], env=dict(env, ZTERM_SOCKET=f"{base}/c2.sock"), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     time.sleep(1.5); srv2.terminate(); err2 = srv2.communicate(timeout=10)[1]
     check("second server leaves the live runner door alone", "not taking the runner door" in err2 and J(runner_sock, {"verb": "hello"})["pid"] == srv.pid, err2)
+    # ── a server started WITHOUT $SHELL (a systemd --user service need not
+    # have one) gives panes the account's login shell from passwd.
+    import pwd
+    login_shell = os.path.basename(pwd.getpwuid(os.getuid()).pw_shell)
+    ns_sock = f"{base}/ns.sock"
+    ns_env = {k: v for k, v in env.items() if k != "SHELL"}
+    ns_env["ZTERM_SOCKET"] = ns_sock
+    ns = subprocess.Popen([Z, "server", "--no-runner"], env=ns_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        wait_for(lambda: os.path.exists(ns_sock), 10)
+        got_fg = lambda: [r["foreground"] for r in J(ns_sock, {"cmd": "list"})][0]
+        check("no $SHELL → the passwd login shell", wait_for(lambda: got_fg() == login_shell, 10), f"{got_fg()} vs {login_shell}")
+    finally:
+        ns.terminate(); ns.wait(timeout=10)
     # ── an OLDER server exiting must not unlink the control socket a NEWER
     # server has since bound there (newest binder wins by design). Before the
     # fix the old server's shutdown deleted it and the new one ran on,
