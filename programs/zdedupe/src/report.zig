@@ -130,8 +130,8 @@ pub const ReportWriter = struct {
         try writer.writeAll("  \"report_type\": \"duplicates\",\n");
 
         // Generated timestamp (current time via libc)
-        var tv: std.c.timeval = undefined;
-        _ = std.c.gettimeofday(&tv, null);
+        var tv: @import("sys.zig").c.timeval = undefined;
+        _ = @import("sys.zig").c.gettimeofday(&tv, null);
         const now: i64 = tv.sec;
         var ts_buf: [24]u8 = undefined;
         try writer.print("  \"generated_at\": \"{s}\",\n", .{formatIso8601(now, &ts_buf)});

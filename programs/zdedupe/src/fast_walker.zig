@@ -44,10 +44,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("types.zig");
-const libc = std.c;
+const libc = @import("sys.zig").c;
 
-/// POSIX `dirfd`: the descriptor behind an open `DIR*` (not in Zig 0.16's std.c).
-extern "c" fn dirfd(dir: *libc.DIR) c_int;
+/// POSIX `dirfd`: the descriptor behind an open `DIR*` (not in Zig 0.16's
+/// std.c); on Windows the platform layer provides it.
+const dirfd = if (builtin.os.tag == .windows) libc.dirfd else struct {
+    extern "c" fn dirfd(dir: *libc.DIR) c_int;
+}.dirfd;
 
 // Stat comes from pstat.zig: std.c ($INODE64-correct) on Darwin, statx on Linux.
 const pstat = @import("pstat.zig");

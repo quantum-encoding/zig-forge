@@ -214,10 +214,10 @@ pub const ParallelHasher = struct {
                 if (parent.len >= name_buf.len) break :blk -1;
                 @memcpy(name_buf[0..parent.len], parent);
                 name_buf[parent.len] = 0;
-                break :blk std.c.open(@ptrCast(&name_buf), .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, @as(std.c.mode_t, 0));
+                break :blk @import("sys.zig").c.open(@ptrCast(&name_buf), .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, @as(@import("sys.zig").c.mode_t, 0));
             };
             defer if (dir_fd >= 0) {
-                _ = std.c.close(dir_fd);
+                _ = @import("sys.zig").c.close(dir_fd);
             };
 
             for (run_jobs) |job| {

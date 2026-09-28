@@ -15,7 +15,7 @@
 //! again after a restart.
 
 const std = @import("std");
-const libc = std.c;
+const libc = @import("sys.zig").c;
 
 /// Past this many entries the set is dropped and the results are flagged as
 /// needing a rescan instead: a bulk delete of a million files is cheaper to

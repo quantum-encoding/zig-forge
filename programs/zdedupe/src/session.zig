@@ -36,7 +36,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const libc = std.c;
+const sys = @import("sys.zig");
+const libc = sys.c;
 
 const store = @import("store.zig");
 const hasher = @import("hasher.zig");
@@ -411,15 +412,8 @@ pub const Session = struct {
 
         // Read-only and private: the engine writes a new file and renames it
         // over the path, so the mapped inode never changes under us.
-        const map = std.posix.mmap(
-            null,
-            length,
-            .{ .READ = true },
-            .{ .TYPE = .PRIVATE },
-            fd,
-            0,
-        ) catch return error.CannotOpenStore;
-        errdefer std.posix.munmap(map);
+        const map = sys.mapReadOnly(fd, length) catch return error.CannotOpenStore;
+        errdefer sys.unmap(map);
 
         const reader = store.Reader.init(map, null) catch return error.StoreIsInvalid;
         const space_reader: ?space_mod.Reader = if (reader.spaceBytes()) |bytes|
@@ -478,7 +472,7 @@ pub const Session = struct {
         gpa.free(self.store_path);
         if (self.last_error) |e| gpa.free(e);
         self.arena.deinit();
-        std.posix.munmap(self.map);
+        sys.unmap(self.map);
         gpa.destroy(self);
     }
 
@@ -2747,7 +2741,7 @@ fn foldersIdentical(gpa: Allocator, a: []const u8, b: []const u8) bool {
 /// symlink swapped in mid-delete redirect the removal somewhere else. Entries
 /// are removed with `unlinkat`, so a symlink beneath is unlinked rather than
 /// followed.
-fn removeTree(path: [*:0]const u8) ?std.c.E {
+fn removeTree(path: [*:0]const u8) ?libc.E {
     const fd = libc.open(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true }, @as(libc.mode_t, 0));
     if (fd < 0) return libc.errno(@as(c_int, -1));
     if (removeChildren(fd)) |errno| {
@@ -2761,7 +2755,7 @@ fn removeTree(path: [*:0]const u8) ?std.c.E {
 
 /// Empty the directory `dir_fd` refers to. Takes ownership of nothing: the
 /// caller still closes `dir_fd`.
-fn removeChildren(dir_fd: c_int) ?std.c.E {
+fn removeChildren(dir_fd: c_int) ?libc.E {
     // fdopendir takes ownership of the fd it is given, so it gets a copy.
     const dup_fd = libc.dup(dir_fd);
     if (dup_fd < 0) return libc.errno(@as(c_int, -1));
@@ -2830,7 +2824,7 @@ fn trashReason(arena: Allocator, err_buf: *const [512]u8) []const u8 {
     return arena.dupe(u8, err_buf[0..len]) catch "could not be moved to the Trash";
 }
 
-fn unlinkReason(err: std.c.E) []const u8 {
+fn unlinkReason(err: libc.E) []const u8 {
     return switch (err) {
         .NOENT => "no longer exists",
         .ACCES, .PERM => "permission denied",

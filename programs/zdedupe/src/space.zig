@@ -52,7 +52,7 @@ const protect_mod = @import("protect.zig");
 const session_mod = @import("session.zig");
 const pstat = @import("pstat.zig");
 const dedupe = @import("dedupe.zig");
-const libc = std.c;
+const libc = @import("sys.zig").c;
 
 const Allocator = std.mem.Allocator;
 
@@ -814,6 +814,15 @@ pub fn volumeOf(gpa: Allocator, path: []const u8) !Volume {
             .total = st.blocks *| block,
             .free = st.bfree *| block,
             .available = st.bavail *| block,
+        };
+    } else if (comptime builtin.os.tag == .windows) {
+        var mount: [1024]u8 = undefined;
+        const v = @import("sys_windows.zig").volumeOf(path_z, &mount) orelse return error.StatFailed;
+        return .{
+            .mount = try gpa.dupe(u8, mount[0..v.mount_len]),
+            .total = v.total,
+            .free = v.free,
+            .available = v.available,
         };
     } else {
         return error.Unsupported;
