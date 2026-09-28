@@ -92,6 +92,7 @@ const pty = @import("pty.zig");
 const ctl = @import("ctl.zig");
 const session = @import("session.zig");
 const visible = @import("main.zig");
+const view = @import("view.zig");
 
 pub const VERSION = "0.3.0";
 
@@ -399,6 +400,9 @@ const Pane = struct {
     /// The master reported EOF/HUP: stop polling it (it would report HUP on
     /// every poll forever and spin the loop). Exit status is read lazily.
     hup: bool = false,
+    /// When `hup` was first seen (monotonic ms), to bound the wait for the
+    /// child to be reaped before viewers are told it exited.
+    hup_ms: i64 = 0,
 
     fn spane(self: *const Pane) *session.Pane {
         return self.handle.sess.getActiveWindow().getActivePane();
@@ -429,6 +433,56 @@ const Pane = struct {
 /// pane's output broadcasts to every attach; attach input writes to the pane.
 /// conn == -1 marks a dead entry awaiting the sweep.
 const Attach = struct { conn: c.fd_t, pane_id: u64 };
+
+/// A `view` connection (docs/VIEW-PROTOCOL.md): frames out, input in, on one
+/// non-blocking socket. STATE-SYNCED: a frame is built only when the previous
+/// one is fully written, and changes made meanwhile accumulate in `dirty`, so
+/// a slow client never blocks the server, is never dropped, and converges on
+/// the latest state. conn == -1 marks a dead entry awaiting the sweep.
+const Viewer = struct {
+    conn: c.fd_t,
+    pane_id: u64,
+    seq: u64 = 0,
+    /// Bytes owed to the client, from `out_off`.
+    out: std.ArrayList(u8) = .empty,
+    out_off: usize = 0,
+    /// An input line still arriving.
+    inbuf: std.ArrayList(u8) = .empty,
+    /// Rows changed since this client's last frame.
+    dirty: std.DynamicBitSetUnmanaged = .{},
+    /// Next frame carries every row (first frame, resize, overflow).
+    full: bool = true,
+    /// Something visible (rows, cursor, modes, title) may have moved.
+    changed: bool = true,
+    exit_sent: bool = false,
+    /// Close once `out` drains (the pane was killed).
+    closing: bool = false,
+
+    /// Close and release. Idempotent: a viewer can die where it is found
+    /// dead and again at the sweep.
+    fn deinit(self: *Viewer, alloc: std.mem.Allocator) void {
+        if (self.conn >= 0) pclose(self.conn);
+        self.conn = -1;
+        self.out.deinit(alloc);
+        self.out = .empty;
+        self.out_off = 0;
+        self.inbuf.deinit(alloc);
+        self.inbuf = .empty;
+        self.dirty.deinit(alloc);
+        self.dirty = .{};
+    }
+
+    fn pending(self: *const Viewer) bool {
+        return self.out.items.len > self.out_off;
+    }
+};
+
+/// Unsent output a viewer may accumulate from events (bell, clipboard,
+/// history) before the backlog is discarded and the client is resynced with
+/// a full frame. Frames themselves never pile up — see `Viewer`.
+const VIEW_OUT_CAP: usize = 8 << 20;
+/// Longest input line a viewer may send (a large paste).
+const VIEW_IN_CAP: usize = 8 << 20;
 
 /// A text delivery in flight: paste now, submit (CR) once the paste has
 /// visibly landed or the settle ceiling passes. Held on the event loop rather
@@ -510,8 +564,12 @@ const Server = struct {
     panes: std.ArrayList(Pane) = .empty,
     attaches: std.ArrayList(Attach) = .empty,
     submits: std.ArrayList(Submit) = .empty,
+    viewers: std.ArrayList(Viewer) = .empty,
     listeners: std.ArrayList(Listener) = .empty,
     agent_env: ?[]const u8,
+    /// Bytes a client sent after its request line, for a request that turns
+    /// the connection into a stream (`view`): they are its first input.
+    trailing: []const u8 = &.{},
 
     fn deinit(self: *Server) void {
         // Doors first: once the loop has stopped nothing answers them, and a
@@ -525,6 +583,8 @@ const Server = struct {
         self.submits.deinit(self.alloc);
         for (self.attaches.items) |a| if (a.conn >= 0) pclose(a.conn);
         self.attaches.deinit(self.alloc);
+        for (self.viewers.items) |*v| v.deinit(self.alloc);
+        self.viewers.deinit(self.alloc);
         for (self.panes.items) |p| {
             capi.tmux_destroy(p.handle);
             if (p.name) |n| self.alloc.free(n);
@@ -695,6 +755,12 @@ const Server = struct {
             // Anything still waiting to be typed into it fails by name.
             for (self.submits.items) |*s| if (s.pane_id == id) self.finishSubmit(s, false, "the pane was killed before the message was submitted");
             self.dropFinishedSubmits();
+            for (self.viewers.items) |*v| {
+                if (v.conn < 0 or v.pane_id != id) continue;
+                self.viewerEvent(v, .{ .t = "exit", .pane = id, .killed = true });
+                v.exit_sent = true;
+                v.closing = true;
+            }
             capi.tmux_destroy(p.handle);
             if (p.name) |n| self.alloc.free(n);
             _ = self.panes.orderedRemove(idx);
@@ -721,6 +787,15 @@ const Server = struct {
                 } else ai += 1;
             }
             self.advanceSubmits(nowNs());
+            // Viewers: flush owed bytes, build frames that are due, drop the dead.
+            const view_tick = self.pumpViewers();
+            var vi: usize = 0;
+            while (vi < self.viewers.items.len) {
+                if (self.viewers.items[vi].conn < 0) {
+                    var dead = self.viewers.orderedRemove(vi);
+                    dead.deinit(self.alloc);
+                } else vi += 1;
+            }
 
             pfds.clearRetainingCapacity();
             polled_panes.clearRetainingCapacity();
@@ -731,13 +806,19 @@ const Server = struct {
                 try polled_panes.append(self.alloc, p.id);
             }
             for (self.attaches.items) |a| try pfds.append(self.alloc, .{ .fd = a.conn, .events = posix.POLL.IN, .revents = 0 });
+            for (self.viewers.items) |v| {
+                const want_out: i16 = if (v.pending()) posix.POLL.OUT else 0;
+                try pfds.append(self.alloc, .{ .fd = v.conn, .events = posix.POLL.IN | want_out, .revents = 0 });
+            }
             const nl = self.listeners.items.len;
             const np = polled_panes.items.len;
             const attach_count = self.attaches.items.len;
+            const viewer_count = self.viewers.items.len;
 
-            // A pending submit is watched for evidence every ~50ms; otherwise
-            // wake once a second so a stop signal is noticed promptly.
-            const timeout: i32 = if (self.submits.items.len > 0) 50 else 1000;
+            // A pending submit is watched for evidence every ~50ms, and a
+            // frame held back by a synchronized update is retried every
+            // 20ms; otherwise wake once a second so a stop signal is noticed.
+            const timeout: i32 = if (view_tick) 20 else if (self.submits.items.len > 0) 50 else 1000;
             _ = posix.poll(pfds.items, timeout) catch continue;
 
             // Pane output: read the raw bytes ONCE — feed the VT grid (so capture/
@@ -748,20 +829,30 @@ const Server = struct {
                 const p = self.findPane(pid) orelse continue;
                 if (rev & posix.POLL.IN == 0) {
                     // HUP/ERR with nothing to read: the slave side is closed.
-                    if (rev & (posix.POLL.HUP | posix.POLL.ERR) != 0) p.hup = true;
+                    if (rev & (posix.POLL.HUP | posix.POLL.ERR) != 0) self.paneHungUp(p);
                     continue;
                 }
                 // Linux reports a dead child as EIO on the master, macOS as 0
                 // bytes; both mean "stop polling this pane".
                 const r = posix.read(p.fd, &io_buf) catch |err| {
-                    if (err != error.WouldBlock) p.hup = true;
+                    if (err != error.WouldBlock) self.paneHungUp(p);
                     continue;
                 };
                 if (r == 0) {
-                    p.hup = true;
+                    self.paneHungUp(p);
                     continue;
                 }
                 p.spane().processOutput(io_buf[0..r]);
+                // zterm is this pane's terminal: answer its DA/CPR/OSC 10-11
+                // queries — unless a raw-relay attach is open on it, whose own
+                // terminal already received the query and answers it. Replies
+                // owed to that terminal are dropped, never sent late.
+                if (self.hasRawAttach(p.id)) {
+                    p.spane().terminal.resp_len = 0;
+                } else {
+                    p.spane().flushResponses();
+                }
+                self.notePaneOutput(p);
                 for (self.attaches.items) |*a| {
                     if (a.conn < 0 or a.pane_id != p.id) continue;
                     // A stalled attach reader must not block the whole pool.
@@ -798,6 +889,23 @@ const Server = struct {
                     pclose(a.conn);
                     a.conn = -1;
                 }
+            }
+
+            // Viewers: input lines in; POLLOUT is served by the next pump.
+            for (self.viewers.items[0..viewer_count], 0..) |*v, k| {
+                if (v.conn < 0) continue;
+                const pf = pfds.items[nl + np + attach_count + k];
+                if (pf.revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) == 0) continue;
+                const r = posix.read(v.conn, &io_buf) catch |err| {
+                    if (err == error.WouldBlock) continue;
+                    v.deinit(self.alloc);
+                    continue;
+                };
+                if (r == 0) {
+                    v.deinit(self.alloc);
+                    continue;
+                }
+                self.viewerInput(v, io_buf[0..r]);
             }
 
             // Clients with a request (or an attach).
@@ -855,6 +963,8 @@ const Server = struct {
             return .close;
         };
         if (line.len == 0) return .close;
+        self.trailing = if (buf.items.len > line.len + 1) buf.items[line.len + 1 ..] else &.{};
+        defer self.trailing = &.{};
         if (line[0] == '{') return self.handleJson(conn, line);
         return self.handleLine(conn, line, buf.items[@min(buf.items.len, line.len + 1)..]);
     }
@@ -917,7 +1027,7 @@ const Server = struct {
                 if (it.next()) |cols_s| {
                     const rows = std.fmt.parseInt(u16, rows_s, 10) catch 0;
                     const cols = std.fmt.parseInt(u16, cols_s, 10) catch 0;
-                    if (rows > 1 and cols > 1) _ = capi.tmux_resize(p.handle, rows, cols);
+                    if (rows > 1 and cols > 1) self.resizePane(p, rows, cols);
                 }
             }
             try writeSnapshot(conn, p.handle, self.alloc);
@@ -958,6 +1068,8 @@ const Server = struct {
 
         if (std.mem.eql(u8, cmd, "list")) {
             try self.writeList(conn);
+        } else if (std.mem.eql(u8, cmd, "view")) {
+            return self.openViewer(conn, v, pane_id);
         } else if (std.mem.eql(u8, cmd, "spawn")) {
             var why: []const u8 = "";
             const o = SpawnOpts{
@@ -1038,7 +1150,9 @@ const Server = struct {
                 cwrite(conn, "{\"ok\":false,\"error\":\"rows and cols must be 2..1000\"}\n");
                 return .close;
             }
-            cwrite(conn, if (capi.tmux_resize(p.handle, rows, cols) == 0) "{\"ok\":true}\n" else "{\"ok\":false,\"error\":\"resize failed\"}\n");
+            // Through resizePane, so every viewer is resynced at the new size.
+            self.resizePane(p, rows, cols);
+            cwrite(conn, "{\"ok\":true}\n");
         } else {
             cwrite(conn, "{\"ok\":false,\"error\":\"unknown cmd\"}\n");
         }
@@ -1162,6 +1276,272 @@ const Server = struct {
         defer self.alloc.free(j);
         cwrite(conn, j);
         cwrite(conn, "\n");
+    }
+
+    // ── viewers (docs/VIEW-PROTOCOL.md) ──────────────────────────────────────────────────────────────
+
+    fn hasRawAttach(self: *Server, pane_id: u64) bool {
+        for (self.attaches.items) |a| if (a.conn >= 0 and a.pane_id == pane_id) return true;
+        return false;
+    }
+
+    fn openViewer(self: *Server, conn: c.fd_t, v: std.json.Value, pane_id: u64) !Disposition {
+        const p = self.findPane(pane_id) orelse {
+            cwrite(conn, "{\"t\":\"error\",\"error\":\"no such pane\"}\n");
+            return .close;
+        };
+        const rows = clampDim(jsonInt(v, "rows"), 0);
+        const cols = clampDim(jsonInt(v, "cols"), 0);
+        if (rows >= 2 and cols >= 2) self.resizePane(p, rows, cols);
+        const fl = c.fcntl(conn, c.F.GETFL, @as(c_int, 0));
+        _ = c.fcntl(conn, c.F.SETFL, fl | @as(c_int, @bitCast(c.O{ .NONBLOCK = true })));
+        try self.viewers.append(self.alloc, .{ .conn = conn, .pane_id = p.id });
+        const vw = &self.viewers.items[self.viewers.items.len - 1];
+        self.viewerEvent(vw, .{ .t = "hello", .v = view.VERSION, .pane = p.id });
+        // Anything the client sent right behind its request is its first input.
+        if (self.trailing.len > 0) self.viewerInput(vw, self.trailing);
+        return .keep;
+    }
+
+    /// Resize a pane and resync everyone viewing it: the grid has new
+    /// dimensions, so only a full frame describes it.
+    fn resizePane(self: *Server, p: *Pane, rows: u16, cols: u16) void {
+        _ = capi.tmux_resize(p.handle, rows, cols);
+        for (self.viewers.items) |*v| {
+            if (v.conn < 0 or v.pane_id != p.id) continue;
+            v.full = true;
+            v.changed = true;
+        }
+    }
+
+    fn paneHungUp(self: *Server, p: *Pane) void {
+        if (!p.hup) p.hup_ms = @import("terminal.zig").monotonicMs();
+        p.hup = true;
+        // Its viewers are owed a last frame and an `exit`.
+        for (self.viewers.items) |*v| {
+            if (v.conn >= 0 and v.pane_id == p.id) v.changed = true;
+        }
+    }
+
+    /// After a pane's output was fed to its emulator: fold the rows it
+    /// dirtied into every viewer's own dirty set, hand out bell and
+    /// clipboard events, then clear the emulator's flags. The server is the
+    /// only consumer of those flags in a headless pool.
+    fn notePaneOutput(self: *Server, p: *Pane) void {
+        const t = &p.spane().terminal;
+        const bells = t.bell_pending;
+        t.bell_pending = 0;
+        const clip = t.clipboard_pending[0..t.clipboard_len];
+        const rows = t.getCurrentGrid().rows;
+        for (self.viewers.items) |*v| {
+            if (v.conn < 0 or v.pane_id != p.id) continue;
+            v.changed = true;
+            if (v.dirty.capacity() != rows) {
+                v.dirty.resize(self.alloc, rows, false) catch {};
+                v.full = true;
+            }
+            if (!v.full) {
+                var r: u16 = 0;
+                while (r < rows) : (r += 1) if (t.isDirty(r)) v.dirty.set(r);
+            }
+            if (bells > 0) self.viewerEvent(v, .{ .t = "bell", .pane = p.id });
+            if (clip.len > 0) {
+                const enc = std.base64.standard.Encoder;
+                const b64 = self.alloc.alloc(u8, enc.calcSize(clip.len)) catch continue;
+                defer self.alloc.free(b64);
+                self.viewerEvent(v, .{ .t = "clipboard", .pane = p.id, .b64 = enc.encode(b64, clip) });
+            }
+        }
+        t.clipboard_len = 0;
+        t.clearDirty();
+    }
+
+    /// Queue one small JSON message for a viewer. If events pile up past the
+    /// cap while the client is not reading, the unsent backlog is discarded
+    /// (keeping any message already partly written, so lines stay whole) and
+    /// the client is resynced with a full frame.
+    fn viewerEvent(self: *Server, v: *Viewer, value: anytype) void {
+        if (v.out.items.len - v.out_off > VIEW_OUT_CAP) {
+            const keep_to = if (v.out_off == 0) 0 else blk: {
+                const nl = std.mem.indexOfScalarPos(u8, v.out.items, v.out_off - 1, '\n') orelse v.out.items.len - 1;
+                break :blk nl + 1;
+            };
+            v.out.items.len = keep_to;
+            v.full = true;
+            v.changed = true;
+        }
+        var aw: std.Io.Writer.Allocating = .fromArrayList(self.alloc, &v.out);
+        defer v.out = aw.toArrayList();
+        std.json.Stringify.value(value, .{}, &aw.writer) catch return;
+        aw.writer.writeByte('\n') catch return;
+    }
+
+    /// Write what a viewer is owed, as far as the socket takes it. False
+    /// when the connection is broken.
+    fn flushViewer(v: *Viewer) bool {
+        while (v.pending()) {
+            const rest = v.out.items[v.out_off..];
+            const n = c.write(v.conn, rest.ptr, rest.len);
+            if (n > 0) {
+                v.out_off += @intCast(n);
+                continue;
+            }
+            if (n < 0 and posix.errno(n) == .INTR) continue;
+            if (n < 0 and posix.errno(n) == .AGAIN) return true;
+            return false;
+        }
+        v.out.clearRetainingCapacity();
+        v.out_off = 0;
+        return true;
+    }
+
+    /// Flush every viewer, and build the frames that are due for those that
+    /// have caught up. Returns true when a frame is being held back by a
+    /// synchronized update and the loop should come back soon.
+    fn pumpViewers(self: *Server) bool {
+        var tick = false;
+        const now = @import("terminal.zig").monotonicMs();
+        for (self.viewers.items) |*v| {
+            if (v.conn < 0) continue;
+            if (!flushViewer(v)) {
+                v.deinit(self.alloc);
+                continue;
+            }
+            if (v.pending()) continue; // still catching up: the next frame waits
+            if (v.closing) {
+                v.deinit(self.alloc);
+                continue;
+            }
+            if (v.exit_sent) continue;
+            const p = self.findPane(v.pane_id) orelse continue;
+            // A hung-up pane is revisited until its exit has been reported.
+            if (!(v.full or v.changed) and !p.hup) continue;
+            const t = &p.spane().terminal;
+            // Never a frame from inside an application's synchronized update
+            // (DEC 2026) — unless it has run past 250ms, when the app is
+            // presumed stuck and the screen is shown as it stands.
+            if (t.modes.synchronized and now - t.sync_began_ms < 250) {
+                tick = true;
+                continue;
+            }
+            // The hangup comes before the child is reaped: the exit status
+            // exists only once `isAlive` has reaped it. Wait for that (the
+            // last frame goes out meanwhile) — up to 2s, after which a child
+            // that closed its terminal but kept running is reported with no
+            // status rather than a made-up one.
+            const reaped = p.hup and !p.alive();
+            const gave_up = p.hup and now - p.hup_ms > 2000;
+            if (p.hup and !reaped and !gave_up) tick = true;
+            if (v.changed or v.full or !p.hup) self.writeFrame(v, p) catch {};
+            if ((reaped or gave_up) and !v.exit_sent) {
+                const st = if (reaped) p.spane().exitStatus() else null;
+                self.viewerEvent(v, .{
+                    .t = "exit",
+                    .pane = p.id,
+                    .code = if (st) |x| @as(?i64, x.code) else null,
+                    .signal = if (st) |x| @as(?i64, x.signal) else null,
+                });
+                v.exit_sent = true;
+            }
+            if (!flushViewer(v)) v.deinit(self.alloc);
+        }
+        return tick;
+    }
+
+    fn writeFrame(self: *Server, v: *Viewer, p: *Pane) !void {
+        const t = &p.spane().terminal;
+        const rows = t.getCurrentGrid().rows;
+        if (v.dirty.capacity() != rows) {
+            try v.dirty.resize(self.alloc, rows, false);
+            v.full = true;
+        }
+        v.seq += 1;
+        var aw: std.Io.Writer.Allocating = .fromArrayList(self.alloc, &v.out);
+        defer v.out = aw.toArrayList();
+        var s: std.json.Stringify = .{ .writer = &aw.writer };
+        try view.writeFrame(&s, t, .{ .pane = p.id, .seq = v.seq, .full = v.full, .dirty = &v.dirty }, self.alloc);
+        try aw.writer.writeByte('\n');
+        v.dirty.setRangeValue(.{ .start = 0, .end = v.dirty.capacity() }, false);
+        v.full = false;
+        v.changed = false;
+    }
+
+    /// Bytes from a viewer: split into lines, act on each complete one.
+    fn viewerInput(self: *Server, v: *Viewer, bytes: []const u8) void {
+        v.inbuf.appendSlice(self.alloc, bytes) catch {
+            v.deinit(self.alloc);
+            return;
+        };
+        while (std.mem.indexOfScalar(u8, v.inbuf.items, '\n')) |nl| {
+            self.viewerLine(v, v.inbuf.items[0..nl]);
+            if (v.conn < 0) return;
+            const rest = v.inbuf.items.len - (nl + 1);
+            std.mem.copyForwards(u8, v.inbuf.items[0..rest], v.inbuf.items[nl + 1 ..]);
+            v.inbuf.items.len = rest;
+        }
+        if (v.inbuf.items.len > VIEW_IN_CAP) v.deinit(self.alloc); // a line that never ends
+    }
+
+    fn viewerLine(self: *Server, v: *Viewer, line: []const u8) void {
+        const parsed = std.json.parseFromSlice(std.json.Value, self.alloc, line, .{}) catch return;
+        defer parsed.deinit();
+        const m = parsed.value;
+        if (m != .object) return;
+        const p = self.findPane(v.pane_id) orelse return;
+
+        if (m.object.get("resize")) |r| {
+            if (r != .object) return;
+            const rows = clampDim(jsonInt(r, "rows"), 0);
+            const cols = clampDim(jsonInt(r, "cols"), 0);
+            if (rows >= 2 and cols >= 2) self.resizePane(p, rows, cols);
+            return;
+        }
+        if (m.object.get("history")) |h| {
+            if (h != .object) return;
+            const from = jsonInt(h, "from") orelse return;
+            const count: usize = @intCast(std.math.clamp(jsonInt(h, "count") orelse 0, 0, 5000));
+            var aw: std.Io.Writer.Allocating = .fromArrayList(self.alloc, &v.out);
+            defer v.out = aw.toArrayList();
+            var s: std.json.Stringify = .{ .writer = &aw.writer };
+            view.writeHistory(&s, &p.spane().terminal, p.id, from, count, self.alloc) catch return;
+            aw.writer.writeByte('\n') catch return;
+            return;
+        }
+        if (p.hup) return; // input to a finished pane goes nowhere
+        if (jsonBool(m, "focus")) |focused| {
+            if (p.spane().terminal.modes.focus_events) {
+                const seq: []const u8 = if (focused) "\x1b[I" else "\x1b[O";
+                _ = capi.tmux_send(p.handle, seq.ptr, seq.len);
+            }
+            return;
+        }
+        const kind = jsonStr(m, "input") orelse return;
+        if (std.mem.eql(u8, kind, "text")) {
+            const data = jsonStr(m, "data") orelse return;
+            if (data.len > 0) _ = capi.tmux_send(p.handle, data.ptr, data.len);
+        } else if (std.mem.eql(u8, kind, "bytes")) {
+            const b64 = jsonStr(m, "b64") orelse return;
+            const dec = std.base64.standard.Decoder;
+            const n = dec.calcSizeForSlice(b64) catch return;
+            const buf = self.alloc.alloc(u8, n) catch return;
+            defer self.alloc.free(buf);
+            dec.decode(buf, b64) catch return;
+            if (n > 0) _ = capi.tmux_send(p.handle, buf.ptr, n);
+        } else if (std.mem.eql(u8, kind, "paste")) {
+            const data = jsonStr(m, "data") orelse return;
+            var clean: std.ArrayList(u8) = .empty;
+            defer clean.deinit(self.alloc);
+            const text = view.stripPasteEnd(data, &clean, self.alloc) catch return;
+            if (text.len > 0) _ = capi.tmux_paste(p.handle, text.ptr, text.len);
+        } else if (std.mem.eql(u8, kind, "mouse")) {
+            const what = jsonStr(m, "kind") orelse return;
+            const k: c_int = if (std.mem.eql(u8, what, "press")) 0 else if (std.mem.eql(u8, what, "release")) 1 else if (std.mem.eql(u8, what, "motion")) 2 else return;
+            const x = std.math.cast(u16, jsonInt(m, "x") orelse return) orelse return;
+            const y = std.math.cast(u16, jsonInt(m, "y") orelse return) orelse return;
+            const button = std.math.cast(c_int, jsonInt(m, "button") orelse 0) orelse return;
+            const mods = std.math.cast(c_int, jsonInt(m, "mods") orelse 0) orelse return;
+            _ = capi.tmux_mouse(p.handle, k, button, y, x, mods);
+        }
     }
 
     // ── list / sessions ──────────────────────────────────────────────────────────────────────────────
@@ -1643,75 +2023,285 @@ fn runClient(alloc: std.mem.Allocator, args: []const []const u8) !void {
 
 // ══ ATTACH CLIENT ═════════════════════════════════════════════════════════════════════════════════════
 //
-// `zterm attach <pane>` — the persistent-session workflow: the SERVER owns the
-// shell; this client is a disposable raw-mode window onto it. Close the
-// terminal, reattach later, the shell never noticed. Detach key: Ctrl-b d.
+// `zterm attach <pane>` — a view-protocol client (docs/VIEW-PROTOCOL.md) that
+// draws the server's frames into this terminal with ANSI. The SERVER owns the
+// shell and is the only emulator; this client never sees the pane's raw
+// output, so it cannot answer a terminal query twice, it redraws a pane in
+// full colour however long ago the application painted it, and it resizes
+// the pane when this window resizes. Close the terminal, reattach later — the
+// shell never noticed. Detach key: Ctrl-b d.
+
+var winch_seen = std.atomic.Value(bool).init(false);
+fn onWinch(_: c_int) callconv(.c) void {
+    winch_seen.store(true, .monotonic);
+}
+
+/// The pane's modes as last mirrored onto the host terminal. Mirroring them
+/// means the host sends input already encoded the way the application asked
+/// (application cursor keys, bracketed paste, its mouse protocol, focus
+/// reports), so keystrokes pass through untouched.
+const HostModes = struct {
+    app_cursor: bool = false,
+    bracketed_paste: bool = false,
+    mouse: []const u8 = "none",
+    mouse_sgr: bool = false,
+    focus: bool = false,
+};
+
+fn hostSgr(out: *std.ArrayList(u8), alloc: std.mem.Allocator, span: std.json.Value) !void {
+    var b: [48]u8 = undefined;
+    try out.appendSlice(alloc, "\x1b[0");
+    const a: u8 = @intCast(@max(0, @min(255, jsonInt(span, "a") orelse 0)));
+    const codes = [_]struct { bit: u8, code: []const u8 }{
+        .{ .bit = 1, .code = ";1" },   .{ .bit = 2, .code = ";2" },
+        .{ .bit = 4, .code = ";3" },   .{ .bit = 8, .code = ";4" },
+        .{ .bit = 16, .code = ";5" },  .{ .bit = 32, .code = ";7" },
+        .{ .bit = 64, .code = ";8" },  .{ .bit = 128, .code = ";9" },
+    };
+    for (codes) |cd| if (a & cd.bit != 0) try out.appendSlice(alloc, cd.code);
+    inline for (.{ .{ "fg", 30, 90, 38 }, .{ "bg", 40, 100, 48 } }) |k| {
+        if (span.object.get(k[0])) |col| switch (col) {
+            // The 16 base colours by their own codes, so the host's palette
+            // (the user's theme) applies; the rest by index.
+            .integer => |i| try out.appendSlice(alloc, if (i < 8)
+                std.fmt.bufPrint(&b, ";{d}", .{k[1] + i}) catch ""
+            else if (i < 16)
+                std.fmt.bufPrint(&b, ";{d}", .{k[2] + i - 8}) catch ""
+            else
+                std.fmt.bufPrint(&b, ";{d};5;{d}", .{ k[3], i }) catch ""),
+            .string => |hex| if (hex.len == 7 and hex[0] == '#') {
+                const r = std.fmt.parseInt(u8, hex[1..3], 16) catch 0;
+                const g = std.fmt.parseInt(u8, hex[3..5], 16) catch 0;
+                const bl = std.fmt.parseInt(u8, hex[5..7], 16) catch 0;
+                try out.appendSlice(alloc, std.fmt.bufPrint(&b, ";{d};2;{d};{d};{d}", .{ k[3], r, g, bl }) catch "");
+            },
+            else => {},
+        };
+    }
+    try out.append(alloc, 'm');
+}
+
+fn cup(out: *std.ArrayList(u8), alloc: std.mem.Allocator, row: i64, col: i64) !void {
+    var b: [32]u8 = undefined;
+    try out.appendSlice(alloc, std.fmt.bufPrint(&b, "\x1b[{d};{d}H", .{ row + 1, col + 1 }) catch "");
+}
+
+/// Mirror changed modes onto the host terminal.
+fn mirrorModes(out: *std.ArrayList(u8), alloc: std.mem.Allocator, have: *HostModes, want: std.json.Value) !void {
+    const w_app = jsonBool(want, "app_cursor") orelse false;
+    const w_bp = jsonBool(want, "bracketed_paste") orelse false;
+    const w_mouse = jsonStr(want, "mouse") orelse "none";
+    const w_sgr = jsonBool(want, "mouse_sgr") orelse false;
+    const w_focus = jsonBool(want, "focus") orelse false;
+    if (w_app != have.app_cursor) try out.appendSlice(alloc, if (w_app) "\x1b[?1h" else "\x1b[?1l");
+    if (w_bp != have.bracketed_paste) try out.appendSlice(alloc, if (w_bp) "\x1b[?2004h" else "\x1b[?2004l");
+    if (!std.mem.eql(u8, w_mouse, have.mouse) or w_sgr != have.mouse_sgr) {
+        try out.appendSlice(alloc, "\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
+        const on: []const u8 = if (std.mem.eql(u8, w_mouse, "x10")) "\x1b[?9h" else if (std.mem.eql(u8, w_mouse, "normal")) "\x1b[?1000h" else if (std.mem.eql(u8, w_mouse, "button")) "\x1b[?1002h" else if (std.mem.eql(u8, w_mouse, "any")) "\x1b[?1003h" else "";
+        try out.appendSlice(alloc, on);
+        if (on.len > 0 and w_sgr) try out.appendSlice(alloc, "\x1b[?1006h");
+    }
+    if (w_focus != have.focus) try out.appendSlice(alloc, if (w_focus) "\x1b[?1004h" else "\x1b[?1004l");
+    have.* = .{
+        .app_cursor = w_app,
+        .bracketed_paste = w_bp,
+        .mouse = if (std.mem.eql(u8, w_mouse, "x10")) "x10" else if (std.mem.eql(u8, w_mouse, "normal")) "normal" else if (std.mem.eql(u8, w_mouse, "button")) "button" else if (std.mem.eql(u8, w_mouse, "any")) "any" else "none",
+        .mouse_sgr = w_sgr,
+        .focus = w_focus,
+    };
+}
+
+/// Draw one frame. Rows are cleared and redrawn whole; every span is placed
+/// at its own column, so a host whose width tables disagree with zterm's
+/// cannot shift the rest of a row. Wrapped in a host synchronized update.
+fn drawFrame(alloc: std.mem.Allocator, frame: std.json.Value, have: *HostModes, title_buf: *std.ArrayList(u8)) !void {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try out.appendSlice(alloc, "\x1b[?2026h\x1b[?25l");
+    if (jsonBool(frame, "full") orelse false) try out.appendSlice(alloc, "\x1b[0m\x1b[H\x1b[2J");
+    if (frame.object.get("lines")) |lines| if (lines == .array) for (lines.array.items) |line| {
+        if (line != .object) continue;
+        const y = jsonInt(line, "y") orelse continue;
+        try cup(&out, alloc, y, 0);
+        try out.appendSlice(alloc, "\x1b[0m\x1b[2K");
+        const spans = line.object.get("spans") orelse continue;
+        if (spans != .array) continue;
+        for (spans.array.items) |span| {
+            if (span != .object) continue;
+            try cup(&out, alloc, y, jsonInt(span, "x") orelse 0);
+            try hostSgr(&out, alloc, span);
+            try out.appendSlice(alloc, jsonStr(span, "text") orelse "");
+        }
+        try out.appendSlice(alloc, "\x1b[0m");
+    };
+    if (frame.object.get("modes")) |m| if (m == .object) try mirrorModes(&out, alloc, have, m);
+    if (jsonStr(frame, "title")) |t| if (!std.mem.eql(u8, t, title_buf.items)) {
+        title_buf.clearRetainingCapacity();
+        try title_buf.appendSlice(alloc, t);
+        // A title is text; drop what would end the OSC early.
+        try out.appendSlice(alloc, "\x1b]2;");
+        for (t) |ch| if (ch >= 0x20 and ch != 0x7f) try out.append(alloc, ch);
+        try out.append(alloc, 0x07);
+    };
+    if (frame.object.get("cursor")) |cur| if (cur == .object) {
+        try cup(&out, alloc, jsonInt(cur, "y") orelse 0, jsonInt(cur, "x") orelse 0);
+        const shape = jsonStr(cur, "shape") orelse "block";
+        const blink = jsonBool(cur, "blink") orelse true;
+        const ps: u8 = if (std.mem.eql(u8, shape, "underline")) 3 else if (std.mem.eql(u8, shape, "bar")) 5 else 1;
+        var b: [16]u8 = undefined;
+        try out.appendSlice(alloc, std.fmt.bufPrint(&b, "\x1b[{d} q", .{if (blink) ps else ps + 1}) catch "");
+        if (jsonBool(cur, "visible") orelse true) try out.appendSlice(alloc, "\x1b[?25h");
+    };
+    try out.appendSlice(alloc, "\x1b[?2026l");
+    cwrite(posix.STDOUT_FILENO, out.items);
+}
+
+fn sendView(fd: c.fd_t, alloc: std.mem.Allocator, value: anytype) void {
+    const j = std.json.Stringify.valueAlloc(alloc, value, .{}) catch return;
+    defer alloc.free(j);
+    cwrite(fd, j);
+    cwrite(fd, "\n");
+}
+
+fn sendKeys(fd: c.fd_t, alloc: std.mem.Allocator, bytes: []const u8) void {
+    if (bytes.len == 0) return;
+    const enc = std.base64.standard.Encoder;
+    const b64 = alloc.alloc(u8, enc.calcSize(bytes.len)) catch return;
+    defer alloc.free(b64);
+    sendView(fd, alloc, .{ .input = "bytes", .b64 = enc.encode(b64, bytes) });
+}
 
 fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
     const id_str = if (args.len > 0) args[0] else "1";
+    const pane_id = std.fmt.parseInt(u64, id_str, 10) catch {
+        std.debug.print("zterm attach: '{s}' is not a pane id (see `zterm cli list`)\n", .{id_str});
+        return error.BadUsage;
+    };
 
     const fd = try connectServer(alloc);
     defer pclose(fd);
 
-    // Attach at OUR terminal's size so the pane's PTY matches this window.
-    const ws = pty.getTerminalSize(posix.STDIN_FILENO) catch pty.Winsize{
-        .ws_row = 24,
-        .ws_col = 80,
-        .ws_xpixel = 0,
-        .ws_ypixel = 0,
-    };
-    var req_buf: [64]u8 = undefined;
-    const req = std.fmt.bufPrint(&req_buf, "attach {s} {d} {d}\n", .{ id_str, ws.ws_row, ws.ws_col }) catch return error.BadUsage;
-    _ = try pwrite(fd, req);
+    // Attach at OUR terminal's size so the pane matches this window.
+    var ws = pty.getTerminalSize(posix.STDIN_FILENO) catch pty.Winsize{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 };
+    sendView(fd, alloc, .{ .cmd = "view", .pane = pane_id, .rows = ws.ws_row, .cols = ws.ws_col });
 
     var raw = try pty.RawMode.enter(posix.STDIN_FILENO);
     defer raw.exit();
+    _ = signal(@intFromEnum(c.SIG.WINCH), onWinch);
+    cwrite(posix.STDOUT_FILENO, "\x1b[?1049h\x1b[H\x1b[2J");
 
+    var have: HostModes = .{};
+    var title: std.ArrayList(u8) = .empty;
+    defer title.deinit(alloc);
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(alloc);
     var buf: [65536]u8 = undefined;
     var held_prefix = false; // saw Ctrl-b, deciding between detach and passthrough
+    var ending: enum { detached, exited, lost, refused } = .detached;
+    var exit_code: ?i64 = null;
+
     outer: while (true) {
+        if (winch_seen.swap(false, .monotonic)) {
+            if (pty.getTerminalSize(posix.STDIN_FILENO)) |now| {
+                if (now.ws_row != ws.ws_row or now.ws_col != ws.ws_col) {
+                    ws = now;
+                    sendView(fd, alloc, .{ .resize = .{ .rows = ws.ws_row, .cols = ws.ws_col } });
+                }
+            } else |_| {}
+        }
         var pfds = [_]posix.pollfd{
             .{ .fd = posix.STDIN_FILENO, .events = posix.POLL.IN, .revents = 0 },
             .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 },
         };
-        _ = posix.poll(&pfds, 1000) catch continue;
+        _ = posix.poll(&pfds, 250) catch continue;
 
         if (pfds[1].revents & (posix.POLL.IN | posix.POLL.HUP) != 0) {
-            const r = posix.read(fd, &buf) catch break;
-            if (r == 0) break; // server gone or pane killed
-            _ = pwrite(posix.STDOUT_FILENO, buf[0..r]) catch break;
+            const r = posix.read(fd, &buf) catch {
+                ending = .lost;
+                break;
+            };
+            if (r == 0) {
+                ending = .lost;
+                break;
+            }
+            try inbuf.appendSlice(alloc, buf[0..r]);
+            while (std.mem.indexOfScalar(u8, inbuf.items, '\n')) |nl| {
+                defer {
+                    const rest = inbuf.items.len - (nl + 1);
+                    std.mem.copyForwards(u8, inbuf.items[0..rest], inbuf.items[nl + 1 ..]);
+                    inbuf.items.len = rest;
+                }
+                const parsed = std.json.parseFromSlice(std.json.Value, alloc, inbuf.items[0..nl], .{}) catch continue;
+                defer parsed.deinit();
+                const m = parsed.value;
+                if (m != .object) continue;
+                const t = jsonStr(m, "t") orelse continue;
+                if (std.mem.eql(u8, t, "frame")) {
+                    try drawFrame(alloc, m, &have, &title);
+                } else if (std.mem.eql(u8, t, "bell")) {
+                    cwrite(posix.STDOUT_FILENO, "\x07");
+                } else if (std.mem.eql(u8, t, "clipboard")) {
+                    // Hand the application's OSC 52 write to this terminal,
+                    // which applies its own policy. Base64 is OSC-safe.
+                    if (jsonStr(m, "b64")) |b64| {
+                        cwrite(posix.STDOUT_FILENO, "\x1b]52;c;");
+                        cwrite(posix.STDOUT_FILENO, b64);
+                        cwrite(posix.STDOUT_FILENO, "\x07");
+                    }
+                } else if (std.mem.eql(u8, t, "exit")) {
+                    exit_code = jsonInt(m, "code");
+                    ending = .exited;
+                    break :outer;
+                } else if (std.mem.eql(u8, t, "error")) {
+                    ending = .refused;
+                    break :outer;
+                }
+            }
         }
 
         if (pfds[0].revents & posix.POLL.IN != 0) {
             const r = posix.read(posix.STDIN_FILENO, &buf) catch break;
             if (r == 0) break;
+            // Everything but the detach chord goes to the pane as typed:
+            // the host already encodes it per the mirrored modes.
+            var fwd: std.ArrayList(u8) = .empty;
+            defer fwd.deinit(alloc);
             var i: usize = 0;
-            while (i < r) {
+            while (i < r) : (i += 1) {
+                const b = buf[i];
                 if (held_prefix) {
                     held_prefix = false;
-                    const b = buf[i];
-                    if (b == 'd') break :outer; // Ctrl-b d → detach
-                    // Not a detach: deliver the withheld prefix.
-                    _ = pwrite(fd, &[_]u8{0x02}) catch break :outer;
-                    if (b == 0x02) { // Ctrl-b Ctrl-b = ONE literal Ctrl-b (sent)
-                        i += 1;
-                        continue;
+                    if (b == 'd') {
+                        sendKeys(fd, alloc, fwd.items);
+                        break :outer; // Ctrl-b d → detach
                     }
-                    // b joins the span below.
+                    try fwd.append(alloc, 0x02); // not a detach: deliver the withheld prefix
+                    if (b == 0x02) continue; // Ctrl-b Ctrl-b = ONE literal Ctrl-b
+                    try fwd.append(alloc, b);
+                    continue;
                 }
-                var j = i;
-                while (j < r and buf[j] != 0x02) j += 1;
-                if (j > i) _ = pwrite(fd, buf[i..j]) catch break :outer;
-                if (j < r) { // hit a prefix: hold it, decide on the next byte
+                if (b == 0x02) {
                     held_prefix = true;
-                    j += 1;
+                    continue;
                 }
-                i = j;
+                try fwd.append(alloc, b);
             }
+            sendKeys(fd, alloc, fwd.items);
         }
     }
+
+    // Leave the host terminal as we found it.
+    cwrite(posix.STDOUT_FILENO, "\x1b[?1l\x1b[?2004l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[0m\x1b[0 q\x1b[?25h\x1b[?1049l");
     raw.exit();
-    std.debug.print("\n[zterm: detached — pane keeps running; `zterm attach {s}` to return]\n", .{id_str});
+    switch (ending) {
+        .detached => std.debug.print("[zterm: detached — pane {d} keeps running; `zterm attach {d}` to return]\n", .{ pane_id, pane_id }),
+        .exited => if (exit_code) |code|
+            std.debug.print("[zterm: pane {d} exited ({d})]\n", .{ pane_id, code })
+        else
+            std.debug.print("[zterm: pane {d} exited]\n", .{pane_id}),
+        .lost => std.debug.print("[zterm: the server went away]\n", .{}),
+        .refused => std.debug.print("[zterm: no pane {d} (see `zterm cli list`)]\n", .{pane_id}),
+    }
 }
 
 // ══ MAIN ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1800,8 +2390,10 @@ pub fn main(init: std.process.Init) !void {
 const testing = std.testing;
 
 test {
-    // ctl.zig's own tests (fillAddr) run with these; lib.zig's suite does not import ctl.
+    // ctl.zig's own tests (fillAddr) and view.zig's encoding tests run with
+    // these; lib.zig's suite imports neither.
     _ = ctl;
+    _ = view;
 }
 
 test "runner socket path follows baton's home_base tiers" {

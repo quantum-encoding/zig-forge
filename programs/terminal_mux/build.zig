@@ -111,6 +111,11 @@ pub fn build(b: *std.Build) void {
     const qa_step = b.step("qa", "Run the end-to-end PTY QA harnesses (needs python3)");
     qa_step.dependOn(&qa_cmd.step);
     qa_step.dependOn(&zterm_qa_cmd.step);
+    // The view protocol (docs/VIEW-PROTOCOL.md) and `zterm attach`, its
+    // first client: frames, input, resize, history, exit, state-sync.
+    const view_qa_cmd = b.addSystemCommand(&.{ "python3", "tests/zterm_view_qa.py" });
+    view_qa_cmd.step.dependOn(b.getInstallStep());
+    qa_step.dependOn(&view_qa_cmd.step);
 
     // ==========================================================================
     // Tests

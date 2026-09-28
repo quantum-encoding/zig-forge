@@ -25,6 +25,9 @@ request shape). Send one line:
 {"cmd":"view","pane":1,"rows":40,"cols":120}
 ```
 
+`pane` is zterm's own pane id (`zterm cli list`) — not the 1000000+n form
+baton uses to keep zterm and WezTerm pane numbers apart.
+
 `rows`/`cols` are optional; when given, the pane is resized to them (see
 "Size" below). The connection then stays open in both directions. Every
 message either way is **one JSON object followed by `\n`**. Unknown message
@@ -87,8 +90,8 @@ Trailing blanks are omitted. A client places each span at its `x` — never at
 with zterm's cannot shift the rest of the row.
 
 **Cursor.** `x`,`y` are grid coordinates. `visible` is false when the
-application hid it. `shape`: 0 default · 1/2 block · 3/4 underline · 5/6 bar
-(DECSCUSR numbering); `blink` as the application asked.
+application hid it. `shape`: `"block"`, `"underline"` or `"bar"`; `blink` as
+the application asked (DECSCUSR sets both).
 
 **Modes.** What the application asked of its terminal, so the client encodes
 input the way the application expects:
@@ -107,12 +110,16 @@ input the way the application expects:
 {"t":"bell","pane":1}
 {"t":"clipboard","pane":1,"b64":"aGVsbG8="}
 {"t":"exit","pane":1,"code":0,"signal":0}
+{"t":"exit","pane":1,"killed":true}
 ```
 
 `clipboard` is an OSC 52 write by the application; the client decides whether
 to honour it. After `exit` no further frames arrive; the last frame is the
-pane's final screen. The server keeps the connection open until the client
-closes it.
+pane's final screen, and the server keeps the connection open until the client
+closes it. `code`/`signal` are the child's real status, or `null` when it
+could not be read (the child closed its terminal but kept running for more
+than 2 s). `killed: true` means the pane was killed (`kill`, runner `stop`);
+the server then closes the connection itself.
 
 ### `history` — reply to a `history` request
 

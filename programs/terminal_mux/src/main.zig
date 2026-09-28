@@ -436,6 +436,9 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
                 const n = p.readOutput(&pty_buf) catch continue;
                 if (n > 0) {
                     p.processOutput(pty_buf[0..n]);
+                    // zterm IS this pane's terminal: answer its DA/CPR/OSC
+                    // queries, or vim, fzf and friends wait and time out.
+                    p.flushResponses();
                     // Output landing in a background window → status-bar '#'.
                     const w = poll_windows.items[i];
                     if (w != initial_session.getActiveWindow()) w.activity = true;

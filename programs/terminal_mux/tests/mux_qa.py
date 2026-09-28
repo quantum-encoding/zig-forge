@@ -480,7 +480,34 @@ def scenario_persistent_detach():
         if os.path.exists(sock_path):
             os.unlink(sock_path)
 
+def scenario_query_responses():
+    """zterm IS the terminal of its panes, so it must answer their queries.
+    A program asks for the cursor position (CPR, ESC[6n) and waits for the
+    reply; before the fix nothing drained the emulator's reply queue and the
+    program waited forever (vim, fzf and inner tmux all do this at start-up)."""
+    rows, cols = 24, 80
+    pid, master = spawn_mux(rows, cols)
+    screen = HostScreen(rows, cols)
+    try:
+        wait_shell_ready(master, screen)
+        out = tempfile.mktemp(prefix="mux-qa-cpr-")
+        prog = ("import tty,os;tty.setraw(0);os.write(1,b'\\033[6n');r=b''\n"
+                "while not r.endswith(b'R'): r+=os.read(0,1)\n"
+                f"open('{out}','wb').write(r)")
+        os.write(master, f'python3 -c "{prog}"\n'.encode())
+        deadline = time.time() + 10
+        while time.time() < deadline and not os.path.exists(out):
+            drain(master, screen, 0.25)
+        assert os.path.exists(out), "the pane's CPR query was never answered"
+        reply = open(out, "rb").read()
+        os.unlink(out)
+        assert re.fullmatch(rb"\x1b\[\d+;\d+R", reply), f"not a CPR reply: {reply!r}"
+        print(f"PASS query-responses (CPR answered by zterm: {reply!r})")
+    finally:
+        kill_mux(pid)
+
 if __name__ == "__main__":
+    scenario_query_responses()
     scenario_scroll_invariant()
     scenario_background_drain()
     scenario_control_socket()

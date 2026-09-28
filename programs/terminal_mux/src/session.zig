@@ -254,6 +254,23 @@ pub const Pane = struct {
         }
     }
 
+    /// Answer the terminal queries this pane's application asked (DA1/DA2,
+    /// CPR, OSC 10/11): the emulator queues each reply as it parses the
+    /// query, and this writes them back to the application. Call after
+    /// `processOutput` wherever zterm IS the terminal — the visible mux and
+    /// `zterm server`. NOT called inside `processOutput`: an embedding host
+    /// (the Swift app) drains the same queue through `tmux_take_responses`
+    /// and writes the replies itself, and would otherwise answer twice.
+    pub fn flushResponses(self: *Self) void {
+        const t = &self.terminal;
+        if (t.resp_len == 0) return;
+        const n = t.resp_len;
+        t.resp_len = 0;
+        // Replies are tens of bytes; a short write means the child stopped
+        // reading, and a partial reply would read as keystrokes — drop it.
+        _ = self.writeInput(t.resp_pending[0..n]) catch {};
+    }
+
     /// Send input to the PTY
     pub fn sendInput(self: *Self, data: []const u8) !void {
         _ = try self.writeInput(data);
