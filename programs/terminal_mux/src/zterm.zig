@@ -325,6 +325,75 @@ pub fn validName(name: []const u8) bool {
     return true;
 }
 
+/// Bounds on a spawn's `env`: a front end passes a handful of variables
+/// (shell integration), not an environment.
+pub const SPAWN_ENV_MAX_VARS: usize = 32;
+pub const SPAWN_ENV_MAX_KEY: usize = 64;
+pub const SPAWN_ENV_MAX_VALUE: usize = 4096;
+
+/// An environment variable name a spawn may set: `[A-Z_][A-Z0-9_]*`, at most
+/// SPAWN_ENV_MAX_KEY bytes, and not a pane-identity variable (`ZTERM_PANE` is
+/// the server's to set; `WEZTERM_PANE` would name somebody else's pane).
+pub fn validEnvKey(key: []const u8) bool {
+    if (key.len == 0 or key.len > SPAWN_ENV_MAX_KEY) return false;
+    if (!(std.ascii.isUpper(key[0]) or key[0] == '_')) return false;
+    for (key[1..]) |ch| if (!(std.ascii.isUpper(ch) or std.ascii.isDigit(ch) or ch == '_')) return false;
+    if (std.mem.eql(u8, key, "ZTERM_PANE") or std.mem.eql(u8, key, "WEZTERM_PANE")) return false;
+    return true;
+}
+
+/// A spawn request's `env` object as owned "KEY=value" entries for the
+/// child's environment, or null with `why` set. Everything is checked before
+/// anything is kept: a request is applied whole or refused whole.
+pub fn parseSpawnEnv(alloc: std.mem.Allocator, env: std.json.Value, why: *[]const u8) ?[][:0]u8 {
+    if (env != .object) {
+        why.* = "env must be an object of string values";
+        return null;
+    }
+    const map = env.object;
+    if (map.count() > SPAWN_ENV_MAX_VARS) {
+        why.* = "env has more than 32 variables";
+        return null;
+    }
+    var it = map.iterator();
+    while (it.next()) |kv| {
+        if (!validEnvKey(kv.key_ptr.*)) {
+            why.* = "env keys must be 1-64 characters of [A-Z0-9_], not starting with a digit, and not ZTERM_PANE or WEZTERM_PANE";
+            return null;
+        }
+        const val = switch (kv.value_ptr.*) {
+            .string => |x| x,
+            else => {
+                why.* = "env values must be strings";
+                return null;
+            },
+        };
+        if (val.len > SPAWN_ENV_MAX_VALUE or std.mem.indexOfScalar(u8, val, 0) != null) {
+            why.* = "env values must be at most 4096 bytes with no NUL";
+            return null;
+        }
+    }
+    const out = alloc.alloc([:0]u8, map.count()) catch {
+        why.* = "out of memory";
+        return null;
+    };
+    var made: usize = 0;
+    it = map.iterator();
+    while (it.next()) |kv| : (made += 1) {
+        out[made] = std.fmt.allocPrintSentinel(alloc, "{s}={s}", .{ kv.key_ptr.*, kv.value_ptr.string }, 0) catch {
+            freeSpawnEnv(alloc, out[0..made]);
+            alloc.free(out);
+            why.* = "out of memory";
+            return null;
+        };
+    }
+    return out;
+}
+
+pub fn freeSpawnEnv(alloc: std.mem.Allocator, entries: []const [:0]u8) void {
+    for (entries) |e| alloc.free(e);
+}
+
 /// baton's `Session::answers_to`: a designation (any case), or `pid:<n>` for
 /// the session whose process is n. A bare number is a designation, never a
 /// pid, and pid 0 ("unknown") answers to nothing.
@@ -471,6 +540,11 @@ const Viewer = struct {
     last_frame_ms: i64 = 0,
     /// The pane's `input_seq` when this client's last frame was built.
     answered_input: u64 = 0,
+    /// OSC 133 marks this client is owed: every mark on lines >= this, sent
+    /// ahead of the next frame (docs/VIEW-PROTOCOL.md `marks`). Starts at the
+    /// bottom of i64 — the whole set — and returns there when a backlog that
+    /// may have held a `marks` message is discarded.
+    marks_from: ?i64 = std.math.minInt(i64),
 
     /// Close and release. Idempotent: a viewer can die where it is found
     /// dead and again at the sweep.
@@ -720,6 +794,9 @@ const Server = struct {
         cwd: ?[]const u8 = null,
         name: ?[]const u8 = null,
         run: ?[]const u8 = null,
+        /// Extra "KEY=value" entries for this pane's environment only
+        /// (`parseSpawnEnv`).
+        env: []const [:0]const u8 = &.{},
     };
 
     /// Spawn a pane. Returns the pane id, or a sentence saying why not.
@@ -749,7 +826,7 @@ const Server = struct {
             return null;
         }) else null;
         var id: u64 = 0;
-        const h = capi.createIn(o.rows, o.cols, null, o.cwd, true, &id) orelse {
+        const h = capi.createIn(o.rows, o.cols, null, o.cwd, true, o.env, &id) orelse {
             if (name_copy) |n| self.alloc.free(n);
             why.* = "could not start a shell in a new PTY";
             return null;
@@ -1100,12 +1177,24 @@ const Server = struct {
             return self.openViewer(conn, v, pane_id);
         } else if (std.mem.eql(u8, cmd, "spawn")) {
             var why: []const u8 = "";
+            var env: [][:0]u8 = &.{};
+            if (v == .object) if (v.object.get("env")) |e| if (e != .null) {
+                env = parseSpawnEnv(self.alloc, e, &why) orelse {
+                    self.reply(conn, .{ .ok = false, .@"error" = why });
+                    return .close;
+                };
+            };
+            defer {
+                freeSpawnEnv(self.alloc, env);
+                if (env.len > 0) self.alloc.free(env);
+            }
             const o = SpawnOpts{
                 .rows = clampDim(jsonInt(v, "rows"), 40),
                 .cols = clampDim(jsonInt(v, "cols"), 120),
                 .cwd = jsonStr(v, "cwd"),
                 .name = jsonStr(v, "name"),
                 .run = jsonStr(v, "run"),
+                .env = env,
             };
             if (self.spawn(o, &why)) |id| {
                 self.reply(conn, .{ .ok = true, .pane = id });
@@ -1379,6 +1468,7 @@ const Server = struct {
         const t = &p.spane().terminal;
         const bells = t.bell_pending;
         t.bell_pending = 0;
+        const marks_touched = t.takeMarksTouched();
         const clip = t.clipboard_pending[0..t.clipboard_len];
         const rows = t.getCurrentGrid().rows;
         for (self.viewers.items) |*v| {
@@ -1392,6 +1482,7 @@ const Server = struct {
                 var r: u16 = 0;
                 while (r < rows) : (r += 1) if (t.isDirty(r)) v.dirty.set(r);
             }
+            if (marks_touched) |line| v.marks_from = if (v.marks_from) |cur| @min(cur, line) else line;
             if (bells > 0) self.viewerEvent(v, .{ .t = "bell", .pane = p.id });
             if (clip.len > 0) {
                 const enc = std.base64.standard.Encoder;
@@ -1417,6 +1508,7 @@ const Server = struct {
             v.out.items.len = keep_to;
             v.full = true;
             v.changed = true;
+            v.marks_from = std.math.minInt(i64);
         }
         var aw: std.Io.Writer.Allocating = .fromArrayList(self.alloc, &v.out);
         defer v.out = aw.toArrayList();
@@ -1534,6 +1626,15 @@ const Server = struct {
         var aw: std.Io.Writer.Allocating = .fromArrayList(self.alloc, &v.out);
         defer v.out = aw.toArrayList();
         var s: std.json.Stringify = .{ .writer = &aw.writer };
+        // Marks go out ahead of the frame that shows their lines. Never below
+        // the oldest primary line held: nothing is there to replace.
+        if (v.marks_from) |from| {
+            const oldest = t.primaryEpoch() - @as(i64, @intCast(t.scrollback.len));
+            try view.writeMarks(&s, t, p.id, @max(from, oldest));
+            try aw.writer.writeByte('\n');
+            s = .{ .writer = &aw.writer };
+            v.marks_from = null;
+        }
         try view.writeFrame(&s, t, .{ .pane = p.id, .seq = v.seq, .full = v.full, .dirty = &v.dirty }, self.alloc);
         try aw.writer.writeByte('\n');
         v.dirty.setRangeValue(.{ .start = 0, .end = v.dirty.capacity() }, false);
@@ -2685,4 +2786,63 @@ test "agent detection uses baton's list, or $BATON_AGENT_EXES instead of it" {
     try testing.expect(!isAgentComm("", null));
     try testing.expect(isAgentComm("qwen", "qwen, claude"));
     try testing.expect(!isAgentComm("codex", "qwen, claude"));
+}
+
+test "spawn env: well-formed keys and values become KEY=value entries" {
+    const alloc = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc,
+        \\{"ZDOTDIR":"/run/user/1000/x","DUCK_REAL_ZDOTDIR":"","_A1":"a=b c"}
+    , .{});
+    defer parsed.deinit();
+    var why: []const u8 = "";
+    const env = parseSpawnEnv(alloc, parsed.value, &why).?;
+    defer {
+        freeSpawnEnv(alloc, env);
+        alloc.free(env);
+    }
+    try std.testing.expectEqual(@as(usize, 3), env.len);
+    try std.testing.expectEqualStrings("ZDOTDIR=/run/user/1000/x", env[0]);
+    try std.testing.expectEqualStrings("DUCK_REAL_ZDOTDIR=", env[1]);
+    try std.testing.expectEqualStrings("_A1=a=b c", env[2]);
+}
+
+test "spawn env: anything outside the bounds is refused whole" {
+    const alloc = std.testing.allocator;
+    var long_val: [SPAWN_ENV_MAX_VALUE + 1]u8 = undefined;
+    @memset(&long_val, 'v');
+    const long_json = try std.json.Stringify.valueAlloc(alloc, .{ .K = long_val[0..] }, .{});
+    defer alloc.free(long_json);
+    // SPAWN_ENV_MAX_VARS + 1 variables, built as a value (not formatted text).
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    var many_map: std.json.ObjectMap = .empty;
+    for (0..SPAWN_ENV_MAX_VARS + 1) |i| {
+        try many_map.put(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "K{d}", .{i}), .{ .string = "v" });
+    }
+    const many = try std.json.Stringify.valueAlloc(alloc, std.json.Value{ .object = many_map }, .{});
+    defer alloc.free(many);
+    const bad = [_][]const u8{
+        "[]",                   "\"X=1\"",
+        "{\"lower\":\"x\"}",    "{\"1ABC\":\"x\"}",
+        "{\"A-B\":\"x\"}",      "{\"\":\"x\"}",
+        "{\"A\":1}",            "{\"A\":null}",
+        "{\"A\":\"x\\u0000y\"}", "{\"ZTERM_PANE\":\"9\"}",
+        "{\"WEZTERM_PANE\":\"9\"}", "{\"A=B\":\"x\"}",
+        long_json,              many,
+    };
+    for (bad) |src| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, src, .{});
+        defer parsed.deinit();
+        var why: []const u8 = "";
+        if (parseSpawnEnv(alloc, parsed.value, &why)) |env| {
+            freeSpawnEnv(alloc, env);
+            alloc.free(env);
+            std.debug.print("accepted: {s}\n", .{src});
+            return error.TestUnexpectedResult;
+        }
+        try std.testing.expect(why.len > 0);
+    }
+    // The key-length bound is inclusive at 64.
+    try std.testing.expect(validEnvKey("A" ** SPAWN_ENV_MAX_KEY));
+    try std.testing.expect(!validEnvKey("A" ** (SPAWN_ENV_MAX_KEY + 1)));
 }

@@ -1220,6 +1220,29 @@ fn handleEscape(term: *Terminal, seq: EscSequence) void {
     }
 }
 
+/// The mark an OSC 133 payload names, or null for one this emulator does not
+/// record (an unknown letter, or kitty's "P" prompt-kind extension). `D`'s
+/// exit status is the field after the letter; absent or not a number, the
+/// mark carries none.
+pub fn parseMark(data: []const u8) ?struct { kind: terminal.Mark.Kind, exit: ?i32 } {
+    if (data.len == 0) return null;
+    if (data.len > 1 and data[1] != ';') return null;
+    const kind: terminal.Mark.Kind = switch (data[0]) {
+        'A' => .prompt,
+        'B' => .input,
+        'C' => .output,
+        'D' => .done,
+        else => return null,
+    };
+    var exit: ?i32 = null;
+    if (kind == .done and data.len > 2) {
+        const rest = data[2..];
+        const field = rest[0 .. std.mem.indexOfScalar(u8, rest, ';') orelse rest.len];
+        exit = std.fmt.parseInt(i32, field, 10) catch null;
+    }
+    return .{ .kind = kind, .exit = exit };
+}
+
 fn handleOsc(term: *Terminal, seq: OscSequence) void {
     switch (seq.command) {
         0, 2 => {
@@ -1248,6 +1271,12 @@ fn handleOsc(term: *Terminal, seq: OscSequence) void {
                 ) catch return;
                 term.queueResponse(reply);
             }
+        },
+        133 => {
+            // Semantic prompt (shell integration, FinalTerm/iTerm2/kitty):
+            // "A" prompt, "B" command line, "C" output, "D[;exit]" done.
+            // Options after the letter (";aid=…", ";cl=…") are ignored.
+            if (parseMark(seq.data)) |m| term.recordMark(m.kind, m.exit);
         },
         52 => {
             // Clipboard (OSC 52;Pc;Pd, Pd = base64). Queue the payload for the
@@ -1306,4 +1335,19 @@ test "utf8 decode" {
 
     // 4-byte: 😀 (U+1F600)
     try std.testing.expectEqual(@as(?u21, 0x1F600), decodeUtf8(&[_]u8{ 0xF0, 0x9F, 0x98, 0x80 }));
+}
+
+test "OSC 133 payloads: letter, options and D's exit status" {
+    const a = parseMark("A").?;
+    try std.testing.expectEqual(terminal.Mark.Kind.prompt, a.kind);
+    try std.testing.expectEqual(terminal.Mark.Kind.prompt, parseMark("A;cl=m;aid=3").?.kind);
+    try std.testing.expectEqual(terminal.Mark.Kind.input, parseMark("B").?.kind);
+    try std.testing.expectEqual(terminal.Mark.Kind.output, parseMark("C").?.kind);
+    try std.testing.expectEqual(@as(?i32, 130), parseMark("D;130").?.exit);
+    try std.testing.expectEqual(@as(?i32, -1), parseMark("D;-1;aid=2").?.exit);
+    try std.testing.expectEqual(@as(?i32, null), parseMark("D").?.exit);
+    try std.testing.expectEqual(@as(?i32, null), parseMark("D;x").?.exit);
+    try std.testing.expect(parseMark("") == null);
+    try std.testing.expect(parseMark("P;k=i") == null);
+    try std.testing.expect(parseMark("AB") == null);
 }

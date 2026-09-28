@@ -312,6 +312,42 @@ pub fn writeFrame(s: *Stringify, term: *Terminal, args: FrameArgs, alloc: std.me
     try s.endObject();
 }
 
+/// A list of OSC 133 marks: `[{"n":line,"k":"A"},{"n":line,"k":"D","exit":0}]`.
+fn writeMarkList(s: *Stringify, marks: []const terminal.Mark) !void {
+    try s.beginArray();
+    for (marks) |m| {
+        try s.beginObject();
+        try s.objectField("n");
+        try s.write(m.line);
+        try s.objectField("k");
+        const letter = [1]u8{m.kind.letter()};
+        try s.write(letter[0..]);
+        if (m.exit) |code| {
+            try s.objectField("exit");
+            try s.write(code);
+        }
+        try s.endObject();
+    }
+    try s.endArray();
+}
+
+/// One `marks` message: every mark the pane holds on lines `>= from`. The
+/// client replaces its own marks from `from` down with these — so one shape
+/// carries a new mark (from = its line), a rewrite that dropped marks below
+/// it, and the whole set (from = the oldest line held).
+pub fn writeMarks(s: *Stringify, term: *const Terminal, pane: u64, from: i64) !void {
+    try s.beginObject();
+    try s.objectField("t");
+    try s.write("marks");
+    try s.objectField("pane");
+    try s.write(pane);
+    try s.objectField("from");
+    try s.write(from);
+    try s.objectField("marks");
+    try writeMarkList(s, term.marksIn(from, std.math.maxInt(i64)));
+    try s.endObject();
+}
+
 /// One `history` reply: `count` lines from absolute line `from`, as spans.
 /// Lines no longer held (or not yet written) are omitted.
 pub fn writeHistory(s: *Stringify, term: *Terminal, pane: u64, from: i64, count: usize, alloc: std.mem.Allocator) !void {
@@ -327,11 +363,14 @@ pub fn writeHistory(s: *Stringify, term: *Terminal, pane: u64, from: i64, count:
     try s.write(pane);
     try s.objectField("from");
     try s.write(from);
+    try s.objectField("count");
+    try s.write(count);
     try s.objectField("lines");
     try s.beginArray();
     var i: usize = 0;
     while (i < count) : (i += 1) {
-        const n = from + @as(i64, @intCast(i));
+        // `from` is the client's; a line number past the end of i64 is none.
+        const n = std.math.add(i64, from, @intCast(i)) catch break;
         const cells: []const Cell = blk: {
             if (n >= range.live_top) {
                 const row = n - range.live_top;
@@ -351,6 +390,11 @@ pub fn writeHistory(s: *Stringify, term: *Terminal, pane: u64, from: i64, count:
         try s.endObject();
     }
     try s.endArray();
+    // The OSC 133 marks on the requested lines, so a view that refills its
+    // scrollback gets that history's command blocks back with it.
+    try s.objectField("marks");
+    const until = std.math.add(i64, from, @intCast(count)) catch std.math.maxInt(i64);
+    try writeMarkList(s, term.marksIn(from, until));
     try s.endObject();
 }
 
@@ -609,4 +653,127 @@ test "a paste can never close its own bracket" {
     try testing.expectEqualStrings("ab", try stripPasteEnd("a\x1b[201~b", &buf, testing.allocator));
     try testing.expectEqualStrings("plain", try stripPasteEnd("plain", &buf, testing.allocator));
     try testing.expectEqualStrings("", try stripPasteEnd("\x1b[201~\x1b[201~", &buf, testing.allocator));
+}
+
+// ── OSC 133 marks ─────────────────────────────────────────────────────────────
+
+fn marksOf(term: *Terminal, from: i64) !std.json.Parsed(std.json.Value) {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var s: Stringify = .{ .writer = &aw.writer };
+    try writeMarks(&s, term, 3, from);
+    return std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
+}
+
+fn expectMark(m: std.json.Value, n: i64, k: []const u8, exit: ?i64) !void {
+    try testing.expectEqual(n, m.object.get("n").?.integer);
+    try testing.expectEqualStrings(k, m.object.get("k").?.string);
+    if (exit) |e| {
+        try testing.expectEqual(e, m.object.get("exit").?.integer);
+    } else try testing.expect(m.object.get("exit") == null);
+}
+
+test "OSC 133 marks land on the absolute line of the cursor, BEL or ST terminated" {
+    var h = try Harness.init(3, 20);
+    defer h.deinit();
+    const term = h.term();
+    // Prompt on line 0, command, output on line 1..3 (scrolls one line off),
+    // then D;7 + the next prompt on line 4.
+    h.feed("\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x1b\\a\r\nb\r\nc\r\n\x1b]133;D;7\x07\x1b]133;A;aid=9\x07$ ");
+    const range = lineRange(term);
+    try testing.expectEqual(@as(i64, 2), range.live_top);
+    const p = try marksOf(term, range.oldest);
+    defer p.deinit();
+    try testing.expectEqualStrings("marks", p.value.object.get("t").?.string);
+    try testing.expectEqual(@as(i64, 3), p.value.object.get("pane").?.integer);
+    try testing.expectEqual(@as(i64, 0), p.value.object.get("from").?.integer);
+    const ms = p.value.object.get("marks").?.array.items;
+    try testing.expectEqual(@as(usize, 5), ms.len);
+    try expectMark(ms[0], 0, "A", null);
+    try expectMark(ms[1], 0, "B", null);
+    try expectMark(ms[2], 1, "C", null);
+    try expectMark(ms[3], 4, "D", 7);
+    try expectMark(ms[4], 4, "A", null);
+    // A tail from line 4 carries only that line's marks.
+    const tail = try marksOf(term, 4);
+    defer tail.deinit();
+    try testing.expectEqual(@as(usize, 2), tail.value.object.get("marks").?.array.items.len);
+    // No trailing backslash from the ST form reached the grid.
+    try testing.expectEqual(@as(u21, 'a'), term.scrollback.line(1)[0].char);
+}
+
+test "a D with no status, an unknown letter and the alternate screen record nothing extra" {
+    var h = try Harness.init(4, 20);
+    defer h.deinit();
+    const term = h.term();
+    h.feed("\x1b]133;D\x07\x1b]133;Z\x07\x1b]133;AB\x07\x1b[?1049h\x1b]133;A\x07\x1b[?1049l");
+    try testing.expectEqual(@as(usize, 1), term.marks.items.len);
+    try testing.expectEqual(terminal.Mark.Kind.done, term.marks.items[0].kind);
+    try testing.expectEqual(@as(?i32, null), term.marks.items[0].exit);
+}
+
+test "a mark written above held ones drops the stale ones below it" {
+    var h = try Harness.init(6, 20);
+    defer h.deinit();
+    const term = h.term();
+    h.feed("\x1b]133;A\x07$ ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    try testing.expectEqual(@as(usize, 4), term.marks.items.len);
+    _ = term.takeMarksTouched();
+    // `clear`: home and erase, then the shell's D + A on row 0 again.
+    h.feed("\x1b[H\x1b[2J\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    try testing.expectEqual(@as(usize, 1), term.marks.items.len);
+    try testing.expectEqual(@as(i64, 0), term.marks.items[0].line);
+    try testing.expectEqual(terminal.Mark.Kind.prompt, term.marks.items[0].kind);
+    try testing.expectEqual(@as(?i64, 0), term.takeMarksTouched());
+}
+
+test "marks are pruned with the scrollback they point into" {
+    var h = try Harness.init(2, 10);
+    defer h.deinit();
+    const term = h.term();
+    h.feed("\x1b]133;A\x07first\r\n");
+    try testing.expectEqual(@as(usize, 1), term.marks.items.len);
+    // Harness scrollback holds 100 lines: push line 0 out of it.
+    var i: usize = 0;
+    while (i < 101) : (i += 1) h.feed("x\r\n");
+    try testing.expect(lineRange(term).oldest > 0);
+    try testing.expectEqual(@as(usize, 0), term.marks.items.len);
+    // ED 3 clears the scrollback, and the marks in it.
+    h.feed("\x1b]133;A\x07p\r\n\r\n\r\n\x1b[3J");
+    try testing.expectEqual(@as(usize, 0), term.marks.items.len);
+}
+
+test "a history reply carries the marks of the lines it covers" {
+    var h = try Harness.init(2, 10);
+    defer h.deinit();
+    const term = h.term();
+    h.feed("\x1b]133;A\x07one\r\n\x1b]133;C\x07two\r\nthree\r\n\x1b]133;D;1\x07");
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var s: Stringify = .{ .writer = &aw.writer };
+    try writeHistory(&s, term, 3, 1, 2, testing.allocator);
+    const p = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
+    defer p.deinit();
+    try testing.expectEqual(@as(i64, 2), p.value.object.get("count").?.integer);
+    const ms = p.value.object.get("marks").?.array.items;
+    try testing.expectEqual(@as(usize, 1), ms.len);
+    try expectMark(ms[0], 1, "C", null);
+    // A range past the end of i64 is empty, not a crash.
+    aw.clearRetainingCapacity();
+    s = .{ .writer = &aw.writer };
+    try writeHistory(&s, term, 3, std.math.maxInt(i64) - 1, 50, testing.allocator);
+}
+
+test "the mark list is bounded, keeping the newest" {
+    var h = try Harness.init(4, 10);
+    defer h.deinit();
+    const term = h.term();
+    var i: usize = 0;
+    while (i < terminal.MAX_MARKS + 10) : (i += 1) {
+        term.recordMark(if (i % 2 == 0) .prompt else .done, @intCast(i));
+        term.cursor.row = @intCast((i + 1) % 2); // alternate lines so none replaces another
+        if (i % 2 == 1) term.graphics.epoch += 1;
+    }
+    try testing.expectEqual(terminal.MAX_MARKS, term.marks.items.len);
+    try testing.expectEqual(@as(?i32, @intCast(terminal.MAX_MARKS + 9)), term.marks.items[terminal.MAX_MARKS - 1].exit);
 }

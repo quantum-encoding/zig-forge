@@ -37,6 +37,23 @@ bump). A breaking change bumps `v`.
 If the pane does not exist the server answers
 `{"t":"error","error":"no such pane"}` and closes.
 
+### Spawning a pane with its own environment
+
+`{"cmd":"spawn"}` takes an optional `env` object — variables for **that
+pane's shell only** (the server's own environment and other panes are
+untouched), each replacing an inherited variable of the same name:
+
+```json
+{"cmd":"spawn","name":"term-1a2b","cwd":"/home/me/src",
+ "env":{"ZDOTDIR":"/run/user/1000/rust_gui-shell-integration","DUCK_REAL_ZDOTDIR":""}}
+```
+
+At most 32 variables; keys `[A-Z_][A-Z0-9_]*`, 1–64 bytes, and never
+`ZTERM_PANE` (the server sets it) or `WEZTERM_PANE`; values strings of at
+most 4096 bytes with no NUL. Anything else refuses the whole spawn with
+`{"ok":false,"error":"…"}`. This is how a front end turns shell
+integration (and so `marks`) on for the panes it spawns.
+
 ### Reattaching after a restart
 
 Panes outlive their viewers: closing a view connection never kills the pane.
@@ -175,11 +192,55 @@ the server then closes the connection itself.
 ### `history` — reply to a `history` request
 
 ```json
-{"t":"history","pane":1,"from":1200,
- "lines":[{"n":1200,"spans":[...]},{"n":1201,"spans":[...]}]}
+{"t":"history","pane":1,"from":1200,"count":100,
+ "lines":[{"n":1200,"spans":[...]},{"n":1201,"spans":[...]}],
+ "marks":[{"n":1200,"k":"A"},{"n":1201,"k":"C"}]}
 ```
 
-`n` is the absolute line number. Lines no longer held are omitted.
+`n` is the absolute line number. Lines no longer held are omitted. `count`
+echoes the request (clamped to 5000). `marks` are the OSC 133 marks the
+server holds on lines `[from, from+count)` (see `marks` below): a client
+replaces its own marks on those lines with them, so refilled scrollback gets
+its command blocks back.
+
+### `marks` — shell-integration marks (OSC 133)
+
+```json
+{"t":"marks","pane":1,"from":1200,
+ "marks":[{"n":1200,"k":"A"},{"n":1200,"k":"B"},{"n":1201,"k":"C"},
+          {"n":1240,"k":"D","exit":0},{"n":1240,"k":"A"}]}
+```
+
+zterm records the semantic-prompt marks a shell with integration prints
+(`OSC 133 ; A|B|C|D[;exit] ST`, BEL or ST terminated; options after the
+letter are ignored): `A` a prompt starts, `B` the command line starts, `C`
+the command's output starts, `D` it finished, with `exit` when the shell
+reported a status. Each mark sits on the absolute line (`n`, the numbering
+of `live_top`/`history`) the cursor was on, on the **primary** screen only.
+Marks are ordered by `n`, and on one line in the order they were written.
+
+**One rule for every message: replace everything from `from` down.** The
+client drops each mark it holds with `n >= from`, then adds the ones in the
+message (all have `n >= from`). That one shape carries:
+
+- **the whole set** — sent ahead of the first frame on every view, and again
+  whenever the server discarded a backlog (see "Backpressure"). `from` is
+  the oldest primary line held; it may be `[]`.
+- **a change** — sent ahead of the next frame after a mark was written:
+  `from` is the lowest line whose marks changed, and the message carries
+  every mark from there on (usually one or two).
+
+A mark written above marks already held means the screen was rewritten
+there (`clear`, a redraw from the top): the server drops the marks on later
+lines, and an earlier mark of the same kind on that line with what followed
+it on the line. The tail replacement tells the client.
+
+Marks go when the lines they sit on leave the server's scrollback, or it is
+cleared (`ED 3`); no message says so — a client may drop marks below a
+frame's `oldest`, or keep them for scrollback it holds itself. The server
+keeps at most 4096. Building command blocks is the client's: a block runs
+from an `A` to the line before the next `A`, its output from the `C`, its
+status from the `D`.
 
 ## Client → server
 

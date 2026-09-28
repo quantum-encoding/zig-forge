@@ -202,12 +202,19 @@ pub export fn tmux_version() [*:0]const u8 {
 /// non-NULL). Returns the handle, or NULL on failure. rows/cols of 0 default
 /// to 24/80.
 pub export fn tmux_create(rows: u16, cols: u16, shell: ?[*:0]const u8, out_id: ?*u64) ?*TmuxSession {
-    return createIn(rows, cols, if (shell) |s| std.mem.sliceTo(s, 0) else null, null, false, out_id);
+    return createIn(rows, cols, if (shell) |s| std.mem.sliceTo(s, 0) else null, null, false, &.{}, out_id);
 }
 
 /// Pane-identity variables a child must not inherit from whatever started
 /// this process: a stale one names somebody else's pane.
 const PANE_ENV_KEYS = [_][]const u8{ "ZTERM_PANE=", "WEZTERM_PANE=" };
+
+/// Whether two "KEY=value" entries name the same variable.
+fn sameEnvKey(a: []const u8, b: []const u8) bool {
+    const ka = a[0 .. std.mem.indexOfScalar(u8, a, '=') orelse a.len];
+    const kb = b[0 .. std.mem.indexOfScalar(u8, b, '=') orelse b.len];
+    return std.mem.eql(u8, ka, kb);
+}
 
 /// The environment for ONE spawn that exports `ZTERM_PANE=<id>`: the shared
 /// child environment minus any inherited pane identity, plus this pane's.
@@ -217,13 +224,16 @@ const SpawnEnv = struct {
     env: [:null]?[*:0]const u8,
     own: [:0]u8,
 
-    fn init(id: u64) ?SpawnEnv {
+    /// `extra` are whole "KEY=value" entries the caller validated; each
+    /// replaces an inherited entry with the same key. They are borrowed, and
+    /// must outlive the spawn.
+    fn init(id: u64, extra: []const [:0]const u8) ?SpawnEnv {
         const base = childEnviron();
         var n: usize = 0;
         while (base[n] != null) : (n += 1) {}
         const own = std.fmt.allocPrintSentinel(alloc, "ZTERM_PANE={d}", .{id}, 0) catch return null;
-        // n inherited + ours; allocSentinel adds the terminating null.
-        const env = alloc.allocSentinel(?[*:0]const u8, n + 1, null) catch {
+        // n inherited + extra + ours; allocSentinel adds the terminating null.
+        const env = alloc.allocSentinel(?[*:0]const u8, n + extra.len + 1, null) catch {
             alloc.free(own);
             return null;
         };
@@ -231,7 +241,12 @@ const SpawnEnv = struct {
         outer: for (0..n) |j| {
             const entry = std.mem.sliceTo(base[j].?, 0);
             for (PANE_ENV_KEYS) |k| if (std.mem.startsWith(u8, entry, k)) continue :outer;
+            for (extra) |e| if (sameEnvKey(entry, e)) continue :outer;
             env[i] = base[j];
+            i += 1;
+        }
+        for (extra) |e| {
+            env[i] = e.ptr;
             i += 1;
         }
         env[i] = own.ptr;
@@ -258,7 +273,11 @@ const SpawnEnv = struct {
 /// an agent's SessionStart hook registering itself — knows which pane it is.
 /// Only the zterm server asks for it: a host app embedding this library has
 /// its own addressing, and its terminals must not claim to be zterm panes.
-pub fn createIn(rows: u16, cols: u16, shell: ?[]const u8, cwd: ?[]const u8, export_pane_id: bool, out_id: ?*u64) ?*TmuxSession {
+///
+/// `extra_env` ("KEY=value", validated by the caller) is added to that pane's
+/// environment only, replacing inherited entries of the same keys; it is
+/// applied only with `export_pane_id` (the server path).
+pub fn createIn(rows: u16, cols: u16, shell: ?[]const u8, cwd: ?[]const u8, export_pane_id: bool, extra_env: []const [:0]const u8, out_id: ?*u64) ?*TmuxSession {
     const r: u16 = if (rows == 0) 24 else rows;
     const co: u16 = if (cols == 0) 80 else cols;
     const rect = session.Rect{ .x = 0, .y = 0, .width = co, .height = r };
@@ -275,7 +294,7 @@ pub fn createIn(rows: u16, cols: u16, shell: ?[]const u8, cwd: ?[]const u8, expo
     const pane = sess.getActiveWindow().getActivePane();
     const shell_path: []const u8 = shell orelse defaultShell();
     if (export_pane_id) {
-        const se = SpawnEnv.init(id) orelse {
+        const se = SpawnEnv.init(id, extra_env) orelse {
             sess.deinit();
             return null;
         };

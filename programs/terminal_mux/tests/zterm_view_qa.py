@@ -14,6 +14,9 @@ What it holds the server to:
   * resize (by a viewer, or by the one-shot `resize` request) yields a full
     frame at the new size; history by absolute line number;
   * exit carries the child's real status;
+  * spawn `env` reaches that child only, and bad env objects are refused;
+  * OSC 133 marks arrive as `marks` messages (the set on view open, the
+    changed tail after), on the right absolute lines, and in history replies;
   * STATE-SYNC: a viewer that stops reading while its pane floods does not
     stall the server, and converges on the final screen once it reads;
   * `zterm attach`: draws, never relays a raw query to the host terminal,
@@ -136,6 +139,83 @@ try:
     check("list reports how many clients view each pane", counts.get(1) == 1, counts)
     seqs = [f["seq"] for f in v.frames()]
     check("frame seq counts up by one", seqs == list(range(1, len(seqs) + 1)))
+
+    # ── spawn env + OSC 133 marks ─────────────────────────────────────────
+    # The skip variables keep /etc/profile.d shell integrations (wezterm.sh,
+    # vte.sh) out of this login shell, so the only marks are the ones printed
+    # below — and they show the env is in place before the shell starts.
+    r = json.loads(request({"cmd": "spawn", "env": {"ZT_QA_VAR": "hello-env", "ZDOTDIR": base,
+                                                    "WEZTERM_SHELL_SKIP_ALL": "1", "VTE_VERSION": ""}}))
+    mp = r.get("pane")
+    check("spawn accepts an env object", r.get("ok") is True and mp, r)
+    for bad, why in (({"lower": "x"}, "lowercase key"), ({"A": 1}, "non-string value"),
+                     ({"ZTERM_PANE": "9"}, "pane identity"), ({"A": "x" * 5000}, "value too long"),
+                     ({f"K{i}": "v" for i in range(40)}, "too many"), ("A=1", "not an object")):
+        r = json.loads(request({"cmd": "spawn", "env": bad}))
+        check(f"spawn refuses a bad env ({why})", r.get("ok") is False and r.get("error"), r)
+    mv = View(mp, 24, 80)
+    mv.until(lambda: "$" in mv.text())
+    marks_msgs = lambda vw: [m for m in vw.msgs if m["t"] == "marks"]
+    first = next((m for m in mv.msgs if m["t"] in ("marks", "frame")), {})
+    check("a new view gets the (empty) mark set ahead of its first frame",
+          first.get("t") == "marks" and first.get("marks") == [] and "from" in first, first)
+    mv.send({"input": "text", "data": 'echo "v=$ZT_QA_VAR"\r'})
+    check("spawn env reaches the child", mv.until(lambda: "v=hello-env" in mv.text()), mv.text()[-200:])
+    v.send({"input": "text", "data": 'echo "w=[$ZT_QA_VAR]"\r'})
+    check("…and only that child", v.until(lambda: "w=[]" in v.text()), v.text()[-200:])
+    mv.send({"input": "text", "data":
+             "printf '\\033]133;A\\007PROMPT-X \\033]133;B\\007cmd\\033]133;C\\033\\134\\n'; "
+             "echo MARK-OUT; printf '\\033]133;D;4\\007'; echo\r"})
+    got = lambda: {m["k"] for mm in marks_msgs(mv) for m in mm["marks"]} >= {"A", "B", "C", "D"}
+    check("OSC 133 A/B/C/D reach the view as marks", mv.until(got), marks_msgs(mv)[-2:])
+    mv.pump(0.3)
+    fr = mv.frames()[-1]
+    def abs_of(needle):
+        ys = [y for y, t in mv.rows.items() if needle in t and "printf" not in t and "echo" not in t]
+        return fr["live_top"] + ys[0] if ys else None
+    # A client's copy: each `marks` message replaces everything from `from` down.
+    def replay(msgs):
+        held = {}
+        for mm in msgs:
+            held = {k: x for k, x in held.items() if k[0] < mm["from"]}
+            for m in mm["marks"]: held[(m["n"], m["k"])] = m
+        return held
+    held = replay(marks_msgs(mv))
+    pl, ol = abs_of("PROMPT-X"), abs_of("MARK-OUT")
+    check("A, B and C sit on the prompt's absolute line",
+          pl is not None and all((pl, k) in held for k in "ABC"), (pl, sorted(held)))
+    check("the shell's own integration stayed off (env applied at startup)",
+          set(held) == {(pl, "A"), (pl, "B"), (pl, "C"), (ol + 1, "D")}, sorted(held))
+    check("D sits after the output and carries the exit status",
+          ol is not None and held.get((ol + 1, "D"), {}).get("exit") == 4, (ol, sorted(held)))
+    carrier = next((mm for mm in marks_msgs(mv) if any(m["k"] == "D" and m.get("exit") == 4 for m in mm["marks"])), {})
+    check("later marks messages carry only the changed tail",
+          carrier.get("from") == pl and all(m["n"] >= pl for m in carrier["marks"]), carrier)
+    mv.send({"history": {"from": fr["oldest"], "count": 100}})
+    mv.until(lambda: any(m["t"] == "history" for m in mv.msgs), 5)
+    hm = [m for m in mv.msgs if m["t"] == "history"][-1]
+    check("a history reply carries the marks of its lines",
+          {(m["n"], m["k"]) for m in hm.get("marks", [])} == set(held), hm.get("marks"))
+    mv2 = View(mp)
+    mv2.until(lambda: len(mv2.frames()) >= 1)
+    full = next((m for m in mv2.msgs if m["t"] == "marks"), {})
+    check("a second view opens with the whole mark set",
+          {(m["n"], m["k"]) for m in full.get("marks", [])} == set(held), full)
+    mv.send({"input": "text", "data": "clear\r"})
+    mv.until(lambda: "MARK-OUT" not in mv.text(), 5)
+    mv.send({"input": "text", "data": "printf '\\033]133;A\\007'; echo AGAIN\r"})
+    mv.until(lambda: "AGAIN" in mv.text(), 5)
+    mv.pump(0.5)
+    fr = mv.frames()[-1]
+    again = abs_of("AGAIN")
+    held = replay(marks_msgs(mv))
+    mv3 = View(mp)
+    mv3.until(lambda: len(mv3.frames()) >= 1)
+    check("a mark written above held ones replaces the stale tail",
+          again is not None and (again, "A") in held and all(m.get("exit") != 4 for m in held.values()),
+          (again, sorted(held)))
+    check("…and a client replaying the tails holds exactly the server's set",
+          set(held) == set(replay(marks_msgs(mv3))), (sorted(held), marks_msgs(mv3)))
 
     # ── state-sync backpressure ───────────────────────────────────────────
     sp = json.loads(cli("spawn"))["pane"]

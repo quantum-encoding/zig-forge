@@ -611,6 +611,35 @@ pub const Scrollback = struct {
     }
 };
 
+/// One OSC 133 semantic-prompt mark (shell integration): `A` a prompt starts,
+/// `B` the command line starts (prompt ends), `C` the command's output
+/// starts, `D[;exit]` the command finished. Recorded against the ABSOLUTE line
+/// number of the cursor's row (`graphics.epoch + row`, the numbering
+/// `view.lineRange` and the view protocol use), so a mark stays on its line as
+/// output scrolls it into history.
+pub const Mark = struct {
+    line: i64,
+    kind: Kind,
+    /// `D` only: the exit status the shell reported, when it reported one.
+    exit: ?i32 = null,
+
+    pub const Kind = enum(u8) {
+        prompt = 'A',
+        input = 'B',
+        output = 'C',
+        done = 'D',
+
+        pub fn letter(self: Kind) u8 {
+            return @intFromEnum(self);
+        }
+    };
+};
+
+/// Marks a terminal keeps. A shell writes about three per command, so this
+/// covers far more commands than scrollback holds lines for; the bound is for
+/// an application that emits OSC 133 in a loop.
+pub const MAX_MARKS: usize = 4096;
+
 /// Main terminal emulator
 pub const Terminal = struct {
     allocator: std.mem.Allocator,
@@ -709,6 +738,14 @@ pub const Terminal = struct {
     /// In-flight chunked transmission (Kitty m=1 continuation).
     graphics_pending: ?GfxPending = null,
 
+    /// OSC 133 marks on the primary screen, ascending by line (and, on one
+    /// line, in the order they were written). Bounded by MAX_MARKS; pruned
+    /// with the scrollback they point into. See `recordMark`.
+    marks: std.ArrayListUnmanaged(Mark) = .empty,
+    /// The lowest line whose marks changed since the host last took it
+    /// (`takeMarksTouched`), or null. Lets a view send only the changed tail.
+    marks_touched: ?i64 = null,
+
     pub const GfxPending = struct {
         id: u32,
         format: gfx.ImageFormat,
@@ -785,6 +822,7 @@ pub const Terminal = struct {
         self.graphics_freed.deinit(self.allocator);
         self.apc_accum.deinit(self.allocator);
         if (self.graphics_pending) |*p| p.data.deinit(self.allocator);
+        self.marks.deinit(self.allocator);
     }
 
     /// The lowest code point in each table below; the fast paths depend on
@@ -1099,6 +1137,7 @@ pub const Terminal = struct {
         // Advance the graphics epoch (grid row 0's absolute line index) and evict
         // any placement that has scrolled entirely out of retained history.
         self.graphics.epoch += n;
+        if (!self.modes.alt_screen) self.pruneMarks();
         const min_retained = self.graphicsMinRetainedAbs();
         if (self.graphics.prune(self.allocator, min_retained, &self.graphics_freed)) {
             self.graphics_gen +%= 1;
@@ -1153,6 +1192,7 @@ pub const Terminal = struct {
                 if (mode == 3) {
                     // Also clear scrollback
                     self.scrollback.clear();
+                    if (!self.modes.alt_screen) self.pruneMarks();
                 }
                 // Clearing the whole display clears its image overlays too.
                 self.graphicsClearScreen();
@@ -1521,6 +1561,78 @@ pub const Terminal = struct {
         if (bytes.len > self.resp_pending.len - self.resp_len) return;
         @memcpy(self.resp_pending[self.resp_len..][0..bytes.len], bytes);
         self.resp_len += bytes.len;
+    }
+
+    // =========================================================================
+    // OSC 133 semantic-prompt marks
+    // =========================================================================
+
+    /// Record an OSC 133 mark at the cursor's line. Primary screen only: a
+    /// full-screen application's alternate screen has no history and no
+    /// shell prompt.
+    ///
+    /// The list stays ordered by line. A mark written ABOVE marks already
+    /// held means the screen was rewritten there (`clear`, a redraw from the
+    /// top), so everything after it is stale: marks on later lines are
+    /// dropped, and so is an earlier mark of the same kind on this line
+    /// together with whatever was recorded on this line after it.
+    pub fn recordMark(self: *Self, kind: Mark.Kind, exit: ?i32) void {
+        if (self.modes.alt_screen) return;
+        const line = self.graphics.epoch + @as(i64, self.cursor.row);
+        var end = self.marks.items.len;
+        while (end > 0 and self.marks.items[end - 1].line > line) end -= 1;
+        var j = end;
+        while (j > 0 and self.marks.items[j - 1].line == line) : (j -= 1) {
+            if (self.marks.items[j - 1].kind == kind) {
+                end = j - 1;
+                break;
+            }
+        }
+        self.marks.items.len = end;
+        if (self.marks.items.len >= MAX_MARKS) {
+            const drop = self.marks.items.len - MAX_MARKS + 1;
+            std.mem.copyForwards(Mark, self.marks.items[0 .. self.marks.items.len - drop], self.marks.items[drop..]);
+            self.marks.items.len -= drop;
+        }
+        self.marks.append(self.allocator, .{ .line = line, .kind = kind, .exit = exit }) catch return;
+        self.marks_touched = if (self.marks_touched) |t| @min(t, line) else line;
+    }
+
+    /// Absolute line number of the primary screen's row 0, also while the
+    /// alternate screen is showing (its epoch is stashed with its graphics).
+    pub fn primaryEpoch(self: *const Self) i64 {
+        if (self.alt_graphics) |g| return g.epoch;
+        return self.graphics.epoch;
+    }
+
+    /// Drop marks on lines no longer held (scrolled out of, or cleared from,
+    /// the scrollback). Marks are ordered, so this is a prefix; it costs one
+    /// comparison when there is nothing to drop (the scroll hot path).
+    fn pruneMarks(self: *Self) void {
+        const oldest = self.graphics.epoch - @as(i64, @intCast(self.scrollback.len));
+        const items = self.marks.items;
+        if (items.len == 0 or items[0].line >= oldest) return;
+        var k: usize = 0;
+        while (k < items.len and items[k].line < oldest) k += 1;
+        std.mem.copyForwards(Mark, items[0 .. items.len - k], items[k..]);
+        self.marks.items.len -= k;
+    }
+
+    /// Read-and-clear the lowest line whose marks changed.
+    pub fn takeMarksTouched(self: *Self) ?i64 {
+        const t = self.marks_touched;
+        self.marks_touched = null;
+        return t;
+    }
+
+    /// The marks on lines `[from, until)`, a slice of the ordered list.
+    pub fn marksIn(self: *const Self, from: i64, until: i64) []const Mark {
+        const items = self.marks.items;
+        var a: usize = 0;
+        while (a < items.len and items[a].line < from) a += 1;
+        var b = a;
+        while (b < items.len and items[b].line < until) b += 1;
+        return items[a..b];
     }
 
     pub fn reset(self: *Self) void {
