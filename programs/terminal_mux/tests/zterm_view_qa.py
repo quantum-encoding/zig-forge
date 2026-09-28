@@ -132,6 +132,8 @@ try:
     h = [m for m in v.msgs if m["t"] == "history"][-1]
     check("history returns lines by absolute number from oldest",
           [l["n"] for l in h["lines"]] == [last["oldest"], last["oldest"] + 1], h["lines"][:2])
+    counts = {r["pane"]: r["viewers"] for r in json.loads(cli("list"))}
+    check("list reports how many clients view each pane", counts.get(1) == 1, counts)
     seqs = [f["seq"] for f in v.frames()]
     check("frame seq counts up by one", seqs == list(range(1, len(seqs) + 1)))
 

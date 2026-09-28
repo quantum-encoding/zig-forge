@@ -1281,6 +1281,17 @@ const Server = struct {
 
     // ── viewers (docs/VIEW-PROTOCOL.md) ──────────────────────────────────────────────────────────────
 
+    fn viewerCount(self: *Server, pane_id: u64) usize {
+        var n: usize = 0;
+        for (self.viewers.items) |v| {
+            if (v.conn >= 0 and v.pane_id == pane_id) n += 1;
+        }
+        for (self.attaches.items) |a| {
+            if (a.conn >= 0 and a.pane_id == pane_id) n += 1;
+        }
+        return n;
+    }
+
     fn hasRawAttach(self: *Server, pane_id: u64) bool {
         for (self.attaches.items) |a| if (a.conn >= 0 and a.pane_id == pane_id) return true;
         return false;
@@ -1573,6 +1584,10 @@ const Server = struct {
             exit_code: ?i64,
             exit_signal: ?i64,
             foreground: []const u8,
+            /// Clients drawing this pane now (view connections + raw
+            /// attaches). A front end reattaching after a restart takes a
+            /// named pane only when this is 0, so two windows never share one.
+            viewers: usize,
         };
         var infos: std.ArrayList(PaneInfo) = .empty;
         defer infos.deinit(self.alloc);
@@ -1607,6 +1622,7 @@ const Server = struct {
                 .exit_code = if (st) |s| s.code else null,
                 .exit_signal = if (st) |s| s.signal else null,
                 .foreground = fg,
+                .viewers = self.viewerCount(p.id),
             });
         }
         const json = try std.json.Stringify.valueAlloc(self.alloc, infos.items, .{});

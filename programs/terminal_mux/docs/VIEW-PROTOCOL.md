@@ -37,6 +37,18 @@ bump). A breaking change bumps `v`.
 If the pane does not exist the server answers
 `{"t":"error","error":"no such pane"}` and closes.
 
+### Reattaching after a restart
+
+Panes outlive their viewers: closing a view connection never kills the pane.
+A front end that wants its panes back after it restarts spawns them with a
+stable `name` it can derive again (`{"cmd":"spawn","name":…}`), and on start
+reads `{"cmd":"list"}`: each entry carries `name`, `alive` and `viewers` — the
+number of clients drawing that pane right now (view connections plus raw
+`zterm attach`es). Take over a named pane only when it is `alive` and
+`viewers` is 0, so two windows never drive one pane; a dead one is `kill`ed
+and respawned. The screen arrives in the first `full` frame; ask for
+`history` to refill scrollback.
+
 ## Server → client
 
 ### `hello` — once, first
