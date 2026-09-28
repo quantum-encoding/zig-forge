@@ -109,7 +109,11 @@ try:
     check("later frames carry only changed rows", incr and all(len(f["lines"]) < 10 for f in incr[-3:]),
           [len(f["lines"]) for f in incr[-3:]])
     wide = [sp for f in v.frames() for l in f["lines"] for sp in l["spans"] if sp.get("w") == 2]
-    check("wide characters are their own 2-column spans", {sp["text"] for sp in wide} >= {"日", "本"}, wide[:2])
+    check("a CJK run is ONE w:2 span (every code point two columns)", any(sp["text"] == "\u65e5\u672c" for sp in wide), wide[:2])
+    th = v.msgs[0].get("theme", {})
+    check("hello carries the theme: fg/bg/cursor and all 256 palette entries",
+          all(th.get(k, "").startswith("#") for k in ("fg", "bg", "cursor", "cursor_text"))
+          and len(th.get("palette", [])) == 256 and "bold_is_bright" in th, list(th)[:6])
     probe = os.path.join(base, "cpr1")
     v.send({"input": "text", "data": cpr_prog(probe)})
     ok = v.until(lambda: os.path.exists(probe))
@@ -169,6 +173,7 @@ try:
         return [(r["rows"], r["cols"]) for r in json.loads(cli("list")) if r["pane"] == ap]
     pid, fd = attach(20, 70); out = drain(fd, 1.5)
     check("attach enters the host alt screen and draws the pane", b"\x1b[?1049h" in out and b"$" in out)
+    check("attach draws in the SERVER's theme (truecolour), not the host palette", b";38;2;" in out and b";48;2;" in out)
     check("attach sizes the pane to the window", pane_dims() == [(20, 70)], pane_dims())
     probe2 = os.path.join(base, "cpr2")
     os.write(fd, cpr_prog(probe2).encode()); out = drain(fd, 2.5)

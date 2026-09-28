@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const terminal = @import("terminal.zig");
+const config = @import("config.zig");
 
 const Terminal = terminal.Terminal;
 const Cell = terminal.Cell;
@@ -100,12 +101,24 @@ pub fn writeSpans(s: *Stringify, cells: []const Cell, scratch: *std.ArrayList(u8
             continue;
         }
         if (cell.width == 2) {
+            // A run of double-width characters in one style is ONE span
+            // (`w: 2` means every code point in it spans two columns), so a
+            // line of CJK costs one span, not one per character. The
+            // continuation cells between them (width 0) are stepped over.
+            const start = c;
             scratch.clearRetainingCapacity();
-            var ub: [4]u8 = undefined;
-            const n = std.unicode.utf8Encode(charOf(cell), &ub) catch 0;
-            try scratch.appendSlice(alloc, ub[0..n]);
-            try writeSpan(s, c, scratch.items, true, cell);
-            c += 1;
+            while (c < cells.len) {
+                if (cells[c].width == 0) {
+                    c += 1;
+                    continue;
+                }
+                if (cells[c].width != 2 or !sameStyle(&cells[c], cell)) break;
+                var ub: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(charOf(&cells[c]), &ub) catch 0;
+                try scratch.appendSlice(alloc, ub[0..n]);
+                c += 1;
+            }
+            try writeSpan(s, start, scratch.items, true, cell);
             continue;
         }
         // A run: consecutive width-1 cells in this cell's style.
@@ -170,6 +183,56 @@ pub fn lineRange(term: *const Terminal) struct { live_top: i64, oldest: i64 } {
     const live_top: i64 = @intCast(term.graphics.epoch);
     const held: i64 = if (term.modes.alt_screen) 0 else @intCast(term.scrollback.len);
     return .{ .live_top = live_top, .oldest = live_top - held };
+}
+
+fn hex(buf: *[7]u8, col: config.Color) []const u8 {
+    const digits = "0123456789abcdef";
+    buf[0] = '#';
+    for ([_]u8{ col.r, col.g, col.b }, 0..) |byte, i| {
+        buf[1 + 2 * i] = digits[byte >> 4];
+        buf[2 + 2 * i] = digits[byte & 0xf];
+    }
+    return buf;
+}
+
+/// The colours every index and "default" on the wire resolve to — the theme
+/// zterm itself answers OSC 10/11 from, so a client draws exactly what the
+/// application was told. `palette` is all 256 entries resolved (0-15 themed,
+/// 16-255 the xterm cube/grey ramp); with `bold_is_bright`, a bold cell in
+/// colours 0-7 is drawn with 8-15.
+pub fn writeTheme(s: *Stringify, theme: *const config.Theme) !void {
+    var b: [7]u8 = undefined;
+    try s.beginObject();
+    inline for (.{ .{ "fg", theme.fg }, .{ "bg", theme.bg }, .{ "cursor", theme.cursor }, .{ "cursor_text", theme.cursor_text } }) |kv| {
+        try s.objectField(kv[0]);
+        try s.write(hex(&b, kv[1]));
+    }
+    try s.objectField("bold_is_bright");
+    try s.write(theme.bold_is_bright);
+    try s.objectField("palette");
+    try s.beginArray();
+    var i: usize = 0;
+    while (i < 256) : (i += 1) {
+        const idx: u8 = @intCast(i);
+        const col = if (idx < 16) theme.palette[idx] else config.Color.from256(idx);
+        try s.write(hex(&b, col));
+    }
+    try s.endArray();
+    try s.endObject();
+}
+
+/// The first message on a view connection.
+pub fn writeHello(s: *Stringify, pane: u64, theme: *const config.Theme) !void {
+    try s.beginObject();
+    try s.objectField("t");
+    try s.write("hello");
+    try s.objectField("v");
+    try s.write(VERSION);
+    try s.objectField("pane");
+    try s.write(pane);
+    try s.objectField("theme");
+    try writeTheme(s, theme);
+    try s.endObject();
 }
 
 /// One `frame` message (without the trailing newline).
@@ -413,7 +476,61 @@ test "colours, attributes and styled spaces become styled spans at their own x" 
     try testing.expectEqual(@as(i64, 7), spans[4].object.get("x").?.integer);
 }
 
-test "a wide character is its own two-column span and nothing after it shifts" {
+test "a CJK run is one w:2 span; a style change or a narrow char ends it" {
+    var h = try Harness.init(2, 30);
+    defer h.deinit();
+    const term = h.term();
+    h.feed("日本語\x1b[31m中\x1b[0mx文");
+    const p = try frameOf(term, true, null);
+    defer p.deinit();
+    const spans = spansOfRow(p.value, 0).?.items;
+    try testing.expectEqual(@as(usize, 4), spans.len);
+    try testing.expectEqualStrings("日本語", spans[0].object.get("text").?.string);
+    try testing.expectEqual(@as(i64, 2), spans[0].object.get("w").?.integer);
+    try testing.expectEqual(@as(i64, 0), spans[0].object.get("x").?.integer);
+    // Red 中 starts at column 6 — three wide chars took six columns.
+    try testing.expectEqualStrings("中", spans[1].object.get("text").?.string);
+    try testing.expectEqual(@as(i64, 6), spans[1].object.get("x").?.integer);
+    try testing.expectEqual(@as(i64, 1), spans[1].object.get("fg").?.integer);
+    try testing.expectEqualStrings("x", spans[2].object.get("text").?.string);
+    try testing.expect(spans[2].object.get("w") == null);
+    try testing.expectEqual(@as(i64, 9), spans[3].object.get("x").?.integer);
+}
+
+test "combining marks are dropped: every code point in a span is a column" {
+    var h = try Harness.init(2, 20);
+    defer h.deinit();
+    const term = h.term();
+    h.feed("e\u{0301}x"); // e + COMBINING ACUTE, then x
+    const p = try frameOf(term, true, null);
+    defer p.deinit();
+    const spans = spansOfRow(p.value, 0).?.items;
+    try testing.expectEqualStrings("ex", spans[0].object.get("text").?.string);
+}
+
+test "hello carries the theme: defaults, cursor and all 256 colours resolved" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var s: Stringify = .{ .writer = &aw.writer };
+    var theme: config.Theme = .{};
+    theme.fg = config.Color.fromRgb(1, 2, 3);
+    theme.palette[1] = config.Color.fromRgb(0xab, 0, 0);
+    try writeHello(&s, 7, &theme);
+    const p = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
+    defer p.deinit();
+    const t = p.value.object.get("theme").?.object;
+    try testing.expectEqualStrings("#010203", t.get("fg").?.string);
+    const pal = t.get("palette").?.array.items;
+    try testing.expectEqual(@as(usize, 256), pal.len);
+    try testing.expectEqualStrings("#ab0000", pal[1].string);
+    // 16-255 are the fixed cube/grey ramp: 196 is pure red, 231 white, 232 near-black.
+    try testing.expectEqualStrings("#ff0000", pal[196].string);
+    try testing.expectEqualStrings("#ffffff", pal[231].string);
+    try testing.expectEqualStrings("#080808", pal[232].string);
+    try testing.expect(t.get("bold_is_bright").?.bool);
+}
+
+test "wide characters keep every following column where it belongs" {
     var h = try Harness.init(2, 20);
     defer h.deinit();
     const term = h.term();
@@ -421,15 +538,14 @@ test "a wide character is its own two-column span and nothing after it shifts" {
     const p = try frameOf(term, true, null);
     defer p.deinit();
     const spans = spansOfRow(p.value, 0).?.items;
-    try testing.expectEqual(@as(usize, 4), spans.len);
+    try testing.expectEqual(@as(usize, 3), spans.len);
     try testing.expectEqualStrings("a", spans[0].object.get("text").?.string);
-    try testing.expectEqualStrings("日", spans[1].object.get("text").?.string);
+    try testing.expectEqualStrings("日本", spans[1].object.get("text").?.string);
     try testing.expectEqual(@as(i64, 2), spans[1].object.get("w").?.integer);
     try testing.expectEqual(@as(i64, 1), spans[1].object.get("x").?.integer);
-    try testing.expectEqual(@as(i64, 3), spans[2].object.get("x").?.integer);
     // 'b' lands at column 5: two wide characters took four columns.
-    try testing.expectEqualStrings("b", spans[3].object.get("text").?.string);
-    try testing.expectEqual(@as(i64, 5), spans[3].object.get("x").?.integer);
+    try testing.expectEqualStrings("b", spans[2].object.get("text").?.string);
+    try testing.expectEqual(@as(i64, 5), spans[2].object.get("x").?.integer);
 }
 
 test "leading and trailing default blanks are not sent; inner ones are" {

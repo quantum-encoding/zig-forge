@@ -93,6 +93,7 @@ const ctl = @import("ctl.zig");
 const session = @import("session.zig");
 const visible = @import("main.zig");
 const view = @import("view.zig");
+const config = @import("config.zig");
 
 pub const VERSION = "0.3.0";
 
@@ -1297,7 +1298,15 @@ const Server = struct {
         _ = c.fcntl(conn, c.F.SETFL, fl | @as(c_int, @bitCast(c.O{ .NONBLOCK = true })));
         try self.viewers.append(self.alloc, .{ .conn = conn, .pane_id = p.id });
         const vw = &self.viewers.items[self.viewers.items.len - 1];
-        self.viewerEvent(vw, .{ .t = "hello", .v = view.VERSION, .pane = p.id });
+        // hello carries the theme: the colours every palette index and
+        // "default" resolve to — the same theme zterm answers OSC 10/11 from.
+        {
+            var aw: std.Io.Writer.Allocating = .fromArrayList(self.alloc, &vw.out);
+            defer vw.out = aw.toArrayList();
+            var s: std.json.Stringify = .{ .writer = &aw.writer };
+            view.writeHello(&s, p.id, &config.active_theme) catch {};
+            aw.writer.writeByte('\n') catch {};
+        }
         // Anything the client sent right behind its request is its first input.
         if (self.trailing.len > 0) self.viewerInput(vw, self.trailing);
         return .keep;
@@ -2048,8 +2057,77 @@ const HostModes = struct {
     focus: bool = false,
 };
 
-fn hostSgr(out: *std.ArrayList(u8), alloc: std.mem.Allocator, span: std.json.Value) !void {
-    var b: [48]u8 = undefined;
+/// The server's theme, from `hello` (docs/VIEW-PROTOCOL.md): every colour on
+/// the wire — each palette index and "default" — resolves through it, so this
+/// window shows the pane in the same colours as any other client, and as
+/// zterm answers OSC 10/11. Emitted as truecolour, never as the host's own
+/// palette codes.
+const ViewTheme = struct {
+    fg: [3]u8,
+    bg: [3]u8,
+    palette: [256][3]u8,
+    bold_is_bright: bool,
+
+    fn rgb(col: config.Color) [3]u8 {
+        return .{ col.r, col.g, col.b };
+    }
+
+    /// zterm's built-in default theme — what applies until `hello` arrives.
+    fn fromConfig(t: *const config.Theme) ViewTheme {
+        var vt: ViewTheme = .{ .fg = rgb(t.fg), .bg = rgb(t.bg), .palette = undefined, .bold_is_bright = t.bold_is_bright };
+        for (0..256) |i| {
+            const idx: u8 = @intCast(i);
+            vt.palette[i] = rgb(if (idx < 16) t.palette[idx] else config.Color.from256(idx));
+        }
+        return vt;
+    }
+
+    fn parseHex(v: ?std.json.Value) ?[3]u8 {
+        const val = v orelse return null;
+        if (val != .string or val.string.len != 7 or val.string[0] != '#') return null;
+        const h = val.string;
+        return .{
+            std.fmt.parseInt(u8, h[1..3], 16) catch return null,
+            std.fmt.parseInt(u8, h[3..5], 16) catch return null,
+            std.fmt.parseInt(u8, h[5..7], 16) catch return null,
+        };
+    }
+
+    /// Overlay a `theme` object from `hello` (or a `palette` message).
+    fn apply(self: *ViewTheme, t: std.json.Value) void {
+        if (t != .object) return;
+        if (parseHex(t.object.get("fg"))) |col| self.fg = col;
+        if (parseHex(t.object.get("bg"))) |col| self.bg = col;
+        if (jsonBool(t, "bold_is_bright")) |b| self.bold_is_bright = b;
+        if (t.object.get("palette")) |pal| if (pal == .array) {
+            for (pal.array.items, 0..) |entry, i| {
+                if (i >= 256) break;
+                if (parseHex(entry)) |col| self.palette[i] = col;
+            }
+        };
+    }
+
+    fn resolve(self: *const ViewTheme, v: ?std.json.Value, default: [3]u8, bold: bool) [3]u8 {
+        const val = v orelse return default;
+        return switch (val) {
+            .integer => |i| blk: {
+                var idx: usize = @intCast(std.math.clamp(i, 0, 255));
+                if (bold and self.bold_is_bright and idx < 8) idx += 8;
+                break :blk self.palette[idx];
+            },
+            .string => parseHex(val) orelse default,
+            else => default,
+        };
+    }
+};
+
+fn sgrRgb(out: *std.ArrayList(u8), alloc: std.mem.Allocator, lead: u8, col: [3]u8) !void {
+    var b: [24]u8 = undefined;
+    try out.appendSlice(alloc, std.fmt.bufPrint(&b, ";{d};2;{d};{d};{d}", .{ lead, col[0], col[1], col[2] }) catch "");
+}
+
+/// SGR for a span: attributes, then fg and bg as truecolour from the theme.
+fn hostSgr(out: *std.ArrayList(u8), alloc: std.mem.Allocator, span: std.json.Value, theme: *const ViewTheme) !void {
     try out.appendSlice(alloc, "\x1b[0");
     const a: u8 = @intCast(@max(0, @min(255, jsonInt(span, "a") orelse 0)));
     const codes = [_]struct { bit: u8, code: []const u8 }{
@@ -2059,25 +2137,16 @@ fn hostSgr(out: *std.ArrayList(u8), alloc: std.mem.Allocator, span: std.json.Val
         .{ .bit = 64, .code = ";8" },  .{ .bit = 128, .code = ";9" },
     };
     for (codes) |cd| if (a & cd.bit != 0) try out.appendSlice(alloc, cd.code);
-    inline for (.{ .{ "fg", 30, 90, 38 }, .{ "bg", 40, 100, 48 } }) |k| {
-        if (span.object.get(k[0])) |col| switch (col) {
-            // The 16 base colours by their own codes, so the host's palette
-            // (the user's theme) applies; the rest by index.
-            .integer => |i| try out.appendSlice(alloc, if (i < 8)
-                std.fmt.bufPrint(&b, ";{d}", .{k[1] + i}) catch ""
-            else if (i < 16)
-                std.fmt.bufPrint(&b, ";{d}", .{k[2] + i - 8}) catch ""
-            else
-                std.fmt.bufPrint(&b, ";{d};5;{d}", .{ k[3], i }) catch ""),
-            .string => |hex| if (hex.len == 7 and hex[0] == '#') {
-                const r = std.fmt.parseInt(u8, hex[1..3], 16) catch 0;
-                const g = std.fmt.parseInt(u8, hex[3..5], 16) catch 0;
-                const bl = std.fmt.parseInt(u8, hex[5..7], 16) catch 0;
-                try out.appendSlice(alloc, std.fmt.bufPrint(&b, ";{d};2;{d};{d};{d}", .{ k[3], r, g, bl }) catch "");
-            },
-            else => {},
-        };
-    }
+    try sgrRgb(out, alloc, 38, theme.resolve(span.object.get("fg"), theme.fg, a & 1 != 0));
+    try sgrRgb(out, alloc, 48, theme.resolve(span.object.get("bg"), theme.bg, false));
+    try out.append(alloc, 'm');
+}
+
+/// Reset to the theme's default colours (what a cleared cell shows).
+fn themeReset(out: *std.ArrayList(u8), alloc: std.mem.Allocator, theme: *const ViewTheme) !void {
+    try out.appendSlice(alloc, "\x1b[0");
+    try sgrRgb(out, alloc, 38, theme.fg);
+    try sgrRgb(out, alloc, 48, theme.bg);
     try out.append(alloc, 'm');
 }
 
@@ -2114,23 +2183,42 @@ fn mirrorModes(out: *std.ArrayList(u8), alloc: std.mem.Allocator, have: *HostMod
 /// Draw one frame. Rows are cleared and redrawn whole; every span is placed
 /// at its own column, so a host whose width tables disagree with zterm's
 /// cannot shift the rest of a row. Wrapped in a host synchronized update.
-fn drawFrame(alloc: std.mem.Allocator, frame: std.json.Value, have: *HostModes, title_buf: *std.ArrayList(u8)) !void {
+fn drawFrame(alloc: std.mem.Allocator, frame: std.json.Value, have: *HostModes, title_buf: *std.ArrayList(u8), theme: *const ViewTheme) !void {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(alloc);
     try out.appendSlice(alloc, "\x1b[?2026h\x1b[?25l");
-    if (jsonBool(frame, "full") orelse false) try out.appendSlice(alloc, "\x1b[0m\x1b[H\x1b[2J");
+    if (jsonBool(frame, "full") orelse false) {
+        // Erase paints with the current background: clear to the theme's.
+        try themeReset(&out, alloc, theme);
+        try out.appendSlice(alloc, "\x1b[H\x1b[2J");
+    }
     if (frame.object.get("lines")) |lines| if (lines == .array) for (lines.array.items) |line| {
         if (line != .object) continue;
         const y = jsonInt(line, "y") orelse continue;
         try cup(&out, alloc, y, 0);
-        try out.appendSlice(alloc, "\x1b[0m\x1b[2K");
+        try themeReset(&out, alloc, theme);
+        try out.appendSlice(alloc, "\x1b[2K");
         const spans = line.object.get("spans") orelse continue;
         if (spans != .array) continue;
         for (spans.array.items) |span| {
             if (span != .object) continue;
-            try cup(&out, alloc, y, jsonInt(span, "x") orelse 0);
-            try hostSgr(&out, alloc, span);
-            try out.appendSlice(alloc, jsonStr(span, "text") orelse "");
+            const x = jsonInt(span, "x") orelse 0;
+            try hostSgr(&out, alloc, span, theme);
+            const text = jsonStr(span, "text") orelse "";
+            if ((jsonInt(span, "w") orelse 1) == 2) {
+                // A run of double-width characters: place each one at its
+                // own pair of columns, so a host whose width tables disagree
+                // with zterm's cannot drift within the run.
+                var it = (std.unicode.Utf8View.init(text) catch continue).iterator();
+                var k: i64 = 0;
+                while (it.nextCodepointSlice()) |ch| : (k += 1) {
+                    try cup(&out, alloc, y, x + 2 * k);
+                    try out.appendSlice(alloc, ch);
+                }
+            } else {
+                try cup(&out, alloc, y, x);
+                try out.appendSlice(alloc, text);
+            }
         }
         try out.appendSlice(alloc, "\x1b[0m");
     };
@@ -2191,6 +2279,7 @@ fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
     cwrite(posix.STDOUT_FILENO, "\x1b[?1049h\x1b[H\x1b[2J");
 
     var have: HostModes = .{};
+    var theme = ViewTheme.fromConfig(&config.Theme{});
     var title: std.ArrayList(u8) = .empty;
     defer title.deinit(alloc);
     var inbuf: std.ArrayList(u8) = .empty;
@@ -2236,8 +2325,12 @@ fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
                 const m = parsed.value;
                 if (m != .object) continue;
                 const t = jsonStr(m, "t") orelse continue;
-                if (std.mem.eql(u8, t, "frame")) {
-                    try drawFrame(alloc, m, &have, &title);
+                if (std.mem.eql(u8, t, "hello")) {
+                    if (m.object.get("theme")) |th| theme.apply(th);
+                } else if (std.mem.eql(u8, t, "palette")) {
+                    if (m.object.get("theme")) |th| theme.apply(th);
+                } else if (std.mem.eql(u8, t, "frame")) {
+                    try drawFrame(alloc, m, &have, &title, &theme);
                 } else if (std.mem.eql(u8, t, "bell")) {
                     cwrite(posix.STDOUT_FILENO, "\x07");
                 } else if (std.mem.eql(u8, t, "clipboard")) {

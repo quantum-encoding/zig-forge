@@ -8,7 +8,7 @@ carried over the socket so the shells live in the server and survive the
 front end.
 
 `zterm attach` is a client of this protocol (it renders to a host terminal
-with ANSI). A GUI front end renders the same frames to pixels.
+with ANSI, in truecolour from the server's theme — not the host's palette). A GUI front end renders the same frames to pixels.
 
 **There is exactly one terminal emulator: zterm's.** A client never parses
 VT sequences from the pane, never answers terminal queries (DA, CPR, OSC
@@ -42,8 +42,33 @@ If the pane does not exist the server answers
 ### `hello` — once, first
 
 ```json
-{"t":"hello","v":1,"pane":1}
+{"t":"hello","v":1,"pane":1,
+ "theme":{"fg":"#d9dbe0","bg":"#121217","cursor":"#f5e0dc","cursor_text":"#121217",
+          "bold_is_bright":true,"palette":["#000000", "…256 entries…"]}}
 ```
+
+**The theme is authoritative.** Every colour on the wire resolves through it:
+an absent `fg`/`bg` is the theme's `fg`/`bg`; a palette index `n` is
+`palette[n]` (all 256 entries, resolved — 0–15 themed, 16–255 the xterm
+cube and grey ramp); with `bold_is_bright`, a bold cell in colours 0–7 is
+drawn with 8–15. It is the same theme zterm answers OSC 10/11 from, so a
+client draws exactly the colours the application was told — and every client
+of a pane draws the same colours. A client never substitutes its own palette.
+
+**Inverse** (`a` bit 32) swaps the RESOLVED foreground and background —
+including when either is absent (the theme default). The theme is what makes
+that computable.
+
+### `palette` — the theme changed
+
+```json
+{"t":"palette","pane":1,"theme":{…same shape as in hello…}}
+```
+
+Sent when the theme changes while the connection is open. Keys present
+replace the client's copy; absent keys are unchanged. The client redraws.
+(`zterm server` loads its theme once at start today, so it does not yet send
+this; clients must still accept it.)
 
 ### `frame` — the pane's state
 
@@ -79,10 +104,24 @@ If the pane does not exist the server answers
 | key    | meaning |
 |--------|---------|
 | `x`    | start column (0-based) |
-| `text` | UTF-8 text |
-| `w`    | `2` for a wide cell (CJK, most emoji): the span is ONE character occupying columns `x` and `x+1`. Absent: every character in `text` is one column wide. |
-| `fg`, `bg` | absent = default colour; a number 0–255 = palette index; a string `"#rrggbb"` = truecolour |
+| `text` | UTF-8 text: a sequence of Unicode **code points**, one per cell (see "Cells" below) |
+| `w`    | `2`: EVERY code point in `text` occupies two columns (CJK, most emoji) — the i-th one covers columns `x+2i` and `x+2i+1`, so a run of CJK is one span. Absent: every code point occupies one column. A span never mixes widths. |
+| `fg`, `bg` | absent = the theme default; a number 0–255 = palette index (resolved through `hello`'s theme); a string `"#rrggbb"` = truecolour |
 | `a`    | attribute bits, absent = none: 1 bold · 2 dim · 4 italic · 8 underline · 16 blink · 32 inverse · 64 invisible · 128 strikethrough |
+| `u`    | *Reserved, not sent yet.* Underline style when underlined: `"single"`, `"double"`, `"curly"`, `"dotted"`, `"dashed"` (SGR 4:1–4:5). Absent with bit 8 set = single. |
+| `uc`   | *Reserved, not sent yet.* Underline colour (SGR 58), same encoding as `fg`. Absent = the text colour. |
+| `link` | *Reserved, not sent yet.* OSC 8 hyperlink target (a URL string) for the span's cells. |
+
+Keys a client does not know are ignored, so the reserved keys can start
+appearing without a version bump; a client that ignores them still draws a
+correct (plainer) screen.
+
+**Cells.** One cell holds exactly one code point — never a grapheme cluster.
+zterm drops zero-width code points as it parses (combining marks, ZWJ/ZWNJ,
+variation selectors), so no span contains a code point that occupies zero
+columns: a client iterates code points, never graphemes, and never needs a
+width table. The cost, stated plainly: `e` + U+0301 arrives as `e`, and a
+ZWJ emoji sequence arrives as its separate emoji.
 
 Columns not covered by any span are blank with the default background.
 Trailing blanks are omitted. A client places each span at its `x` — never at
