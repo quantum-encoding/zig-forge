@@ -112,6 +112,11 @@ pub const SavedCursor = struct {
     autowrap: bool,
     /// DECSC saves the deferred-wrap state too (xterm: DECRC restores it).
     pending_wrap: bool = false,
+    /// And the character sets: G0-G3 designations and which is in GL/GR
+    /// (a TUI saves the cursor, draws a box in line drawing, restores).
+    charsets: [4]Charset = .{ .ascii, .ascii, .ascii, .ascii },
+    gl: CharsetSlot = .g0,
+    gr: CharsetSlot = .g1,
 };
 
 /// Scroll region
@@ -180,6 +185,67 @@ pub const Charset = enum {
     ascii,
     dec_special, // DEC Special Graphics (line drawing)
     uk,
+
+    /// The set a designation's final byte names (`ESC ( F` and friends):
+    /// `B` US ASCII, `0` DEC Special Graphics, `A` UK. Null for any other
+    /// (national sets, 96-character sets): the designation is ignored.
+    pub fn fromFinal(final: u8) ?Charset {
+        return switch (final) {
+            'B' => .ascii,
+            '0' => .dec_special,
+            'A' => .uk,
+            else => null,
+        };
+    }
+
+    /// What `c` prints as in this set. Only 0x23 (UK) and 0x5F..0x7E (DEC
+    /// Special Graphics) differ from ASCII.
+    ///
+    /// Anchor: the VT100 Special Graphics table as the `vte` crate maps it
+    /// (vte 0.14.1 src/ansi.rs `StandardCharset::map`, Alacritty's parser);
+    /// the Unicode names of the targets (HORIZONTAL SCAN LINE-1/3/7/9, SYMBOL
+    /// FOR HORIZONTAL TABULATION, …) match the glyphs the VT100 draws.
+    pub fn map(self: Charset, c: u21) u21 {
+        return switch (self) {
+            .ascii => c,
+            .uk => if (c == '#') 0x00A3 else c, // £
+            .dec_special => switch (c) {
+                '_' => ' ',
+                '`' => 0x25C6, // ◆
+                'a' => 0x2592, // ▒
+                'b' => 0x2409, // ␉
+                'c' => 0x240C, // ␌
+                'd' => 0x240D, // ␍
+                'e' => 0x240A, // ␊
+                'f' => 0x00B0, // °
+                'g' => 0x00B1, // ±
+                'h' => 0x2424, // ␤
+                'i' => 0x240B, // ␋
+                'j' => 0x2518, // ┘
+                'k' => 0x2510, // ┐
+                'l' => 0x250C, // ┌
+                'm' => 0x2514, // └
+                'n' => 0x253C, // ┼
+                'o' => 0x23BA, // ⎺
+                'p' => 0x23BB, // ⎻
+                'q' => 0x2500, // ─
+                'r' => 0x23BC, // ⎼
+                's' => 0x23BD, // ⎽
+                't' => 0x251C, // ├
+                'u' => 0x2524, // ┤
+                'v' => 0x2534, // ┴
+                'w' => 0x252C, // ┬
+                'x' => 0x2502, // │
+                'y' => 0x2264, // ≤
+                'z' => 0x2265, // ≥
+                '{' => 0x03C0, // π
+                '|' => 0x2260, // ≠
+                '}' => 0x00A3, // £
+                '~' => 0x00B7, // ·
+                else => c,
+            },
+        };
+    }
 };
 
 /// Ring buffer for scrollback
@@ -577,6 +643,8 @@ pub const Terminal = struct {
     charsets: [4]Charset,
     gl: CharsetSlot, // G0-G3 in GL
     gr: CharsetSlot, // G0-G3 in GR
+    /// SS2/SS3: the set the NEXT printable character is taken from, once.
+    single_shift: ?CharsetSlot = null,
 
     // Scrollback
     scrollback: Scrollback,
@@ -835,8 +903,27 @@ pub const Terminal = struct {
         self.cursor.col = 0;
     }
 
+    /// Designate `set` into G0-G3 (`ESC ( F`, `ESC ) F`, `ESC * F`, `ESC + F`).
+    pub fn designate(self: *Self, slot: CharsetSlot, set: Charset) void {
+        self.charsets[@intFromEnum(slot)] = set;
+    }
+
+    /// Whether printable ASCII prints as itself right now, so a run of it may
+    /// take the bulk path (putPrintableRun) that does no charset mapping.
+    pub fn asciiPassThrough(self: *const Self) bool {
+        return self.single_shift == null and self.charsets[@intFromEnum(self.gl)] == .ascii;
+    }
+
     /// Write a character at the current cursor position
-    pub fn putChar(self: *Self, char: u21) void {
+    pub fn putChar(self: *Self, raw: u21) void {
+        // The character set in effect maps it first: GL's, or a single
+        // shift's for this one character. Only ASCII is ever remapped.
+        var char = raw;
+        if (raw >= 0x20 and raw < 0x7F) {
+            const slot = self.single_shift orelse self.gl;
+            char = self.charsets[@intFromEnum(slot)].map(raw);
+        }
+        self.single_shift = null;
         if (isZeroWidth(char)) return;
 
         const width: u2 = if (isWideChar(char)) 2 else 1;
@@ -901,7 +988,8 @@ pub const Terminal = struct {
     /// honoring autowrap and scrolling. Semantically equivalent to calling
     /// putChar for each byte, but writes whole same-row spans at once and marks
     /// each touched row dirty only once. The SIMD fast path in processOutput
-    /// calls this; `bytes` must contain only printable ASCII (0x20..0x7E).
+    /// calls this; `bytes` must contain only printable ASCII (0x20..0x7E),
+    /// and only while `asciiPassThrough()` — it does no charset mapping.
     pub fn putPrintableRun(self: *Self, bytes: []const u8) void {
         const cols: usize = self.grid.cols;
         var idx: usize = 0;
@@ -1254,6 +1342,9 @@ pub const Terminal = struct {
             .origin_mode = self.modes.origin,
             .autowrap = self.modes.autowrap,
             .pending_wrap = self.pending_wrap,
+            .charsets = self.charsets,
+            .gl = self.gl,
+            .gr = self.gr,
         };
 
         if (self.modes.alt_screen) {
@@ -1276,6 +1367,9 @@ pub const Terminal = struct {
             self.modes.origin = s.origin_mode;
             self.modes.autowrap = s.autowrap;
             self.pending_wrap = s.pending_wrap;
+            self.charsets = s.charsets;
+            self.gl = s.gl;
+            self.gr = s.gr;
         } else {
             self.pending_wrap = false;
         }
@@ -1440,6 +1534,7 @@ pub const Terminal = struct {
         self.charsets = .{ .ascii, .ascii, .ascii, .ascii };
         self.gl = .g0;
         self.gr = .g1;
+        self.single_shift = null;
 
         self.grid.clearRegion(0, 0, self.grid.rows - 1, self.grid.cols - 1, Cell.default);
         self.markAllDirty();

@@ -1166,7 +1166,29 @@ fn handleSgr(term: *Terminal, seq: CsiSequence) void {
 }
 
 fn handleEscape(term: *Terminal, seq: EscSequence) void {
+    // Character set designation: ESC ( F → G0, ESC ) F → G1, ESC * F → G2,
+    // ESC + F → G3 (94-character sets; the final byte names the set).
+    if (seq.intermediate_count == 1) {
+        const slot: ?terminal.CharsetSlot = switch (seq.intermediates[0]) {
+            '(' => .g0,
+            ')' => .g1,
+            '*' => .g2,
+            '+' => .g3,
+            else => null,
+        };
+        if (slot) |sl| {
+            if (terminal.Charset.fromFinal(seq.final_byte)) |set| term.designate(sl, set);
+            return;
+        }
+    }
+    if (seq.intermediate_count != 0) return;
     switch (seq.final_byte) {
+        // SS2 / SS3: the next character only, from G2 / G3.
+        'N' => term.single_shift = .g2,
+        'O' => term.single_shift = .g3,
+        // LS2 / LS3: G2 / G3 into GL until shifted again.
+        'n' => term.gl = .g2,
+        'o' => term.gl = .g3,
         '7' => term.saveCursor(),
         '8' => term.restoreCursor(),
         'D' => {

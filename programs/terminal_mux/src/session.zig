@@ -801,7 +801,8 @@ pub const SessionManager = struct {
 /// putPrintableRun. Every other byte, and every byte outside ground state,
 /// takes the state machine. Equivalent to feeding each byte to the parser:
 /// in ground state it maps printable ASCII straight to putChar, which
-/// putPrintableRun matches (the test below holds all three together).
+/// putPrintableRun matches while the charset in GL is ASCII (the test below
+/// holds all three together, line drawing included).
 pub fn feedOutput(parser: *Parser, term: *Terminal, data: []const u8) void {
     const V = @Vector(16, u8);
     const lo: V = @splat(0x20); // first printable
@@ -809,7 +810,10 @@ pub fn feedOutput(parser: *Parser, term: *Terminal, data: []const u8) void {
 
     var i: usize = 0;
     while (i < data.len) {
-        if (parser.state == .ground) {
+        // The bulk path does no charset mapping, so it is taken only while
+        // printable ASCII prints as itself (not in line drawing, not with a
+        // single shift pending); otherwise every byte goes to putChar.
+        if (parser.state == .ground and term.asciiPassThrough()) {
             var end = i;
             // Whole 16-byte chunks of printable ASCII first, then a scalar tail.
             while (end + 16 <= data.len) {
@@ -841,7 +845,8 @@ test "feedOutput's bulk paths leave the emulator exactly as the per-byte parser 
         "\x1b[K",     "\x1b[3A",            "\x1b]0;title\x07",  "日本",                 "é",       "\x08",
         "\x1b[?7l",   "\x1b[?7h",           "\x1b[2;5r",         "\x1bM",                "\x1b[4h", "\x1b[1@",
         "\x1b(0qqq",  "\x1b(B",             "\x0e",              "\x0f",                 "~",       " ",
-        "ab\x7fcd",
+        "ab\x7fcd",   "\x1b)0",             "\x1b*0",             "\x1bN",                "\x1b7",  "\x1b8",
+        "lqqqqqqqqqqqqqqqqqqqqk",           "\x1b(A#",            "\x1bn",                "\x1b#8",
     };
     for (0..300) |round| {
         var a = try Terminal.init(alloc, 6, 13, 50);
@@ -880,6 +885,53 @@ test "feedOutput's bulk paths leave the emulator exactly as the per-byte parser 
                 try std.testing.expect(std.meta.eql(cb.attrs, ca.attrs));
             }
         }
+    }
+}
+
+fn screenRow(term: *Terminal, row: u16, buf: []u8) []const u8 {
+    var n: usize = 0;
+    var c: u16 = 0;
+    while (c < term.grid.cols) : (c += 1) {
+        const ch = term.grid.getCellConst(row, c).char;
+        if (ch == 0) continue;
+        n += std.unicode.utf8Encode(ch, buf[n..]) catch break;
+    }
+    return std.mem.trimEnd(u8, buf[0..n], " ");
+}
+
+test "DEC line drawing: designation, SO/SI, single shift, DECSC, bulk runs" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { in: []const u8, want: []const u8 }{
+        // ESC ( 0 puts line drawing in G0 (GL); ESC ( B takes it back.
+        .{ .in = "\x1b(0lqk\x1b(Bx", .want = "┌─┐x" },
+        // G1 = line drawing; SO shifts it in, SI back out.
+        .{ .in = "\x1b)0a\x0eqx\x0fq", .want = "a─│q" },
+        // SS2: ONE character from G2.
+        .{ .in = "\x1b*0\x1bNqq", .want = "─q" },
+        // DECSC saves the charset state, DECRC restores it: the ASCII q is
+        // overwritten at the restored column by a line-drawing one.
+        .{ .in = "\x1b(0\x1b7\x1b(Bq\x1b8q", .want = "─" },
+        // A run long enough for the SIMD path is still mapped.
+        .{ .in = "\x1b(0lqqqqqqqqqqqqqqqqqqqqk", .want = "┌────────────────────┐" },
+        // UK: # is the pound sign.
+        .{ .in = "\x1b(A#1", .want = "£1" },
+        // RIS resets to ASCII.
+        .{ .in = "\x1b(0\x1bcq", .want = "q" },
+        // An unknown set leaves the designation as it was.
+        .{ .in = "\x1b(0\x1b(Kq", .want = "─" },
+        // Escapes with intermediates are not their final byte alone:
+        // ESC ( 7 designates (nothing), it must not save the cursor.
+        .{ .in = "ab\x1b(7c", .want = "abc" },
+    };
+    for (cases) |cs| {
+        var t = try Terminal.init(alloc, 3, 30, 10);
+        defer t.deinit();
+        var p = Parser.init();
+        feedOutput(&p, &t, cs.in);
+        var buf: [256]u8 = undefined;
+        const got = screenRow(&t, 0, &buf);
+        errdefer std.debug.print("input {any}: got '{s}' want '{s}'\n", .{ cs.in, got, cs.want });
+        try std.testing.expectEqualStrings(cs.want, got);
     }
 }
 
