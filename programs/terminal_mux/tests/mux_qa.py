@@ -2,7 +2,8 @@
 """End-to-end QA harness for the standalone terminal_mux binary.
 
 Run:  python3 tests/mux_qa.py [path-to-tmux-binary]
-      (default: ../zig-out/bin/tmux relative to this file)
+      (default: ../zig-out/bin/zterm relative to this file — run bare,
+      zterm IS the visible multiplexer)
 
 Asserts two invariants a screenshot-level regression would violate:
 
@@ -34,7 +35,7 @@ import time
 import unicodedata
 
 MUX = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "zig-out", "bin", "tmux")
+    os.path.dirname(os.path.abspath(__file__)), "..", "zig-out", "bin", "zterm")
 
 class HostScreen:
     """Minimal host-terminal cursor model (deferred wrap, CUP, CR/LF)."""

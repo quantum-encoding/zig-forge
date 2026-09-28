@@ -3,7 +3,7 @@
 #
 # Usage: ./scripts/bench-track.sh [runs]     (default 3)
 #
-# Builds ReleaseFast, runs tmux-bench N times, keeps the BEST of each metric
+# Builds ReleaseFast, runs zterm-bench N times, keeps the BEST of each metric
 # (best-of-N filters scheduler noise — a regression can't hide behind a lucky
 # run, only a noisy machine can under-report), appends a row to
 # bench/results.csv with the git rev, and prints deltas vs the previous row.
@@ -18,7 +18,7 @@ zig build -Doptimize=ReleaseFast >/dev/null
 
 best_mixed=0; best_plain=0; best_pty=0; best_create=999999999; best_attach=999999999
 for i in $(seq "$RUNS"); do
-  out="$(./zig-out/bin/tmux-bench 2>&1)"
+  out="$(./zig-out/bin/zterm-bench 2>&1)"
   mixed=$(awk  '/emulator mixed/  {print $(NF-1)}' <<<"$out")
   plain=$(awk  '/emulator plain/  {print $(NF-1)}' <<<"$out")
   pty=$(awk    '/pty ingest/      {print $(NF-1)}' <<<"$out")

@@ -48,34 +48,10 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(lib);
 
     // ==========================================================================
-    // Standalone Executable (single-process session)
-    // ==========================================================================
-    const exe = b.addExecutable(.{
-        .name = "tmux",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-        .use_llvm = use_llvm,
-        .use_lld = use_lld,
-    });
-    exe.root_module.link_libc = true;
-    b.installArtifact(exe);
-
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-    const run_step = b.step("run", "Run the terminal multiplexer");
-    run_step.dependOn(&run_cmd.step);
-
-    // ==========================================================================
     // Benchmark (drives the C ABI like a host application would)
     // ==========================================================================
     const bench = b.addExecutable(.{
-        .name = "tmux-bench",
+        .name = "zterm-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/bench.zig"),
             .target = target,
@@ -93,7 +69,10 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&bench_cmd.step);
 
     // ==========================================================================
-    // zterm — standalone mux server + CLI (the `wezterm cli` equivalent)
+    // zterm — THE executable: bare it is the visible multiplexer; `server`,
+    // `attach` and `cli` are the headless pool and its `wezterm cli`-style
+    // control. (It was once two binaries, one named `tmux`, which shadowed
+    // the real tmux on PATH.)
     // ==========================================================================
     const zterm = b.addExecutable(.{
         .name = "zterm",
@@ -113,6 +92,9 @@ pub fn build(b: *std.Build) void {
     if (b.args) |a| zterm_run.addArgs(a);
     const zterm_step = b.step("zterm", "Run zterm (e.g. `zig build zterm -- cli list`)");
     zterm_step.dependOn(&zterm_run.step);
+    // `zig build run` is the multiplexer — the same binary, run bare.
+    const run_step = b.step("run", "Run the multiplexer (zterm)");
+    run_step.dependOn(&zterm_run.step);
 
     // ==========================================================================
     // End-to-end QA — tests/mux_qa.py drives the installed standalone binary

@@ -2,12 +2,13 @@
 //! ecosystem (mac-drive / imsg bridge / the roster / baton) can drive the Zig terminal exactly as it drives
 //! WezTerm — with no WezTerm installed.
 //!
-//! TWO servers speak the control protocol:
+//! One binary, `zterm` (terminal_mux):
+//!   - `zterm` / `zterm new` — the VISIBLE multiplexer in this terminal
+//!     (src/main.zig). It binds the control socket too (src/ctl.zig), so
+//!     `zterm cli` drives it: list/send/enter/capture plus `split h|v`,
+//!     `new-window`, `focus <pane>` — the wezterm-cli model.
 //!   - `zterm server` — a HEADLESS pane pool (this file), for agents that need
 //!     invisible shells. It is also a baton RUNNER (see "Runner door" below).
-//!   - the interactive `tmux` binary — binds the same socket (src/ctl.zig), so
-//!     `zterm cli` drives the VISIBLE terminal: list/send/enter/capture plus
-//!     `split h|v`, `new-window`, `focus <pane>` — the wezterm-cli model.
 //!   Newest binder wins the default path; $ZTERM_SOCKET targets a specific one.
 //!
 //! Persistent sessions (the tmux detach guarantee): the SERVER owns the
@@ -15,7 +16,7 @@
 //! the terminal, reattach later — the shell never notices. Ctrl-b d detaches.
 //!
 //! Test loop (two terminals):
-//!     zterm server                 # headless pool (or just run `tmux` for the visible mux)
+//!     zterm server                 # headless pool (or run bare `zterm` for the visible mux)
 //!     zterm attach 1               # raw window onto pane 1; Ctrl-b d detaches
 //!     zterm cli list               # → [{"pane":1,...}]
 //!     zterm cli spawn              # → {"ok":true,"pane":2}
@@ -90,6 +91,9 @@ const capi = @import("capi.zig");
 const pty = @import("pty.zig");
 const ctl = @import("ctl.zig");
 const session = @import("session.zig");
+const visible = @import("main.zig");
+
+pub const VERSION = "0.3.0";
 
 const is_linux = builtin.os.tag == .linux;
 const is_darwin = builtin.os.tag.isDarwin();
@@ -1713,15 +1717,28 @@ fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
 // ══ MAIN ══════════════════════════════════════════════════════════════════════════════════════════════
 fn usage() void {
     std.debug.print(
-        \\usage: zterm server [--no-runner] [--runner-socket PATH]
-        \\       zterm attach <pane>
-        \\       zterm cli <list|spawn|send <id> <text>|enter <id>|capture <id>|kill <id>>
-        \\       zterm cli send <id> -- <text…>     (JSON path: binary-safe, submits with Enter)
-        \\       zterm cli '<json request>'
-        \\  attach: raw window onto a server pane; Ctrl-b d detaches (shell keeps running)
-        \\  server: also answers baton's runner contract on <fleet home>/var/zterm.sock
+        \\zterm {s} — terminal multiplexer
         \\
-    , .{});
+        \\usage: zterm [new [-s NAME]]      the multiplexer, in this terminal
+        \\       zterm server [--no-runner] [--runner-socket PATH]
+        \\                                 headless pane pool (a service; baton's runner)
+        \\       zterm attach <pane>        this terminal onto a server pane
+        \\       zterm cli <list|spawn|send <id> <text>|enter <id>|capture <id>|kill <id>>
+        \\       zterm cli send <id> -- <text…>   (JSON path: binary-safe, submits with Enter)
+        \\       zterm cli '<json request>'
+        \\       zterm --version | --help
+        \\
+        \\In the multiplexer (prefix Ctrl-b):
+        \\  d  quit — ends every shell in it     c  new window    n / p  next / previous window
+        \\  %  split horizontal   "  split vertical   o  next pane
+        \\  [  copy mode: j/k u/d g/G scroll, / search, n next, q/Esc/Enter exit
+        \\In an attach: Ctrl-b d DETACHES — the server's shell keeps running.
+        \\
+        \\Sessions that outlive the terminal: run `zterm server` (as a service) and
+        \\`zterm attach <pane>`. `zterm cli` drives whichever of the two owns the socket
+        \\($ZTERM_SOCKET, default /tmp/zterm-<uid>.sock).
+        \\
+    , .{VERSION});
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -1731,9 +1748,27 @@ pub fn main(init: std.process.Init) !void {
     var ai = std.process.Args.Iterator.init(init.minimal.args);
     while (ai.next()) |a| try args.append(alloc, a);
 
-    if (args.items.len < 2) return usage();
+    // Bare `zterm`: the multiplexer, as tmux runs bare.
+    if (args.items.len < 2) return visible.run(alloc, "0");
     const sub = args.items[1];
-    if (std.mem.eql(u8, sub, "server")) {
+    if (std.mem.eql(u8, sub, "-h") or std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "help")) {
+        return usage();
+    } else if (std.mem.eql(u8, sub, "-v") or std.mem.eql(u8, sub, "--version")) {
+        std.debug.print("zterm {s}\n", .{VERSION});
+    } else if (std.mem.eql(u8, sub, "new") or std.mem.eql(u8, sub, "new-session")) {
+        var name: []const u8 = "0";
+        var i: usize = 2;
+        while (i < args.items.len) : (i += 1) {
+            if (std.mem.eql(u8, args.items[i], "-s") and i + 1 < args.items.len) {
+                i += 1;
+                name = args.items[i];
+            } else {
+                std.debug.print("zterm new: unknown option '{s}'\n", .{args.items[i]});
+                return usage();
+            }
+        }
+        try visible.run(alloc, name);
+    } else if (std.mem.eql(u8, sub, "server")) {
         var opts = ServerOptions{};
         var i: usize = 2;
         while (i < args.items.len) : (i += 1) {

@@ -1,6 +1,6 @@
 //! Control socket for the INTERACTIVE mux — the `wezterm cli` analogue.
 //!
-//! The standalone `tmux` binary binds a unix socket and answers the same
+//! The visible multiplexer (bare `zterm`) binds a unix socket and answers the same
 //! one-line protocol `zterm cli` speaks, so a driver (mac-drive, an agent, a
 //! script) can list/send/capture/split the panes of the terminal the user is
 //! actually looking at — not a separate headless pool (that's `zterm server`).

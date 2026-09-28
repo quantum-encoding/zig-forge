@@ -1,18 +1,16 @@
-//! Terminal Multiplexer - Main Entry Point
+//! The visible multiplexer: `zterm` run bare (or `zterm new`) in a terminal.
+//! Windows, splits and copy mode inside the terminal you ran it in, rendered
+//! with the portable diff-ANSI renderer. The CLI lives in zterm.zig; this
+//! module is its interactive half.
 //!
-//! Usage:
-//!   tmux                    # Start new session or attach to existing
-//!   tmux new -s name        # Create new session with name
-//!   tmux attach -t name     # Attach to existing session
-//!   tmux list-sessions      # List all sessions
-//!   tmux kill-session -t X  # Kill session
+//! One process owns this session: Ctrl-b d QUITS it and every shell in it.
+//! Sessions that survive the terminal closing are `zterm server` +
+//! `zterm attach <pane>`.
 //!
-//! When attached:
-//!   Ctrl-b d               # Detach from session
-//!   Ctrl-b c               # Create new window
-//!   Ctrl-b n/p             # Next/previous window
-//!   Ctrl-b %               # Split horizontally
-//!   Ctrl-b "               # Split vertically
+//! Keys (prefix Ctrl-b):
+//!   d  quit              c  new window          n / p  next / previous window
+//!   %  split horizontal  "  split vertical     o      next pane
+//!   [  copy mode (j/k u/d g/G scroll, / search, n next, q/Esc/Enter exit)
 
 const std = @import("std");
 const posix = std.posix;
@@ -26,7 +24,6 @@ const ctl = @import("ctl.zig");
 const SignalHandler = ?*const fn (c_int) callconv(.c) void;
 extern "c" fn signal(sig: c_int, handler: SignalHandler) SignalHandler;
 
-const VERSION = "0.1.0";
 
 /// Copy-mode '/' search: jump the view so the next scrollback line OLDER than
 /// the current top that contains `needle` sits at the top row. ASCII,
@@ -142,108 +139,13 @@ fn handleMouse(sess: *lib.Session, ev: MouseEvent, force_redraw: *bool) void {
     }
 }
 
-pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
-
-    // Collect args into a slice
-    var args_list: std.ArrayList([]const u8) = .empty;
-    defer args_list.deinit(allocator);
-    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
-    while (args_iter.next()) |arg| {
-        try args_list.append(allocator, arg);
-    }
-    const args = args_list.items;
-
-    // Parse command
-    if (args.len < 2) {
-        // Default: try to attach or create new session
-        try attachOrCreate(allocator, "0");
-        return;
-    }
-
-    const cmd = args[1];
-
-    if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
-        printHelp();
-        return;
-    }
-
-    if (std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-v")) {
-        std.debug.print("terminal_mux {s}\n", .{VERSION});
-        return;
-    }
-
-    if (std.mem.eql(u8, cmd, "new") or std.mem.eql(u8, cmd, "new-session")) {
-        var session_name: []const u8 = "0";
-
-        // Parse options
-        var i: usize = 2;
-        while (i < args.len) : (i += 1) {
-            if (std.mem.eql(u8, args[i], "-s") and i + 1 < args.len) {
-                i += 1;
-                session_name = args[i];
-            }
-        }
-
-        try runServer(allocator, session_name);
-        return;
-    }
-
-    if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
-        var session_name: []const u8 = "0";
-
-        var i: usize = 2;
-        while (i < args.len) : (i += 1) {
-            if (std.mem.eql(u8, args[i], "-t") and i + 1 < args.len) {
-                i += 1;
-                session_name = args[i];
-            }
-        }
-
-        try attachToSession(allocator, session_name);
-        return;
-    }
-
-    if (std.mem.eql(u8, cmd, "list-sessions") or std.mem.eql(u8, cmd, "ls")) {
-        try listSessions(allocator);
-        return;
-    }
-
-    if (std.mem.eql(u8, cmd, "kill-session")) {
-        var session_name: ?[]const u8 = null;
-
-        var i: usize = 2;
-        while (i < args.len) : (i += 1) {
-            if (std.mem.eql(u8, args[i], "-t") and i + 1 < args.len) {
-                i += 1;
-                session_name = args[i];
-            }
-        }
-
-        if (session_name) |name| {
-            try killSession(allocator, name);
-        } else {
-            std.debug.print("Error: -t <session> required\n", .{});
-        }
-        return;
-    }
-
-    std.debug.print("Unknown command: {s}\n", .{cmd});
-    printHelp();
-}
-
-fn attachOrCreate(allocator: std.mem.Allocator, session_name: []const u8) !void {
-    // This binary runs a self-contained, single-process session (the multiplexer
-    // core driving a PTY + VT emulator). Cross-process attach/detach is provided
-    // by the in-process C ABI (libterminal_mux, src/capi.zig) for embedding into
-    // host apps such as the Swift/SwiftUI front-end — see docs/CAPI.md.
+/// Run the visible multiplexer in this terminal until the user quits.
+/// `session_name` names the session (`zterm new -s NAME`).
+pub fn run(allocator: std.mem.Allocator, session_name: []const u8) !void {
     try runServer(allocator, session_name);
 }
 
-fn attachToSession(allocator: std.mem.Allocator, session_name: []const u8) !void {
-    // No standalone socket daemon in this build; run the session directly.
-    try runServer(allocator, session_name);
-}
+
 
 fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     // Get terminal size (kept current via SIGWINCH below)
@@ -622,48 +524,5 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     _ = c.write(posix.STDOUT_FILENO, renderer.getOutput().ptr, renderer.getOutput().len);
 }
 
-fn listSessions(allocator: std.mem.Allocator) !void {
-    _ = allocator;
-    // The standalone binary is single-session; multi-session enumeration lives
-    // in the embedding C ABI (tmux_list, src/capi.zig).
-    std.debug.print("This build runs one session per process. For multi-session\n", .{});
-    std.debug.print("attach/detach, embed libterminal_mux (see docs/CAPI.md).\n", .{});
-}
 
-fn killSession(allocator: std.mem.Allocator, session_name: []const u8) !void {
-    _ = allocator;
-    std.debug.print("kill-session '{s}': not applicable to the standalone binary.\n", .{session_name});
-}
 
-fn printHelp() void {
-    std.debug.print(
-        \\Terminal Multiplexer v{s}
-        \\
-        \\Usage: tmux [command] [options]
-        \\
-        \\Commands:
-        \\  new [-s name]          Create a new session
-        \\  attach [-t name]       Attach to an existing session
-        \\  list-sessions          List all sessions
-        \\  kill-session -t name   Kill a session
-        \\
-        \\Options:
-        \\  -h, --help             Show this help
-        \\  -v, --version          Show version
-        \\
-        \\Key Bindings (default prefix: Ctrl-b):
-        \\  d                      Detach from session
-        \\  c                      Create new window
-        \\  n / p                  Next / previous window
-        \\  %                      Split pane horizontally
-        \\  "                      Split pane vertically
-        \\  o                      Switch to next pane
-        \\  0-9                    Select window by number
-        \\
-        \\Examples:
-        \\  tmux                   Start new session (or attach if one exists)
-        \\  tmux new -s dev        Create session named "dev"
-        \\  tmux attach -t dev     Attach to session "dev"
-        \\
-    , .{VERSION});
-}
