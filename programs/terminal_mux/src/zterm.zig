@@ -45,6 +45,22 @@
 //!   * `{"verb":...}` — baton's RUNNER CONTRACT (baton src/runner/contract.rs):
 //!              hello, status, list, send, stop.
 //!
+//! ## Running it
+//!
+//! As a SERVICE, not from inside an agent's session. baton's Linux payload
+//! installs it as the `baton-zterm.service` systemd user unit (see baton's
+//! scripts/install-linux.sh); anything equivalent works. Two reasons:
+//!   * On a box with Guardian Shield in agent-containment mode, a process
+//!     started from an agent's tree inherits the agent tag and cannot unlink
+//!     under $HOME — so zterm could not remove its own socket on shutdown and
+//!     the next start would find the door taken. Started by systemd it can.
+//!   * It owns the shells agents run in. Its lifetime is the host's, not the
+//!     lifetime of whichever session happened to start it.
+//! With no $SHELL (a service need not have one) panes get the account's login
+//! shell from passwd. Every pane gets `ZTERM_PANE=<id>` so a program inside
+//! it (an agent's SessionStart hook) can name the pane it is in; baton
+//! addresses zterm pane n as 1000000+n (baton src/wez/zterm.rs).
+//!
 //! ## Runner door
 //!
 //! baton finds runner `<name>` at `<fleet home>/var/<name>.sock`, where the
