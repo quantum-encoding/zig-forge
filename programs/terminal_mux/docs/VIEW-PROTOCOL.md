@@ -223,9 +223,10 @@ gets a `full` frame when it catches up. State converges; intermediate frames
 may be skipped.
 
 Frames are also paced: at most one per client every `--frame-ms` (default
-8 ms, ~120 Hz). The first change after a quiet spell is sent at once, so the
-echo of a keystroke is never held; changes inside the interval go out together
-in the next frame. A client must not assume one frame per write the
+8 ms, ~120 Hz). Frames that answer a client — for 50 ms after input, a focus
+change or a resize reaches the pane — are never held, nor is the first change
+after a quiet spell; other changes inside the interval go out together in the
+next frame. A client must not assume one frame per write the
 application made — only that the last frame shows the pane's current state.
 
 ## What the server does that a client must not

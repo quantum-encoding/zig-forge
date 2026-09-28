@@ -156,6 +156,31 @@ try:
     check("…and the stalled viewer converges on the final screen once it reads",
           slow.until(lambda: "FLOOD-DONE" in slow.text(), 30), slow.text()[-120:])
 
+    # ── pacing never holds the answer to input ────────────────────────────
+    # Keys sent back to back, each as soon as the last one's echo is drawn:
+    # every key lands inside the pacing interval, so a pacer that ignored
+    # input would add the whole 8 ms to each (measured before the fix).
+    kp = json.loads(cli("spawn"))["pane"]
+    kv = View(kp, 24, 80)
+    kv.send({"input": "text", "data": "exec cat\r"}); kv.pump(0.5)
+    # Timed to the arrival of the frame's bytes: View.pump would sit out its
+    # socket timeout after the frame and time itself instead.
+    kv.s.settimeout(0.05)
+    lat = []
+    for i in range(30):
+        got = b""; t0 = time.time()
+        kv.send({"input": "text", "data": "k"})
+        while b'"t":"frame"' not in got and time.time() - t0 < 2:
+            try:
+                got += kv.s.recv(1 << 20)
+            except socket.timeout:
+                pass
+        lat.append(time.time() - t0)
+    kv.s.settimeout(0.1)
+    lat.sort()
+    check("a keystroke's echo is not held by pacing (median < 3 ms)", lat[len(lat) // 2] < 0.003,
+          f"median {lat[len(lat) // 2] * 1000:.2f} ms")
+
     # ── exit status ───────────────────────────────────────────────────────
     v.send({"input": "text", "data": "exit 3\r"})
     v.until(lambda: any(m["t"] == "exit" for m in v.msgs))

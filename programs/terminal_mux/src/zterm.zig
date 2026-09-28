@@ -404,6 +404,14 @@ const Pane = struct {
     /// When `hup` was first seen (monotonic ms), to bound the wait for the
     /// child to be reaped before viewers are told it exited.
     hup_ms: i64 = 0,
+    /// When a client's input, focus change or resize last reached this pane
+    /// (monotonic ms). Its frames are unpaced for INPUT_UNPACED_MS after it:
+    /// someone is waiting to see the result.
+    input_ms: i64 = 0,
+
+    fn noteInput(self: *Pane) void {
+        self.input_ms = @import("terminal.zig").monotonicMs();
+    }
 
     fn spane(self: *const Pane) *session.Pane {
         return self.handle.sess.getActiveWindow().getActivePane();
@@ -564,6 +572,13 @@ pub const ServerOptions = struct {
 /// latency, while a pane streaming output is sent as ~120 frames a second
 /// instead of one per PTY read (2000-5000/s measured: bench/runs).
 pub const DEFAULT_FRAME_MS: u32 = 8;
+
+/// How long after input a pane's frames go out unpaced. Long enough to cover
+/// an echo and an application's reply to a key (a TUI redrawing in several
+/// writes); short enough that typing into a flooding pane only briefly
+/// restores the unpaced rate. Measured without it: pacing added the whole
+/// interval to every keystroke typed within 8 ms of the previous frame.
+const INPUT_UNPACED_MS: i64 = 50;
 
 var stop_requested = std.atomic.Value(bool).init(false);
 fn onStopSignal(_: c_int) callconv(.c) void {
@@ -901,6 +916,7 @@ const Server = struct {
                 }
                 if (self.findPane(a.pane_id)) |p| {
                     _ = capi.tmux_send(p.handle, &io_buf, r);
+                    p.noteInput();
                 } else {
                     pclose(a.conn);
                     a.conn = -1;
@@ -1342,6 +1358,7 @@ const Server = struct {
     /// dimensions, so only a full frame describes it.
     fn resizePane(self: *Server, p: *Pane, rows: u16, cols: u16) void {
         _ = capi.tmux_resize(p.handle, rows, cols);
+        p.noteInput(); // a window being dragged wants its frames now
         for (self.viewers.items) |*v| {
             if (v.conn < 0 or v.pane_id != p.id) continue;
             v.full = true;
@@ -1472,7 +1489,8 @@ const Server = struct {
                 continue;
             }
             const since = now - v.last_frame_ms;
-            if ((v.changed or v.full) and v.last_frame_ms != 0 and since < self.frame_ms) {
+            const answering_input = now - p.input_ms < INPUT_UNPACED_MS;
+            if ((v.changed or v.full) and v.last_frame_ms != 0 and since < self.frame_ms and !answering_input) {
                 soon(&wake, self.frame_ms - since);
                 continue;
             }
@@ -1563,6 +1581,7 @@ const Server = struct {
             return;
         }
         if (p.hup) return; // input to a finished pane goes nowhere
+        p.noteInput();
         if (jsonBool(m, "focus")) |focused| {
             if (p.spane().terminal.modes.focus_events) {
                 const seq: []const u8 = if (focused) "\x1b[I" else "\x1b[O";
