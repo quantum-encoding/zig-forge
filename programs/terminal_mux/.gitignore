@@ -1,0 +1,4 @@
+# The repo-root .gitignore ignores *.bin as build output. These fixtures are
+# test INPUTS: build.zig embeds them as the root source of the composer lib
+# tests, so without them a fresh clone cannot compile those tests at all.
+!tests/fixtures/*.bin
