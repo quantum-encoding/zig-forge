@@ -178,13 +178,13 @@ def wait_socket(path, proc, timeout=5.0):
     raise RuntimeError("zterm server never listened on " + path)
 
 
-def view_stage(env, cpus, view_args, log):
+def view_stage(env, cpus, view_args, log, server_args):
     """Start a server, run the view benchmark against it, measure the server."""
     sockdir = tempfile.mkdtemp(prefix="zb-", dir="/tmp")
     sock = os.path.join(sockdir, "s.sock")
     senv = dict(env, ZTERM_SOCKET=sock)
     with open(os.path.join(sockdir, "server.log"), "w") as slog:
-        server = subprocess.Popen(pinned([os.path.join(BIN, "zterm"), "server", "--no-runner"], cpus),
+        server = subprocess.Popen(pinned([os.path.join(BIN, "zterm"), "server", "--no-runner"] + server_args, cpus),
                                   env=senv, stdout=slog, stderr=subprocess.STDOUT)
     try:
         wait_socket(sock, server)
@@ -259,6 +259,8 @@ def main():
     ap.add_argument("--quick", action="store_true", help="small volumes: a smoke test, not a comparable run")
     ap.add_argument("--repeat", type=int, default=5, help="samples per core metric (default 5)")
     ap.add_argument("--cpus", default="", help="pin every process to these CPUs (taskset list, e.g. 2-7)")
+    ap.add_argument("--frame-ms", type=int, default=None,
+                    help="the server's frame pacing interval (default: the server's own; 0 = unpaced)")
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--compare", default="", help="report JSON to compare with (default: the previous run)")
     ap.add_argument("--fail-on-regression", action="store_true", help="exit 1 when a metric is WORSE")
@@ -278,7 +280,8 @@ def main():
     if a.quick:
         core_args += ["--feed-mib", "16", "--pty-mib", "4"]
         view_args += ["--keys", "100", "--seq", "100000"]
-    flags = " ".join(core_args + (["--quick"] if a.quick else []) + (["--cpus", a.cpus] if a.cpus else []))
+    server_args = ["--frame-ms", str(a.frame_ms)] if a.frame_ms is not None else []
+    flags = " ".join(core_args + (["--quick"] if a.quick else []) + (["--cpus", a.cpus] if a.cpus else []) + server_args)
 
     log = []
     try:
@@ -288,7 +291,7 @@ def main():
         if r.returncode != 0:
             sys.exit("zterm-bench failed:\n" + r.stderr[-2000:])
         core = json.loads(r.stdout)
-        view = view_stage(env, a.cpus, view_args, log)
+        view = view_stage(env, a.cpus, view_args, log, server_args)
     finally:
         shutil.rmtree(home, ignore_errors=True)
     ctx["loadavg_end"] = read("/proc/loadavg").split()[:3]
@@ -296,7 +299,7 @@ def main():
     report = {
         "bench": "zterm", "schema": SCHEMA, "stamp": stamp, "label": a.label, "flags": flags,
         "quick": a.quick, "context": ctx,
-        "config": {"core": core["config"], "view": view["config"],
+        "config": {"core": core["config"], "view": view["config"], "server_args": server_args,
                    "schemas": {"zterm-bench": core["schema"], "zterm-viewbench": view["schema"]}},
         "zterm_version": core.get("zterm_version"),
         "inputs": core["inputs"],

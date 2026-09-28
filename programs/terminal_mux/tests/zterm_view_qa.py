@@ -142,10 +142,17 @@ try:
     slow = View(sp, 24, 80)          # connects, then does not read
     fast = View(sp)
     fast.until(lambda: "$" in fast.text())
+    n0 = len(fast.frames()); flood_t0 = time.time()
     fast.send({"input": "text", "data": "seq 1 200000; echo FLOOD-DONE\r"})
     t0 = time.time(); listed = cli("list"); dt = time.time() - t0
     check("a viewer that stops reading does not stall the server", listed.startswith("[") and dt < 2.0, f"{dt:.2f}s")
     check("…and the reading viewer keeps up", fast.until(lambda: "FLOOD-DONE" in fast.text(), 60))
+    # Pacing: one frame per 8 ms at most (the default --frame-ms), however
+    # many reads the flood took. 190/s leaves room for the leading frame and
+    # timer slack; unpaced this was 2000-5000/s.
+    flood_frames = len(fast.frames()) - n0; flood_s = time.time() - flood_t0
+    check("frames are paced while a pane streams (<= ~120/s)",
+          flood_frames >= 2 and flood_frames / flood_s <= 190, f"{flood_frames} frames in {flood_s:.2f}s")
     check("…and the stalled viewer converges on the final screen once it reads",
           slow.until(lambda: "FLOOD-DONE" in slow.text(), 30), slow.text()[-120:])
 

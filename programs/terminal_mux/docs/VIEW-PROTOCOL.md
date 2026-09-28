@@ -222,6 +222,12 @@ that has fallen far behind (its unsent output exceeds the server's buffer)
 gets a `full` frame when it catches up. State converges; intermediate frames
 may be skipped.
 
+Frames are also paced: at most one per client every `--frame-ms` (default
+8 ms, ~120 Hz). The first change after a quiet spell is sent at once, so the
+echo of a keystroke is never held; changes inside the interval go out together
+in the next frame. A client must not assume one frame per write the
+application made — only that the last frame shows the pane's current state.
+
 ## What the server does that a client must not
 
 - Answer terminal queries (DA1/DA2, CPR, OSC 10/11 colour queries).

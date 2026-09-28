@@ -458,6 +458,9 @@ const Viewer = struct {
     exit_sent: bool = false,
     /// Close once `out` drains (the pane was killed).
     closing: bool = false,
+    /// When this client's last frame was built (monotonic ms; 0 = never), for
+    /// frame pacing (`Server.frame_ms`).
+    last_frame_ms: i64 = 0,
 
     /// Close and release. Idempotent: a viewer can die where it is found
     /// dead and again at the sweep.
@@ -552,7 +555,15 @@ pub const ServerOptions = struct {
     runner: bool = true,
     /// An explicit runner socket path (`--runner-socket`), else resolved.
     runner_path: ?[]const u8 = null,
+    /// Minimum ms between two frames to one viewer (`--frame-ms`); 0 = a
+    /// frame for every read of pane output, the pre-pacing behaviour.
+    frame_ms: u32 = DEFAULT_FRAME_MS,
 };
+
+/// ~120 Hz: at or above most displays' refresh, so pacing costs no visible
+/// latency, while a pane streaming output is sent as ~120 frames a second
+/// instead of one per PTY read (2000-5000/s measured: bench/runs).
+pub const DEFAULT_FRAME_MS: u32 = 8;
 
 var stop_requested = std.atomic.Value(bool).init(false);
 fn onStopSignal(_: c_int) callconv(.c) void {
@@ -568,6 +579,8 @@ const Server = struct {
     viewers: std.ArrayList(Viewer) = .empty,
     listeners: std.ArrayList(Listener) = .empty,
     agent_env: ?[]const u8,
+    /// Frame pacing interval (ServerOptions.frame_ms).
+    frame_ms: i64 = DEFAULT_FRAME_MS,
     /// Bytes a client sent after its request line, for a request that turns
     /// the connection into a stream (`view`): they are its first input.
     trailing: []const u8 = &.{},
@@ -789,7 +802,7 @@ const Server = struct {
             }
             self.advanceSubmits(nowNs());
             // Viewers: flush owed bytes, build frames that are due, drop the dead.
-            const view_tick = self.pumpViewers();
+            const view_wake = self.pumpViewers();
             var vi: usize = 0;
             while (vi < self.viewers.items.len) {
                 if (self.viewers.items[vi].conn < 0) {
@@ -816,10 +829,12 @@ const Server = struct {
             const attach_count = self.attaches.items.len;
             const viewer_count = self.viewers.items.len;
 
-            // A pending submit is watched for evidence every ~50ms, and a
-            // frame held back by a synchronized update is retried every
-            // 20ms; otherwise wake once a second so a stop signal is noticed.
-            const timeout: i32 = if (view_tick) 20 else if (self.submits.items.len > 0) 50 else 1000;
+            // A viewer's held frame wakes the loop when it falls due (pacing,
+            // a synchronized update, a pane awaiting its reap); a pending
+            // submit is watched for evidence every ~50ms; otherwise wake once
+            // a second so a stop signal is noticed.
+            var timeout: i32 = if (self.submits.items.len > 0) 50 else 1000;
+            if (view_wake) |ms| timeout = @min(timeout, @as(i32, @intCast(std.math.clamp(ms, 1, 1000))));
             _ = posix.poll(pfds.items, timeout) catch continue;
 
             // Pane output: read the raw bytes ONCE — feed the VT grid (so capture/
@@ -1416,10 +1431,22 @@ const Server = struct {
     }
 
     /// Flush every viewer, and build the frames that are due for those that
-    /// have caught up. Returns true when a frame is being held back by a
-    /// synchronized update and the loop should come back soon.
-    fn pumpViewers(self: *Server) bool {
-        var tick = false;
+    /// have caught up. Returns in how many ms the loop must come back for a
+    /// frame being held (pacing, a synchronized update, a pane not yet
+    /// reaped), or null when nothing is held.
+    ///
+    /// Pacing: a viewer gets at most one frame per `frame_ms`. The first
+    /// change after a quiet spell goes out at once (a keystroke's echo is
+    /// never delayed); changes inside the interval fold into the next frame.
+    /// A frame holds the pane's state when it is built, so nothing is lost —
+    /// only intermediate states nobody could have seen at display rate.
+    fn pumpViewers(self: *Server) ?i64 {
+        var wake: ?i64 = null;
+        const soon = struct {
+            fn f(w: *?i64, ms: i64) void {
+                w.* = if (w.*) |cur| @min(cur, ms) else ms;
+            }
+        }.f;
         const now = @import("terminal.zig").monotonicMs();
         for (self.viewers.items) |*v| {
             if (v.conn < 0) continue;
@@ -1441,7 +1468,12 @@ const Server = struct {
             // (DEC 2026) — unless it has run past 250ms, when the app is
             // presumed stuck and the screen is shown as it stands.
             if (t.modes.synchronized and now - t.sync_began_ms < 250) {
-                tick = true;
+                soon(&wake, 20);
+                continue;
+            }
+            const since = now - v.last_frame_ms;
+            if ((v.changed or v.full) and v.last_frame_ms != 0 and since < self.frame_ms) {
+                soon(&wake, self.frame_ms - since);
                 continue;
             }
             // The hangup comes before the child is reaped: the exit status
@@ -1451,8 +1483,11 @@ const Server = struct {
             // status rather than a made-up one.
             const reaped = p.hup and !p.alive();
             const gave_up = p.hup and now - p.hup_ms > 2000;
-            if (p.hup and !reaped and !gave_up) tick = true;
-            if (v.changed or v.full or !p.hup) self.writeFrame(v, p) catch {};
+            if (p.hup and !reaped and !gave_up) soon(&wake, 20);
+            if (v.changed or v.full or !p.hup) {
+                self.writeFrame(v, p) catch {};
+                v.last_frame_ms = now;
+            }
             if ((reaped or gave_up) and !v.exit_sent) {
                 const st = if (reaped) p.spane().exitStatus() else null;
                 self.viewerEvent(v, .{
@@ -1465,7 +1500,7 @@ const Server = struct {
             }
             if (!flushViewer(v)) v.deinit(self.alloc);
         }
-        return tick;
+        return wake;
     }
 
     fn writeFrame(self: *Server, v: *Viewer, p: *Pane) !void {
@@ -1921,6 +1956,7 @@ fn runServer(alloc: std.mem.Allocator, opts: ServerOptions) !void {
         .alloc = alloc,
         .pid = c.getpid(),
         .agent_env = envSlice("BATON_AGENT_EXES"),
+        .frame_ms = opts.frame_ms,
     };
     defer srv.deinit();
 
@@ -2419,7 +2455,7 @@ fn usage() void {
         \\zterm {s} — terminal multiplexer
         \\
         \\usage: zterm [new [-s NAME]]      the multiplexer, in this terminal
-        \\       zterm server [--no-runner] [--runner-socket PATH]
+        \\       zterm server [--no-runner] [--runner-socket PATH] [--frame-ms N]
         \\                                 headless pane pool (a service; baton's runner)
         \\       zterm attach <pane>        this terminal onto a server pane
         \\       zterm cli <list|spawn|send <id> <text>|enter <id>|capture <id>|kill <id>>
@@ -2477,6 +2513,13 @@ pub fn main(init: std.process.Init) !void {
             } else if (std.mem.eql(u8, a, "--runner-socket") and i + 1 < args.items.len) {
                 i += 1;
                 opts.runner_path = args.items[i];
+            } else if (std.mem.eql(u8, a, "--frame-ms") and i + 1 < args.items.len) {
+                i += 1;
+                const ms = std.fmt.parseInt(u32, args.items[i], 10) catch {
+                    std.debug.print("zterm server: --frame-ms takes a number of milliseconds (0-1000)\n", .{});
+                    return usage();
+                };
+                opts.frame_ms = @min(ms, 1000);
             } else {
                 std.debug.print("zterm server: unknown option '{s}'\n", .{a});
                 return usage();
