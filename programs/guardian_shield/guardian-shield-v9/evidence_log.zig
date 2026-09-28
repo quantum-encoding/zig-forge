@@ -333,8 +333,14 @@ pub const Sink = struct {
         }
         var zb: [512]u8 = undefined;
         const zdir = std.fmt.bufPrintZ(&zb, "{s}", .{self.cfg.evidence_dir}) catch return;
+        // 0750 and no wider — but KEEP the setgid bit a group-owned parent
+        // hands down (a plain chmod 0750 would clear it, and files created
+        // after that would lose the reader group). openSegment also sets each
+        // file's group explicitly, so readers do not depend on setgid alone.
         _ = c.mkdir(zdir.ptr, 0o750);
-        _ = c.chmod(zdir.ptr, 0o750);
+        var dst: c.struct_stat = undefined;
+        if (c.stat(zdir.ptr, &dst) == 0)
+            _ = c.chmod(zdir.ptr, 0o750 | (@as(c_uint, @intCast(dst.st_mode)) & c.S_ISGID));
         if (!self.chain_started) self.resumeChain();
         self.openSegment();
         if (self.ev_fd < 0) return;
@@ -413,6 +419,14 @@ pub const Sink = struct {
         const fd = c.open(path.ptr, c.O_WRONLY | c.O_CREAT | c.O_APPEND | c.O_CLOEXEC, @as(c_uint, 0o640));
         if (fd < 0) return;
         _ = c.fchmod(fd, 0o640);
+        // The segment's group is the evidence dir's group: that group is the
+        // reader set (e.g. the operator's `evidence` group), however the file
+        // happened to be created.
+        var zb: [512]u8 = undefined;
+        if (std.fmt.bufPrintZ(&zb, "{s}", .{self.cfg.evidence_dir})) |zdir| {
+            var dst: c.struct_stat = undefined;
+            if (c.stat(zdir.ptr, &dst) == 0) _ = c.fchown(fd, @bitCast(@as(i32, -1)), dst.st_gid);
+        } else |_| {}
         var st: c.struct_stat = undefined;
         self.ev_bytes = if (c.fstat(fd, &st) == 0) @intCast(st.st_size) else 0;
         self.ev_fd = fd;
@@ -854,6 +868,38 @@ test "below the free-space reserve, full events are withheld and counted" {
     try testing.expectEqual(@as(u64, 0), s.ev_withheld);
     try testing.expect(s.ev_bytes > before);
     s.deinit(30 * std.time.ns_per_s);
+}
+
+test "segments take the evidence dir's group, and setgid survives" {
+    // Needs a supplementary group to hand the dir to; skip where there is none.
+    var groups: [64]c.gid_t = undefined;
+    const n = c.getgroups(groups.len, &groups);
+    if (n <= 0) return error.SkipZigTest;
+    const my_egid = c.getegid();
+    var other: ?c.gid_t = null;
+    for (groups[0..@intCast(n)]) |g| {
+        if (g != my_egid) other = g;
+    }
+    const gid = other orelse return error.SkipZigTest;
+
+    var db: [128]u8 = undefined;
+    const dir = try tmpDir(&db);
+    var eb: [256]u8 = undefined;
+    const ev = try std.fmt.bufPrintZ(&eb, "{s}/evidence", .{dir});
+    try testing.expect(c.mkdir(ev.ptr, 0o750) == 0);
+    try testing.expect(c.chown(ev.ptr, @bitCast(@as(i32, -1)), gid) == 0);
+    try testing.expect(c.chmod(ev.ptr, 0o2750) == 0);
+
+    const s = try testing.allocator.create(Sink);
+    defer testing.allocator.destroy(s);
+    s.init(.{ .evidence_dir = ev, .min_free_bytes = 0 }, 1);
+    try testing.expect(s.ev_fd >= 0);
+    var st: c.struct_stat = undefined;
+    try testing.expect(c.fstat(s.ev_fd, &st) == 0);
+    try testing.expectEqual(gid, st.st_gid);
+    try testing.expect(c.stat(ev.ptr, &st) == 0);
+    try testing.expect(st.st_mode & c.S_ISGID != 0);
+    s.deinit(2);
 }
 
 test "the feed is capped and keeps one previous generation" {
