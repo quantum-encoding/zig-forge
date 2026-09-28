@@ -1,0 +1,31 @@
+== zterm-bench ==
+zterm-bench v0.2.0 (schema 2): repeat=5 feed=128MiB pty=16MiB shell=/bin/sh
+| metric | median | min | max | p99 | unit | n |
+|---|---:|---:|---:|---:|---|---:|
+| feed_mixed_mibs | 72.346 | 68.994 | 74.211 | 74.211 | MiB/s | 5 |
+| feed_plain_mibs | 163.825 | 161.428 | 165.523 | 165.523 | MiB/s | 5 |
+| feed_cjk_mibs | 56.285 | 54.121 | 58.938 | 58.938 | MiB/s | 5 |
+| feed_redraw_mibs | 348.180 | 293.283 | 370.872 | 370.872 | MiB/s | 5 |
+| pty_ingest_mibs | 66.356 | 58.578 | 70.110 | 70.110 | MiB/s | 5 |
+| create_destroy_us | 5295.779 | 5277.737 | 5301.025 | 5301.025 | us/op | 5 |
+| attach_detach_us | 0.027 | 0.026 | 0.028 | 0.028 | us/op | 5 |
+
+== zterm-viewbench ==
+zterm-viewbench (schema 1): socket=/tmp/zb-whtjlovw/s.sock keys=500 repeat=5 seq=500000
+| metric | median | min | max | p99 | unit | n |
+|---|---:|---:|---:|---:|---|---:|
+| keypress_us | 25.948 | 19.727 | 176.763 | 95.268 | us | 500 |
+| resize_ms | 0.069 | 0.045 | 0.113 | 0.113 | ms | 50 |
+| view_output_mibs_v1 | 10.295 | 9.797 | 14.955 | 14.955 | MiB/s | 5 |
+| view_output_mibs_v4 | 8.941 | 7.656 | 12.258 | 12.258 | MiB/s | 5 |
+| view_output_mibs_v16 | 3.869 | 3.672 | 5.648 | 5.648 | MiB/s | 5 |
+| view_output_mibs_v1_stalled1 | 10.032 | 8.899 | 12.619 | 12.619 | MiB/s | 5 |
+| view_frames_per_s_v1 | 2396.981 | 1988.546 | 4603.332 | 4603.332 | frames/s | 5 |
+| view_bytes_per_frame_v1 | 1996.369 | 1989.162 | 2003.523 | 2003.523 | B/frame | 5 |
+| reattach_first_frame_ms | 0.135 | 0.107 | 0.262 | 0.262 | ms | 20 |
+| reattach_history_ms | 15.109 | 14.485 | 18.301 | 18.301 | ms | 20 |
+
+== zterm server ==
+zterm server: listening on /tmp/zb-whtjlovw/s.sock
+zterm server: pane 1 (shell) ready
+zterm server: stopping

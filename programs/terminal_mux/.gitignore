@@ -2,3 +2,6 @@
 # test INPUTS: build.zig embeds them as the root source of the composer lib
 # tests, so without them a fresh clone cannot compile those tests at all.
 !tests/fixtures/*.bin
+# Benchmark runs keep what the programs printed (the Experiments contract
+# shows its tail); the repo-wide *.log rule would drop it.
+!bench/runs/**/stderr-*.log
