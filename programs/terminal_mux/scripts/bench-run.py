@@ -271,7 +271,7 @@ def main():
     home = tempfile.mkdtemp(prefix="zbench-home-", dir="/tmp")
     env = hermetic_env(home)
     core_args = ["--repeat", str(a.repeat)]
-    view_args = ["--repeat", str(max(1, a.repeat // 2 + 1))]
+    view_args = ["--repeat", str(a.repeat)]
     if a.quick:
         core_args += ["--feed-mib", "16", "--pty-mib", "4"]
         view_args += ["--keys", "100", "--seq", "100000"]
