@@ -1,8 +1,12 @@
 #!/bin/bash
 # chronos-enable-repo [REPO_DIR] — opt a git repo in to chronos ticking + squash.
 #
-#   1. git config chronos.enabled true   -> chronos-hook starts committing a
-#      [CHRONOS] tick after each tool call in this repo (and ONLY this repo).
+#   1. git config chronos.enabled true   -> batond's chronos watcher starts
+#      committing a [CHRONOS] tick after each tool call in this repo (and ONLY
+#      this repo). The harness hook is `baton chronos note` (wired by
+#      `baton chronos wire`): it records WHO acted and returns; the watcher
+#      does the committing. The zig chronos-hook binary in this directory is
+#      no longer wired on any machine — do not install it as a second writer.
 #   2. git config chronos.autopush <on>  -> whether the squash auto-pushes.
 #   3. Installs .git/hooks/post-commit as a shim that execs the global
 #      /usr/local/bin/chronos-post-commit squasher. An existing, non-chronos
