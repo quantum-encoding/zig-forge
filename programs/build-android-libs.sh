@@ -102,31 +102,31 @@ build_lib() {
 # Format: build_lib "lib_name" "directory" "source_file"
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "quantum_crypto" "simd_crypto_ffi" "src/ffi-grok.zig" && ((SUCCESS++)) || ((FAILED++))
+build_lib "quantum_crypto" "simd_crypto_ffi" "src/ffi-grok.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "http_sentinel" "http_sentinel_ffi" "src/ffi.zig" && ((SUCCESS++)) || ((FAILED++))
+build_lib "http_sentinel" "http_sentinel_ffi" "src/ffi.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "electrum_ffi" "electrum_ffi" "src/ffi.zig" && ((SUCCESS++)) || ((FAILED++))
+build_lib "electrum_ffi" "electrum_ffi" "src/ffi.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "market_data_core" "market_data_parser" "src/market_data_core.zig" && ((SUCCESS++)) || ((FAILED++))
+build_lib "market_data_core" "market_data_parser" "src/market_data_core.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "lockfree_core" "lockfree_queue" "src/lockfree_core.zig" && ((SUCCESS++)) || ((FAILED++))
+build_lib "lockfree_core" "lockfree_queue" "src/lockfree_core.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "async_core" "async_scheduler" "src/async_core.zig" && ((SUCCESS++)) || ((FAILED++))
+build_lib "async_core" "async_scheduler" "src/async_core.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "memory_pool_core" "memory_pool" "src/memory_pool_core.zig" && ((SUCCESS++)) || ((FAILED++))
+build_lib "memory_pool_core" "memory_pool" "src/memory_pool_core.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "financial_core" "financial_engine" "src/financial_core.zig" && ((SUCCESS++)) || ((FAILED++))
+build_lib "financial_core" "financial_engine" "src/financial_core.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "zigpdf" "zig_pdf_generator" "src/ffi.zig" && ((SUCCESS++)) || ((FAILED++))
+build_lib "zigpdf" "zig_pdf_generator" "src/ffi.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
 
 # =============================================================================
 # Programs with their own `zig build android` step.
@@ -171,10 +171,10 @@ native_android_step() {
 }
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-native_android_step "financial_engine" && ((SUCCESS++)) || ((FAILED++))
+native_android_step "financial_engine" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-native_android_step "mempool_sniffer" && ((SUCCESS++)) || ((FAILED++))
+native_android_step "mempool_sniffer" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
 
 # zsss lives under zig_core_utils/, not programs/. The iOS build
 # skips it with a "directory not found" warning because of the same

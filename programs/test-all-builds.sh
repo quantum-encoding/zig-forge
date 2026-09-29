@@ -128,7 +128,7 @@ test_program() {
         echo -e "${RED}[FAIL]${NC}"
         echo "[FAIL]" >> "$LOG_FILE"
         FAILED_PROGRAMS+=("$prog_name")
-        ((FAILED++))
+        FAILED=$((FAILED + 1))
     fi
 
     # Log output (filter out libwarden noise for cleaner logs)

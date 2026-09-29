@@ -155,7 +155,7 @@ for entry in "${LIBS[@]}"; do
         continue
     fi
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    if build_lib "$name" "$dir" "$source"; then ((SUCCESS++)); else ((FAILED++)); fi
+    if build_lib "$name" "$dir" "$source"; then SUCCESS=$((SUCCESS + 1)); else FAILED=$((FAILED + 1)); fi
 done
 
 echo ""
