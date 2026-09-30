@@ -42,12 +42,27 @@ set -euo pipefail
 msg_override=""
 msg_from_file=""
 repo_dir=""
+
+usage() {
+  cat <<'USAGE'
+chronos-push [-m "message" | -F <file>] [-C <repo>] [remote] [branch]
+  Fold [CHRONOS] tick commits out of the unpushed range and push clean history.
+
+  -m "subject"          subject for the trailing summary commit
+  -F <file>             message read verbatim from a file ("-" = stdin)
+  -C <repo>             run against another working tree
+  -h, --help            print this help and fold nothing
+  [remote] [branch]     default: origin <current-branch>
+USAGE
+}
+
 # Flags in any order, before the positional remote/branch.
 while true; do
   case "${1:-}" in
     -m) msg_override="${2:-}"; shift 2 ;;
     -F|--message-file) msg_from_file="${2:-}"; shift 2 ;;
     -C|--repo|--git-repo) repo_dir="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
     *) break ;;
   esac
 done
@@ -106,6 +121,17 @@ fi
 # (rewrite only unpushed history); fall back to the nearest non-tick ancestor.
 upstream="${remote}/${branch}"
 if git rev-parse --verify -q "$upstream" >/dev/null 2>&1; then
+  # The fold replays local commits' EXISTING trees onto a chain rooted at
+  # `base`. When `base` is the upstream tip, a tree built before upstream moved
+  # no longer contains upstream's changes, so folding above a diverged upstream
+  # pushes a fast-forward that SILENTLY REVERTS whatever upstream added. Refuse
+  # unless upstream is an ancestor of HEAD (i.e. HEAD already contains it).
+  if ! git merge-base --is-ancestor "$upstream" HEAD 2>/dev/null; then
+    echo "chronos-push: ERROR — $upstream has commits HEAD does not contain." >&2
+    echo "  Folding now would push a tree missing those commits and revert them." >&2
+    echo "  Integrate first:  git pull --rebase $remote $branch   (then re-run)" >&2
+    exit 1
+  fi
   base=$(git rev-parse "$upstream")
 else
   h=$(git rev-parse HEAD); base=""
