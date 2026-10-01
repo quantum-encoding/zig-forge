@@ -41,11 +41,11 @@ BOOTSTRAP_ZIG="${BOOTSTRAP_ZIG:-/Users/director/Downloads/zig-aarch64-macos-0.16
 # bootstrap binary's stdlib. The master branch on codeberg is too new.
 ZIG_SRC="${ZIG_SRC:-/tmp/zig-src/zig-0.16.3153}"
 ZIG_OUT="${ZIG_OUT:-/tmp/zig-patched}"
-PATCH="${PATCH:-/Users/director/work/poly-repo/zig-forge/scripts/zig-macho-archive-alignment.patch}"
+PATCH="${PATCH:-/Users/director/work/zig-forge/scripts/zig-macho-archive-alignment.patch}"
 
-PDF_DIR=/Users/director/work/poly-repo/zig-forge/programs/zig_pdf_generator
-DOCX_DIR=/Users/director/work/poly-repo/zig-forge/programs/zig_docx
-XCODE_PROJ=/Users/director/work/poly-repo/CosmicDuckOS
+PDF_DIR=/Users/director/work/zig-forge/programs/zig_pdf_generator
+DOCX_DIR=/Users/director/work/zig-forge/programs/zig_docx
+XCODE_PROJ=/Users/director/work/apple_apps/CosmicDuckOS
 
 # ── Pre-flight ──────────────────────────────────────────────────────────
 hdr "Pre-flight"

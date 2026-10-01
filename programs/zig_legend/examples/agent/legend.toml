@@ -38,10 +38,10 @@ name = "PROJECT_PATH"
 type = "string"
 by = "PROJECT"
 [var.map]
-zig-forge = "~/work/poly-repo/zig-forge"
-baton = "~/work/poly-repo/baton-ecosystem/baton"
-rust_agent = "~/work/poly-repo/baton-ecosystem/rust_agent"
-GuardianShield = "~/work/poly-repo/GuardianShieldSec/GuardianShield"
+zig-forge = "~/work/zig-forge"
+baton = "~/work/baton_group/baton"
+rust_agent = "~/work/baton_group/rust_agent"
+GuardianShield = "~/work/apple_apps/MetatronSecurity"
 
 [[var]]
 name = "GOAL_ID"

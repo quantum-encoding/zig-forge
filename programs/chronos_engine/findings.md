@@ -1,6 +1,6 @@
 # Chronos Engine — Red Team Audit
 
-**Target:** `/Users/director/work/poly-repo/zig-forge/programs/chronos_engine`
+**Target:** `/Users/director/work/zig-forge/programs/chronos_engine`
 **Date:** 2026-04-27
 **Scope:** Sovereign Clock daemon, Phi timestamp library, IPC sockets, D-Bus bridge, eBPF cognitive watcher, conductor correlation engine, CLI tools.
 **Project nature confirmed:** "Sovereign monotonic clock" + persisted tick counter + agent-action chronicle (`chronos.zig`, `phi_timestamp.zig`). The README's threat model explicitly lists *tick rollback*, *tick forgery*, *DoS*, *file tampering*, *priv-esc*. Several of those defenses are not delivered by the code.
