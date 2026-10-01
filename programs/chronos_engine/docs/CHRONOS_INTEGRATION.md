@@ -5,7 +5,7 @@ Integrate the cognitive state capture system with Chronos git commit stamps.
 ## Current State (OLD)
 
 ```
-[CHRONOS] 2025-10-28T07:43:14.+699177185Z::claude-code::Pondering::TICK-0000010974::[/home/founder/github_public/guardian-shield]::[/home/founder/github_public/guardian-shield/src/chronos-engine] → tool-completion - Create file: README_COGNITIVE_CAPTURE.md
+[CHRONOS] 2025-10-28T07:43:14.+699177185Z::claude-code::Pondering::TICK-0000010974::[/home/founder/work/zig_programs/guardian-shield]::[/home/founder/work/zig_programs/guardian-shield/src/chronos-engine] → tool-completion - Create file: README_COGNITIVE_CAPTURE.md
 ```
 
 **Problem**: "Pondering" is a static snapshot from old Python system, not real-time.
@@ -13,7 +13,7 @@ Integrate the cognitive state capture system with Chronos git commit stamps.
 ## New State (REAL-TIME)
 
 ```
-[CHRONOS] 2025-10-28T09:15:32.+123456789Z::claude-code::Write::Creating integration guide::TICK-0000011234::[/home/founder/github_public/guardian-shield]::[/home/founder/github_public/guardian-shield/src/chronos-engine] → tool-completion - Create file: CHRONOS_INTEGRATION.md
+[CHRONOS] 2025-10-28T09:15:32.+123456789Z::claude-code::Write::Creating integration guide::TICK-0000011234::[/home/founder/work/zig_programs/guardian-shield]::[/home/founder/work/zig_programs/guardian-shield/src/chronos-engine] → tool-completion - Create file: CHRONOS_INTEGRATION.md
 ```
 
 **Solution**: Query live cognitive state database for actual tool + status.
@@ -32,8 +32,8 @@ sudo chmod 0440 /etc/sudoers.d/cognitive-query
 ### 2. Add Tools to PATH
 
 ```bash
-sudo ln -s /home/founder/github_public/guardian-shield/src/chronos-engine/cognitive-query /usr/local/bin/
-sudo ln -s /home/founder/github_public/guardian-shield/src/chronos-engine/get-cognitive-state /usr/local/bin/
+sudo ln -s /home/founder/work/zig_programs/guardian-shield/src/chronos-engine/cognitive-query /usr/local/bin/
+sudo ln -s /home/founder/work/zig_programs/guardian-shield/src/chronos-engine/get-cognitive-state /usr/local/bin/
 ```
 
 ### 3. Grant Claude Code Permission
@@ -179,19 +179,19 @@ CHRONOS_STAMP="[CHRONOS] ${TIMESTAMP}::claude-code[${CLAUDE_PID}]::${COGNITIVE_S
 ### Tool Execution
 
 ```
-[CHRONOS] 2025-10-28T09:20:15.+456789123Z::claude-code[302079]::Bash::Running::TICK-0000011245::[/home/founder/github_public/guardian-shield]::[/home/founder/github_public/guardian-shield/src/chronos-engine] → tool-completion - Create cognitive query tool
+[CHRONOS] 2025-10-28T09:20:15.+456789123Z::claude-code[302079]::Bash::Running::TICK-0000011245::[/home/founder/work/zig_programs/guardian-shield]::[/home/founder/work/zig_programs/guardian-shield/src/chronos-engine] → tool-completion - Create cognitive query tool
 ```
 
 ### File Creation
 
 ```
-[CHRONOS] 2025-10-28T09:21:33.+789456123Z::claude-code[302079]::Write::Creating CHRONOS_INTEGRATION.md::TICK-0000011246::[/home/founder/github_public/guardian-shield]::[/home/founder/github_public/guardian-shield/src/chronos-engine] → file-created - CHRONOS_INTEGRATION.md
+[CHRONOS] 2025-10-28T09:21:33.+789456123Z::claude-code[302079]::Write::Creating CHRONOS_INTEGRATION.md::TICK-0000011246::[/home/founder/work/zig_programs/guardian-shield]::[/home/founder/work/zig_programs/guardian-shield/src/chronos-engine] → file-created - CHRONOS_INTEGRATION.md
 ```
 
 ### Thinking States
 
 ```
-[CHRONOS] 2025-10-28T09:22:44.+123789456Z::claude-code[302079]::Analyzing::button placement in App.svelte::TICK-0000011247::[/home/founder/apps_and_extensions/quantum-bridge]::[/home/founder/apps_and_extensions/quantum-bridge/quantum-local-agent] → analysis - Exploring quantum-bridge architecture
+[CHRONOS] 2025-10-28T09:22:44.+123789456Z::claude-code[302079]::Analyzing::button placement in App.svelte::TICK-0000011247::[/home/founder/work/typescript/apps_and_extensions/quantum-bridge]::[/home/founder/work/typescript/apps_and_extensions/quantum-bridge/quantum-local-agent] → analysis - Exploring quantum-bridge architecture
 ```
 
 ---
@@ -225,8 +225,8 @@ cognitive-query summary 302079
 
 Combine PWD tracking with cognitive states:
 ```
-[/home/founder/github_public/guardian-shield]::[...chronos-engine] → Bash::Running
-[/home/founder/apps_and_extensions/quantum-bridge]::[...quantum-local-agent] → Read::Analyzing
+[/home/founder/work/zig_programs/guardian-shield]::[...chronos-engine] → Bash::Running
+[/home/founder/work/typescript/apps_and_extensions/quantum-bridge]::[...quantum-local-agent] → Read::Analyzing
 ```
 
 Know which project Claude was working in when the commit happened.
@@ -299,7 +299,7 @@ The cognitive watcher may not be running:
 ps aux | grep cognitive-watcher-v2
 
 # Start if not running
-cd /home/founder/github_public/guardian-shield/src/chronos-engine
+cd /home/founder/work/zig_programs/guardian-shield/src/chronos-engine
 sudo ./cognitive-watcher-v2
 ```
 

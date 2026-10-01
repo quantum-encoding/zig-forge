@@ -1,7 +1,7 @@
 #!/bin/bash
 # Test the Python cognitive monitor with simulated Claude output
 
-MONITOR_SCRIPT="/home/founder/apps_and_extensions/claude-code-cognitive-monitor/monitor.py"
+MONITOR_SCRIPT="/home/founder/work/typescript/apps_and_extensions/claude-code-cognitive-monitor/monitor.py"
 
 echo "🧪 Testing Cognitive State Monitor"
 echo "=================================="

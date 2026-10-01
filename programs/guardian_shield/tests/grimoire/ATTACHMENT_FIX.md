@@ -57,7 +57,7 @@ const grimoire_link = c.bpf_program__attach_tracepoint(grimoire_prog, "raw_sysca
 
 Run the automated test:
 ```bash
-cd /home/founder/github_public/guardian-shield
+cd /home/founder/work/zig_programs/guardian-shield
 sudo ./tests/grimoire/verify-attachment.sh
 ```
 
@@ -112,7 +112,7 @@ With this fix:
 
 Execute the full behavioral detection test:
 ```bash
-cd /home/founder/github_public/guardian-shield
+cd /home/founder/work/zig_programs/guardian-shield
 sudo ./tests/grimoire/run-first-blood-test.sh
 ```
 

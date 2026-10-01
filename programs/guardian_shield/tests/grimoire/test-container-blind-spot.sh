@@ -24,7 +24,7 @@ docker stop test-attack-container 2>/dev/null || true
 docker rm test-attack-container 2>/dev/null || true
 sleep 2
 
-cd /home/founder/github_public/guardian-shield
+cd /home/founder/work/zig_programs/guardian-shield
 
 # Check Guardian binary exists
 echo "2. Checking Guardian binary..."

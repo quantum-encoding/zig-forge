@@ -34,7 +34,7 @@ For projects that require `ReleaseSafe`, you can patch `/usr/local/zig/src/Compi
 ## Building from Source
 
 ```bash
-cd /home/founder/github_public/guardian-shield
+cd /home/founder/work/zig_programs/guardian-shield
 zig build -Doptimize=ReleaseFast
 ```
 

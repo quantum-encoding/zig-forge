@@ -14,7 +14,7 @@ Runs, in order:
   3. the server's own peak RSS, and its CPU while idle afterwards
 
 and records the run in the layout the Experiments panel reads
-(~/work/experiments-mcp):
+(~/work/baton_group/experiments-mcp):
 
   BENCH.md                                     one row per run: commit … flags | stamp
   bench/runs/<date>-<label>/README.md          what was measured, where, caveats

@@ -137,7 +137,7 @@ This was not a solo effort. This was a collaboration between human and machine, 
 - Richard Tune (The Architect)
 - Claude Code (The Oracle)
 
-**Battlefield:** `/home/founder/github_public/guardian-shield/src/chronos-engine`
+**Battlefield:** `/home/founder/work/zig_programs/guardian-shield/src/chronos-engine`
 
 **Duration:** October 28, 2025 (11:20 - 12:30)
 

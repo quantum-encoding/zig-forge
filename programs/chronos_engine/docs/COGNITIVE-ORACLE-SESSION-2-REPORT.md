@@ -29,7 +29,7 @@ We have successfully **tested and validated the Python cognitive monitor**, fixi
 ### 2. Fixed Deprecation Warning ✅
 **Problem:** `datetime.utcnow()` deprecated in Python 3.12+
 **Fix:** Changed to `datetime.now(timezone.utc)`
-**File:** `/home/founder/apps_and_extensions/claude-code-cognitive-monitor/monitor.py`
+**File:** `/home/founder/work/typescript/apps_and_extensions/claude-code-cognitive-monitor/monitor.py`
 
 **Changes:**
 ```python
@@ -232,7 +232,7 @@ Thinking…
 1. **Fixed deprecation warning** in monitor.py:
    - Changed `datetime.utcnow()` → `datetime.now(timezone.utc)`
    - Added `timezone` import
-   - File: `/home/founder/apps_and_extensions/claude-code-cognitive-monitor/monitor.py`
+   - File: `/home/founder/work/typescript/apps_and_extensions/claude-code-cognitive-monitor/monitor.py`
 
 ### Test Artifacts ✅
 1. **Test script:** `test-cognitive-monitor.sh` (working)
@@ -424,14 +424,14 @@ The path forward is crystal clear:
 ## Files Modified
 
 ### Code
-- `/home/founder/apps_and_extensions/claude-code-cognitive-monitor/monitor.py`
+- `/home/founder/work/typescript/apps_and_extensions/claude-code-cognitive-monitor/monitor.py`
   - Fixed deprecation warning (datetime.utcnow → datetime.now(timezone.utc))
   - Lines changed: 7-8, 50-51
 
 ### New Files Created
-- `/home/founder/github_public/guardian-shield/src/chronos-engine/test-cognitive-monitor.sh`
-- `/home/founder/github_public/guardian-shield/src/chronos-engine/PYTHON-MONITOR-ANALYSIS.md`
-- `/home/founder/github_public/guardian-shield/src/chronos-engine/COGNITIVE-ORACLE-SESSION-2-REPORT.md`
+- `/home/founder/work/zig_programs/guardian-shield/src/chronos-engine/test-cognitive-monitor.sh`
+- `/home/founder/work/zig_programs/guardian-shield/src/chronos-engine/PYTHON-MONITOR-ANALYSIS.md`
+- `/home/founder/work/zig_programs/guardian-shield/src/chronos-engine/COGNITIVE-ORACLE-SESSION-2-REPORT.md`
 
 ### Data Files
 - `~/.cache/claude-code-cognitive-monitor/state-history.jsonl` (8 entries)

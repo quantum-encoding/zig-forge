@@ -11,7 +11,7 @@ echo ""
 sudo pkill -9 zig-sentinel 2>/dev/null || true
 sleep 1
 
-cd /home/founder/github_public/guardian-shield
+cd /home/founder/work/zig_programs/guardian-shield
 
 # Run Guardian for 5 seconds (no timeout, let it exit normally)
 echo "Starting Guardian with Grimoire (5 seconds)..."

@@ -311,7 +311,7 @@ fn validate_fan_speed(u8) -> Result<u8>  // ✅ Adapt for blacklist validation
 
 ```bash
 # Create development branch
-cd /home/founder/github_public/guardian-shield
+cd /home/founder/work/zig_programs/guardian-shield
 git checkout -b oracle-development
 
 # Extend eBPF program

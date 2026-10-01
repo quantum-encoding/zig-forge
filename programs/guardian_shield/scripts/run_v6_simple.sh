@@ -2,7 +2,7 @@
 # run_v6_simple.sh - Simplified V6 Docker test (no /etc/warden needed)
 
 docker run --rm \
-  -v /home/founder/github_public/guardian-shield:/forge:ro \
+  -v /home/founder/work/zig_programs/guardian-shield:/forge:ro \
   warden-test:v4 \
   bash -c '
 # Create test directories as testuser

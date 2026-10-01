@@ -14,7 +14,7 @@ sudo pkill -9 zig-sentinel 2>/dev/null || true
 sudo rm -f /var/log/zig-sentinel/grimoire_alerts.json
 sleep 1
 
-cd /home/founder/github_public/guardian-shield
+cd /home/founder/work/zig_programs/guardian-shield
 
 echo "1. Starting Guardian with Grimoire (20 seconds)..."
 sudo ./zig-out/bin/zig-sentinel \

@@ -25,7 +25,7 @@ docker stop test-enforcement-container 2>/dev/null || true
 docker rm test-enforcement-container 2>/dev/null || true
 sleep 2
 
-cd /home/founder/github_public/guardian-shield
+cd /home/founder/work/zig_programs/guardian-shield
 
 echo "═══════════════════════════════════════════════════════════════"
 echo "PHASE 1: PREPARATION"

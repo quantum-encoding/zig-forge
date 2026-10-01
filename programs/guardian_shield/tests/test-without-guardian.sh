@@ -19,7 +19,7 @@ export LD_PRELOAD=""
 echo "Starting Inquisitor in MONITOR mode (15 seconds)..."
 echo ""
 
-/home/founder/github_public/guardian-shield/zig-out/bin/test-inquisitor monitor 15 &
+/home/founder/work/zig_programs/guardian-shield/zig-out/bin/test-inquisitor monitor 15 &
 INQUISITOR_PID=$!
 
 # Wait for attachment
@@ -27,7 +27,7 @@ sleep 3
 
 echo ""
 echo "Executing test-target (WITHOUT Guardian Shield)..."
-/home/founder/github_public/guardian-shield/test-target
+/home/founder/work/zig_programs/guardian-shield/test-target
 echo ""
 
 echo "Waiting for monitoring to complete..."

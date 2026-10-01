@@ -13,7 +13,7 @@ sudo pkill -9 zig-sentinel 2>/dev/null || true
 sudo pkill -9 nc 2>/dev/null || true
 sleep 1
 
-cd /home/founder/github_public/guardian-shield
+cd /home/founder/work/zig_programs/guardian-shield
 
 # Start listener in background
 echo "1. Starting netcat listener on port 4444..."

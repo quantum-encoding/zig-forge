@@ -142,14 +142,14 @@ test-target should NOT execute.
 
 ## Files to Modify
 
-1. `/home/founder/github_public/guardian-shield/src/zig-sentinel/ebpf/inquisitor-simple.bpf.c`
+1. `/home/founder/work/zig_programs/guardian-shield/src/zig-sentinel/ebpf/inquisitor-simple.bpf.c`
    - Lines 175-177: Replace `bpf_get_current_comm()` logic
    - Add `extract_basename_from_path()` helper function
    - Update blacklist matching to use extracted program name
 
 2. Recompile:
    ```bash
-   cd /home/founder/github_public/guardian-shield/src/zig-sentinel/ebpf
+   cd /home/founder/work/zig_programs/guardian-shield/src/zig-sentinel/ebpf
    clang -target bpf -D__TARGET_ARCH_x86 -O2 -g -Wall \
          -I/usr/include -I/usr/include/x86_64-linux-gnu \
          -c inquisitor-simple.bpf.c -o inquisitor-simple.bpf.o
@@ -157,7 +157,7 @@ test-target should NOT execute.
 
 3. Rebuild Zig binary:
    ```bash
-   cd /home/founder/github_public/guardian-shield
+   cd /home/founder/work/zig_programs/guardian-shield
    zig build
    ```
 

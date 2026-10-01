@@ -17,7 +17,7 @@ echo ""
 # Setup
 TEST_DIR="/tmp/trial-by-fire"
 mkdir -p "$TEST_DIR"
-cd /home/founder/github_public/guardian-shield
+cd /home/founder/work/zig_programs/guardian-shield
 
 # Cleanup
 sudo pkill -9 zig-sentinel 2>/dev/null || true

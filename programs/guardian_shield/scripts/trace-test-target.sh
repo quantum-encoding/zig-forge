@@ -20,7 +20,7 @@ echo > /sys/kernel/tracing/trace
 
 # Start Inquisitor
 echo "Starting Inquisitor in MONITOR mode..."
-/home/founder/github_public/guardian-shield/zig-out/bin/test-inquisitor monitor 15 > /tmp/inquisitor.log 2>&1 &
+/home/founder/work/zig_programs/guardian-shield/zig-out/bin/test-inquisitor monitor 15 > /tmp/inquisitor.log 2>&1 &
 INQUISITOR_PID=$!
 
 sleep 3
@@ -40,7 +40,7 @@ echo ""
 
 # Execute test-target
 echo "Executing test-target..."
-/home/founder/github_public/guardian-shield/test-target
+/home/founder/work/zig_programs/guardian-shield/test-target
 echo ""
 
 # Execute bash for comparison

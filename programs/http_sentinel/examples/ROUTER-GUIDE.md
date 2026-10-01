@@ -65,7 +65,7 @@ Results:
 
 ### Tokenizer Service Endpoints
 
-Your service at `/home/founder/rust_programs/tokenizer-service` exposes:
+Your service at `/home/founder/work/rust_programs/rust_tokenizer` exposes:
 
 ```rust
 POST /v1/tokenize          - Batch tokenization

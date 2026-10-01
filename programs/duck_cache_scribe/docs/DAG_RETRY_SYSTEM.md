@@ -15,7 +15,7 @@ The DAG Retry System implements autonomous failure recovery for AI_CONDUCTOR bat
 
 ### 1. Anti-Brittle Retry Logic (Weapon Layer)
 
-**Location:** `/home/founder/apps_and_extensions/agent-summon/src/retry.rs`
+**Location:** `/home/founder/work/rust_programs/agent-summon/src/retry.rs`
 
 ```rust
 pub struct RetryConfig {
@@ -168,8 +168,8 @@ The upgraded summon_agent will now automatically retry on 429 rate limits, with 
 The system consists of:
 
 1. **agent-batch-retry** → `~/.local/bin/agent-batch-retry` (executable)
-2. **retry.rs** → `/home/founder/apps_and_extensions/agent-summon/src/retry.rs`
-3. **grok.rs (modified)** → `/home/founder/apps_and_extensions/agent-summon/src/api/grok.rs`
+2. **retry.rs** → `/home/founder/work/rust_programs/agent-summon/src/retry.rs`
+3. **grok.rs (modified)** → `/home/founder/work/rust_programs/agent-summon/src/api/grok.rs`
 
 **Status:** ✅ Installed and operational
 

@@ -15,7 +15,7 @@ docker stop test-attack-container 2>/dev/null || true
 docker rm test-attack-container 2>/dev/null || true
 sleep 1
 
-cd /home/founder/github_public/guardian-shield
+cd /home/founder/work/zig_programs/guardian-shield
 
 # Start Guardian
 echo "1. Starting Guardian with Grimoire (30 second monitoring)..."

@@ -4,7 +4,7 @@
 
 set -e
 
-SCRIPT_DIR="/home/founder/github_public/guardian-shield"
+SCRIPT_DIR="/home/founder/work/zig_programs/guardian-shield"
 ORACLE_SRC="$SCRIPT_DIR/oracle-probe.c"
 ORACLE_BIN="$SCRIPT_DIR/oracle-probe"
 REPORT_PATH="$SCRIPT_DIR/oracle-report.txt"

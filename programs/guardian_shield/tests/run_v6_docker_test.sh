@@ -3,7 +3,7 @@
 # Runs setup as root, then tests as testuser
 
 docker run --rm \
-  -v /home/founder/github_public/guardian-shield:/forge:ro \
+  -v /home/founder/work/zig_programs/guardian-shield:/forge:ro \
   warden-test:v4 \
   bash -c '
 # Run as root to set up environment

@@ -30,7 +30,7 @@ echo ""
 # Start Inquisitor in background (will run for 30 seconds)
 echo "🗡️  Starting Inquisitor in ENFORCE mode..."
 echo "🚫 Blacklisting: 'test-target'"
-sudo /home/founder/github_public/guardian-shield/zig-out/bin/test-inquisitor enforce 30 &
+sudo /home/founder/work/zig_programs/guardian-shield/zig-out/bin/test-inquisitor enforce 30 &
 INQUISITOR_PID=$!
 
 # Give it time to load and attach

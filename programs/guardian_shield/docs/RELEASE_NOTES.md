@@ -127,7 +127,7 @@ guardian-shield/
 
 1. **Testing**
    ```bash
-   cd /home/founder/github_public/guardian-shield
+   cd /home/founder/work/zig_programs/guardian-shield
    zig build -Doptimize=ReleaseSafe
    sudo ./install.sh
    # Run test suite

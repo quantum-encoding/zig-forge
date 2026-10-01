@@ -14,11 +14,11 @@ The weapon has been upgraded from manual batch execution to **fully autonomous s
 **Completed:** 2025-10-24 13:09
 
 **Files Created:**
-- `/home/founder/apps_and_extensions/agent-summon/src/retry.rs`
+- `/home/founder/work/rust_programs/agent-summon/src/retry.rs`
 
 **Files Modified:**
-- `/home/founder/apps_and_extensions/agent-summon/src/api/grok.rs`
-- `/home/founder/apps_and_extensions/agent-summon/src/main.rs`
+- `/home/founder/work/rust_programs/agent-summon/src/api/grok.rs`
+- `/home/founder/work/rust_programs/agent-summon/src/main.rs`
 
 **Features:**
 - Exponential backoff: 5s → 15s → 45s → 135s → 300s

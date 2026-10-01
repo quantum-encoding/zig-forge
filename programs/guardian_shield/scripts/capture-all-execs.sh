@@ -17,7 +17,7 @@ echo ""
 
 # Start Inquisitor in monitor mode (logs ALL)
 echo "Starting Inquisitor (logs all execs for 10 seconds)..."
-/home/founder/github_public/guardian-shield/zig-out/bin/test-inquisitor monitor 10 > /tmp/inquisitor-full-log.txt 2>&1 &
+/home/founder/work/zig_programs/guardian-shield/zig-out/bin/test-inquisitor monitor 10 > /tmp/inquisitor-full-log.txt 2>&1 &
 INQUISITOR_PID=$!
 
 sleep 2
@@ -27,12 +27,12 @@ echo "Executing various commands to generate events..."
 echo ""
 
 # Execute test-target multiple ways
-echo "[1] Executing: /home/founder/github_public/guardian-shield/test-target"
-/home/founder/github_public/guardian-shield/test-target
+echo "[1] Executing: /home/founder/work/zig_programs/guardian-shield/test-target"
+/home/founder/work/zig_programs/guardian-shield/test-target
 
 echo ""
 echo "[2] Executing: ./test-target (from guardian-shield dir)"
-cd /home/founder/github_public/guardian-shield
+cd /home/founder/work/zig_programs/guardian-shield
 ./test-target
 
 echo ""

@@ -69,7 +69,7 @@ chattr -a /log/file        # Remove append-only
 ### Tier 3: Security Infrastructure
 ```
 /home/founder/github_public/guardian-shield/libwarden.so
-/home/founder/github_public/guardian-shield/zig-out/bin/test-inquisitor
+/home/founder/work/zig_programs/guardian-shield/zig-out/bin/test-inquisitor
 /etc/warden/warden-config.json
 /etc/ld.so.preload
 ```

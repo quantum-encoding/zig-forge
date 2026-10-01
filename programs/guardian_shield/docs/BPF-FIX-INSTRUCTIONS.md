@@ -3,7 +3,7 @@
 ## Critical Change Required
 
 ### Location:
-`/home/founder/github_public/guardian-shield/src/zig-sentinel/ebpf/inquisitor-simple.bpf.c`
+`/home/founder/work/zig_programs/guardian-shield/src/zig-sentinel/ebpf/inquisitor-simple.bpf.c`
 
 ### Lines to Replace: 175-181
 
@@ -96,7 +96,7 @@ __builtin_memcpy(event->filename, program_name, 64);
 ## Compile After Fix
 
 ```bash
-cd /home/founder/github_public/guardian-shield/src/zig-sentinel/ebpf
+cd /home/founder/work/zig_programs/guardian-shield/src/zig-sentinel/ebpf
 clang -target bpf -D__TARGET_ARCH_x86 -O2 -g -Wall \
       -I/usr/include -I/usr/include/x86_64-linux-gnu \
       -c inquisitor-simple.bpf.c -o inquisitor-simple.bpf.o
@@ -109,7 +109,7 @@ If you get verifier errors, you may need to add more `#pragma unroll` directives
 ## Test After Fix
 
 ```bash
-cd /home/founder/github_public/guardian-shield
+cd /home/founder/work/zig_programs/guardian-shield
 zig build
 
 # Test 1: Monitor mode - should now see 'test-target' in logs

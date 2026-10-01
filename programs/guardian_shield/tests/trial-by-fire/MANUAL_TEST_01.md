@@ -38,7 +38,7 @@ exploit
 ## Step 3: Start Guardian (Terminal 2)
 
 ```bash
-cd /home/founder/github_public/guardian-shield
+cd /home/founder/work/zig_programs/guardian-shield
 
 sudo ./zig-out/bin/zig-sentinel \
     --enable-grimoire \

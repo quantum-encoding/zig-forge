@@ -293,7 +293,7 @@ For structured logging with full metadata:
 
 **v2.0 (Spatial-temporal sovereignty):**
 ```
-[CHRONOS] 2025-10-19T23:45:18.726242726Z::CLAUDE-CODE::TICK-0000000019::[/home/founder/.claude/projects/-home-founder-github-public-guardian-shield]::[/home/founder/github_public/guardian-shield] → Action
+[CHRONOS] 2025-10-19T23:45:18.726242726Z::CLAUDE-CODE::TICK-0000000019::[/home/founder/.claude/projects/-home-founder-github-public-guardian-shield]::[/home/founder/work/zig_programs/guardian-shield] → Action
 ```
 
 ### The Four Dimensions

@@ -287,7 +287,7 @@ The Python cognitive monitor is **production-ready and fully functional**. It su
 ## Test Artifacts
 
 ### Test Script
-- `/home/founder/github_public/guardian-shield/src/chronos-engine/test-cognitive-monitor.sh`
+- `/home/founder/work/zig_programs/guardian-shield/src/chronos-engine/test-cognitive-monitor.sh`
 
 ### Captured Data
 - `~/.cache/claude-code-cognitive-monitor/state-history.jsonl` (8 entries)

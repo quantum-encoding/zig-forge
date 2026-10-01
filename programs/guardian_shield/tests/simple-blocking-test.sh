@@ -8,8 +8,8 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-INQUISITOR_BIN="/home/founder/github_public/guardian-shield/zig-out/bin/test-inquisitor"
-TEST_TARGET="/home/founder/github_public/guardian-shield/test-target"
+INQUISITOR_BIN="/home/founder/work/zig_programs/guardian-shield/zig-out/bin/test-inquisitor"
+TEST_TARGET="/home/founder/work/zig_programs/guardian-shield/test-target"
 
 echo "═══════════════════════════════════════════════════════════"
 echo "  SIMPLE BLOCKING TEST"
