@@ -735,7 +735,7 @@ test "a sparse disk image and its dense copy are duplicates; a same-size image t
 
     const size: u64 = hasher.probe_sample_min + 4 * 1024 * 1024;
     const header = [_]u8{'h'} ** 4096;
-    const sampled = ((size - 4096) / hasher.probe_samples * 3) & ~@as(u64, 4095);
+    const sampled = ((size - 4096) / hasher.probeSamples(size) * 3) & ~@as(u64, 4095);
     const one = [_]u8{'1'} ** 4096;
     const two = [_]u8{'2'} ** 4096;
     try scratch.makeDir("vm");

@@ -162,7 +162,7 @@ fn hashFileWith(comptime Hasher: type, path: []const u8, max_bytes: ?usize, moni
 
 pub const ScanRead = enum {
     /// Cheap rejection: the first `DEFAULT_QUICK_HASH_SIZE` bytes, plus, for
-    /// a file of `probe_sample_min` or more, `probe_samples` blocks spread
+    /// a file of `probe_sample_min` or more, `probeSamples` blocks spread
     /// over the rest. Big files of one size (disk images, VM bundles) tend to
     /// share their first block; without samples each such pair is read
     /// whole before it turns out to differ.
@@ -172,13 +172,20 @@ pub const ScanRead = enum {
 };
 
 pub const probe_sample_min: u64 = 64 * 1024 * 1024;
-pub const probe_samples: u64 = 15;
+/// One sample per this many bytes, between 15 and 4096 samples: a 64 GiB
+/// image gets 1024 (4 MiB of reads), enough to catch two VM images of one
+/// size that differ in scattered places, as installs of two OS versions do.
+pub const probe_stride: u64 = 64 * 1024 * 1024;
+
+pub fn probeSamples(size: u64) u64 {
+    return std.math.clamp(size / probe_stride, 15, 4096);
+}
 
 /// Bytes `ScanRead.probe` reads from a file of `size`.
 pub fn probeBytes(size: u64) u64 {
     const prefix: u64 = DEFAULT_QUICK_HASH_SIZE;
     if (size < probe_sample_min) return @min(size, prefix);
-    return prefix * (1 + probe_samples);
+    return prefix * (1 + probeSamples(size));
 }
 
 fn scanFd(comptime Hasher: type, fd: c_int, read: ScanRead, size: u64, monitor: ?*types.Monitor, budget_bytes: u64) !Hash {
@@ -192,10 +199,11 @@ fn scanFd(comptime Hasher: type, fd: c_int, read: ScanRead, size: u64, monitor: 
             var buf: [DEFAULT_QUICK_HASH_SIZE]u8 = undefined;
             const last = size - buf.len;
             var k: u64 = 0;
-            while (k <= probe_samples) : (k += 1) {
+            const samples = probeSamples(size);
+            while (k <= samples) : (k += 1) {
                 if (monitor) |m| if (m.cancelled()) return error.Cancelled;
                 // Block-aligned, so a sample never straddles two extents.
-                const offset = (last / probe_samples * k) & ~@as(u64, buf.len - 1);
+                const offset = (last / samples * k) & ~@as(u64, buf.len - 1);
                 const n = try preadAll(fd, &buf, offset);
                 hasher.update(std.mem.asBytes(&offset));
                 hasher.update(buf[0..n]);
@@ -659,7 +667,7 @@ test "the probe tells big same-size files apart past their first block, and agre
     // Two disk images with the same header, differing at the 7th sample.
     const size: u64 = probe_sample_min + 8 * 1024 * 1024;
     const header = [_]u8{'h'} ** 4096;
-    const sampled = ((size - 4096) / probe_samples * 7) & ~@as(u64, 4095);
+    const sampled = ((size - 4096) / probeSamples(size) * 7) & ~@as(u64, 4095);
     const one = [_]u8{'1'} ** 4096;
     const two = [_]u8{'2'} ** 4096;
     try scratch.writeSparse("a.img", size, &.{ .{ .offset = 0, .data = &header }, .{ .offset = sampled, .data = &one } });
