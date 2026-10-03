@@ -32,12 +32,16 @@ pub const ArenaAllocator = struct {
             return error.InvalidAlignment;
         }
 
-        // self.offset is always <= buffer.len (a real heap allocation), so
-        // alignForward cannot overflow here. The bump, however, can: with
-        // size == SIZE_MAX, aligned_offset + size wraps below buffer.len and
-        // would pass the bounds check, yielding a reversed-bounds slice (UB in
-        // ReleaseFast). Use checked addition.
-        const aligned_offset = std.mem.alignForward(usize, self.offset, alignment);
+        // Align the address, not the offset: the backing buffer is only as
+        // aligned as the parent allocator chose to make it. Rounding up can
+        // overflow for an alignment near the top of the address space, and the
+        // bump can too: with size == SIZE_MAX, aligned_offset + size wraps below
+        // buffer.len and would pass the bounds check, yielding a reversed-bounds
+        // slice (UB in ReleaseFast). Use checked arithmetic for both.
+        const base = @intFromPtr(self.buffer.ptr);
+        const addr = base + self.offset;
+        const rounded = std.math.add(usize, addr, alignment - 1) catch return error.OutOfMemory;
+        const aligned_offset = (rounded & ~(alignment - 1)) - base;
         const new_offset = std.math.add(usize, aligned_offset, size) catch return error.OutOfMemory;
 
         if (new_offset > self.buffer.len) {
