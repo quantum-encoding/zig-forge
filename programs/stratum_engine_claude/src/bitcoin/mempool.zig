@@ -109,7 +109,7 @@ fn buildVersionMessage(remote_addr: posix.sockaddr.in, allocator: std.mem.Alloca
     try payload.appendSlice(allocator, buf[0..2]);
 
     // Nonce (random)
-    const nonce: u64 = @intCast(@as(u128, @bitCast(ts)) & 0xFFFFFFFFFFFFFFFF);
+    const nonce: u64 = @intCast(std.mem.bytesToValue(u128, std.mem.asBytes(&ts)) & 0xFFFFFFFFFFFFFFFF);
     std.mem.writeInt(u64, &buf, nonce, .little);
     try payload.appendSlice(allocator, &buf);
 
