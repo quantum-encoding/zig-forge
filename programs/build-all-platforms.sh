@@ -155,7 +155,7 @@ build_native() {
     local dir="$1"
     local name=$(basename "$dir")
 
-    if is_linux_only "$name"; then
+    if is_linux_only "$name" && [[ "$(uname -s)" != "Linux" ]]; then
         echo -e "  ${YELLOW}SKIP${NC} (Linux-only)"
         return 0
     fi
