@@ -44,7 +44,7 @@ pub const CacheEntry = struct {
 };
 
 const CACHE_SIZE = 64;
-var cache: [CACHE_SIZE]CacheEntry = .{CacheEntry{}} ** CACHE_SIZE;
+var cache: [CACHE_SIZE]CacheEntry = @splat(CacheEntry{});
 var dns_server: u32 = 0; // DNS server IP (from DHCP)
 var next_id: u16 = 1;
 var initialized: bool = false;

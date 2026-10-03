@@ -35,7 +35,7 @@ pub const DistributorConfig = struct {
     pub fn init(num_workers: u8) DistributorConfig {
         return .{
             .num_workers = num_workers,
-            .output_rings = [_]?*ring_mod.Ring(*MBuf){null} ** MAX_WORKERS,
+            .output_rings = @as([MAX_WORKERS]?*ring_mod.Ring(*MBuf), @splat(null)),
         };
     }
 };

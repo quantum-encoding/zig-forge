@@ -42,7 +42,7 @@ pub const NetState = struct {
     deathmatch: u8 = 0, // 0=coop, 1=deathmatch, 2=altdeath
 
     // Tic command ring buffers
-    netcmds: [MAXPLAYERS][BACKUPTICS]TicCmd = [_][BACKUPTICS]TicCmd{@as([BACKUPTICS]TicCmd, @splat(.{}))} ** MAXPLAYERS,
+    netcmds: [MAXPLAYERS][BACKUPTICS]TicCmd = @splat(@splat(.{})),
 
     // Input state tracking
     gamekeydown: [256]bool = @splat(false),

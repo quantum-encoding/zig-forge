@@ -35,10 +35,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    const run_parity = b.addRunArtifact(parity_tests);
-    // Tests invoke the freshly-installed zshuf binary via ZSHUF_BIN.
+    // Tests invoke the built zshuf binary via ZSHUF_BIN, set by `env`.
+    const run_parity = b.addSystemCommand(&.{"env"});
+    run_parity.addPrefixedFileArg("ZSHUF_BIN=", exe.getEmittedBin());
+    run_parity.addArtifactArg(parity_tests);
     run_parity.step.dependOn(b.getInstallStep());
-    run_parity.setEnvironmentVariable("ZSHUF_BIN", b.pathJoin(&.{ b.install_path, "bin", "zshuf" }));
     run_parity.setEnvironmentVariable("GSHUF_BIN", "/opt/homebrew/bin/gshuf");
 
     const test_step = b.step("test", "Run GNU-parity tests against gshuf");
