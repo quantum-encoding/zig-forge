@@ -161,15 +161,26 @@ pub const Pty = struct {
         };
     }
 
-    /// Close the PTY
+    /// Close the PTY, then end and reap the child.
     pub fn close(self: *Self) void {
+        // The descriptors go first. A child exiting with output still queued
+        // on its terminal waits in the kernel for that output to drain (ps
+        // state `E`), and only a reader on the master or the master's close
+        // releases it, even after SIGKILL. Waiting before closing deadlocks
+        // the reap below with nothing that can break it. Closing the master
+        // also hangs up the terminal, which ends an ordinary shell before
+        // the TERM lands.
+        if (self.slave_fd >= 0) _ = std.c.close(self.slave_fd);
+        self.slave_fd = -1;
+        _ = std.c.close(self.master_fd);
+        self.master_fd = -1;
+
         if (self.child_pid) |pid| {
             // TERM, then reap. Without the waitpid every closed pane left a
             // zombie for the life of the host process — the GUI embeddings
             // (CosmicDuck/aiconductor) run for days and accumulate one per
             // closed tab/split. If TERM hasn't landed yet, escalate to KILL
-            // and reap synchronously (KILL cannot be caught; the reap is
-            // immediate, no unbounded block).
+            // and reap synchronously.
             _ = posix.kill(pid, posix.SIG.TERM) catch {};
             var i: u8 = 0;
             var reaped = false;
@@ -187,9 +198,6 @@ pub const Pty = struct {
             }
             self.child_pid = null;
         }
-
-        if (self.slave_fd >= 0) _ = std.c.close(self.slave_fd);
-        _ = std.c.close(self.master_fd);
     }
 
     /// Get slave path as a slice
@@ -625,6 +633,41 @@ test "write delivers everything when the child IS reading" {
     const n = try p.write(big);
     th.join();
     try std.testing.expectEqual(payload_len, n);
+}
+
+test "close reaps a child whose output nobody read" {
+    // The child floods its terminal and the master is never read, so its
+    // exit waits on the tty draining. Reaping before closing the master hung
+    // forever: six such threads were found parked in waitpid inside the app.
+    var p = Pty.create() catch |err| {
+        if (isUnavailableError(err)) return error.SkipZigTest;
+        return err;
+    };
+    const argv = [_:null]?[*:0]const u8{ "sh", "-c", "yes x | head -c 2000000; sleep 100" };
+    try p.spawn("/bin/sh", &argv, std.c.environ);
+    var no_fds = [_]posix.pollfd{};
+    _ = posix.poll(&no_fds, 500) catch {}; // let the output queue fill
+
+    const Closer = struct {
+        pty: *Pty,
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            self.pty.close();
+            self.done.store(true, .release);
+        }
+    };
+    var closer = Closer{ .pty = &p };
+    const th = try std.Thread.spawn(.{}, Closer.run, .{&closer});
+    const started = monotonicMsForTest();
+    while (!closer.done.load(.acquire) and monotonicMsForTest() - started < 5000) {
+        _ = posix.poll(&no_fds, 10) catch {};
+    }
+    // A hung close cannot be joined; leave its thread behind and fail.
+    if (!closer.done.load(.acquire)) {
+        th.detach();
+        return error.CloseHung;
+    }
+    th.join();
 }
 
 /// Local monotonic clock for the write-budget test. `std.time.Instant` and
