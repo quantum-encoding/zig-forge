@@ -456,7 +456,7 @@ const TestDir = struct {
     }
 
     fn mkdirAbs(self: *TestDir, p: []const u8) !void {
-        const z = try self.dupeSentinel(p, 0);
+        const z = try self.dupeZ(p);
         defer self.allocator.free(z);
         try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(z.ptr, 0o755));
     }
@@ -464,7 +464,7 @@ const TestDir = struct {
     fn writeFile(self: *TestDir, sub: []const u8, contents: []const u8) !void {
         const p = try self.join(sub);
         defer self.allocator.free(p);
-        const z = try self.dupeSentinel(p, 0);
+        const z = try self.dupeZ(p);
         defer self.allocator.free(z);
         const fd = std.c.open(z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
         try std.testing.expect(fd >= 0);
@@ -481,7 +481,7 @@ const TestDir = struct {
             if (end == 0) continue;
             const p = try self.join(sub[0..end]);
             defer self.allocator.free(p);
-            const z = try self.dupeSentinel(p, 0);
+            const z = try self.dupeZ(p);
             defer self.allocator.free(z);
             // EEXIST is fine; anything else surfaces on the next operation.
             _ = std.c.mkdir(z.ptr, 0o755);
@@ -496,7 +496,7 @@ const TestDir = struct {
 
     /// Recursively delete `p` (file, symlink, or directory). Missing is not an error.
     fn rmTree(self: *TestDir, p: []const u8) !void {
-        const z = try self.dupeSentinel(p, 0);
+        const z = try self.dupeZ(p);
         defer self.allocator.free(z);
 
         var st: Stat = undefined;
@@ -530,9 +530,9 @@ const TestDir = struct {
     fn symlink(self: *TestDir, target: []const u8, sub: []const u8) !void {
         const p = try self.join(sub);
         defer self.allocator.free(p);
-        const target_z = try self.dupeSentinel(target, 0);
+        const target_z = try self.dupeZ(target);
         defer self.allocator.free(target_z);
-        const link_z = try self.dupeSentinel(p, 0);
+        const link_z = try self.dupeZ(p);
         defer self.allocator.free(link_z);
         try std.testing.expectEqual(@as(c_int, 0), std.c.symlink(target_z.ptr, link_z.ptr));
     }
@@ -542,9 +542,9 @@ const TestDir = struct {
         defer self.allocator.free(from);
         const to = try self.join(to_sub);
         defer self.allocator.free(to);
-        const from_z = try self.dupeSentinel(from, 0);
+        const from_z = try self.dupeZ(from);
         defer self.allocator.free(from_z);
-        const to_z = try self.dupeSentinel(to, 0);
+        const to_z = try self.dupeZ(to);
         defer self.allocator.free(to_z);
         try std.testing.expectEqual(@as(c_int, 0), std.c.rename(from_z.ptr, to_z.ptr));
     }
@@ -555,7 +555,7 @@ const TestDir = struct {
     fn setMtime(self: *TestDir, sub: []const u8, sec: isize, nsec: isize) !void {
         const p = try self.join(sub);
         defer self.allocator.free(p);
-        const p_z = try self.dupeSentinel(p, 0);
+        const p_z = try self.dupeZ(p);
         defer self.allocator.free(p_z);
         const times = [2]std.c.timespec{
             .{ .sec = @intCast(sec), .nsec = @intCast(nsec) },

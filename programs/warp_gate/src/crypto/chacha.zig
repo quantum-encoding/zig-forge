@@ -178,7 +178,7 @@ pub const KeyExchange = struct {
         var secret_key: [32]u8 = undefined;
         std.c.arc4random_buf(&secret_key, secret_key.len);
 
-        const public_key = try std.crypto.dh.X25519.recoverPublicKey(secret_key);
+        const public_key = try x25519PublicKey(secret_key);
 
         return KeyExchange{
             .secret_key = secret_key,
@@ -248,4 +248,10 @@ test "key exchange produces shared secret" {
     const bob_shared = try bob.computeShared(alice.public_key);
 
     try std.testing.expectEqualSlices(u8, &alice_shared, &bob_shared);
+}
+
+/// X25519 public key for a secret key. Zig 0.17 made this infallible (clamping
+/// keeps the product off the identity); 0.16 still declares IdentityElementError.
+fn x25519PublicKey(sk: [32]u8) ![32]u8 {
+    return std.crypto.dh.X25519.recoverPublicKey(sk);
 }
