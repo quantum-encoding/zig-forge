@@ -153,3 +153,6 @@ programs/zig-quantum-encryption/secrets
 
 # ── Git worktrees (never content; a worktree is a checkout, not a submodule) ──
 .worktrees/
+
+# zig_core_utils/build-all.sh per-utility logs
+zig_core_utils/.build-all-logs/

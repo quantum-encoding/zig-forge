@@ -1,6 +1,9 @@
 #!/bin/bash
 # Build all zig-coreutils with ReleaseFast optimization
 # Usage: ./build-all.sh [--parallel N]
+#   ZIG=/path/to/zig   compiler to use (default: zig on PATH)
+#   LOG_DIR=dir        per-utility build logs (default: .build-all-logs)
+# Exits non-zero if any utility fails to build.
 
 set -e
 
@@ -8,6 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 PARALLEL=4
+ZIG="${ZIG:-zig}"
 if [[ "$1" == "--parallel" ]] && [[ -n "$2" ]]; then
     PARALLEL=$2
 fi
@@ -30,50 +34,47 @@ utilities=(
     zwhoami zxargs zxz zyes zzstd
 )
 
-success=0
-failed=()
 total=${#utilities[@]}
+LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/.build-all-logs}"
+mkdir -p "$LOG_DIR"
 
-echo "Building $total utilities with $PARALLEL parallel jobs..."
+echo "Building $total utilities with $("$ZIG" version) ($PARALLEL parallel jobs)..."
 echo ""
 
 build_util() {
     local util=$1
-    if [[ -d "$util" ]]; then
-        if (cd "$util" && zig build -Doptimize=ReleaseFast 2>/dev/null); then
-            echo "  [OK] $util"
-            return 0
-        else
-            echo "  [FAIL] $util"
-            return 1
-        fi
+    if [[ ! -d "$util" ]]; then
+        echo "  [MISSING] $util"
+        return 0
     fi
-    return 1
+    if (cd "$util" && "$ZIG" build -Doptimize=ReleaseFast > "$LOG_DIR/$util.log" 2>&1); then
+        echo "  [OK] $util"
+    else
+        echo "  [FAIL] $util (log: $LOG_DIR/$util.log)"
+    fi
 }
 
 export -f build_util
+export ZIG LOG_DIR
 
-# Build in parallel
-printf '%s\n' "${utilities[@]}" | xargs -P "$PARALLEL" -I {} bash -c 'build_util "$@"' _ {}
+# Each build's own exit status decides OK/FAIL; zig-out/bin left over from an
+# earlier build must not count as a success.
+results=$(printf '%s\n' "${utilities[@]}" | xargs -P "$PARALLEL" -I {} bash -c 'build_util "$@"' _ {})
+echo "$results"
 
-# Count results
-for util in "${utilities[@]}"; do
-    # Some utilities produce differently-named binaries (e.g. zclip → zcopy/zpaste)
-    if [[ -f "${util}/zig-out/bin/${util}" ]] || [[ -d "${util}/zig-out/bin" && -n "$(ls -A "${util}/zig-out/bin/" 2>/dev/null)" ]]; then
-        ((success++))
-    else
-        failed+=("$util")
-    fi
-done
+success=$(grep -c '\[OK\]' <<< "$results" || true)
+failed=$(grep -E '\[(FAIL|MISSING)\]' <<< "$results" | awk '{print $2}' | sort | tr '\n' ' ')
 
 echo ""
 echo "========================================="
 echo "Build complete: $success/$total succeeded"
-if [[ ${#failed[@]} -gt 0 ]]; then
-    echo "Failed: ${failed[*]}"
+if [[ -n "$failed" ]]; then
+    echo "Failed: $failed"
 fi
 echo "========================================="
 
 # Calculate total size
 total_size=$(du -ch */zig-out/bin/* 2>/dev/null | tail -1 | cut -f1)
 echo "Total binary size: $total_size"
+
+[[ -z "$failed" ]]

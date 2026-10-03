@@ -20,6 +20,9 @@
 #   --list         List all available programs
 #   --help         Show this help message
 #
+# Environment:
+#   ZIG=/path/to/zig  compiler to use (default: zig on PATH)
+#
 # Examples:
 #   ./build-all-platforms.sh --native
 #   ./build-all-platforms.sh --all
@@ -38,6 +41,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
+
+# Compiler (override to try another toolchain, e.g. ZIG=~/.local/zig/0.17.0/zig)
+ZIG="${ZIG:-zig}"
 
 # Build flags
 BUILD_NATIVE=false
@@ -142,7 +148,7 @@ has_target() {
     local dir="$1"
     local target="$2"
     cd "$dir"
-    zig build --help 2>&1 | grep -q "^  $target "
+    "$ZIG" build --help 2>&1 | grep -q "^  $target "
 }
 
 build_native() {
@@ -155,7 +161,7 @@ build_native() {
     fi
 
     cd "$dir"
-    if zig build 2>&1; then
+    if "$ZIG" build 2>&1; then
         echo -e "  ${GREEN}PASS${NC}"
         ((NATIVE_PASS++))
         return 0
@@ -177,7 +183,7 @@ build_android() {
         return 0
     fi
 
-    if zig build android 2>&1; then
+    if "$ZIG" build android 2>&1; then
         echo -e "  ${GREEN}PASS${NC}"
         ((ANDROID_PASS++))
         return 0
@@ -199,7 +205,7 @@ build_ios() {
         return 0
     fi
 
-    if zig build ios 2>&1; then
+    if "$ZIG" build ios 2>&1; then
         echo -e "  ${GREEN}PASS${NC}"
         ((IOS_PASS++))
         return 0
@@ -221,7 +227,7 @@ build_ios_sim() {
         return 0
     fi
 
-    if zig build ios-sim 2>&1; then
+    if "$ZIG" build ios-sim 2>&1; then
         echo -e "  ${GREEN}PASS${NC}"
         ((IOS_SIM_PASS++))
         return 0
@@ -243,7 +249,7 @@ build_wasm() {
         return 0
     fi
 
-    if zig build wasm 2>&1; then
+    if "$ZIG" build wasm 2>&1; then
         echo -e "  ${GREEN}PASS${NC}"
         ((WASM_PASS++))
         return 0
