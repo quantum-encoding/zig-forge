@@ -87,6 +87,7 @@ const char* zdedupe_results_overview(zdedupe_results* r);
   "files_scanned": 0, "bytes_scanned": 0, "duplicate_groups": 0,
   "duplicate_files": 0, "space_savings": 0, "scan_time_ns": 0,
   "excluded_entries": 0, "overlapping_roots": 0, "failed_paths": 0,
+  "dataless_skipped": 0, "dataless_bytes": 0, "clone_hash_skips": 0,
   "has_directories": false, "dirs_analyzed": 0, "dirs_incomplete": 0,
   "identical_sets": 0, "overlaps": 0, "redundant_pairs": 0, "reclaimable": 0 }
 ```

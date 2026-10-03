@@ -323,6 +323,8 @@ const AliveFile = struct {
     index: u32,
     path: []const u8,
     mtime: i64,
+    /// See `store.GroupFile.clone_class`.
+    clone_class: u32 = 0,
 };
 
 /// One member folder of an identical set that still exists as far as the
@@ -755,6 +757,7 @@ pub const Session = struct {
                 .index = @intCast(f),
                 .path = file.path,
                 .mtime = file.mtime,
+                .clone_class = file.clone_class,
             });
         }
         return self.alive.items;
@@ -779,6 +782,49 @@ pub const Session = struct {
 
     fn liveSavings(size: u64, copies: usize) u64 {
         return size *| (@as(u64, copies) -| 1);
+    }
+
+    /// Savings of a file group: every copy of the data but one. Pure clones
+    /// (one `clone_class`) hold a single copy between them.
+    fn groupSavings(size: u64, alive: []const AliveFile) u64 {
+        return liveSavings(size, distinctCopies(alive));
+    }
+
+    fn distinctCopies(alive: []const AliveFile) usize {
+        var copies: usize = 0;
+        for (alive, 0..) |file, i| {
+            if (file.clone_class == 0) {
+                copies += 1;
+                continue;
+            }
+            const first = for (alive[0..i]) |earlier| {
+                if (earlier.clone_class == file.clone_class) break false;
+            } else true;
+            copies += @intFromBool(first);
+        }
+        return copies;
+    }
+
+    /// Bytes deleting the `taken` members of a group frees: `size` for each,
+    /// except that a clone class holds one copy of the data - freed once,
+    /// and only when no member of the class is kept.
+    fn freedBytes(size: u64, alive: []const AliveFile, taken: []const bool) u64 {
+        var total: u64 = 0;
+        for (alive, taken, 0..) |file, take, i| {
+            if (!take) continue;
+            if (file.clone_class == 0) {
+                total +|= size;
+                continue;
+            }
+            var first = true;
+            var kept = false;
+            for (alive, taken, 0..) |other, other_taken, j| {
+                if (other.clone_class != file.clone_class) continue;
+                if (!other_taken) kept = true else if (j < i) first = false;
+            }
+            if (first and !kept) total +|= size;
+        }
+        return total;
     }
 
     /// What "size" means for an overlap: the content the two folders share.
@@ -817,7 +863,7 @@ pub const Session = struct {
                 // The store is already in savings order; a delete changes a
                 // group's savings, so once anything is removed the live value
                 // is the key.
-                .savings => if (self.removed.isEmpty()) 0 else liveSavings(group.size, alive.len),
+                .savings => if (self.removed.isEmpty()) 0 else groupSavings(group.size, alive),
                 .size => group.size,
                 .count => alive.len,
             };
@@ -913,6 +959,9 @@ pub const Session = struct {
             .{ "excluded_entries", header.excluded_entries },
             .{ "overlapping_roots", header.overlapping_roots },
             .{ "failed_paths", header.failed_paths },
+            .{ "dataless_skipped", header.dataless_skipped },
+            .{ "dataless_bytes", header.dataless_bytes },
+            .{ "clone_hash_skips", header.clone_hash_skips },
         }) |field| {
             try json.objectField(field[0]);
             try json.write(field[1]);
@@ -992,7 +1041,7 @@ pub const Session = struct {
             try json.objectField("size");
             try json.write(group.size);
             try json.objectField("savings");
-            try json.write(liveSavings(group.size, alive.len));
+            try json.write(groupSavings(group.size, alive));
 
             const listed = alive[0..@min(alive.len, group_files_in_row)];
             try json.objectField("files");
@@ -1014,6 +1063,12 @@ pub const Session = struct {
             try json.objectField("targets");
             try json.beginArray();
             for (decided.targets[0..listed.len]) |target| try json.write(target);
+            try json.endArray();
+            // Parallel to `files`: 0, or the clone class a file shares with
+            // others of this group (they share their blocks).
+            try json.objectField("clones");
+            try json.beginArray();
+            for (listed) |file| try json.write(file.clone_class);
             try json.endArray();
             try json.objectField("bulk");
             try json.write(covered);
@@ -1054,7 +1109,7 @@ pub const Session = struct {
             var extra: u64 = 0;
             for (decided.targets) |t| extra += @intFromBool(t);
             files +|= extra;
-            bytes +|= group.size *| extra;
+            bytes +|= freedBytes(group.size, alive, decided.targets);
         }
 
         var out: std.Io.Writer.Allocating = .init(arena);
@@ -1122,11 +1177,14 @@ pub const Session = struct {
         const alive = try self.aliveFiles(&group);
         const decided = try self.planGroup(arena, spec, &group, alive);
         var taken: u64 = 0;
-        for (decided.members, decided.targets) |member, target| {
+        const taking = try arena.alloc(bool, alive.len);
+        @memset(taking, false);
+        for (decided.members, decided.targets, 0..) |member, target, m| {
             tally.locked += @intFromBool(member.protected);
             if (!target) continue;
             if (unticked.count() > 0 and unticked.contains(try lossy(arena, member.path))) continue;
             taken += 1;
+            taking[m] = true;
             // A file is somewhere by its folder: one directly in `base` counts
             // as "here", never as a location of its own.
             const key = try facetKey(arena, .location, parentOf(member.path), base, roots) orelse continue;
@@ -1138,7 +1196,7 @@ pub const Session = struct {
         }
         tally.groups += 1;
         tally.files +|= taken;
-        tally.bytes +|= group.size *| taken;
+        tally.bytes +|= freedBytes(group.size, alive, taking);
     }
 
     fn writePlan(
@@ -1530,7 +1588,7 @@ pub const Session = struct {
                 paths.clearRetainingCapacity();
                 for (alive) |file| try paths.append(arena, file.path);
                 try collectKeys(arena, &keys, paths.items, query.by, matcher, base, roots, .files);
-                try counter.add(arena, liveSavings(group.size, alive.len), keys.items);
+                try counter.add(arena, groupSavings(group.size, alive), keys.items);
             },
             .sets => for (0..self.reader.setCount()) |i| {
                 const set = try self.reader.set(i);
@@ -2402,7 +2460,7 @@ pub const Session = struct {
             const group = try self.reader.group(i);
             const alive = try self.aliveFiles(&group);
             if (alive.len < 2) continue;
-            const savings = liveSavings(group.size, alive.len);
+            const savings = groupSavings(group.size, alive);
 
             var hex: [64]u8 = undefined;
             const hash = hasher.hashToHex(&group.hash, &hex);
@@ -3025,4 +3083,24 @@ test "CSV fields are quoted only when they have to be" {
     try testing.expectEqualStrings(
         \\/plain/path.txt|"/has,comma.txt"|"/has""quote.txt"
     , writer.buffered());
+}
+
+test "clones hold one copy: savings and freed bytes count a clone class once, and only when it all goes" {
+    const files = [_]AliveFile{
+        .{ .index = 0, .path = "a", .mtime = 0, .clone_class = 1 },
+        .{ .index = 1, .path = "b", .mtime = 0, .clone_class = 1 },
+        .{ .index = 2, .path = "c", .mtime = 0 },
+        .{ .index = 3, .path = "d", .mtime = 0 },
+    };
+    // a+b are one copy, c and d one each: three copies, two reclaimable.
+    try std.testing.expectEqual(@as(u64, 200), Session.groupSavings(100, &files));
+    // Deleting b alone frees nothing: a still holds its blocks.
+    try std.testing.expectEqual(@as(u64, 0), Session.freedBytes(100, &files, &.{ false, true, false, false }));
+    // Deleting a and b frees their one copy; with d, two.
+    try std.testing.expectEqual(@as(u64, 100), Session.freedBytes(100, &files, &.{ true, true, false, false }));
+    try std.testing.expectEqual(@as(u64, 200), Session.freedBytes(100, &files, &.{ true, true, false, true }));
+    // Without clones it is size per file, as before.
+    const plain = [_]AliveFile{ .{ .index = 0, .path = "x", .mtime = 0 }, .{ .index = 1, .path = "y", .mtime = 0 } };
+    try std.testing.expectEqual(@as(u64, 100), Session.groupSavings(100, &plain));
+    try std.testing.expectEqual(@as(u64, 100), Session.freedBytes(100, &plain, &.{ false, true }));
 }

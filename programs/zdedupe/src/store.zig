@@ -16,7 +16,8 @@
 //!
 //! Layout — little-endian, every section 8-byte aligned:
 //!
-//!     Header (256 bytes)           magic, version, summary, section table
+//!     Header (320 bytes)           magic, version, summary, section table
+//!                                  (256 in version 1, which is still read)
 //!     GROUPS       Group[]         duplicate groups, largest savings first
 //!     GROUP_FILES  GroupFile[]     their files, oldest first within a group
 //!     SETS         Set[]           identical-directory sets
@@ -56,8 +57,10 @@ comptime {
 }
 
 pub const magic = "ZDSTORE1".*;
-pub const format_version: u32 = 1;
-pub const header_size: usize = 256;
+pub const format_version: u32 = 2;
+pub const header_size: usize = 320;
+/// Version 1 headers end before `dataless_skipped`; readers zero what follows.
+pub const v1_header_size: usize = 256;
 
 pub const flag_has_directories: u64 = 1 << 0;
 pub const flag_sha256: u64 = 1 << 1;
@@ -108,6 +111,14 @@ pub const Header = extern struct {
     /// zeros when the scan was not one. Readers that predate it saw these
     /// bytes as reserved zeros, which is still what a duplicate scan writes.
     space: Section = .{},
+
+    // Version 2.
+    /// Cloud placeholders left unread (macOS), and their logical size.
+    dataless_skipped: u64 = 0,
+    dataless_bytes: u64 = 0,
+    /// Candidates whose hashes came from a pure clone instead of a read.
+    clone_hash_skips: u64 = 0,
+    _reserved: [5]u64 = @splat(0),
 };
 
 pub const Group = extern struct {
@@ -117,7 +128,10 @@ pub const Group = extern struct {
     /// Index of the group's first record in GROUP_FILES.
     first_file: u64,
     file_count: u32,
-    _pad: u32 = 0,
+    /// Files beyond the first of their clone class (see `GroupFile`): the
+    /// group holds `file_count - clone_files` copies of the data. 0 in
+    /// version 1 stores.
+    clone_files: u32 = 0,
 };
 
 pub const GroupFile = extern struct {
@@ -125,7 +139,10 @@ pub const GroupFile = extern struct {
     /// Modification time, seconds since the epoch.
     mtime: i64,
     path_len: u32,
-    _pad: u32 = 0,
+    /// 0, or the group-local number (from 1) its pure clones share: files of
+    /// one class share their blocks (APFS), so deleting one frees nothing
+    /// while another is kept. 0 in version 1 stores.
+    clone_class: u32 = 0,
 };
 
 pub const Set = extern struct {
@@ -263,6 +280,9 @@ fn writeAll(out: *FileWriter, source: Source) WriteError!void {
         .excluded_entries = summary.excluded_entries,
         .overlapping_roots = summary.overlapping_roots,
         .failed_paths = source.failed_paths,
+        .dataless_skipped = summary.dataless_skipped,
+        .dataless_bytes = summary.dataless_bytes,
+        .clone_hash_skips = summary.clone_hash_skips,
     };
     if (source.analysis) |analysis| {
         header.dirs_analyzed = analysis.dirs_analyzed;
@@ -288,6 +308,7 @@ fn writeAll(out: *FileWriter, source: Source) WriteError!void {
             .size = group.size,
             .first_file = next_file,
             .file_count = @intCast(group.file_infos.items.len),
+            .clone_files = @intCast(group.cloneFiles()),
         }));
         next_file += group.file_infos.items.len;
     }
@@ -302,6 +323,7 @@ fn writeAll(out: *FileWriter, source: Source) WriteError!void {
                 .path_offset = ref.offset,
                 .path_len = ref.len,
                 .mtime = info.mtime,
+                .clone_class = info.clone_class,
             }));
         }
     }
@@ -549,6 +571,8 @@ pub const FileRef = struct {
     path: []const u8,
     /// Modification time, seconds since the epoch.
     mtime: i64,
+    /// See `GroupFile.clone_class`.
+    clone_class: u32 = 0,
 };
 
 /// One member directory of an identical set. `path` borrows the mapped bytes.
@@ -598,11 +622,19 @@ pub const Reader = struct {
             }
         }.set;
 
-        if (bytes.len < header_size) return reject(why, .shorter_than_a_header);
-        const header = std.mem.bytesToValue(Header, bytes[0..header_size]);
+        if (bytes.len < v1_header_size) return reject(why, .shorter_than_a_header);
+        // Version 1 is read into a zeroed version-2 header.
+        var header: Header = .{};
+        @memcpy(std.mem.asBytes(&header)[0..v1_header_size], bytes[0..v1_header_size]);
         if (!std.mem.eql(u8, &header.magic, &magic)) return reject(why, .not_a_zdedupe_result_store);
-        if (header.version != format_version) return reject(why, .unsupported_format_version);
-        if (header.header_size != header_size) return reject(why, .unexpected_header_size);
+        const expected_size: usize = switch (header.version) {
+            1 => v1_header_size,
+            format_version => header_size,
+            else => return reject(why, .unsupported_format_version),
+        };
+        if (header.header_size != expected_size) return reject(why, .unexpected_header_size);
+        if (bytes.len < expected_size) return reject(why, .shorter_than_a_header);
+        if (header.version == format_version) header = std.mem.bytesToValue(Header, bytes[0..header_size]);
         if (header.file_size != bytes.len) return reject(why, .file_size_disagrees_with_the_header);
 
         // Every section must lie wholly inside the file, with no arithmetic
@@ -617,7 +649,7 @@ pub const Reader = struct {
                 return reject(why, .a_section_lies_outside_the_file);
             const end = std.math.add(usize, offset, byte_len) catch
                 return reject(why, .a_section_lies_outside_the_file);
-            if (offset < header_size or offset % 8 != 0 or end > bytes.len) {
+            if (offset < expected_size or offset % 8 != 0 or end > bytes.len) {
                 return reject(why, .a_section_lies_outside_the_file);
             }
         }
@@ -628,7 +660,7 @@ pub const Reader = struct {
                 return reject(why, .a_section_lies_outside_the_file);
             const end = std.math.add(usize, offset, len) catch
                 return reject(why, .a_section_lies_outside_the_file);
-            if (offset < header_size or offset % 8 != 0 or end > bytes.len) {
+            if (offset < expected_size or offset % 8 != 0 or end > bytes.len) {
                 return reject(why, .a_section_lies_outside_the_file);
             }
         }
@@ -705,13 +737,13 @@ pub const Reader = struct {
         if (i >= g.file_count) return error.OutOfRange;
         const bytes = try self.record(.group_files, @as(usize, @intCast(g.first_file)) + i);
         const r = std.mem.bytesToValue(GroupFile, bytes[0..@sizeOf(GroupFile)]);
-        return .{ .path = try self.string(r.path_offset, r.path_len), .mtime = r.mtime };
+        return .{ .path = try self.string(r.path_offset, r.path_len), .mtime = r.mtime, .clone_class = r.clone_class };
     }
 
     /// Savings over every copy the scan recorded. Live savings, once anything
     /// has been deleted, are the session's business (see `session.zig`).
     pub fn groupSavings(g: *const Group) u64 {
-        return g.size *| (@as(u64, g.file_count) -| 1);
+        return g.size *| ((@as(u64, g.file_count) -| g.clone_files) -| 1);
     }
 
     pub fn set(self: *const Reader, i: usize) ReadError!Set {
@@ -773,7 +805,11 @@ pub const Reader = struct {
 // through the results session lives in session.zig.
 
 test "record layouts are the sizes the format documents" {
-    try std.testing.expectEqual(@as(usize, 256), @sizeOf(Header));
+    try std.testing.expectEqual(@as(usize, 320), @sizeOf(Header));
+    // Version 1 headers end where version 2's fields begin.
+    try std.testing.expectEqual(v1_header_size, @offsetOf(Header, "dataless_skipped"));
+    try std.testing.expectEqual(@as(usize, 52), @offsetOf(Group, "clone_files"));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(GroupFile, "clone_class"));
     try std.testing.expectEqual(@as(usize, 56), @sizeOf(Group));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(GroupFile));
     try std.testing.expectEqual(@as(usize, 200), @sizeOf(Overlap));
@@ -910,4 +946,22 @@ test "savings is the size of every copy but one, and cannot overflow" {
 
     const absurd: Group = .{ .hash = @splat(0), .size = std.math.maxInt(u64), .first_file = 0, .file_count = 9 };
     try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), Reader.groupSavings(&absurd));
+}
+
+test "a version 1 store still opens, with the version 2 fields zero" {
+    const gpa = std.testing.allocator;
+    // A version 1 file: a 256-byte header and empty sections right after it.
+    const header: Header = .{
+        .version = 1,
+        .header_size = v1_header_size,
+        .file_size = v1_header_size,
+        .sections = @splat(.{ .offset = v1_header_size, .count = 0 }),
+        .dataless_skipped = 7, // past the v1 header: must not be read
+    };
+    const bytes = try gpa.alloc(u8, v1_header_size);
+    defer gpa.free(bytes);
+    @memcpy(bytes, std.mem.asBytes(&header)[0..v1_header_size]);
+    const reader = try Reader.init(bytes, null);
+    try std.testing.expectEqual(@as(u64, 0), reader.header.dataless_skipped);
+    try std.testing.expectEqual(@as(u32, 1), reader.header.version);
 }

@@ -102,6 +102,9 @@ const ATTR_CMN_RETURNED_ATTRS: u32 = 0x80000000;
 const ATTR_FILE_LINKCOUNT: u32 = 0x00000001;
 const ATTR_FILE_ALLOCSIZE: u32 = 0x00000004;
 const ATTR_FILE_DATALENGTH: u32 = 0x00000200;
+// CMNEXT attributes ride in the forkattr field when FSOPT_ATTR_CMN_EXTENDED is set.
+const ATTR_CMNEXT_CLONEID: u32 = 0x00000100;
+const FSOPT_ATTR_CMN_EXTENDED: u64 = 0x00000020;
 
 // sys/vnode.h `enum vtype`
 const VREG: u32 = 1;
@@ -116,6 +119,7 @@ const bulk_attrs: AttrList = .{
     .commonattr = ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_ERROR | ATTR_CMN_NAME | ATTR_CMN_DEVID |
         ATTR_CMN_OBJTYPE | ATTR_CMN_MODTIME | ATTR_CMN_FLAGS | ATTR_CMN_FILEID,
     .fileattr = ATTR_FILE_LINKCOUNT | ATTR_FILE_ALLOCSIZE | ATTR_FILE_DATALENGTH,
+    .forkattr = ATTR_CMNEXT_CLONEID,
 };
 
 /// sys/mount.h `struct statfs` (the 64-bit-inode layout).
@@ -208,7 +212,7 @@ pub const BulkDirStream = struct {
         if (self.fallback) |*f| return f.next() catch unreachable;
         if (self.remaining == 0) {
             while (true) {
-                const n = getattrlistbulk(self.dir_fd, &bulk_attrs, &self.buf, self.buf.len, 0);
+                const n = getattrlistbulk(self.dir_fd, &bulk_attrs, &self.buf, self.buf.len, FSOPT_ATTR_CMN_EXTENDED);
                 if (n > 0) {
                     self.remaining = @intCast(n);
                     self.cursor = 0;
@@ -241,7 +245,7 @@ pub const BulkDirStream = struct {
         _ = r.int(u32); // volattr
         _ = r.int(u32); // dirattr
         const file = r.int(u32);
-        _ = r.int(u32); // forkattr
+        const ext = r.int(u32); // forkattr: CMNEXT attributes
 
         var err: u32 = 0;
         if (common & ATTR_CMN_ERROR != 0) err = r.int(u32);
@@ -288,6 +292,8 @@ pub const BulkDirStream = struct {
         }
         const size = r.int(i64);
         st.size = if (size > 0) @intCast(size) else 0;
+        // CMNEXT attributes follow the file attributes.
+        if (ext & ATTR_CMNEXT_CLONEID != 0) st.clone_id = r.int(u64);
         return .{ .name = name, .kind = DT_REG, .stat = st };
     }
 };

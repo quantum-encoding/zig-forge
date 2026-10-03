@@ -97,6 +97,27 @@ pub const Scratch = struct {
         }
     }
 
+    pub const Extent = struct { offset: u64, data: []const u8 };
+
+    /// A file of `size` bytes holding `extents` and nothing else: written
+    /// with ftruncate + pwrite, so on APFS and ext4 the rest is holes.
+    pub fn writeSparse(self: *const Scratch, sub_path: []const u8, size: u64, extents: []const Extent) !void {
+        const full = try self.joinZ(sub_path);
+        defer self.allocator.free(full);
+        const fd = libc.open(full.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(libc.mode_t, 0o600));
+        if (fd < 0) return error.OpenFailed;
+        defer _ = libc.close(fd);
+        if (libc.ftruncate(fd, @intCast(size)) != 0) return error.WriteFailed;
+        for (extents) |e| {
+            var written: usize = 0;
+            while (written < e.data.len) {
+                const n = libc.pwrite(fd, e.data.ptr + written, e.data.len - written, @intCast(e.offset + written));
+                if (n <= 0) return error.WriteFailed;
+                written += @intCast(n);
+            }
+        }
+    }
+
     /// `target` is interpreted relative to the link's own directory, as with
     /// `ln -s target link`.
     pub fn symLink(self: *const Scratch, target: []const u8, link_sub_path: []const u8) !void {

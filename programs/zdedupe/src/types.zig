@@ -30,6 +30,18 @@ pub const FileEntry = struct {
     allocated: u64 = 0,
     /// A cloud placeholder whose content is not on disk (macOS).
     dataless: bool = false,
+    /// APFS data-stream id (macOS): files with the same non-zero id are pure
+    /// clones, sharing every block. 0 = unknown.
+    clone_id: u64 = 0,
+    /// Index of an earlier entry this one is a pure clone of; its hashes are
+    /// copied from that entry instead of being read again.
+    clone_of: ?usize = null,
+
+    /// Bytes reading this file's content costs: its allocated bytes (holes are
+    /// not read), or its size when the filesystem reported no allocation.
+    pub fn readBytes(self: *const FileEntry) u64 {
+        return if (self.allocated > 0) @min(self.size, self.allocated) else self.size;
+    }
 
     pub fn deinit(self: *FileEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
@@ -48,6 +60,10 @@ pub const FileEntry = struct {
 pub const DuplicateFileInfo = struct {
     path: []const u8,
     mtime: i64, // seconds since epoch
+    /// 0, or a number (from 1) shared by the files of this group that are
+    /// pure clones of each other: they share their blocks, so deleting one
+    /// of them frees nothing while another remains.
+    clone_class: u32 = 0,
 };
 
 /// Group of duplicate files (same content)
@@ -91,12 +107,38 @@ pub const DuplicateGroup = struct {
 
     /// Add file with metadata
     pub fn addFileWithInfo(self: *DuplicateGroup, path: []const u8, mtime: i64) !void {
+        try self.addFileWithClone(path, mtime, 0);
+    }
+
+    /// Add a file and its clone class (see `DuplicateFileInfo.clone_class`).
+    /// Savings count each set of clones once: they hold one copy of the data.
+    pub fn addFileWithClone(self: *DuplicateGroup, path: []const u8, mtime: i64, clone_class: u32) !void {
         try self.files.append(self.allocator, path);
-        try self.file_infos.append(self.allocator, .{ .path = path, .mtime = mtime });
-        // Update savings: (count - 1) * size
-        if (self.files.items.len > 1) {
-            self.savings = (self.files.items.len - 1) * self.size;
+        try self.file_infos.append(self.allocator, .{ .path = path, .mtime = mtime, .clone_class = clone_class });
+        self.savings = self.size *| (self.distinctCopies() -| 1);
+    }
+
+    /// Copies of the data the group really holds: every file outside a clone
+    /// class, plus one per clone class.
+    pub fn distinctCopies(self: *const DuplicateGroup) u64 {
+        var copies: u64 = 0;
+        for (self.file_infos.items, 0..) |info, i| {
+            if (info.clone_class == 0) {
+                copies += 1;
+                continue;
+            }
+            // First file of its class.
+            const first = for (self.file_infos.items[0..i]) |earlier| {
+                if (earlier.clone_class == info.clone_class) break false;
+            } else true;
+            if (first) copies += 1;
         }
+        return copies;
+    }
+
+    /// Files beyond the first of their clone class.
+    pub fn cloneFiles(self: *const DuplicateGroup) u64 {
+        return @as(u64, self.file_infos.items.len) - self.distinctCopies();
     }
 
     pub fn count(self: *const DuplicateGroup) usize {
@@ -365,6 +407,10 @@ pub const Monitor = struct {
     /// Work items finished / expected in the current phase (hashing phases).
     done: std.atomic.Value(u64) = .init(0),
     total: std.atomic.Value(u64) = .init(0),
+    /// Bytes read / to read in the current hashing phase: allocated bytes,
+    /// so a sparse disk image counts what is on disk, not its nominal size.
+    bytes_done: std.atomic.Value(u64) = .init(0),
+    bytes_total: std.atomic.Value(u64) = .init(0),
     cancel_requested: std.atomic.Value(bool) = .init(false),
     /// What each worker is on right now (a directory being read, a file
     /// being hashed), indexed by worker; see `longestRunning`.
@@ -392,6 +438,8 @@ pub const Monitor = struct {
         self.files_found.store(0, .release);
         self.done.store(0, .release);
         self.total.store(0, .release);
+        self.bytes_done.store(0, .release);
+        self.bytes_total.store(0, .release);
         self.cancel_requested.store(false, .release);
     }
 
@@ -440,9 +488,20 @@ pub const Monitor = struct {
     }
 
     pub fn enter(self: *Monitor, phase: Phase, total: u64) void {
+        self.enterBytes(phase, total, 0);
+    }
+
+    /// `enter`, for a phase that also knows how many bytes it will read.
+    pub fn enterBytes(self: *Monitor, phase: Phase, total: u64, bytes_total: u64) void {
         self.done.store(0, .release);
         self.total.store(total, .release);
+        self.bytes_done.store(0, .release);
+        self.bytes_total.store(bytes_total, .release);
         self.phase.store(@intFromEnum(phase), .release);
+    }
+
+    pub fn addBytes(self: *Monitor, n: u64) void {
+        _ = self.bytes_done.fetchAdd(n, .monotonic);
     }
 
     pub fn cancel(self: *Monitor) void {
@@ -640,6 +699,13 @@ pub const DuplicateSummary = struct {
     /// Files read in full: small candidates, and larger ones whose prefix
     /// matched another's.
     full_hash_jobs: u64 = 0,
+    /// Cloud placeholders (macOS, content not on disk) left unread rather
+    /// than downloaded; they are not compared at all.
+    dataless_skipped: u64 = 0,
+    /// Their logical size.
+    dataless_bytes: u64 = 0,
+    /// Candidates whose hashes came from a pure clone instead of a read.
+    clone_hash_skips: u64 = 0,
 
     pub fn spaceSavingsHuman(self: *const DuplicateSummary, buf: []u8) []const u8 {
         return formatBytes(self.space_savings, buf);

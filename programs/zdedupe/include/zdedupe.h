@@ -218,7 +218,10 @@ int zdedupe_add_exclude_path(zdedupe_ctx* ctx, const char* path);
  *   0 idle, 1 scanning (walking), 2 size grouping, 3 quick hashing,
  *   4 full hashing, 5 analyzing, 6 writing results, 7 done
  * `done`/`total` count work items of the current phase (meaningful for the
- * hashing phases); `files_found` grows during the walk.
+ * hashing phases); `files_found` grows during the walk. `bytes_done` /
+ * `bytes_total` are the hashing phases' reads in bytes: allocated bytes, so
+ * a sparse disk image counts what is on disk. A progress bar should follow
+ * bytes - one big file can hold a phase up while the file count barely moves.
  */
 typedef struct {
     uint32_t phase;
@@ -226,6 +229,8 @@ typedef struct {
     uint64_t files_found;
     uint64_t done;
     uint64_t total;
+    uint64_t bytes_done;
+    uint64_t bytes_total;
 } zdedupe_progress;
 
 /**
@@ -506,12 +511,14 @@ const char* zdedupe_results_last_error(const zdedupe_results* r);
  *   "files_scanned": 0, "bytes_scanned": 0, "duplicate_groups": 0,
  *   "duplicate_files": 0, "space_savings": 0, "scan_time_ns": 0,
  *   "excluded_entries": 0, "overlapping_roots": 0, "failed_paths": 0,
+ *   "dataless_skipped": 0, "dataless_bytes": 0, "clone_hash_skips": 0,
  *   "has_directories": false, "dirs_analyzed": 0, "dirs_incomplete": 0,
  *   "identical_sets": 0, "overlaps": 0, "redundant_pairs": 0,
  *   "reclaimable": 0 }
  *
  * These counters are the SCAN's and do not change with deletes; say so
- * beside them. "reclaimable" is the sum of bytes * (copies - 1) over
+ * beside them. "dataless_skipped" counts cloud placeholders (macOS) that
+ * were not downloaded and so not compared; a host should say so. "reclaimable" is the sum of bytes * (copies - 1) over
  * identical folder sets; "redundant_pairs" counts overlap pairs where at
  * least one side has nothing unique.
  */
@@ -530,7 +537,12 @@ const char* zdedupe_results_overview(zdedupe_results* r);
  * Page: { "rows": [GroupRow], "total": N, "offset": 0 }, where a GroupRow is
  * { "hash": "64 hex", "count": 3, "size": 1048576, "savings": 2097152,
  *   "files": ["/oldest", ...], "mtimes": [ms, ...], "keeper": "/path",
- *   "locked": [bool, ...], "targets": [bool, ...], "bulk": false }
+ *   "locked": [bool, ...], "targets": [bool, ...], "clones": [0, ...],
+ *   "bulk": false }
+ *
+ * "clones" runs parallel to "files": 0, or a group-local class number shared
+ * by APFS clones (files sharing every block). Deleting a clone frees nothing
+ * while a member of its class remains, so "savings" counts a class once.
  *
  * "count" and "savings" are over the copies that are still ALIVE (the
  * removed overlay applied), "files" lists at most 50 of them oldest first,

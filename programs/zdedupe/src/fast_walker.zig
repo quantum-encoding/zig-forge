@@ -77,6 +77,8 @@ pub const FastFileEntry = struct {
     allocated: u64 = 0,
     /// A cloud placeholder whose content is not on disk.
     dataless: bool = false,
+    /// APFS data-stream id; see `pstat.Stat.clone_id`.
+    clone_id: u64 = 0,
     /// Index of the entry that stands for this inode, when this entry is an
     /// extra hard link to it. Only ever set in tree-recording mode; otherwise
     /// extra hard links are dropped.
@@ -452,6 +454,7 @@ const Worker = struct {
             .nlink = st.nlink,
             .allocated = st.allocated,
             .dataless = st.dataless,
+            .clone_id = st.clone_id,
         });
         return true;
     }
@@ -562,14 +565,14 @@ const IOPOL_MATERIALIZE_DATALESS_FILES_OFF: c_int = 1;
 /// folders). An access that would have downloaded one fails instead, so a
 /// dataless directory is reported unreadable rather than pulled down. Returns
 /// the policy it replaced, for `restoreMaterialize`.
-fn noMaterializeThisThread() c_int {
+pub fn noMaterializeThisThread() c_int {
     if (comptime builtin.os.tag != .macos) return 0;
     const previous = getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD);
     _ = setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, IOPOL_MATERIALIZE_DATALESS_FILES_OFF);
     return previous;
 }
 
-fn restoreMaterialize(previous: c_int) void {
+pub fn restoreMaterialize(previous: c_int) void {
     if (comptime builtin.os.tag != .macos) return;
     if (previous >= 0) _ = setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, previous);
 }
@@ -855,6 +858,7 @@ pub const FastWalker = struct {
                 .nlink = fast.nlink,
                 .allocated = fast.allocated,
                 .dataless = fast.dataless,
+                .clone_id = fast.clone_id,
             });
         }
         worker.files.clearAndFree(self.allocator);

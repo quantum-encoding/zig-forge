@@ -125,6 +125,9 @@ pub const DupeFinder = struct {
         fw.setOneFilesystem(self.config.one_filesystem);
         fw.setSkipAppLibraries(self.config.skip_app_libraries);
         fw.enableHardLinkDetection();
+        // Never download a cloud placeholder to look inside it (macOS): the
+        // walk reports it as dataless and it is left out (see groupBySize).
+        fw.setNoMaterialize(true);
         // The walk is syscall-bound, so it uses the same parallelism as hashing.
         fw.setThreads(self.config.getThreadCount());
 
@@ -302,6 +305,13 @@ pub const DupeFinder = struct {
         for (self.files.items, 0..) |*entry, idx| {
             // An extra hard link is the same file, not a copy of it.
             if (entry.link_of != null) continue;
+            // A cloud placeholder's content is not on this disk; reading it
+            // would download it. It is counted, not compared.
+            if (entry.dataless) {
+                self.summary.dataless_skipped += 1;
+                self.summary.dataless_bytes +|= entry.size;
+                continue;
+            }
             if (entry.size == 0) {
                 self.summary.empty_files += 1;
                 if (self.config.analyze_dirs) entry.hash = empty_hash;
@@ -335,7 +345,45 @@ pub const DupeFinder = struct {
             _ = groups.remove(size);
         }
 
+        try self.linkClones(&groups);
         return groups;
+    }
+
+    /// Within each size group, point every pure clone (same volume, same
+    /// APFS data-stream id) at the first of its kind: they share their
+    /// blocks, so their content is read once and their hashes copied.
+    fn linkClones(self: *DupeFinder, groups: *std.AutoHashMap(u64, SizeGroup)) !void {
+        const Key = struct { dev: u64, clone_id: u64 };
+        var first: std.AutoHashMapUnmanaged(Key, usize) = .empty;
+        defer first.deinit(self.allocator);
+        var iter = groups.valueIterator();
+        while (iter.next()) |group| {
+            first.clearRetainingCapacity();
+            for (group.indices.items) |idx| {
+                const entry = &self.files.items[idx];
+                if (entry.clone_id == 0) continue;
+                const gop = try first.getOrPut(self.allocator, .{ .dev = entry.dev, .clone_id = entry.clone_id });
+                if (gop.found_existing) {
+                    entry.clone_of = gop.value_ptr.*;
+                    self.summary.clone_hash_skips += 1;
+                } else {
+                    gop.value_ptr.* = idx;
+                }
+            }
+        }
+    }
+
+    /// Give every clone the hashes of the file it is a clone of.
+    fn copyCloneHashes(self: *DupeFinder, size_groups: *std.AutoHashMap(u64, SizeGroup)) void {
+        var iter = size_groups.valueIterator();
+        while (iter.next()) |group| {
+            for (group.indices.items) |idx| {
+                const entry = &self.files.items[idx];
+                const of = entry.clone_of orelse continue;
+                entry.quick_hash = self.files.items[of].quick_hash;
+                entry.hash = self.files.items[of].hash;
+            }
+        }
     }
 
     fn countCandidates(self: *DupeFinder, size_groups: *const std.AutoHashMap(u64, SizeGroup)) u64 {
@@ -372,12 +420,18 @@ pub const DupeFinder = struct {
             if (group.size <= @max(self.config.quick_hash_size, hasher.BUFFER_SIZE)) continue;
 
             for (group.indices.items) |idx| {
+                if (self.files.items[idx].clone_of != null) continue;
                 try indices_to_hash.append(self.allocator, idx);
             }
         }
 
         self.summary.quick_hash_jobs = indices_to_hash.items.len;
         self.updateProgress(.quick_hashing, 0, indices_to_hash.items.len, null);
+        if (self.config.monitor) |m| {
+            var bytes: u64 = 0;
+            for (indices_to_hash.items) |idx| bytes +|= hasher.probeBytes(self.files.items[idx].size);
+            m.bytes_total.store(bytes, .release);
+        }
         if (indices_to_hash.items.len == 0) return;
         sortWalkOrder(indices_to_hash.items);
 
@@ -396,6 +450,7 @@ pub const DupeFinder = struct {
     }
 
     fn fullHashGroups(self: *DupeFinder, size_groups: *std.AutoHashMap(u64, SizeGroup)) !void {
+        self.copyCloneHashes(size_groups);
         // Collect all file indices that need full hashing
         // Only hash files with matching quick hashes (potential duplicates)
         var indices_to_hash: std.ArrayListUnmanaged(usize) = .empty;
@@ -430,6 +485,7 @@ pub const DupeFinder = struct {
                 if (indices.items.len < 2) continue; // Skip unique quick hashes
 
                 for (indices.items) |idx| {
+                    if (self.files.items[idx].clone_of != null) continue;
                     try indices_to_hash.append(self.allocator, idx);
                 }
             }
@@ -437,6 +493,11 @@ pub const DupeFinder = struct {
 
         self.summary.full_hash_jobs = indices_to_hash.items.len;
         self.updateProgress(.full_hashing, 0, indices_to_hash.items.len, null);
+        if (self.config.monitor) |m| {
+            var bytes: u64 = 0;
+            for (indices_to_hash.items) |idx| bytes +|= self.files.items[idx].readBytes();
+            m.bytes_total.store(bytes, .release);
+        }
         if (indices_to_hash.items.len == 0) return;
         sortWalkOrder(indices_to_hash.items);
 
@@ -454,6 +515,10 @@ pub const DupeFinder = struct {
     }
 
     fn buildDuplicateGroups(self: *DupeFinder, size_groups: *std.AutoHashMap(u64, SizeGroup)) !void {
+        self.copyCloneHashes(size_groups);
+        // Clone classes, per group: clone id -> class number.
+        var classes: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+        defer classes.deinit(self.allocator);
         // Group by full hash
         var hash_groups = std.AutoHashMap([32]u8, std.ArrayListUnmanaged(usize)).init(self.allocator);
         defer {
@@ -502,9 +567,30 @@ pub const DupeFinder = struct {
                 }
             }.lessThan);
 
+            // A clone id shared by two or more files of the group is a clone
+            // class; the group numbers its classes from 1, in file order.
+            classes.clearRetainingCapacity();
+            for (kv.value_ptr.items) |idx| {
+                const id = self.files.items[idx].clone_id;
+                if (id == 0) continue;
+                const gop = try classes.getOrPut(self.allocator, id);
+                gop.value_ptr.* = if (gop.found_existing) 1 else 0; // 1 = shared
+            }
+            var next_class: u32 = 1;
+            var it = classes.valueIterator();
+            while (it.next()) |v| v.* = if (v.* == 1) std.math.maxInt(u32) else 0;
             for (kv.value_ptr.items) |idx| {
                 const entry = &self.files.items[idx];
-                try group.addFileWithInfo(entry.path, entry.mtime);
+                var class: u32 = 0;
+                if (entry.clone_id != 0) {
+                    const slot = classes.getPtr(entry.clone_id).?;
+                    if (slot.* == std.math.maxInt(u32)) {
+                        slot.* = next_class;
+                        next_class += 1;
+                    }
+                    class = slot.*;
+                }
+                try group.addFileWithClone(entry.path, entry.mtime, class);
             }
 
             try self.groups.append(self.allocator, group);
@@ -638,4 +724,114 @@ test "DupeFinder empty scan" {
     try std.testing.expectEqual(@as(u64, 0), summary.duplicate_groups);
     // The failure is reported through the API, not printed to stderr.
     try std.testing.expectEqual(@as(u64, 1), finder.getFailedPathCount());
+}
+
+test "a sparse disk image and its dense copy are duplicates; a same-size image that differs is rejected by the probe" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "dedupe-sparse");
+    defer scratch.deinit();
+
+    const size: u64 = hasher.probe_sample_min + 4 * 1024 * 1024;
+    const header = [_]u8{'h'} ** 4096;
+    const sampled = ((size - 4096) / hasher.probe_samples * 3) & ~@as(u64, 4095);
+    const one = [_]u8{'1'} ** 4096;
+    const two = [_]u8{'2'} ** 4096;
+    try scratch.makeDir("vm");
+    try scratch.writeSparse("vm/a.img", size, &.{ .{ .offset = 0, .data = &header }, .{ .offset = sampled, .data = &one } });
+    try scratch.writeSparse("vm/other.img", size, &.{ .{ .offset = 0, .data = &header }, .{ .offset = sampled, .data = &two } });
+
+    // The dense equivalent of a.img.
+    const content = try allocator.alloc(u8, size);
+    defer allocator.free(content);
+    @memset(content, 0);
+    @memcpy(content[0..header.len], &header);
+    @memcpy(content[sampled..][0..one.len], &one);
+    try scratch.writeFile("vm/a-dense.img", content);
+
+    var monitor: types.Monitor = .{};
+    var finder = DupeFinder.init(allocator, .{ .monitor = &monitor });
+    defer finder.deinit();
+    try finder.scan(&.{scratch.path});
+
+    const groups = finder.getGroups();
+    try std.testing.expectEqual(@as(usize, 1), groups.len);
+    try std.testing.expectEqual(@as(usize, 2), groups[0].count());
+    try std.testing.expectEqual(hasher.hashBytesBlake3(content), groups[0].hash);
+    for (groups[0].files.items) |path| try std.testing.expect(std.mem.indexOf(u8, path, "other.img") == null);
+    // All three were probed; only the two whose probes matched were read whole.
+    try std.testing.expectEqual(@as(u64, 3), finder.getSummary().quick_hash_jobs);
+    try std.testing.expectEqual(@as(u64, 2), finder.getSummary().full_hash_jobs);
+}
+
+test "cloud placeholders are counted and never compared" {
+    const allocator = std.testing.allocator;
+    var finder = DupeFinder.init(allocator, .{});
+    defer finder.deinit();
+    // Three same-size files, two of them dataless: only one is left, so no
+    // size group forms and nothing would be read.
+    for ([_]bool{ true, true, false }, 0..) |dataless, i| {
+        try finder.files.append(allocator, .{
+            .path = "x",
+            .size = 4096,
+            .inode = i + 1,
+            .dev = 1,
+            .mtime = 0,
+            .hash = null,
+            .quick_hash = null,
+            .dataless = dataless,
+        });
+    }
+    var groups = try finder.groupBySize();
+    defer {
+        var it = groups.valueIterator();
+        while (it.next()) |g| g.deinit();
+        groups.deinit();
+    }
+    try std.testing.expectEqual(@as(u32, 0), groups.count());
+    try std.testing.expectEqual(@as(u64, 2), finder.summary.dataless_skipped);
+    try std.testing.expectEqual(@as(u64, 8192), finder.summary.dataless_bytes);
+}
+
+extern "c" fn clonefile(src: [*:0]const u8, dst: [*:0]const u8, flags: u32) c_int;
+
+test "APFS clones are read once, share a clone class, and count as one copy" {
+    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "dedupe-clones");
+    defer scratch.deinit();
+
+    const data = [_]u8{'c'} ** (200 * 1024);
+    try scratch.writeFile("orig", &data);
+    try scratch.writeFile("copy", &data);
+    const orig = try scratch.joinZ("orig");
+    defer allocator.free(orig);
+    const clone = try scratch.joinZ("clone");
+    defer allocator.free(clone);
+    // Not APFS (or no clone support): nothing to test here.
+    if (clonefile(orig, clone, 0) != 0) return error.SkipZigTest;
+
+    var finder = DupeFinder.init(allocator, .{});
+    defer finder.deinit();
+    try finder.scan(&.{scratch.path});
+
+    const groups = finder.getGroups();
+    try std.testing.expectEqual(@as(usize, 1), groups.len);
+    try std.testing.expectEqual(@as(usize, 3), groups[0].count());
+    // The clone and its original hold one copy of the data, the plain copy
+    // another: deleting all but one frees one file's worth.
+    try std.testing.expectEqual(@as(u64, data.len), groups[0].savings);
+    try std.testing.expectEqual(@as(u64, 1), groups[0].cloneFiles());
+    var classes: [3]u32 = undefined;
+    for (groups[0].file_infos.items, &classes) |info, *class| {
+        const name = std.fs.path.basename(info.path);
+        class.* = info.clone_class;
+        if (std.mem.eql(u8, name, "copy")) try std.testing.expectEqual(@as(u32, 0), info.clone_class);
+        if (!std.mem.eql(u8, name, "copy")) try std.testing.expectEqual(@as(u32, 1), info.clone_class);
+    }
+    // The clone's hash came from its original, not from a read.
+    try std.testing.expectEqual(@as(u64, 1), finder.getSummary().clone_hash_skips);
+    try std.testing.expectEqual(@as(u64, 2), finder.getSummary().full_hash_jobs);
 }

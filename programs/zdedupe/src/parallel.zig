@@ -6,6 +6,7 @@
 const std = @import("std");
 const hasher = @import("hasher.zig");
 const types = @import("types.zig");
+const fast_walker = @import("fast_walker.zig");
 
 /// Hash job for worker threads
 const HashJob = struct {
@@ -135,7 +136,9 @@ pub const ParallelHasher = struct {
         const actual_threads = @min(self.thread_count, @as(u32, @intCast(self.runs.items.len)));
 
         if (actual_threads <= 1) {
-            // Single-threaded fallback
+            // Single-threaded fallback, on the caller's thread.
+            const previous = fast_walker.noMaterializeThisThread();
+            defer fast_walker.restoreMaterialize(previous);
             self.workerLoop(0);
             return;
         }
@@ -151,7 +154,11 @@ pub const ParallelHasher = struct {
             t.* = std.Thread.spawn(.{}, workerThreadFn, .{ self, index }) catch break;
             started += 1;
         }
-        if (started == 0) self.workerLoop(0);
+        if (started == 0) {
+            const previous = fast_walker.noMaterializeThisThread();
+            defer fast_walker.restoreMaterialize(previous);
+            self.workerLoop(0);
+        }
 
         for (self.threads[0..started]) |t| {
             t.join();
@@ -164,6 +171,9 @@ pub const ParallelHasher = struct {
 
     /// Worker thread function
     fn workerThreadFn(self: *ParallelHasher, index: usize) void {
+        // A file evicted to the cloud after the walk saw it fails to read
+        // rather than being downloaded (macOS; see fast_walker).
+        _ = fast_walker.noMaterializeThisThread();
         self.workerLoop(index);
     }
 
@@ -189,7 +199,7 @@ pub const ParallelHasher = struct {
                     bytes = 0;
                 }
             }
-            bytes += if (job.quick_hash) @min(entry.size, job.quick_hash_size) else entry.size;
+            bytes += if (job.quick_hash) hasher.probeBytes(entry.size) else entry.readBytes();
         }
         try self.runs.append(self.allocator, .{ .start = start, .end = self.jobs.items.len });
     }
@@ -262,6 +272,8 @@ pub const ParallelHasher = struct {
         name_buf: *[4096]u8,
     ) ?hasher.Hash {
         _ = self;
+        const read: hasher.ScanRead = if (job.quick_hash) .probe else .full;
+        const budget = if (job.quick_hash) hasher.probeBytes(entry.size) else entry.readBytes();
         if (dir_fd >= 0) {
             const slash = std.mem.lastIndexOfScalar(u8, entry.path, '/').?;
             const name = entry.path[slash + 1 ..];
@@ -269,16 +281,10 @@ pub const ParallelHasher = struct {
                 @memcpy(name_buf[0..name.len], name);
                 name_buf[name.len] = 0;
                 const name_z: [*:0]const u8 = @ptrCast(name_buf);
-                return if (job.quick_hash)
-                    file_hasher.hashFileQuickAt(dir_fd, name_z, job.quick_hash_size) catch null
-                else
-                    file_hasher.hashFileAt(dir_fd, name_z) catch null;
+                return file_hasher.hashForScanAt(dir_fd, name_z, read, entry.size, budget) catch null;
             }
         }
-        return if (job.quick_hash)
-            file_hasher.hashFileQuick(entry.path, job.quick_hash_size) catch null
-        else
-            file_hasher.hashFile(entry.path) catch null;
+        return file_hasher.hashForScan(entry.path, read, entry.size, budget) catch null;
     }
 
     /// Get number of completed jobs

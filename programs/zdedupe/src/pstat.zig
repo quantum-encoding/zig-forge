@@ -43,6 +43,9 @@ pub const Stat = struct {
     /// Storage", File Provider). Its content is not on disk, and reading it
     /// would download it.
     dataless: bool = false,
+    /// APFS data-stream id, from a bulk directory listing (dirstream.zig);
+    /// 0 when unknown. Equal non-zero ids mean pure clones.
+    clone_id: u64 = 0,
 
     pub const IFMT: u32 = 0o170000;
     pub const IFREG: u32 = 0o100000;

@@ -151,7 +151,7 @@
       "description": "One set of identical files. Which copy stays is the query's KeepSpec decision, reported in keeper, locked and targets — not the position in files. A group with fewer than two alive copies is not a row at all.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["hash", "count", "size", "savings", "files", "mtimes", "keeper", "locked", "targets", "bulk"],
+      "required": ["hash", "count", "size", "savings", "files", "mtimes", "keeper", "locked", "targets", "clones", "bulk"],
       "properties": {
         "hash": { "$ref": "#/$defs/Sha256Hex" },
         "count": {
@@ -164,7 +164,7 @@
           "$ref": "#/$defs/ByteCount"
         },
         "savings": {
-          "description": "size * (count - 1) over the alive copies: what deleting every copy but the keeper reclaims.",
+          "description": "What deleting every copy but the keeper reclaims, over the alive copies: size * (distinct copies - 1), where the files of one clone class (see clones) count as a single copy.",
           "$ref": "#/$defs/ByteCount"
         },
         "files": {
@@ -198,6 +198,13 @@
           "minItems": 2,
           "maxItems": 50,
           "items": { "type": "boolean" }
+        },
+        "clones": {
+          "description": "Aligned with files: 0, or the group-local clone class (from 1) a file shares with other files of this group. Files of one class are APFS clones sharing every block: deleting one frees nothing while another member of its class remains. Always 0 off APFS.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 50,
+          "items": { "type": "integer", "minimum": 0 }
         },
         "bulk": {
           "description": "True when the query carried a bulk rule and this row is covered by it: alive >= 2 and the rule matches. Absent rule means false, never omitted.",
@@ -416,7 +423,7 @@
       "description": "Response of zdedupe_results_overview: the scan's own counters plus what the folder sections add up to. These counters are the SCAN's and do NOT change as files are deleted — a host must say so beside them rather than let them read as live. Every field is always present; hosts should not treat any as optional.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["roots", "generated_at", "files_scanned", "bytes_scanned", "duplicate_groups", "duplicate_files", "space_savings", "scan_time_ns", "excluded_entries", "overlapping_roots", "failed_paths", "has_directories", "dirs_analyzed", "dirs_incomplete", "identical_sets", "overlaps", "redundant_pairs", "reclaimable"],
+      "required": ["roots", "generated_at", "files_scanned", "bytes_scanned", "duplicate_groups", "duplicate_files", "space_savings", "scan_time_ns", "excluded_entries", "overlapping_roots", "failed_paths", "dataless_skipped", "dataless_bytes", "clone_hash_skips", "has_directories", "dirs_analyzed", "dirs_incomplete", "identical_sets", "overlaps", "redundant_pairs", "reclaimable"],
       "properties": {
         "roots": {
           "description": "The folders that were scanned. Empty if not recorded; on reopening, taken from the sidecar or inferred as the deepest directory containing every result.",
@@ -446,6 +453,20 @@
         },
         "failed_paths": {
           "description": "Selected folders that could not be read at all. Non-zero means the results are incomplete and the user should be told which.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "dataless_skipped": {
+          "description": "Cloud placeholders (macOS: iCloud Drive and File Provider files whose content is not on this disk) left unread rather than downloaded. They are not compared; a host should say so when this is non-zero.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "dataless_bytes": {
+          "description": "Logical size of those placeholders.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "clone_hash_skips": {
+          "description": "Candidates whose hashes were taken from a pure APFS clone of theirs instead of being read.",
           "type": "integer",
           "minimum": 0
         },
@@ -1124,15 +1145,17 @@
     },
 
     "ScanProgress": {
-      "description": "Not part of the results session — zdedupe_get_progress fills a C struct during a scan, and the host serialises it. Included because a host's progress type drifts just as easily. phase: 0 idle, 1 finding files, 2 grouping by size, 3 comparing file beginnings, 4 comparing full contents, 5 analysing folders (a disk-space scan: adding up the tree), 6 saving results, 7 done. A disk-space scan goes 1, 5, 6, 7. Only phases 3 and 4 know how much work there is, so total is 0 elsewhere and a host must not render a percentage from it.",
+      "description": "Not part of the results session — zdedupe_get_progress fills a C struct during a scan, and the host serialises it. Included because a host's progress type drifts just as easily. phase: 0 idle, 1 finding files, 2 grouping by size, 3 comparing file beginnings, 4 comparing full contents, 5 analysing folders (a disk-space scan: adding up the tree), 6 saving results, 7 done. A disk-space scan goes 1, 5, 6, 7. Only phases 3 and 4 know how much work there is, so total and bytes_total are 0 elsewhere and a host must not render a percentage from them. A progress bar should follow bytes_done / bytes_total (allocated bytes, so a sparse disk image counts what is on disk): one large file can hold a phase up for minutes while done barely moves.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["phase", "files_found", "done", "total"],
+      "required": ["phase", "files_found", "done", "total", "bytes_done", "bytes_total"],
       "properties": {
         "phase": { "type": "integer", "minimum": 0, "maximum": 7 },
         "files_found": { "type": "integer", "minimum": 0 },
         "done": { "type": "integer", "minimum": 0 },
-        "total": { "type": "integer", "minimum": 0 }
+        "total": { "type": "integer", "minimum": 0 },
+        "bytes_done": { "type": "integer", "minimum": 0 },
+        "bytes_total": { "type": "integer", "minimum": 0 }
       }
     }
   }

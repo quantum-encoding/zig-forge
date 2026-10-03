@@ -281,6 +281,8 @@ pub const ZDedupeProgress = extern struct {
     files_found: u64,
     done: u64,
     total: u64,
+    bytes_done: u64,
+    bytes_total: u64,
 };
 
 pub export fn zdedupe_get_progress(ctx: ?*const ZDedupeContext, out: ?*ZDedupeProgress) void {
@@ -292,6 +294,8 @@ pub export fn zdedupe_get_progress(ctx: ?*const ZDedupeContext, out: ?*ZDedupePr
         .files_found = internal.monitor.files_found.load(.acquire),
         .done = internal.monitor.done.load(.acquire),
         .total = internal.monitor.total.load(.acquire),
+        .bytes_done = internal.monitor.bytes_done.load(.acquire),
+        .bytes_total = internal.monitor.bytes_total.load(.acquire),
     };
 }
 

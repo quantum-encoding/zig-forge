@@ -77,6 +77,9 @@ pub const ReportWriter = struct {
         if (summary.overlapping_roots > 0) {
             try writer.print("Roots skipped:    {} (already covered by another root)\n", .{summary.overlapping_roots});
         }
+        if (summary.dataless_skipped > 0) {
+            try writer.print("Not compared:     {} cloud-only files ({s}, not downloaded)\n", .{ summary.dataless_skipped, types.formatBytes(summary.dataless_bytes, &buf) });
+        }
         try writer.print(
             "Candidates:       {} files in {} shared sizes ({} empty and {} unique-size files never read)\n",
             .{ summary.candidate_files, summary.size_groups, summary.empty_files, summary.unique_size_files },
@@ -156,7 +159,10 @@ pub const ReportWriter = struct {
         try writer.print("    \"size_groups\": {},\n", .{summary.size_groups});
         try writer.print("    \"candidate_files\": {},\n", .{summary.candidate_files});
         try writer.print("    \"quick_hash_jobs\": {},\n", .{summary.quick_hash_jobs});
-        try writer.print("    \"full_hash_jobs\": {}\n", .{summary.full_hash_jobs});
+        try writer.print("    \"full_hash_jobs\": {},\n", .{summary.full_hash_jobs});
+        try writer.print("    \"dataless_skipped\": {},\n", .{summary.dataless_skipped});
+        try writer.print("    \"dataless_bytes\": {},\n", .{summary.dataless_bytes});
+        try writer.print("    \"clone_hash_skips\": {}\n", .{summary.clone_hash_skips});
         try writer.writeAll("  },\n");
 
         // Groups

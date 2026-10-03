@@ -28,7 +28,8 @@ pub const FileHasher = struct {
     /// Hash algorithm to use
     algorithm: types.Config.HashAlgorithm,
     /// Polled between reads; a cancelled hash returns `error.Cancelled`.
-    monitor: ?*const types.Monitor = null,
+    /// Bytes read are added to its `bytes_done` (see `hashForScanAt`).
+    monitor: ?*types.Monitor = null,
 
     pub fn init(algorithm: types.Config.HashAlgorithm) FileHasher {
         return .{ .algorithm = algorithm };
@@ -53,9 +54,34 @@ pub const FileHasher = struct {
         const fd = try openRegularFileAt(dir_fd, name);
         defer _ = libc.close(fd);
         return switch (self.algorithm) {
-            .blake3 => hashFd(std.crypto.hash.Blake3, fd, max_bytes, self.monitor),
-            .sha256 => hashFd(std.crypto.hash.sha2.Sha256, fd, max_bytes, self.monitor),
+            .blake3 => hashFd(std.crypto.hash.Blake3, fd, max_bytes, self.monitor, 0),
+            .sha256 => hashFd(std.crypto.hash.sha2.Sha256, fd, max_bytes, self.monitor, 0),
         };
+    }
+
+    /// The two reads a duplicate scan makes of a candidate, of the file
+    /// `name` in `dir_fd` (or `AT_FDCWD` and an absolute path). `size` is
+    /// the size the walk saw. `budget` is this file's share of the phase's
+    /// `Monitor.bytes_total` (`probeBytes` / `FileEntry.readBytes`):
+    /// `bytes_done` advances by what is read, capped at the share, and is
+    /// topped up to it when the file is done, so the phase ends exactly at
+    /// its total however the file turned out.
+    pub fn hashForScanAt(self: *const FileHasher, dir_fd: c_int, name: [*:0]const u8, read: ScanRead, size: u64, budget: u64) !Hash {
+        const fd = try openRegularFileAt(dir_fd, name);
+        defer _ = libc.close(fd);
+        return switch (self.algorithm) {
+            .blake3 => scanFd(std.crypto.hash.Blake3, fd, read, size, self.monitor, budget),
+            .sha256 => scanFd(std.crypto.hash.sha2.Sha256, fd, read, size, self.monitor, budget),
+        };
+    }
+
+    /// `hashForScanAt` by absolute path.
+    pub fn hashForScan(self: *const FileHasher, path: []const u8, read: ScanRead, size: u64, budget: u64) !Hash {
+        var path_buf: [4096]u8 = undefined;
+        if (path.len >= path_buf.len) return error.PathTooLong;
+        @memcpy(path_buf[0..path.len], path);
+        path_buf[path.len] = 0;
+        return self.hashForScanAt(AT_FDCWD, @ptrCast(&path_buf), read, size, budget);
     }
 
     /// Hash first N bytes of file (quick hash for fast rejection)
@@ -128,14 +154,172 @@ pub fn hashFileSha256(path: []const u8, max_bytes: ?usize) !Hash {
 
 /// The one file-reading hash loop. `monitor`, when given, is polled between
 /// reads so cancelling does not have to wait out a multi-gigabyte file.
-fn hashFileWith(comptime Hasher: type, path: []const u8, max_bytes: ?usize, monitor: ?*const types.Monitor) !Hash {
+fn hashFileWith(comptime Hasher: type, path: []const u8, max_bytes: ?usize, monitor: ?*types.Monitor) !Hash {
     const fd = try openRegularFile(path);
     defer _ = libc.close(fd);
-    return hashFd(Hasher, fd, max_bytes, monitor);
+    return hashFd(Hasher, fd, max_bytes, monitor, 0);
 }
 
-fn hashFd(comptime Hasher: type, fd: c_int, max_bytes: ?usize, monitor: ?*const types.Monitor) !Hash {
+pub const ScanRead = enum {
+    /// Cheap rejection: the first `DEFAULT_QUICK_HASH_SIZE` bytes, plus, for
+    /// a file of `probe_sample_min` or more, `probe_samples` blocks spread
+    /// over the rest. Big files of one size (disk images, VM bundles) tend to
+    /// share their first block; without samples each such pair is read
+    /// whole before it turns out to differ.
+    probe,
+    /// The whole content, by data extents (see `feedSparse`).
+    full,
+};
+
+pub const probe_sample_min: u64 = 64 * 1024 * 1024;
+pub const probe_samples: u64 = 15;
+
+/// Bytes `ScanRead.probe` reads from a file of `size`.
+pub fn probeBytes(size: u64) u64 {
+    const prefix: u64 = DEFAULT_QUICK_HASH_SIZE;
+    if (size < probe_sample_min) return @min(size, prefix);
+    return prefix * (1 + probe_samples);
+}
+
+fn scanFd(comptime Hasher: type, fd: c_int, read: ScanRead, size: u64, monitor: ?*types.Monitor, budget_bytes: u64) !Hash {
+    switch (read) {
+        .full => return hashFd(Hasher, fd, null, monitor, budget_bytes),
+        .probe => {
+            if (size < probe_sample_min) return hashFd(Hasher, fd, DEFAULT_QUICK_HASH_SIZE, monitor, budget_bytes);
+            var budget: Budget = .{ .monitor = monitor, .left = budget_bytes };
+            defer budget.finish();
+            var hasher = Hasher.init(.{});
+            var buf: [DEFAULT_QUICK_HASH_SIZE]u8 = undefined;
+            const last = size - buf.len;
+            var k: u64 = 0;
+            while (k <= probe_samples) : (k += 1) {
+                if (monitor) |m| if (m.cancelled()) return error.Cancelled;
+                // Block-aligned, so a sample never straddles two extents.
+                const offset = (last / probe_samples * k) & ~@as(u64, buf.len - 1);
+                const n = try preadAll(fd, &buf, offset);
+                hasher.update(std.mem.asBytes(&offset));
+                hasher.update(buf[0..n]);
+                budget.add(n);
+            }
+            var result: Hash = undefined;
+            hasher.final(&result);
+            return result;
+        },
+    }
+}
+
+/// Fill `buf` from `offset`, short only at end of file.
+fn preadAll(fd: c_int, buf: []u8, offset: u64) !usize {
+    var got: usize = 0;
+    while (got < buf.len) {
+        const n = libc.pread(fd, buf[got..].ptr, buf.len - got, @intCast(offset + got));
+        if (n == 0) break;
+        if (n < 0) {
+            if (libc.errno(n) == .INTR) continue;
+            return error.ReadFailed;
+        }
+        got += @intCast(n);
+    }
+    return got;
+}
+
+/// One file's share of a phase's byte progress; see `hashForScanAt`.
+const Budget = struct {
+    monitor: ?*types.Monitor,
+    left: u64,
+
+    fn add(self: *Budget, n: u64) void {
+        const take = @min(n, self.left);
+        if (take == 0) return;
+        self.left -= take;
+        if (self.monitor) |m| m.addBytes(take);
+    }
+
+    fn finish(self: *Budget) void {
+        self.add(self.left);
+    }
+};
+
+// lseek whence values for extent queries; Darwin and Linux number them oppositely.
+const SEEK_HOLE: c_int = if (builtin.os.tag.isDarwin()) 3 else 4;
+const SEEK_DATA: c_int = if (builtin.os.tag.isDarwin()) 4 else 3;
+const holes_reported = builtin.os.tag.isDarwin() or is_linux;
+
+/// All zeros, fed for holes.
+const zero_block: [BUFFER_SIZE]u8 = @splat(0);
+
+/// Feed the whole content of `fd` to `hasher`, reading only its data extents:
+/// a hole reads back as zeros, so zeros are fed for it without a read. The
+/// digest is the one a plain read gives - a sparse file and its dense copy
+/// hash the same - but a mostly empty disk image costs what is on disk, not
+/// its nominal size, in I/O. Returns false, having fed nothing, when the
+/// filesystem does not answer extent queries; the caller then reads plainly.
+fn feedSparse(comptime Hasher: type, hasher: *Hasher, fd: c_int, monitor: ?*types.Monitor, budget: *Budget) !bool {
+    if (comptime !holes_reported) return false;
+    var buf: [BUFFER_SIZE]u8 = undefined;
+    var pos: i64 = 0;
+    var fed = false;
+    while (true) {
+        if (monitor) |m| if (m.cancelled()) return error.Cancelled;
+        const data = libc.lseek(fd, pos, SEEK_DATA);
+        if (data < 0) switch (libc.errno(data)) {
+            .INTR => continue,
+            // Nothing but hole from `pos` to the end of the file.
+            .NXIO => {
+                const st = pstat.fstat(fd) catch return error.ReadFailed;
+                if (st.size > pos) try feedZeros(Hasher, hasher, st.size - @as(u64, @intCast(pos)), monitor);
+                return true;
+            },
+            else => return if (fed) error.ReadFailed else false,
+        };
+        if (data > pos) {
+            try feedZeros(Hasher, hasher, @intCast(data - pos), monitor);
+            fed = true;
+        }
+        const hole = libc.lseek(fd, data, SEEK_HOLE);
+        if (hole < data) return if (fed) error.ReadFailed else false;
+
+        var offset = data;
+        while (offset < hole) {
+            if (monitor) |m| if (m.cancelled()) return error.Cancelled;
+            const want: usize = @intCast(@min(@as(i64, buf.len), hole - offset));
+            const n = libc.pread(fd, &buf, want, offset);
+            // The file shrank under us: hash what is there, as a plain read would.
+            if (n == 0) return true;
+            if (n < 0) {
+                if (libc.errno(n) == .INTR) continue;
+                return error.ReadFailed;
+            }
+            const got: usize = @intCast(n);
+            hasher.update(buf[0..got]);
+            budget.add(got);
+            offset += n;
+            fed = true;
+        }
+        pos = hole;
+    }
+}
+
+fn feedZeros(comptime Hasher: type, hasher: *Hasher, len: u64, monitor: ?*types.Monitor) !void {
+    var left = len;
+    while (left > 0) {
+        if (monitor) |m| if (m.cancelled()) return error.Cancelled;
+        const n: usize = @intCast(@min(left, zero_block.len));
+        hasher.update(zero_block[0..n]);
+        left -= n;
+    }
+}
+
+fn hashFd(comptime Hasher: type, fd: c_int, max_bytes: ?usize, monitor: ?*types.Monitor, budget_bytes: u64) !Hash {
+    var budget: Budget = .{ .monitor = monitor, .left = budget_bytes };
+    defer budget.finish();
     var hasher = Hasher.init(.{});
+    // A whole file is read by its data extents; holes are fed as zeros.
+    if (max_bytes == null and try feedSparse(Hasher, &hasher, fd, monitor, &budget)) {
+        var result: Hash = undefined;
+        hasher.final(&result);
+        return result;
+    }
     var buf: [BUFFER_SIZE]u8 = undefined;
     var total_read: usize = 0;
 
@@ -164,6 +348,7 @@ fn hashFd(comptime Hasher: type, fd: c_int, max_bytes: ?usize, monitor: ?*const 
 
         const bytes_read: usize = @intCast(n);
         hasher.update(buf[0..bytes_read]);
+        budget.add(bytes_read);
         total_read += bytes_read;
     }
 
@@ -413,4 +598,110 @@ test "hashFile refuses non-regular files instead of hanging or hashing empty" {
     try std.testing.expectError(error.NotRegularFile, hashFileBlake3(fifo_path, null));
     try std.testing.expectError(error.NotRegularFile, hashFileSha256(fifo_path, null));
     try std.testing.expectError(error.NotRegularFile, hashFileBlake3(fifo_path, 4096));
+}
+
+test "a sparse file hashes like its dense copy, and like its bytes" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "hasher-sparse");
+    defer scratch.deinit();
+
+    // Data at the start, in the middle across a block boundary, and in the
+    // last partial block; holes between, and none at the very end.
+    const size: u64 = 3 * 1024 * 1024 + 123;
+    const head = [_]u8{'a'} ** 4096;
+    const middle = [_]u8{'b'} ** 5000;
+    const tail = [_]u8{'c'} ** 100;
+    const extents = [_]Scratch.Extent{
+        .{ .offset = 0, .data = &head },
+        .{ .offset = 1024 * 1024 + 2048, .data = &middle },
+        .{ .offset = size - tail.len, .data = &tail },
+    };
+    const content = try allocator.alloc(u8, size);
+    defer allocator.free(content);
+    @memset(content, 0);
+    for (extents) |e| @memcpy(content[e.offset..][0..e.data.len], e.data);
+
+    try scratch.writeSparse("sparse.img", size, &extents);
+    try scratch.writeFile("dense.img", content);
+    // Nothing but a hole, and a hole up to one block at the end.
+    try scratch.writeSparse("empty.img", size, &.{});
+    try scratch.writeSparse("late.img", size, &.{.{ .offset = size - tail.len, .data = &tail }});
+
+    const sparse = try scratch.join("sparse.img");
+    defer allocator.free(sparse);
+    const dense = try scratch.join("dense.img");
+    defer allocator.free(dense);
+    const empty = try scratch.join("empty.img");
+    defer allocator.free(empty);
+    const late = try scratch.join("late.img");
+    defer allocator.free(late);
+
+    const want = hashBytesBlake3(content);
+    try std.testing.expectEqual(want, try hashFileBlake3(sparse, null));
+    try std.testing.expectEqual(want, try hashFileBlake3(dense, null));
+    try std.testing.expectEqual(hashBytesSha256(content), try hashFileSha256(sparse, null));
+
+    @memset(content, 0);
+    try std.testing.expectEqual(hashBytesBlake3(content), try hashFileBlake3(empty, null));
+    @memcpy(content[size - tail.len ..], &tail);
+    try std.testing.expectEqual(hashBytesBlake3(content), try hashFileBlake3(late, null));
+}
+
+test "the probe tells big same-size files apart past their first block, and agrees on copies" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "hasher-probe");
+    defer scratch.deinit();
+
+    // Two disk images with the same header, differing at the 7th sample.
+    const size: u64 = probe_sample_min + 8 * 1024 * 1024;
+    const header = [_]u8{'h'} ** 4096;
+    const sampled = ((size - 4096) / probe_samples * 7) & ~@as(u64, 4095);
+    const one = [_]u8{'1'} ** 4096;
+    const two = [_]u8{'2'} ** 4096;
+    try scratch.writeSparse("a.img", size, &.{ .{ .offset = 0, .data = &header }, .{ .offset = sampled, .data = &one } });
+    try scratch.writeSparse("b.img", size, &.{ .{ .offset = 0, .data = &header }, .{ .offset = sampled, .data = &two } });
+    try scratch.writeSparse("a-copy.img", size, &.{ .{ .offset = 0, .data = &header }, .{ .offset = sampled, .data = &one } });
+
+    const h = FileHasher.init(.blake3);
+    var probes: [3]Hash = undefined;
+    for ([_][]const u8{ "a.img", "b.img", "a-copy.img" }, &probes) |name, *probe| {
+        const path = try scratch.join(name);
+        defer allocator.free(path);
+        probe.* = try h.hashForScan(path, .probe, size, probeBytes(size));
+    }
+    try std.testing.expect(!std.mem.eql(u8, &probes[0], &probes[1]));
+    try std.testing.expectEqual(probes[0], probes[2]);
+
+    // Below the threshold the probe is the plain 4 KiB prefix hash.
+    try scratch.writeFile("small", &header);
+    const small = try scratch.join("small");
+    defer allocator.free(small);
+    try std.testing.expectEqual(try h.hashFileQuick(small, 4096), try h.hashForScan(small, .probe, header.len, probeBytes(header.len)));
+}
+
+test "byte progress lands exactly on each file's share" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "hasher-bytes");
+    defer scratch.deinit();
+
+    const data = [_]u8{'d'} ** 10_000;
+    try scratch.writeSparse("f", 1024 * 1024, &.{.{ .offset = 0, .data = &data }});
+    const path = try scratch.join("f");
+    defer allocator.free(path);
+
+    var monitor: types.Monitor = .{};
+    var h = FileHasher.init(.blake3);
+    h.monitor = &monitor;
+    // A share smaller than what is read (a compressed file reads more than
+    // it allocates) and one larger (the file shrank): either way, exact.
+    _ = try h.hashForScan(path, .full, 1024 * 1024, 4096);
+    try std.testing.expectEqual(@as(u64, 4096), monitor.bytes_done.load(.acquire));
+    _ = try h.hashForScan(path, .full, 1024 * 1024, 1_000_000);
+    try std.testing.expectEqual(@as(u64, 1_004_096), monitor.bytes_done.load(.acquire));
 }
