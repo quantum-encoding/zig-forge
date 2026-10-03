@@ -1160,6 +1160,10 @@
           "description": "How long the item the scan has been on longest (zdedupe_get_current_path) has been in progress, in milliseconds; 0 when idle. Seconds on one folder while finding files usually means a permission dialog for it is waiting for an answer: say so and name the folder.",
           "type": "integer",
           "minimum": 0
+        },
+        "current_path": {
+          "description": "Host-added, not in the C struct: what zdedupe_get_current_path returns (a leading '…' marks a path cut to its tail), or null between items.",
+          "type": ["string", "null"]
         }
       }
     }
