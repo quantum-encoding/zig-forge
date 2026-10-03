@@ -363,11 +363,12 @@ pub const DupeFinder = struct {
 
         var iter = size_groups.valueIterator();
         while (iter.next()) |group| {
-            // Only quick hash files larger than quick_hash_size
-            if (group.size <= self.config.quick_hash_size) {
-                // Small files - skip quick hash, go straight to full hash
-                continue;
-            }
+            // A file that one read takes whole is hashed whole straight
+            // away: a quick hash would cost the same open and read, and a
+            // matching prefix would then open and read it a second time. The
+            // open is the expensive part (on macOS every one is an Endpoint
+            // Security authorization), so this halves them for small files.
+            if (group.size <= @max(self.config.quick_hash_size, hasher.BUFFER_SIZE)) continue;
 
             for (group.indices.items) |idx| {
                 try indices_to_hash.append(self.allocator, idx);

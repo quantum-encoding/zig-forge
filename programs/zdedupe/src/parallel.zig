@@ -206,10 +206,14 @@ pub const ParallelHasher = struct {
             if (run_idx >= self.runs.items.len) break;
             const run_jobs = self.jobs.items[self.runs.items[run_idx].start..self.runs.items[run_idx].end];
 
-            // One directory open per run; if it cannot be opened, each file
-            // is tried by its full path instead (and fails the same way the
-            // old path did, or succeeds if the directory was the only issue).
+            // One directory open per run of several files; if it cannot be
+            // opened, each file is tried by its full path instead (and fails
+            // the same way, or succeeds if the directory was the only issue).
+            // A lone file is opened by its full path straight away: opening
+            // its directory first resolves the same components and costs a
+            // second open (on macOS, a second Endpoint Security authorization).
             const dir_fd: c_int = blk: {
+                if (run_jobs.len < 2) break :blk -1;
                 const parent = parentOf(self.files[run_jobs[0].file_idx].path) orelse break :blk -1;
                 if (parent.len >= name_buf.len) break :blk -1;
                 @memcpy(name_buf[0..parent.len], parent);

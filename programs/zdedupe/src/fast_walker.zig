@@ -6,7 +6,9 @@
 //!
 //!   * Files are stat'ed *relative to the open directory* (`statx(dirfd, name)`),
 //!     so the kernel does not re-resolve every component of a long absolute
-//!     path for each file.
+//!     path for each file. On macOS the listing itself carries each file's
+//!     stat (`getattrlistbulk`, see dirstream.zig), so there is no per-file
+//!     syscall at all.
 //!   * Directories are processed by a pool of workers pulling from a shared
 //!     stack. On a warm cache this spreads the syscall cost across cores; on a
 //!     cold one it is what gives an NVMe drive a queue depth worth having.
@@ -46,8 +48,8 @@ const builtin = @import("builtin");
 const types = @import("types.zig");
 const libc = std.c;
 
-/// POSIX `dirfd`: the descriptor behind an open `DIR*` (not in Zig 0.16's std.c).
-extern "c" fn dirfd(dir: *libc.DIR) c_int;
+const dirstream = @import("dirstream.zig");
+const DirStream = dirstream.DirStream;
 
 // Stat comes from pstat.zig: std.c ($INODE64-correct) on Darwin, statx on Linux.
 const pstat = @import("pstat.zig");
@@ -224,12 +226,11 @@ const Shared = struct {
 /// Longest path the walker will record.
 const max_path = 8190;
 
-// d_type constants from dirent.h
-const DT_UNKNOWN: u8 = 0;
-const DT_DIR: u8 = 4; // Directory
-const DT_REG: u8 = 8; // Regular file
-const DT_LNK: u8 = 10; // Symbolic link
-const DT_OTHER: u8 = 255; // Anything else, once classified by stat
+const DT_UNKNOWN = dirstream.DT_UNKNOWN;
+const DT_DIR = dirstream.DT_DIR;
+const DT_REG = dirstream.DT_REG;
+const DT_LNK = dirstream.DT_LNK;
+const DT_OTHER = dirstream.DT_OTHER;
 
 /// One thread's private state.
 const Worker = struct {
@@ -294,19 +295,19 @@ const Worker = struct {
             return;
         }
 
-        if (w.exclude_cache_dirs and !w.isRoot(dir_path) and self.isCacheDir(dir_path)) {
-            self.stats.excluded += 1;
-            try self.markParent(dir_path, .skipped);
-            return;
-        }
-
-        const dir = libc.opendir(self.pathZ(dir_path)) orelse {
+        var stream = DirStream.open(self.pathZ(dir_path)) orelse {
             self.stats.errors += 1;
             try self.markParent(dir_path, .incomplete);
             return;
         };
-        defer _ = libc.closedir(dir);
-        const dir_fd = dirfd(dir);
+        defer stream.close();
+        const dir_fd = stream.fd();
+
+        if (w.exclude_cache_dirs and !w.isRoot(dir_path) and isCacheDir(dir_fd)) {
+            self.stats.excluded += 1;
+            try self.markParent(dir_path, .skipped);
+            return;
+        }
 
         // A mount point inside a root belongs to another filesystem; reading
         // from one (a network share, a phone's DeviceFS) can block forever.
@@ -350,7 +351,11 @@ const Worker = struct {
         var unreported: u64 = 0;
         var entries_seen: u32 = 0;
 
-        while (libc.readdir(dir)) |entry| {
+        while (true) {
+            const entry = (stream.next() catch {
+                self.noteError(&record);
+                break;
+            }) orelse break;
             entries_seen +%= 1;
             if (entries_seen % 4096 == 0) {
                 if (w.monitor) |m| {
@@ -359,16 +364,11 @@ const Worker = struct {
                     unreported = found_here;
                 }
             }
-            const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
+            const name_ptr = entry.name;
 
-            // Quick skip for . and ..
-            if (name_ptr[0] == '.') {
-                if (name_ptr[1] == 0) continue; // "."
-                if (name_ptr[1] == '.' and name_ptr[2] == 0) continue; // ".."
-                if (!w.include_hidden) {
-                    record.skipped += 1;
-                    continue; // Hidden entry
-                }
+            if (name_ptr[0] == '.' and !w.include_hidden) {
+                record.skipped += 1;
+                continue; // Hidden entry
             }
 
             const name = name_ptr[0..std.mem.len(name_ptr)];
@@ -384,11 +384,11 @@ const Worker = struct {
                 continue;
             }
 
-            // Use d_type to classify without a syscall when the filesystem
-            // provides it; otherwise ask.
-            var kind: u8 = entry.type;
-            var known: ?Stat = null;
-            if (kind == DT_UNKNOWN or kind == DT_REG) {
+            // Classify from the listing when it says enough (d_type, or the
+            // bulk listing's own stat); otherwise ask.
+            var kind: u8 = entry.kind;
+            var known: ?Stat = entry.stat;
+            if (known == null and (kind == DT_UNKNOWN or kind == DT_REG)) {
                 // Relative to the directory we hold open: an absolute-path stat
                 // makes the kernel re-walk every component of a deep path.
                 const st = pstat.lstatAt(dir_fd, name_ptr) catch {
@@ -503,18 +503,15 @@ const Worker = struct {
     /// regular file starting with the fixed signature; its mere presence is
     /// not enough (that is the spec, and it stops an empty file of that name
     /// from hiding a directory from the scan).
-    fn isCacheDir(self: *Worker, dir_path: []const u8) bool {
-        const tag = "/CACHEDIR.TAG";
-        if (dir_path.len + tag.len >= self.path_buf.len) return false;
-        @memcpy(self.path_buf[0..dir_path.len], dir_path);
-        @memcpy(self.path_buf[dir_path.len..][0..tag.len], tag);
-        self.path_buf[dir_path.len + tag.len] = 0;
-
+    /// Looked up relative to the open directory: one name to resolve, and a
+    /// miss (nearly every directory) is answered from the name cache.
+    fn isCacheDir(dir_fd: c_int) bool {
         // NOFOLLOW + NONBLOCK: never chase a link out of the tree, never hang
         // on a FIFO someone named CACHEDIR.TAG.
-        const fd = libc.open(
-            @ptrCast(&self.path_buf),
-            .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .NOFOLLOW = true },
+        const fd = libc.openat(
+            dir_fd,
+            "CACHEDIR.TAG",
+            .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .NOFOLLOW = true, .CLOEXEC = true },
             @as(libc.mode_t, 0),
         );
         if (fd < 0) return false;

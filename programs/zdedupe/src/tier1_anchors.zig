@@ -1393,8 +1393,9 @@ test "empty and unique-size files are never read; the counts say what was hashed
     var scratch = try Scratch.init(allocator, "candidates");
     defer scratch.deinit();
 
-    // Three empty files, two unique sizes, one small pair, one large pair
-    // (beyond the 4 KiB prefix) and a large file that only shares a size.
+    // Three empty files, two unique sizes, one small pair, a medium pair (past
+    // the 4 KiB prefix but inside one read), one large pair (beyond one read)
+    // and a large file that only shares a size.
     try scratch.writeFile("e1", "");
     try scratch.writeFile("e2", "");
     try scratch.writeFile("e3", "");
@@ -1402,7 +1403,10 @@ test "empty and unique-size files are never read; the counts say what was hashed
     try scratch.writeFile("u2", "abcdefghijk");
     try scratch.writeFile("s1", "same");
     try scratch.writeFile("s2", "same");
-    const big = try allocator.alloc(u8, 8192);
+    const medium = [_]u8{'m'} ** 8192;
+    try scratch.writeFile("m1", &medium);
+    try scratch.writeFile("m2", &medium);
+    const big = try allocator.alloc(u8, hasher.BUFFER_SIZE + 4096);
     defer allocator.free(big);
     @memset(big, 'x');
     try scratch.writeFile("b1", big);
@@ -1416,18 +1420,19 @@ test "empty and unique-size files are never read; the counts say what was hashed
     try finder.scan(&.{scratch.path});
     const s = finder.getSummary();
 
-    try testing.expectEqual(@as(u64, 10), s.files_scanned);
+    try testing.expectEqual(@as(u64, 12), s.files_scanned);
     try testing.expectEqual(@as(u64, 3), s.empty_files);
     try testing.expectEqual(@as(u64, 2), s.unique_size_files);
-    try testing.expectEqual(@as(u64, 2), s.size_groups);
-    try testing.expectEqual(@as(u64, 5), s.candidate_files);
+    try testing.expectEqual(@as(u64, 3), s.size_groups);
+    try testing.expectEqual(@as(u64, 7), s.candidate_files);
+    // Only the large files get a prefix hash; the medium pair is read once.
     try testing.expectEqual(@as(u64, 3), s.quick_hash_jobs);
-    // The small pair, plus the two large files whose prefixes matched; b3
-    // differs in its first byte and is never read in full.
-    try testing.expectEqual(@as(u64, 4), s.full_hash_jobs);
+    // The small and medium pairs, plus the two large files whose prefixes
+    // matched; b3 differs in its first byte and is never read in full.
+    try testing.expectEqual(@as(u64, 6), s.full_hash_jobs);
 
     // Empty files are not offered as duplicates.
-    try testing.expectEqual(@as(usize, 2), finder.getGroups().len);
+    try testing.expectEqual(@as(usize, 3), finder.getGroups().len);
     for (finder.getGroups()) |g| try testing.expect(g.size > 0);
 }
 
