@@ -10,7 +10,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const hasher = @import("hasher.zig");
 const walker = @import("walker.zig");
-const libc = std.c;
+const libc = @import("sys.zig").c;
 const builtin = @import("builtin");
 
 // Stat comes from pstat.zig: std.c ($INODE64-correct) on Darwin, statx on Linux.

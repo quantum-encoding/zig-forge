@@ -20,7 +20,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const pstat = @import("pstat.zig");
 const Stat = pstat.Stat;
-const libc = std.c;
+const libc = @import("sys.zig").c;
 
 const is_darwin = builtin.os.tag.isDarwin();
 
@@ -42,8 +42,11 @@ pub const Entry = struct {
 
 pub const DirStream = if (is_darwin) BulkDirStream else ReaddirStream;
 
-/// POSIX `dirfd`: the descriptor behind an open `DIR*` (not in Zig 0.16's std.c).
-extern "c" fn dirfd(dir: *libc.DIR) c_int;
+/// POSIX `dirfd`: the descriptor behind an open `DIR*` (not in Zig 0.16's
+/// std.c); on Windows the platform layer provides it.
+const dirfd = if (builtin.os.tag == .windows) libc.dirfd else struct {
+    extern "c" fn dirfd(dir: *libc.DIR) c_int;
+}.dirfd;
 
 pub const ReaddirStream = struct {
     dir: *libc.DIR,
@@ -351,7 +354,10 @@ fn expectListingMatchesLstat(dir_path: [:0]const u8, recurse: bool) !u64 {
     return from_listing;
 }
 
-extern "c" fn mkfifo(path: [*:0]const u8, mode: libc.mode_t) c_int;
+/// FIFOs are a POSIX thing; the test below makes none on Windows.
+const mkfifo = if (builtin.os.tag == .windows) undefined else struct {
+    extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+}.mkfifo;
 
 test "a directory listing's stats agree with lstat, across several bulk reads" {
     const Scratch = @import("testing_scratch.zig").Scratch;
@@ -366,13 +372,16 @@ test "a directory listing's stats agree with lstat, across several bulk reads" {
     defer allocator.free(big);
     @memset(big, 0xA5);
     try scratch.writeFile("big", big);
-    try scratch.hardLink("small", "small-link");
-    try scratch.symLink("small", "to-small");
     try scratch.makeDir("sub");
-    try scratch.symLink("sub", "to-sub");
-    const fifo = try scratch.joinZ("fifo");
-    defer allocator.free(fifo);
-    try std.testing.expectEqual(@as(c_int, 0), mkfifo(fifo, 0o600));
+    // Links and FIFOs are POSIX fixtures; the Windows layer has neither.
+    if (builtin.os.tag != .windows) {
+        try scratch.hardLink("small", "small-link");
+        try scratch.symLink("small", "to-small");
+        try scratch.symLink("sub", "to-sub");
+        const fifo = try scratch.joinZ("fifo");
+        defer allocator.free(fifo);
+        try std.testing.expectEqual(@as(c_int, 0), mkfifo(fifo, 0o600));
+    }
     // Long names, so the listing takes more than one 32 KB read.
     var name_buf: [300]u8 = undefined;
     for (0..400) |i| {
@@ -397,4 +406,61 @@ test "listing stats agree with lstat over a real tree (ZDEDUPE_DIRSTREAM_TREE)" 
     const root = libc.getenv("ZDEDUPE_DIRSTREAM_TREE") orelse return error.SkipZigTest;
     const from_listing = try expectListingMatchesLstat(std.mem.span(root), true);
     std.debug.print("dirstream: {d} files compared against lstat under {s}\n", .{ from_listing, root });
+}
+
+/// Lists every directory under `dir_path` both ways and reports any
+/// directory whose names differ. Returns the number of such directories.
+fn diffListings(dir_path: [:0]const u8) !u64 {
+    const allocator = std.testing.allocator;
+    var names: std.StringHashMapUnmanaged(void) = .empty;
+    defer {
+        var it = names.keyIterator();
+        while (it.next()) |k| allocator.free(k.*);
+        names.deinit(allocator);
+    }
+    var subdirs: std.ArrayListUnmanaged([:0]u8) = .empty;
+    defer {
+        for (subdirs.items) |d| allocator.free(d);
+        subdirs.deinit(allocator);
+    }
+    var bulk_failed = false;
+    {
+        var stream = BulkDirStream.open(dir_path) orelse return 0;
+        defer stream.close();
+        while (stream.next() catch blk: {
+            bulk_failed = true;
+            break :blk null;
+        }) |entry| {
+            const name = std.mem.span(entry.name);
+            try names.put(allocator, try allocator.dupe(u8, name), {});
+            if (entry.kind == DT_DIR) try subdirs.append(allocator, try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ dir_path, name }, 0));
+        }
+    }
+    var differing: u64 = 0;
+    {
+        var stream = ReaddirStream.open(dir_path) orelse return 0;
+        defer stream.close();
+        var seen: usize = 0;
+        var missing: usize = 0;
+        while (try stream.next()) |entry| {
+            seen += 1;
+            if (!names.contains(std.mem.span(entry.name))) {
+                if (missing < 3) std.debug.print("  bulk lacks {s}/{s}\n", .{ dir_path, entry.name });
+                missing += 1;
+            }
+        }
+        if (missing > 0 or seen != names.count() or bulk_failed) {
+            std.debug.print("DIFF {s}: readdir {d} bulk {d} missing {d} bulk_failed {}\n", .{ dir_path, seen, names.count(), missing, bulk_failed });
+            differing += 1;
+        }
+    }
+    for (subdirs.items) |d| differing += try diffListings(d);
+    return differing;
+}
+
+test "bulk and readdir list the same names over a real tree (ZDEDUPE_DIRSTREAM_DIFF)" {
+    if (!is_darwin) return error.SkipZigTest; // only macOS has a second way to list
+    const root = libc.getenv("ZDEDUPE_DIRSTREAM_DIFF") orelse return error.SkipZigTest;
+    const differing = try diffListings(std.mem.span(root));
+    std.debug.print("dirstream diff: {d} directories differ under {s}\n", .{ differing, root });
 }

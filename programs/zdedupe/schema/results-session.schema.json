@@ -852,6 +852,20 @@
       }
     },
 
+    "SpaceSuggestQuery": {
+      "description": "Query for zdedupe_results_space_suggest. Suggestions come from below the named folder (default: every scan root); the folder itself, scan roots, removed and protected items are never suggested.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "node": { "type": ["integer", "null"], "minimum": 0, "default": null },
+        "path": { "type": ["string", "null"], "default": null },
+        "limit": { "type": "integer", "minimum": 0, "maximum": 200, "default": 50, "description": "Items listed per kind, largest first; clamped to 200." },
+        "stale_days": { "type": "integer", "minimum": 0, "default": 365, "description": "stale_large_files: not modified for this many days; 0 turns the kind off." },
+        "stale_min_bytes": { "$ref": "#/$defs/ByteCount", "default": 104857600, "description": "stale_large_files: at least this much on disk." },
+        "now": { "type": ["integer", "null"], "default": null, "description": "Seconds since the epoch to measure staleness from; null is now." }
+      }
+    },
+
     "SpaceNode": {
       "description": "One folder or file in a disk-space answer, or (kind 'all', id null) every scan root together. bytes is space on disk (allocated blocks: a cloud placeholder counts ~0, a sparse file what it occupies); logical is the apparent size. Every inode counts once: of several hard links the lexicographically smallest path holds the bytes. Folder figures are the whole subtree's, corrected for everything removed since the scan.",
       "type": "object",
@@ -976,6 +990,33 @@
       "properties": {
         "kind": { "type": "string", "enum": ["files", "folders"] },
         "items": { "type": "array", "items": { "$ref": "#/$defs/SpaceNode" } }
+      }
+    },
+
+    "SpaceSuggestions": {
+      "description": "Response of zdedupe_results_space_suggest: space a person can usually take back. kinds is always all four, in this order. build_output: dependency stores and build folders (node_modules, zig-out, DerivedData, target beside Cargo.toml or pom.xml, ...). caches: the entries of cache roots (~/.cache, ~/Library/Caches, .npm, ...), one item per entry. partial_downloads: .part, .crdownload, .incomplete and the like, 1 MiB or more. stale_large_files: archives, applications, code and other files of at least stale_min_bytes not modified for stale_days (never media, documents or system files for age alone). The first kind to claim a folder takes everything below it, so no item appears twice and the totals add up.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stale_days", "stale_min_bytes", "kinds"],
+      "properties": {
+        "stale_days": { "type": "integer", "minimum": 0 },
+        "stale_min_bytes": { "$ref": "#/$defs/ByteCount" },
+        "kinds": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "count", "bytes", "items"],
+            "properties": {
+              "key": { "type": "string", "enum": ["build_output", "caches", "partial_downloads", "stale_large_files"] },
+              "count": { "type": "integer", "minimum": 0, "description": "Everything found of this kind, listed or not." },
+              "bytes": { "$ref": "#/$defs/ByteCount" },
+              "items": { "type": "array", "items": { "$ref": "#/$defs/SpaceNode" } }
+            }
+          }
+        }
       }
     },
 

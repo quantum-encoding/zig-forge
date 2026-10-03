@@ -30,8 +30,7 @@ const run_max_files = 64;
 const run_max_bytes: u64 = 64 * 1024 * 1024;
 
 fn parentOf(path: []const u8) ?[]const u8 {
-    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return null;
-    return if (slash == 0) path[0..1] else path[0..slash];
+    return @import("filters.zig").parentDir(path);
 }
 
 /// Parallel hasher using a thread pool
@@ -218,10 +217,10 @@ pub const ParallelHasher = struct {
                 if (parent.len >= name_buf.len) break :blk -1;
                 @memcpy(name_buf[0..parent.len], parent);
                 name_buf[parent.len] = 0;
-                break :blk std.c.open(@ptrCast(&name_buf), .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, @as(std.c.mode_t, 0));
+                break :blk @import("sys.zig").c.open(@ptrCast(&name_buf), .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, @as(@import("sys.zig").c.mode_t, 0));
             };
             defer if (dir_fd >= 0) {
-                _ = std.c.close(dir_fd);
+                _ = @import("sys.zig").c.close(dir_fd);
             };
 
             for (run_jobs) |job| {

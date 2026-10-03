@@ -10,7 +10,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("types.zig");
-const libc = std.c;
+const libc = @import("sys.zig").c;
 
 const is_linux = builtin.os.tag == .linux;
 const is_darwin = builtin.os.tag == .macos or builtin.os.tag == .ios;

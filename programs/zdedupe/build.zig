@@ -26,7 +26,10 @@ pub fn build(b: *std.Build) void {
         .root_module = lib_module,
         .linkage = .static,
     });
-    static_lib.root_module.link_libc = true;
+    // Windows has no C runtime Zig can link for an MSVC host; the core calls
+    // Win32 there instead (src/sys_windows.zig).
+    const link_libc = target.result.os.tag != .windows;
+    static_lib.root_module.link_libc = link_libc;
     static_lib.root_module.strip = optimize != .Debug;
     // The results session parses its queries with std.json, whose integer
     // path falls back to f128 (`sliceToInt`), and f128 arithmetic is
@@ -53,7 +56,7 @@ pub fn build(b: *std.Build) void {
         .use_llvm = true,
         .use_lld = use_lld,
     });
-    shared_lib.root_module.link_libc = true;
+    shared_lib.root_module.link_libc = link_libc;
     shared_lib.root_module.strip = optimize != .Debug;
 
     const shared_install = b.addInstallArtifact(shared_lib, .{
@@ -84,8 +87,9 @@ pub fn build(b: *std.Build) void {
         .use_llvm = true,
         .use_lld = use_lld,
     });
-    exe.root_module.link_libc = true;
-    b.installArtifact(exe);
+    exe.root_module.link_libc = link_libc;
+    // The CLI is a POSIX tool; on Windows only the library is built.
+    if (target.result.os.tag != .windows) b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -145,7 +149,7 @@ pub fn build(b: *std.Build) void {
             .use_llvm = true,
             .use_lld = use_lld,
         });
-        mod_test.root_module.link_libc = true;
+        mod_test.root_module.link_libc = link_libc;
         test_step.dependOn(&b.addRunArtifact(mod_test).step);
     }
 

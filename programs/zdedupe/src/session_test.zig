@@ -12,6 +12,8 @@
 //! touch the user's real Trash.
 
 const std = @import("std");
+/// The platform C library (std.c on Linux and macOS; see sys.zig).
+const sysc = @import("sys.zig").c;
 const lib = @import("lib.zig");
 const session = @import("session.zig");
 const store = @import("store.zig");
@@ -601,7 +603,7 @@ test "nothing in a group goes if no copy would survive" {
     defer gpa.free(keeper);
     const keeper_z = try gpa.dupeZ(u8, keeper);
     defer gpa.free(keeper_z);
-    try testing.expectEqual(@as(c_int, 0), std.c.unlink(keeper_z.ptr));
+    try testing.expectEqual(@as(c_int, 0), sysc.unlink(keeper_z.ptr));
 
     var s = try fixture.open(null);
     defer s.close();
@@ -924,6 +926,10 @@ test "an overflowed overlay asks for a rescan, through the session and after reo
 // ===========================================================================
 
 test "a name that is not UTF-8 pages, spells and deletes correctly" {
+    // Windows names are UTF-16, so no name there is a stray 0xE9 byte (the
+    // equivalent, an unpaired surrogate, arrives as WTF-8 and is not what
+    // this test builds).
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     if (@import("builtin").os.tag.isDarwin()) {
         // APFS validates file names and refuses invalid UTF-8, so the tree
         // this needs cannot be built here. The byte round trip that carries
@@ -1033,7 +1039,10 @@ test "export leaves out what was deleted, and escapes a hostile name" {
 
     // A name that breaks naive emission in all three formats at once. No
     // slash: it has to stay one path component.
-    const hostile = "evil\" ,\"injected\":1, \\ <script>alert(1)<x>.bin";
+    // Windows forbids `"`, `\\`, `<`, `>` in names: there the name carries
+    // what NTFS allows, and the checks that need a quote or a tag are skipped.
+    const on_windows = @import("builtin").os.tag == .windows;
+    const hostile = if (on_windows) "evil' ,'injected'=1, amp& {x};alert(1).bin" else "evil\" ,\"injected\":1, \\ <script>alert(1)<x>.bin";
     var fixture = try Fixture.init(gpa, "session-export-hostile", &.{});
     defer fixture.deinit();
     const payload = [_]u8{'h'} ** 700;
@@ -1066,14 +1075,16 @@ test "export leaves out what was deleted, and escapes a hostile name" {
     // The comma and quotes are inside one quoted field, so the row still has
     // five of them: a bare write would have split it.
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, csv, "\n"));
-    try testing.expect(std.mem.indexOf(u8, csv, "\"\"injected\"\"") != null);
+    if (!on_windows) try testing.expect(std.mem.indexOf(u8, csv, "\"\"injected\"\"") != null);
 
     const html_path = try fixture.out.join("hostile.html");
     defer gpa.free(html_path);
     try testing.expect(s.exportTo("html", html_path));
     const html = try readFile(a, html_path);
-    try testing.expect(std.mem.indexOf(u8, html, "<script>") == null);
-    try testing.expect(std.mem.indexOf(u8, html, "&lt;script&gt;") != null);
+    if (!on_windows) {
+        try testing.expect(std.mem.indexOf(u8, html, "<script>") == null);
+        try testing.expect(std.mem.indexOf(u8, html, "&lt;script&gt;") != null);
+    }
 
     // After a delete the group is down to one copy and drops out entirely.
     _ = try parse(a, s.delete("{\"rule\":{\"filters\":{}}}", false, null, null));
@@ -1755,7 +1766,7 @@ const FakeTrash = struct {
     }
 
     fn take(self: *FakeTrash, path: [*:0]const u8) bool {
-        const bin = self.bin orelse return std.c.unlink(path) == 0;
+        const bin = self.bin orelse return sysc.unlink(path) == 0;
         const target = std.fmt.allocPrintSentinel(
             self.gpa,
             "{s}/{d}",
@@ -1767,12 +1778,15 @@ const FakeTrash = struct {
     }
 };
 
-extern "c" fn rename(old: [*:0]const u8, new: [*:0]const u8) c_int;
+const rename = @import("sys.zig").c.rename;
 
-extern "c" fn utimes(path: [*:0]const u8, times: ?*const [2]std.c.timeval) c_int;
+// Windows: the platform layer; elsewhere libc's own declarations.
+const utimes = if (@import("builtin").os.tag == .windows) sysc.utimes else struct {
+    extern "c" fn utimes(path: [*:0]const u8, times: ?*const [2]sysc.timeval) c_int;
+}.utimes;
 
 fn setMtime(path: [:0]const u8, seconds: i64) !void {
-    const times = [2]std.c.timeval{
+    const times = [2]sysc.timeval{
         .{ .sec = seconds, .usec = 0 },
         .{ .sec = seconds, .usec = 0 },
     };
@@ -2102,14 +2116,14 @@ test "the protected home is the user's real one, not $HOME" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const pw = std.c.getpwuid(std.c.getuid()) orelse return error.SkipZigTest;
+    const pw = sysc.getpwuid(sysc.getuid()) orelse return error.SkipZigTest;
     const real = std.mem.trimEnd(u8, std.mem.span(pw.dir orelse return error.SkipZigTest), "/");
 
     var fixture = try Fixture.init(gpa, "session-real-home", &keep_tree);
     defer fixture.deinit();
 
     // What the sandbox does: $HOME names somewhere that is not the home.
-    const saved = std.c.getenv("HOME");
+    const saved = sysc.getenv("HOME");
     const saved_copy: ?[:0]u8 = if (saved) |h| try gpa.dupeZ(u8, std.mem.span(h)) else null;
     defer if (saved_copy) |h| gpa.free(h);
     _ = setenv("HOME", "/private/tmp/zdedupe-container-home", 1);
@@ -2126,8 +2140,12 @@ test "the protected home is the user's real one, not $HOME" {
     try testing.expectEqualStrings(try query(a, "{s}/Library", .{real}), homes[0].string);
 }
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+const setenv = if (@import("builtin").os.tag == .windows) sysc.setenv else struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+}.setenv;
+const unsetenv = if (@import("builtin").os.tag == .windows) sysc.unsetenv else struct {
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+}.unsetenv;
 
 test "a host can say where home is, and only home moves" {
     const gpa = testing.allocator;

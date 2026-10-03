@@ -10,7 +10,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("types.zig");
 const pstat = @import("pstat.zig");
-const libc = std.c;
+const libc = @import("sys.zig").c;
 
 const is_linux = builtin.os.tag == .linux;
 
@@ -387,9 +387,13 @@ test "hashToHex all ones" {
     );
 }
 
-extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+/// FIFOs are a POSIX thing; the test below skips on Windows.
+const mkfifo = if (@import("builtin").os.tag == .windows) undefined else struct {
+    extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+}.mkfifo;
 
 test "hashFile refuses non-regular files instead of hanging or hashing empty" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     // A FIFO is the dangerous case twice over: opened without O_NONBLOCK it
     // blocks the worker forever (observed hanging a full $HOME scan on
     // steam.pipe); opened with O_NONBLOCK but without the fstat guard it

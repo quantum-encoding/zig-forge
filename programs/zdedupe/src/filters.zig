@@ -66,6 +66,83 @@ fn optEql(a: ?[]const u8, b: ?[]const u8) bool {
     return std.mem.eql(u8, a.?, b.?);
 }
 
+// ---------------------------------------------------------------------------
+// Roots and parents
+//
+// The core's paths use `/` on every platform. On Linux and macOS the root is
+// `/`; on Windows a path starts at a drive root (`C:/`) or a share
+// (`//server/share/`), and the host's `C:\\...` spelling is converted to that
+// form where it enters (`normalizeOwned`). Drive and share roots are only
+// recognised in Windows builds, so nothing changes elsewhere.
+// ---------------------------------------------------------------------------
+
+const drive_roots = @import("builtin").os.tag == .windows;
+
+fn isSep(ch: u8) bool {
+    return ch == '/' or (drive_roots and ch == '\\');
+}
+
+/// Length of the root at the start of `path`: 1 for `/`, 3 for `C:/`, up to
+/// and including the slash after the share for `//server/share/`; 0 for a
+/// relative path.
+pub fn rootLen(path: []const u8) usize {
+    if (drive_roots) {
+        // A host path may still spell its root with `\\` (`C:\\`); the rest
+        // of the path is only ever read after normalizeOwned.
+        if (path.len >= 3 and std.ascii.isAlphabetic(path[0]) and path[1] == ':' and isSep(path[2])) return 3;
+        if (path.len >= 2 and isSep(path[0]) and isSep(path[1])) {
+            const server_end = std.mem.indexOfScalarPos(u8, path, 2, '/') orelse return path.len;
+            const share_end = std.mem.indexOfScalarPos(u8, path, server_end + 1, '/') orelse return path.len;
+            return share_end + 1;
+        }
+    }
+    return if (path.len > 0 and path[0] == '/') 1 else 0;
+}
+
+pub fn isAbsolute(path: []const u8) bool {
+    return rootLen(path) > 0;
+}
+
+/// `path` is a root itself: `/`, `C:/`, `//server/share/`.
+pub fn isRoot(path: []const u8) bool {
+    const r = rootLen(path);
+    return r > 0 and path.len == r;
+}
+
+/// The folder holding `path`, keeping a root whole (`/x` -> `/`, `C:/x` ->
+/// `C:/`); null for a root or a bare name.
+pub fn parentDir(path: []const u8) ?[]const u8 {
+    const r = rootLen(path);
+    if (path.len <= r) return null;
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return null;
+    if (slash < r) return path[0..r];
+    return path[0..slash];
+}
+
+/// `path` without trailing slashes, except that a root keeps its own.
+pub fn trimSep(path: []const u8) []const u8 {
+    const r = rootLen(path);
+    var end = path.len;
+    while (end > r and path[end - 1] == '/') end -= 1;
+    return path[0..end];
+}
+
+/// A path from the host, in the core's form: on Windows `\\` becomes `/` and
+/// the drive letter is upper-cased; trailing slashes go (a root keeps its own).
+pub fn normalizeOwned(gpa: std.mem.Allocator, path: []const u8) ![]u8 {
+    const out = try gpa.dupe(u8, path);
+    if (drive_roots) {
+        for (out) |*ch| {
+            if (ch.* == '\\') ch.* = '/';
+        }
+        if (out.len >= 2 and out[1] == ':') out[0] = std.ascii.toUpper(out[0]);
+    }
+    const trimmed = trimSep(out);
+    if (trimmed.len == out.len) return out;
+    defer gpa.free(out);
+    return gpa.dupe(u8, trimmed);
+}
+
 /// The part of `path` after its last slash.
 pub fn baseName(path: []const u8) []const u8 {
     const i = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
@@ -295,4 +372,43 @@ test "filters compare by value, including the optional facets" {
     var owned = try (Filters{ .text = "t", .ext = ".png" }).clone(testing.allocator);
     defer owned.deinit(testing.allocator);
     try testing.expect(owned.eql(.{ .text = "t", .ext = ".png" }));
+}
+
+test "roots and parents: a lone slash is the root" {
+    const t = std.testing;
+    try t.expectEqual(@as(usize, 1), rootLen("/usr/lib"));
+    try t.expect(isRoot("/"));
+    try t.expect(!isRoot("/usr"));
+    try t.expectEqualStrings("/", parentDir("/usr").?);
+    try t.expectEqualStrings("/usr", parentDir("/usr/lib").?);
+    try t.expect(parentDir("/") == null);
+    try t.expect(parentDir("name") == null);
+    try t.expectEqualStrings("/", trimSep("/"));
+    try t.expectEqualStrings("/a/b", trimSep("/a/b//"));
+    try t.expect(!isAbsolute("a/b"));
+}
+
+test "roots and parents: drive and share roots on Windows" {
+    if (!drive_roots) return error.SkipZigTest;
+    const t = std.testing;
+    try t.expectEqual(@as(usize, 3), rootLen("C:/Users"));
+    try t.expect(isRoot("C:/"));
+    try t.expect(isAbsolute("C:\\Users"));
+    try t.expectEqualStrings("C:/", parentDir("C:/Users").?);
+    try t.expectEqualStrings("C:/Users", parentDir("C:/Users/rich").?);
+    try t.expect(parentDir("C:/") == null);
+    try t.expectEqualStrings("C:/", trimSep("C:/"));
+    try t.expectEqual(@as(usize, 15), rootLen("//server/share/dir"));
+    try t.expectEqualStrings("//server/share/", parentDir("//server/share/dir").?);
+    try t.expect(isAtOrUnder("C:/Users/rich", "C:/"));
+    try t.expect(!isAtOrUnder("C:/Usersx", "C:/Users"));
+    try t.expectEqualStrings("C:/Users/rich", areaUnder("C:/Users/rich/x", "C:/Users").?);
+
+    const gpa = t.allocator;
+    const a = try normalizeOwned(gpa, "c:\\Users\\rich\\");
+    defer gpa.free(a);
+    try t.expectEqualStrings("C:/Users/rich", a);
+    const b = try normalizeOwned(gpa, "D:\\");
+    defer gpa.free(b);
+    try t.expectEqualStrings("D:/", b);
 }

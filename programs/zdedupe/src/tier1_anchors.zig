@@ -22,6 +22,8 @@
 //!   * `std.json` as an independent parser for the emitted report.
 
 const std = @import("std");
+/// The platform C library (std.c on Linux and macOS; see sys.zig).
+const sysc = @import("sys.zig").c;
 const hasher = @import("hasher.zig");
 const types = @import("types.zig");
 const dedupe = @import("dedupe.zig");
@@ -171,7 +173,11 @@ test "a file that cannot be opened is excluded, not grouped" {
 
 /// Filename containing every character that breaks naive JSON emission, plus
 /// an HTML payload. Both are legal on APFS and ext4.
-const hostile_name = "evil\" ,\"injected\":1, \\ <script>alert(1)<x>.txt";
+/// Everything that needs escaping in JSON, CSV and HTML. Windows forbids
+/// `"`, `\\`, `<` and `>` in names, so there the fixture carries what NTFS
+/// allows, and the assertions that need a quote or a tag run elsewhere.
+const hostile_name = if (is_windows) "evil' ,'injected'=1, amp&amp; {x};alert(1).txt" else "evil\" ,\"injected\":1, \\ <script>alert(1)<x>.txt";
+const is_windows = @import("builtin").os.tag == .windows;
 
 fn buildFixture(scratch: *Scratch) !void {
     // Two byte-identical files + one different, all above Config.min_size.
@@ -333,6 +339,9 @@ test "external contract: the compare JSON report parses" {
 }
 
 test "the HTML report escapes a filename carrying a script tag" {
+    // NTFS names cannot carry `<` or `>`; the escaping itself is platform
+    // independent and runs on Linux and macOS.
+    if (is_windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     var scratch = try Scratch.init(allocator, "html");
     defer scratch.deinit();
@@ -360,6 +369,8 @@ test "the HTML report escapes a filename carrying a script tag" {
 // ===========================================================================
 
 test "follow_symlinks reaches files behind a symlinked directory" {
+    // Windows never follows links (zdedupe_set_follow_symlinks is ignored there).
+    if (is_windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     var scratch = try Scratch.init(allocator, "symlink-follow");
     defer scratch.deinit();
@@ -739,7 +750,9 @@ test "no finding points inside .git, yet .git still decides project identity" {
     for (overlap.b.only) |path| try testing.expect(std.mem.indexOf(u8, path, "/.git/") != null);
 }
 
-extern "c" fn geteuid() c_uint;
+/// Windows has no permission bits to deny, so the tests that need a
+/// permission failure skip there as they do under root.
+const geteuid = @import("sys.zig").c.geteuid;
 
 test "an unreadable subdirectory blocks every safety verdict" {
     // root reads through mode 000, so the fixture would not be unreadable.
@@ -754,9 +767,9 @@ test "an unreadable subdirectory blocks every safety verdict" {
 
     const locked = try scratch.joinZ("q/src/util");
     defer allocator.free(locked);
-    if (std.c.chmod(locked.ptr, 0) != 0) return error.SkipZigTest;
+    if (sysc.chmod(locked.ptr, 0) != 0) return error.SkipZigTest;
     // Restore before Scratch.deinit, or the tree cannot be cleaned up.
-    defer _ = std.c.chmod(locked.ptr, 0o700);
+    defer _ = sysc.chmod(locked.ptr, 0o700);
 
     var finder = dedupe.DupeFinder.init(allocator, .{ .analyze_dirs = true });
     defer finder.deinit();
@@ -905,7 +918,7 @@ test "external contract: the directories JSON section parses with the documented
     var scratch = try Scratch.init(allocator, "dirs-json");
     defer scratch.deinit();
 
-    const hostile_dir = "dir\" ,\"injected\":1, \\ <b>";
+    const hostile_dir = if (is_windows) "dir' ,'injected'=1, & {b}" else "dir\" ,\"injected\":1, \\ <b>";
     try buildProject(&scratch, "p");
     try buildProject(&scratch, "q");
     try buildProject(&scratch, hostile_dir);
@@ -1033,14 +1046,14 @@ const StoreView = struct {
 };
 
 fn readWholeFile(allocator: std.mem.Allocator, path: [:0]const u8) ![]u8 {
-    const fd = std.c.open(path.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    const fd = sysc.open(path.ptr, .{ .ACCMODE = .RDONLY }, @as(sysc.mode_t, 0));
     if (fd < 0) return error.OpenFailed;
-    defer _ = std.c.close(fd);
+    defer _ = sysc.close(fd);
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
     var buf: [16 * 1024]u8 = undefined;
     while (true) {
-        const n = std.c.read(fd, &buf, buf.len);
+        const n = sysc.read(fd, &buf, buf.len);
         if (n < 0) return error.ReadFailed;
         if (n == 0) break;
         try out.appendSlice(allocator, buf[0..@intCast(n)]);
@@ -1051,11 +1064,11 @@ fn readWholeFile(allocator: std.mem.Allocator, path: [:0]const u8) ![]u8 {
 fn setMtime(scratch: *const Scratch, sub_path: []const u8, seconds: i64) !void {
     const full = try scratch.joinZ(sub_path);
     defer scratch.allocator.free(full);
-    const times = [2]std.c.timespec{
+    const times = [2]sysc.timespec{
         .{ .sec = seconds, .nsec = 0 },
         .{ .sec = seconds, .nsec = 0 },
     };
-    if (std.c.utimensat(std.c.AT.FDCWD, full.ptr, &times, 0) != 0) return error.SetMtimeFailed;
+    if (sysc.utimensat(sysc.AT.FDCWD, full.ptr, &times, 0) != 0) return error.SetMtimeFailed;
 }
 
 test "duplicate groups list the oldest file first, whatever order the walk found them in" {
@@ -1090,7 +1103,7 @@ test "the result store holds exactly what the JSON report of the same scan says"
     var scratch = try Scratch.init(allocator, "store");
     defer scratch.deinit();
 
-    const hostile_dir = "dir\" ,\"injected\":1, \\ <b>";
+    const hostile_dir = if (is_windows) "dir' ,'injected'=1, & {b}" else "dir\" ,\"injected\":1, \\ <b>";
     try buildProject(&scratch, "p");
     try buildProject(&scratch, "q");
     try buildProject(&scratch, hostile_dir);

@@ -105,7 +105,8 @@ void zdedupe_set_include_hidden(zdedupe_ctx* ctx, bool include);
  * Set whether to follow symbolic links
  *
  * @param ctx    Context handle
- * @param follow true to follow symlinks (default: false)
+ * @param follow true to follow symlinks (default: false). Ignored on Windows,
+ *               where symlinks and junctions are never followed.
  */
 void zdedupe_set_follow_symlinks(zdedupe_ctx* ctx, bool follow);
 
@@ -922,6 +923,26 @@ const char* zdedupe_results_space_children(zdedupe_results* r, const char* query
  * largest subfolder holds 90% or more of it is represented by that subfolder.
  */
 const char* zdedupe_results_space_largest(zdedupe_results* r, const char* query_json);
+
+/**
+ * Space a person can usually take back -> SpaceSuggestions. Query
+ * (SpaceSuggestQuery): { "node"|"path" as above, "limit": 50 (<= 200 per
+ * kind), "stale_days": 365 (0: off), "stale_min_bytes": 104857600,
+ * "now": epoch seconds | null }. Four kinds, always in this order:
+ * build_output (node_modules, zig-out, DerivedData, __pycache__, ...; target
+ * only beside Cargo.toml or pom.xml, .build only beside Package.swift),
+ * caches (each entry of ~/.cache, ~/Library/Caches, .npm, .pnpm-store,
+ * ~/.cargo/registry, ~/.gradle/caches), partial_downloads (.part, .partial,
+ * .crdownload, .incomplete, .opdownload, .!qB; 1 MiB or more, below which a
+ * .part is usually a transfer's staging file) and stale_large_files (not
+ * modified for stale_days and at least stale_min_bytes; archives,
+ * applications, code and other files only - never media, documents or
+ * system files for age alone). One pre-order pass; the first kind to claim a folder takes what is
+ * below it, so nothing is listed twice. Scan roots, the queried folder,
+ * removed and protected items are never suggested. Each kind lists its
+ * `limit` largest items and counts all it found.
+ */
+const char* zdedupe_results_space_suggest(zdedupe_results* r, const char* query_json);
 
 /**
  * Record this scan in its volume's history, kept as one JSON file per volume

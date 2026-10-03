@@ -17,6 +17,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const is_linux = builtin.os.tag == .linux;
+const is_windows = builtin.os.tag == .windows;
+const win = if (is_windows) @import("sys_windows.zig") else struct {};
 
 pub const Error = error{StatFailed};
 
@@ -133,6 +135,24 @@ fn statxCall(path: [*:0]const u8, flags: c_int) Error!Stat {
     return statxTo(&stx);
 }
 
+// ---------------------------------------------------------------------------
+// Windows backend: sys_windows.zig (file id, volume serial, allocation size)
+// ---------------------------------------------------------------------------
+
+fn fromWindows(info: anytype) Error!Stat {
+    const i = info orelse return error.StatFailed;
+    return .{
+        .dev = i.dev,
+        .ino = i.ino,
+        .mode = i.mode,
+        .size = i.size,
+        .mtime_sec = i.mtime_sec,
+        .nlink = i.nlink,
+        .allocated = i.allocated,
+        .dataless = i.dataless,
+    };
+}
+
 /// `st_flags` bit of a dataless file (sys/stat.h).
 const SF_DATALESS: u32 = 0x40000000;
 
@@ -164,6 +184,7 @@ fn cStatTo(st: *const std.c.Stat) Stat {
 /// declares the `stat$INODE64` private symbol for x86_64 Darwin — `std.c.stat`
 /// does not compile on arm64 macOS. `fstatat` is declared for both.
 pub fn stat(path: [*:0]const u8) Error!Stat {
+    if (is_windows) return fromWindows(win.statPath(path, true));
     if (is_linux) return statxCall(path, 0);
     var st: std.c.Stat = undefined;
     if (std.c.fstatat(std.c.AT.FDCWD, path, &st, 0) != 0) return error.StatFailed;
@@ -175,6 +196,7 @@ pub fn stat(path: [*:0]const u8) Error!Stat {
 /// cannot guarantee that, since the path can be replaced (e.g. by a FIFO)
 /// between walk and hash.
 pub fn fstat(fd: c_int) Error!Stat {
+    if (is_windows) return fromWindows(win.statFd(fd));
     if (is_linux) {
         var stx: Statx = undefined;
         if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC, STATX_NEEDED, &stx) != 0) {
@@ -192,6 +214,7 @@ pub fn fstat(fd: c_int) Error!Stat {
 /// the kernel starts from the directory it already has open instead of
 /// re-resolving every component of a long absolute path for each file.
 pub fn lstatAt(dir_fd: c_int, name: [*:0]const u8) Error!Stat {
+    if (is_windows) return fromWindows(win.statAt(dir_fd, name));
     if (is_linux) {
         var stx: Statx = undefined;
         if (statx(dir_fd, name, AT_SYMLINK_NOFOLLOW | AT_STATX_DONT_SYNC, STATX_NEEDED, &stx) != 0) {
@@ -206,6 +229,7 @@ pub fn lstatAt(dir_fd: c_int, name: [*:0]const u8) Error!Stat {
 
 /// `lstat()` semantics: do not follow symlinks, report the link itself.
 pub fn lstat(path: [*:0]const u8) Error!Stat {
+    if (is_windows) return fromWindows(win.statPath(path, false));
     if (is_linux) return statxCall(path, AT_SYMLINK_NOFOLLOW);
     var st: std.c.Stat = undefined;
     if (std.c.fstatat(std.c.AT.FDCWD, path, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) {

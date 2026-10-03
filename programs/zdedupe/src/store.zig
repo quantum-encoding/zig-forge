@@ -47,7 +47,7 @@ const builtin = @import("builtin");
 const types = @import("types.zig");
 const dirs = @import("dirs.zig");
 const space = @import("space.zig");
-const libc = std.c;
+const libc = @import("sys.zig").c;
 
 comptime {
     // Records are written as raw bytes. Every supported target is

@@ -36,7 +36,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const libc = std.c;
+const sys = @import("sys.zig");
+const libc = sys.c;
 
 const store = @import("store.zig");
 const hasher = @import("hasher.zig");
@@ -411,15 +412,8 @@ pub const Session = struct {
 
         // Read-only and private: the engine writes a new file and renames it
         // over the path, so the mapped inode never changes under us.
-        const map = std.posix.mmap(
-            null,
-            length,
-            .{ .READ = true },
-            .{ .TYPE = .PRIVATE },
-            fd,
-            0,
-        ) catch return error.CannotOpenStore;
-        errdefer std.posix.munmap(map);
+        const map = sys.mapReadOnly(fd, length) catch return error.CannotOpenStore;
+        errdefer sys.unmap(map);
 
         const reader = store.Reader.init(map, null) catch return error.StoreIsInvalid;
         const space_reader: ?space_mod.Reader = if (reader.spaceBytes()) |bytes|
@@ -478,7 +472,7 @@ pub const Session = struct {
         gpa.free(self.store_path);
         if (self.last_error) |e| gpa.free(e);
         self.arena.deinit();
-        std.posix.munmap(self.map);
+        sys.unmap(self.map);
         gpa.destroy(self);
     }
 
@@ -552,8 +546,7 @@ pub const Session = struct {
     fn normalizedRoots(self: *Session, arena: Allocator) ![]const []const u8 {
         const out = try arena.alloc([]const u8, self.roots.len);
         for (self.roots, out) |root, *slot| {
-            const trimmed = std.mem.trimEnd(u8, root, "/");
-            slot.* = if (trimmed.len == 0) "/" else trimmed;
+            slot.* = filters_mod.trimSep(root);
         }
         return out;
     }
@@ -607,7 +600,7 @@ pub const Session = struct {
             return false;
         };
         for (paths) |path| {
-            if (path.len == 0 or path[0] != '/') {
+            if (!filters_mod.isAbsolute(path)) {
                 self.fail("protected location \"{s}\" is not an absolute path", .{path});
                 return false;
             }
@@ -618,8 +611,7 @@ pub const Session = struct {
         };
         var filled: usize = 0;
         for (paths, owned) |path, *slot| {
-            const trimmed = std.mem.trimEnd(u8, path, "/");
-            slot.* = self.gpa.dupe(u8, if (trimmed.len == 0) "/" else trimmed) catch {
+            slot.* = filters_mod.normalizeOwned(self.gpa, path) catch {
                 for (owned[0..filled]) |p| self.gpa.free(p);
                 self.gpa.free(owned);
                 self.fail("out of memory", .{});
@@ -639,12 +631,11 @@ pub const Session = struct {
     /// protection off: the system roots, stores and packages stay in force.
     pub fn setHome(self: *Session, path: []const u8) bool {
         _ = self.beginCall();
-        const trimmed = std.mem.trimEnd(u8, path, "/");
-        if (trimmed.len == 0 or trimmed[0] != '/') {
+        if (!filters_mod.isAbsolute(path)) {
             self.fail("home \"{s}\" is not an absolute path", .{path});
             return false;
         }
-        const owned = self.gpa.dupe(u8, trimmed) catch {
+        const owned = filters_mod.normalizeOwned(self.gpa, path) catch {
             self.fail("out of memory", .{});
             return false;
         };
@@ -2100,10 +2091,27 @@ pub const Session = struct {
         return self.finishJson(&out);
     }
 
+    /// What could usually go: build output, cache entries, unfinished
+    /// downloads, large untouched files.
+    pub fn spaceSuggest(self: *Session, query_json: []const u8) ?[:0]const u8 {
+        const arena = self.beginCall();
+        const query = std.json.parseFromSliceLeaky(space_mod.SuggestQuery, arena, query_json, .{
+            .ignore_unknown_fields = true,
+        }) catch {
+            self.fail("suggestion query is not valid JSON", .{});
+            return null;
+        };
+        const view = self.spaceView(arena) orelse return null;
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        view.suggest(&json, query) catch |err| return self.spaceFailed(err);
+        return self.finishJson(&out);
+    }
+
     /// Record this scan in the volume's history under `dir` and describe it.
     pub fn spaceHistory(self: *Session, dir: []const u8) ?[:0]const u8 {
         const arena = self.beginCall();
-        if (dir.len == 0 or dir[0] != '/') {
+        if (!filters_mod.isAbsolute(dir)) {
             self.fail("history folder \"{s}\" is not an absolute path", .{dir});
             return null;
         }
@@ -2585,8 +2593,7 @@ const MemberKind = enum { files, folders };
 /// The folder holding `path`: everything before its last slash ("/" for a
 /// file at the top).
 fn parentOf(path: []const u8) []const u8 {
-    const i = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
-    return if (i == 0) "/" else path[0..i];
+    return filters_mod.parentDir(path) orelse path;
 }
 
 /// Counts findings per facet. A finding contributes once to each distinct
@@ -2686,8 +2693,8 @@ fn folderKind(path: [*:0]const u8) ?[]const u8 {
 /// content. Null means it may go on to be compared with its keepers.
 fn folderRefusal(item: FolderItem, path: [*:0]const u8) ?[]const u8 {
     // An absolute path with a parent: never a relative path, and never "/".
-    if (item.path.len == 0 or item.path[0] != '/') return "not an absolute folder path";
-    if (std.mem.eql(u8, item.path, "/")) return "not an absolute folder path";
+    if (!filters_mod.isAbsolute(item.path)) return "not an absolute folder path";
+    if (filters_mod.isRoot(item.path)) return "not an absolute folder path";
     // A symlink to a folder: removing "it" is not what was verified.
     if (folderKind(path)) |reason| return reason;
     if (item.keepers.len == 0) return "no surviving copy was named";
@@ -2730,7 +2737,7 @@ fn foldersIdentical(gpa: Allocator, a: []const u8, b: []const u8) bool {
 /// symlink swapped in mid-delete redirect the removal somewhere else. Entries
 /// are removed with `unlinkat`, so a symlink beneath is unlinked rather than
 /// followed.
-fn removeTree(path: [*:0]const u8) ?std.c.E {
+fn removeTree(path: [*:0]const u8) ?libc.E {
     const fd = libc.open(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true }, @as(libc.mode_t, 0));
     if (fd < 0) return libc.errno(@as(c_int, -1));
     if (removeChildren(fd)) |errno| {
@@ -2744,7 +2751,7 @@ fn removeTree(path: [*:0]const u8) ?std.c.E {
 
 /// Empty the directory `dir_fd` refers to. Takes ownership of nothing: the
 /// caller still closes `dir_fd`.
-fn removeChildren(dir_fd: c_int) ?std.c.E {
+fn removeChildren(dir_fd: c_int) ?libc.E {
     // fdopendir takes ownership of the fd it is given, so it gets a copy.
     const dup_fd = libc.dup(dir_fd);
     if (dup_fd < 0) return libc.errno(@as(c_int, -1));
@@ -2813,7 +2820,7 @@ fn trashReason(arena: Allocator, err_buf: *const [512]u8) []const u8 {
     return arena.dupe(u8, err_buf[0..len]) catch "could not be moved to the Trash";
 }
 
-fn unlinkReason(err: std.c.E) []const u8 {
+fn unlinkReason(err: libc.E) []const u8 {
     return switch (err) {
         .NOENT => "no longer exists",
         .ACCES, .PERM => "permission denied",
@@ -2832,8 +2839,7 @@ fn millis(seconds: i64) i64 {
 
 /// Shrink `common` until it contains the parent directory of `path`.
 fn narrowToCommonDir(common: *?[]const u8, path: []const u8) void {
-    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return;
-    const dir = if (slash == 0) path[0..1] else path[0..slash];
+    const dir = filters_mod.parentDir(path) orelse return;
     const current = common.* orelse {
         common.* = dir;
         return;

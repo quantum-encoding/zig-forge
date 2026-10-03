@@ -18,14 +18,15 @@ const fast_walker = @import("fast_walker.zig");
 const parallel = @import("parallel.zig");
 const dirs = @import("dirs.zig");
 const builtin = @import("builtin");
+const sys = @import("sys.zig");
 
 /// Cross-platform timestamp for elapsed time measurement using clock_gettime
 const Timestamp = struct {
-    ts: std.c.timespec,
+    ts: sys.c.timespec,
 
     fn now() Timestamp {
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        var ts: sys.c.timespec = undefined;
+        _ = sys.c.clock_gettime(.MONOTONIC, &ts);
         return .{ .ts = ts };
     }
 
@@ -588,15 +589,15 @@ fn canonicalPath(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
 
-    var buf: [std.c.PATH_MAX]u8 = undefined;
-    const resolved = std.c.realpath(path_z.ptr, &buf) orelse return null;
+    var buf: [sys.c.PATH_MAX]u8 = undefined;
+    const resolved = sys.c.realpath(path_z.ptr, &buf) orelse return null;
     return try allocator.dupe(u8, std.mem.span(resolved));
 }
 
 /// True if canonical path `inner` lies strictly inside canonical path `outer`.
 fn isInside(inner: []const u8, outer: []const u8) bool {
     // zig-lens-ignore: EQL-FOR-SECRETS filesystem paths, not secrets
-    if (std.mem.eql(u8, outer, "/")) return inner.len > 1;
+    if (@import("filters.zig").isRoot(outer)) return inner.len > outer.len and std.mem.startsWith(u8, inner, outer);
     return inner.len > outer.len + 1 and
         inner[outer.len] == '/' and
         std.mem.startsWith(u8, inner, outer);

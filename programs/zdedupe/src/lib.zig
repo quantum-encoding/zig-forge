@@ -57,8 +57,13 @@ pub const compareFolders = compare.compareFolders;
 
 pub const ZDedupeContext = opaque {};
 
+/// The allocator behind everything the C API hands out: libc's malloc where
+/// there is a libc; on Windows (no C runtime linked) Zig's thread-safe
+/// general-purpose allocator.
+const core_alloc = if (builtin.os.tag == .windows) std.heap.smp_allocator else std.heap.c_allocator;
+
 // Use libc for context allocation to avoid GPA self-referential issues
-const libc_alloc = std.heap.c_allocator;
+const libc_alloc = core_alloc;
 
 const InternalContext = struct {
     config: Config,
@@ -75,7 +80,7 @@ const InternalContext = struct {
     monitor: types.Monitor,
 
     const Mode = enum(c_int) { find_duplicates = 0, compare_folders = 1, disk_space = 2 };
-    const alloc = std.heap.c_allocator;
+    const alloc = core_alloc;
 
     fn init() ?*InternalContext {
         const self = libc_alloc.create(InternalContext) catch return null;
@@ -126,8 +131,9 @@ pub export fn zdedupe_free(ctx: ?*ZDedupeContext) void {
 pub export fn zdedupe_add_path(ctx: ?*ZDedupeContext, path: [*:0]const u8) c_int {
     const c = ctx orelse return -1;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
-    const alloc = std.heap.c_allocator;
-    const owned = alloc.dupe(u8, std.mem.span(path)) catch return -1;
+    const alloc = core_alloc;
+    // The core's path form (Windows: `C:\\x` becomes `C:/x`).
+    const owned = filters.normalizeOwned(alloc, std.mem.span(path)) catch return -1;
     internal.paths.append(alloc, owned) catch {
         alloc.free(owned);
         return -1;
@@ -163,7 +169,9 @@ pub export fn zdedupe_set_include_hidden(ctx: ?*ZDedupeContext, include: bool) v
 pub export fn zdedupe_set_follow_symlinks(ctx: ?*ZDedupeContext, follow: bool) void {
     const c = ctx orelse return;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
-    internal.config.follow_symlinks = follow;
+    // Windows: links and junctions are never followed (see sys_windows.zig);
+    // their targets still count toward a folder's identity.
+    internal.config.follow_symlinks = follow and builtin.os.tag != .windows;
 }
 
 pub export fn zdedupe_set_threads(ctx: ?*ZDedupeContext, count: u32) void {
@@ -226,7 +234,7 @@ const credential_excludes_json: [:0]const u8 = blk: {
 pub export fn zdedupe_add_exclude(ctx: ?*ZDedupeContext, name: [*:0]const u8) c_int {
     const c = ctx orelse return -1;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
-    const alloc = std.heap.c_allocator;
+    const alloc = core_alloc;
 
     // An exclude is one path component. A name holding a slash could never
     // match, so refuse it rather than accept a filter that silently does nothing.
@@ -244,15 +252,15 @@ pub export fn zdedupe_add_exclude(ctx: ?*ZDedupeContext, name: [*:0]const u8) c_
 pub export fn zdedupe_add_exclude_path(ctx: ?*ZDedupeContext, path: [*:0]const u8) c_int {
     const c = ctx orelse return -1;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
-    const alloc = std.heap.c_allocator;
+    const alloc = core_alloc;
 
     // Matched against the walk's absolute paths, which carry no trailing
     // slash; a relative path could never match.
-    var span: []const u8 = std.mem.span(path);
-    while (span.len > 1 and span[span.len - 1] == '/') span = span[0 .. span.len - 1];
-    if (span.len < 2 or span[0] != '/') return -1;
-
-    const owned = alloc.dupe(u8, span) catch return -1;
+    const owned = filters.normalizeOwned(alloc, std.mem.span(path)) catch return -1;
+    if (!filters.isAbsolute(owned) or filters.isRoot(owned)) {
+        alloc.free(owned);
+        return -1;
+    }
     internal.exclude_paths.append(alloc, owned) catch {
         alloc.free(owned);
         return -1;
@@ -346,7 +354,7 @@ pub export fn zdedupe_run_to_file(ctx: ?*ZDedupeContext, path: ?[*:0]const u8) c
 pub export fn zdedupe_run_sync(ctx: ?*ZDedupeContext) ?[*:0]const u8 {
     const c = ctx orelse return null;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
-    const alloc = std.heap.c_allocator;
+    const alloc = core_alloc;
 
     // Clear previous result
     if (internal.result_json) |j| {
@@ -406,7 +414,7 @@ fn runDuplicateScan(
     context: anytype,
     comptime emit: fn (@TypeOf(context), *InternalContext, *DupeFinder) RunStatus,
 ) RunStatus {
-    const alloc = std.heap.c_allocator;
+    const alloc = core_alloc;
     const monitor = &internal.monitor;
 
     // Progress restarts; a cancel requested before the run began still counts.
@@ -453,7 +461,7 @@ fn runDuplicateScan(
 /// dependency folders, noise to a duplicate finder and exactly what a
 /// disk-space view has to show.
 fn runSpaceScan(internal: *InternalContext, out_path: []const u8) RunStatus {
-    const alloc = std.heap.c_allocator;
+    const alloc = core_alloc;
     const monitor = &internal.monitor;
 
     const cancel_was_requested = monitor.cancelled();
@@ -489,7 +497,7 @@ fn runDuplicates(internal: *InternalContext) ?[]u8 {
     var json: ?[]u8 = null;
     const status = runDuplicateScan(internal, &json, struct {
         fn emit(out: *?[]u8, _: *InternalContext, finder: *DupeFinder) RunStatus {
-            const alloc = std.heap.c_allocator;
+            const alloc = core_alloc;
             // Generate JSON report using Allocating writer
             var alloc_writer: std.Io.Writer.Allocating = .init(alloc);
 
@@ -509,7 +517,7 @@ fn runDuplicates(internal: *InternalContext) ?[]u8 {
 }
 
 fn runCompare(internal: *InternalContext) ?[]u8 {
-    const alloc = std.heap.c_allocator;
+    const alloc = core_alloc;
 
     if (internal.paths.items.len < 2) return null;
 
@@ -558,7 +566,7 @@ fn asSessionConst(r: ?*const ZDedupeResults) ?*const session.Session {
 pub export fn zdedupe_results_open(store_path: ?[*:0]const u8, roots_json: ?[*:0]const u8) ?*ZDedupeResults {
     const path = store_path orelse return null;
     const roots: ?[]const u8 = if (roots_json) |j| std.mem.span(j) else null;
-    const opened = session.Session.open(std.heap.c_allocator, std.mem.span(path), roots) catch return null;
+    const opened = session.Session.open(core_alloc, std.mem.span(path), roots) catch return null;
     return @ptrCast(opened);
 }
 
@@ -695,6 +703,12 @@ pub export fn zdedupe_results_space_largest(r: ?*ZDedupeResults, query_json: ?[*
     return (s.spaceLargest(std.mem.span(query)) orelse return null).ptr;
 }
 
+pub export fn zdedupe_results_space_suggest(r: ?*ZDedupeResults, query_json: ?[*:0]const u8) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const query = query_json orelse return null;
+    return (s.spaceSuggest(std.mem.span(query)) orelse return null).ptr;
+}
+
 pub export fn zdedupe_results_space_history(r: ?*ZDedupeResults, history_dir: ?[*:0]const u8) ?[*:0]const u8 {
     const s = asSession(r) orelse return null;
     const dir = history_dir orelse return null;
@@ -725,9 +739,9 @@ pub export fn zdedupe_results_export(
 
 // === Utilities ===
 
-// C library functions for file operations
-extern "c" fn unlink(path: [*:0]const u8) c_int;
-extern "c" fn rename(old: [*:0]const u8, new: [*:0]const u8) c_int;
+// File operations, through the platform's C library (sys.zig on Windows).
+const unlink = @import("sys.zig").c.unlink;
+const rename = @import("sys.zig").c.rename;
 
 pub export fn zdedupe_delete_file(path: [*:0]const u8) c_int {
     const result = unlink(path);

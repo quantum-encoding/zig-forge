@@ -956,9 +956,7 @@ const Analyzer = struct {
 
 /// Parent directory of `path`, or null for a bare name or the filesystem root.
 fn parentPath(path: []const u8) ?[]const u8 {
-    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return null;
-    if (slash == 0) return if (path.len > 1) "/" else null;
-    return path[0..slash];
+    return @import("filters.zig").parentDir(path);
 }
 
 fn baseName(path: []const u8) []const u8 {

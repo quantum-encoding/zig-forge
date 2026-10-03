@@ -6,6 +6,8 @@
 //! touch the user's real Trash.
 
 const std = @import("std");
+/// The platform C library (std.c on Linux and macOS; see sys.zig).
+const sysc = @import("sys.zig").c;
 const lib = @import("lib.zig");
 const session = @import("session.zig");
 const space = @import("space.zig");
@@ -40,7 +42,7 @@ const Fixture = struct {
     fn init(gpa: Allocator) !Fixture {
         // Scratch trees default to $TMPDIR, which on macOS is under /var — a
         // system tree, where every file would be categorised `system`.
-        _ = setenv("TMPDIR", "/tmp", 1);
+        if (@import("builtin").os.tag != .windows) _ = setenv("TMPDIR", "/tmp", 1);
         var tree = try Scratch.init(gpa, "space");
         errdefer tree.deinit();
         var out = try Scratch.init(gpa, "space-store");
@@ -103,8 +105,11 @@ const Fixture = struct {
     }
 };
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn rename(old: [*:0]const u8, new: [*:0]const u8) c_int;
+// Windows: the platform layer; elsewhere libc's own (std.c declares none).
+const setenv = if (@import("builtin").os.tag == .windows) sysc.setenv else struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+}.setenv;
+const rename = @import("sys.zig").c.rename;
 
 fn parse(arena: Allocator, json: ?[:0]const u8) !Value {
     const text = json orelse return error.CallFailed;
@@ -362,7 +367,7 @@ test "trash: verified, protected roots refused, changes skipped, totals correcte
     // roots come from the tree itself.
     const sidecar = try std.fmt.allocPrintSentinel(arena, "{s}", .{fx.store_path}, 0);
     const roots_sidecar = try std.fmt.allocPrintSentinel(arena, "{s}.roots.json", .{sidecar[0 .. sidecar.len - ".zds".len]}, 0);
-    _ = std.c.unlink(roots_sidecar.ptr);
+    _ = sysc.unlink(roots_sidecar.ptr);
     const again = try fx.open(false);
     defer again.close();
     const reopened = try parse(arena, again.spaceOverview());
@@ -394,8 +399,8 @@ test "history records each scan once and reports what grew" {
     }
 
     // Scan times have one-second resolution.
-    const pause: std.c.timespec = .{ .sec = 1, .nsec = 100_000_000 };
-    _ = std.c.nanosleep(&pause, null);
+    const pause: sysc.timespec = .{ .sec = 1, .nsec = 100_000_000 };
+    _ = sysc.nanosleep(&pause, null);
     try fx.write("media/new.mov", 3 << 20);
     try fx.scan();
     const s = try fx.open(true);
@@ -463,19 +468,19 @@ fn readAll(gpa: Allocator, path: [:0]const u8) ![]u8 {
 }
 
 fn writeAll(path: [:0]const u8, bytes: []const u8) !void {
-    const fd = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .TRUNC = true }, @as(std.c.mode_t, 0));
+    const fd = sysc.open(path.ptr, .{ .ACCMODE = .WRONLY, .TRUNC = true }, @as(sysc.mode_t, 0));
     if (fd < 0) return error.OpenFailed;
-    defer _ = std.c.close(fd);
+    defer _ = sysc.close(fd);
     var written: usize = 0;
     while (written < bytes.len) {
-        const n = std.c.write(fd, bytes.ptr + written, bytes.len - written);
+        const n = sysc.write(fd, bytes.ptr + written, bytes.len - written);
         if (n <= 0) return error.WriteFailed;
         written += @intCast(n);
     }
 }
 
 test "an unreadable folder marks everything above it incomplete" {
-    if (std.c.getuid() == 0) return error.SkipZigTest;
+    if (sysc.getuid() == 0) return error.SkipZigTest;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -485,8 +490,8 @@ test "an unreadable folder marks everything above it incomplete" {
     try fx.write("docs/locked/secret.bin", 9_000);
     const locked = try fx.tree.joinZ("docs/locked");
     defer testing.allocator.free(locked);
-    try testing.expectEqual(@as(c_int, 0), std.c.chmod(locked.ptr, 0));
-    defer _ = std.c.chmod(locked.ptr, 0o700);
+    try testing.expectEqual(@as(c_int, 0), sysc.chmod(locked.ptr, 0));
+    defer _ = sysc.chmod(locked.ptr, 0o700);
 
     try fx.scan();
     const s = try fx.open(true);
@@ -500,4 +505,110 @@ test "an unreadable folder marks everything above it incomplete" {
     try testing.expect(field(docs, "incomplete").bool);
     const media = findItem(field(field(root, "groups").array.items[0], "items"), "media").?;
     try testing.expect(!field(media, "incomplete").bool);
+}
+
+fn kindOf(answer: Value, key: []const u8) Value {
+    for (field(answer, "kinds").array.items) |k| {
+        if (std.mem.eql(u8, str(k, "key"), key)) return k;
+    }
+    std.debug.panic("missing kind {s}", .{key});
+}
+
+test "suggestions: build output, cache entries, unfinished downloads, large untouched files" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    // Rust build output: `target` beside Cargo.toml is build output; one
+    // without a manifest is somebody's folder called target.
+    try fx.write("rs/Cargo.toml", 100);
+    try fx.write("rs/target/debug/app", 30_000);
+    try fx.write("plans/target/goals.txt", 2_000);
+    // A cache root is offered entry by entry.
+    try fx.write(".cache/pip/wheel.whl", 8_000);
+    try fx.write(".cache/huggingface/blob.incomplete", 90_000);
+    try fx.write(".cache/stray.db", 4_000);
+    try fx.write("Library/Caches/com.example/cache.db", 6_000);
+    // Unfinished downloads, one inside build output (claimed by it, not twice).
+    try fx.write("Downloads/movie.mkv.part", 1_300_000);
+    try fx.write("Downloads/setup.crdownload", 1_100_000);
+    // A program's atomic-write staging file, not a download.
+    try fx.write("app/.staging/message.json.part", 900);
+    try fx.write("proj/node_modules/pkg/tarball.tgz.partial", 1_000);
+    try fx.scan();
+    const s = try fx.open(true);
+    defer s.close();
+
+    // Files written just now; a year 2200 clock sees them all as untouched.
+    const far_future: i64 = 7_258_118_400;
+    const later = std.fmt.allocPrint(arena, "{{\"stale_days\":365,\"stale_min_bytes\":30000,\"now\":{d}}}", .{far_future}) catch unreachable;
+    const answer = try parse(arena, s.spaceSuggest(later));
+    try testing.expectEqual(@as(usize, 4), field(answer, "kinds").array.items.len);
+
+    const build = kindOf(answer, "build_output");
+    const build_items = field(build, "items");
+    try testing.expect(findItem(build_items, "node_modules") != null);
+    const target = findItem(build_items, "target") orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.endsWith(u8, str(target, "path"), "/rs/target"));
+    try testing.expectEqual(@as(usize, 2), build_items.array.items.len);
+    try testing.expectEqual(@as(i64, 2), int(build, "count"));
+
+    const caches = field(kindOf(answer, "caches"), "items");
+    try testing.expect(findItem(caches, "pip") != null);
+    try testing.expect(findItem(caches, "huggingface") != null);
+    try testing.expect(findItem(caches, "stray.db") != null);
+    try testing.expect(findItem(caches, "com.example") != null);
+    try testing.expect(findItem(caches, ".cache") == null);
+    try testing.expectEqual(@as(usize, 4), caches.array.items.len);
+
+    // The .incomplete blob is inside a cache, so it is a cache entry only.
+    const partial = kindOf(answer, "partial_downloads");
+    const partial_items = field(partial, "items");
+    try testing.expectEqual(@as(usize, 2), partial_items.array.items.len);
+    try testing.expectEqualStrings("movie.mkv.part", str(partial_items.array.items[0], "name"));
+    try testing.expect(findItem(partial_items, "setup.crdownload") != null);
+
+    try testing.expect(findItem(partial_items, "message.json.part") == null);
+
+    // Untouched and >= 30 KB, outside anything already claimed: the zip is.
+    // Media and documents are never suggested for age alone; the .part
+    // download and the cache blob are claimed by their own kinds.
+    const stale_items = field(kindOf(answer, "stale_large_files"), "items");
+    try testing.expectEqual(@as(usize, 1), stale_items.array.items.len);
+    try testing.expectEqualStrings("archive.zip", str(stale_items.array.items[0], "name"));
+
+    // Kinds never overlap: no path appears twice across them.
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    for (field(answer, "kinds").array.items) |k| {
+        for (field(k, "items").array.items) |item| {
+            const gop = try seen.getOrPut(arena, str(item, "path"));
+            try testing.expect(!gop.found_existing);
+        }
+    }
+
+    // Measured now, nothing is untouched yet; stale_days 0 turns it off.
+    const now = try parse(arena, s.spaceSuggest("{}"));
+    try testing.expectEqual(@as(i64, 0), int(kindOf(now, "stale_large_files"), "count"));
+    const off_query = std.fmt.allocPrint(arena, "{{\"stale_days\":0,\"now\":{d}}}", .{far_future}) catch unreachable;
+    const off = try parse(arena, s.spaceSuggest(off_query));
+    try testing.expectEqual(@as(i64, 0), int(kindOf(off, "stale_large_files"), "count"));
+
+    // Trashed build output stops being suggested.
+    const id = int(target, "id");
+    const items = std.fmt.allocPrint(arena, "{{\"items\":[{{\"kind\":\"dir\",\"id\":{d}}}]}}", .{id}) catch unreachable;
+    var bin = try Scratch.init(testing.allocator, "space-bin");
+    defer bin.deinit();
+    var fake: FakeTrash = .{ .bin = bin.path };
+    _ = try parse(arena, s.spaceTrash(items, FakeTrash.callback, &fake));
+    const after = try parse(arena, s.spaceSuggest("{}"));
+    try testing.expect(findItem(field(kindOf(after, "build_output"), "items"), "target") == null);
+    try testing.expectEqual(@as(i64, 1), int(kindOf(after, "build_output"), "count"));
+
+    // Below a folder: only what is inside it.
+    const in_downloads = std.fmt.allocPrint(arena, "{{\"path\":\"{s}/Downloads\"}}", .{fx.tree.path}) catch unreachable;
+    const scoped = try parse(arena, s.spaceSuggest(in_downloads));
+    try testing.expectEqual(@as(i64, 2), int(kindOf(scoped, "partial_downloads"), "count"));
+    try testing.expectEqual(@as(i64, 0), int(kindOf(scoped, "build_output"), "count"));
 }

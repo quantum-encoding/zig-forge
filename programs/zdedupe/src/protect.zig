@@ -39,10 +39,32 @@ pub const system_roots = [_][]const u8{
     "/nix",
 };
 
+/// Windows system locations, as they sit below any drive root (`C:/`,
+/// `D:/`): the OS, installed programs, per-drive system areas and the paging
+/// and hibernation files. Matched ignoring case, as NTFS names are.
+pub const windows_drive_roots = [_][]const u8{
+    "/Windows",
+    "/Program Files",
+    "/Program Files (x86)",
+    "/ProgramData",
+    "/System Volume Information",
+    "/$Recycle.Bin",
+    "/Recovery",
+    "/Boot",
+    "/EFI",
+    "/pagefile.sys",
+    "/hiberfil.sys",
+    "/swapfile.sys",
+};
+
+const windows = @import("builtin").os.tag == .windows;
+
 /// Roots relative to the user's home directory: per-user application data
-/// that apps expect to find byte for byte where they left it.
+/// that apps expect to find byte for byte where they left it. `AppData` is
+/// Windows' `Library`.
 pub const home_roots = [_][]const u8{
     "Library",
+    "AppData",
     ".local/share/flatpak",
     ".var/app",
 };
@@ -84,6 +106,13 @@ pub const Protection = struct {
         for (system_roots) |root| {
             if (filters.isAtOrUnder(path, root)) return true;
         }
+        if (windows) {
+            if (belowDrive(path)) |rest| {
+                for (windows_drive_roots) |root| {
+                    if (atOrUnderIgnoreCase(rest, root)) return true;
+                }
+            }
+        }
         if (self.home) |home| {
             if (filters.isAtOrUnder(path, home) and path.len > home.len + 1) {
                 const rest = path[home.len + 1 ..];
@@ -111,6 +140,14 @@ pub const Protection = struct {
         for (system_roots) |root| {
             if (filters.isAtOrUnder(root, dir)) return true;
         }
+        if (windows) {
+            // A drive root, or a folder holding one of its system locations.
+            if (belowDrive(dir)) |rest| {
+                for (windows_drive_roots) |root| {
+                    if (atOrUnderIgnoreCase(root, rest)) return true;
+                }
+            }
+        }
         if (self.home) |home| {
             if (filters.isAtOrUnder(home, dir)) return true;
         }
@@ -120,6 +157,21 @@ pub const Protection = struct {
         return false;
     }
 };
+
+/// The part of a drive path after its letter: `C:/Windows/x` -> `/Windows/x`,
+/// `C:/` -> `/`. Null for anything else.
+fn belowDrive(path: []const u8) ?[]const u8 {
+    if (filters.rootLen(path) != 3) return null;
+    return path[2..];
+}
+
+/// `filters.isAtOrUnder`, ignoring ASCII case.
+fn atOrUnderIgnoreCase(path: []const u8, base_in: []const u8) bool {
+    const base = if (base_in.len > 1 and base_in[base_in.len - 1] == '/') base_in[0 .. base_in.len - 1] else base_in;
+    if (base.len == 1 and base[0] == '/') return path.len > 0 and path[0] == '/';
+    if (path.len < base.len or !std.ascii.eqlIgnoreCase(path[0..base.len], base)) return false;
+    return path.len == base.len or path[base.len] == '/';
+}
 
 /// `dirs` (which starts with a slash) appears in `path` as whole components
 /// followed by more path: `/g/steamapps/common/x` contains `/steamapps`.
@@ -216,4 +268,21 @@ test "a folder that holds a protected root is guarded" {
     try testing.expect(!p.guardsFolder("/Users/u/work/proj-backup"));
     // A whole project copy, repository included, is a folder anyone may drop.
     try testing.expect(!p.guardsFolder("/Users/u/old/proj"));
+}
+
+test "Windows system locations are protected on every drive, whatever the case" {
+    if (!windows) return error.SkipZigTest;
+    const t = std.testing;
+    const p: Protection = .{ .home = "C:/Users/rich" };
+    try t.expect(p.protects("C:/Windows/System32/kernel32.dll"));
+    try t.expect(p.protects("C:/windows/notepad.exe"));
+    try t.expect(p.protects("D:/System Volume Information/x"));
+    try t.expect(p.protects("C:/Program Files (x86)/App/a.dll"));
+    try t.expect(p.protects("C:/pagefile.sys"));
+    try t.expect(p.protects("C:/Users/rich/AppData/Local/x.db"));
+    try t.expect(!p.protects("C:/Users/rich/Documents/a.pdf"));
+    try t.expect(!p.protects("C:/Windowsx/a"));
+    try t.expect(p.guardsFolder("C:/"));
+    try t.expect(p.guardsFolder("C:/Users"));
+    try t.expect(!p.guardsFolder("C:/Users/rich/Documents"));
 }
