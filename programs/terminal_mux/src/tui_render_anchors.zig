@@ -333,6 +333,7 @@ test "DEC 2026: sync flag tracks h/l and the REAL claude stream closes every blo
 /// Comptime string repetition (`s` concatenated `n` times).
 fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
     return comptime blk: {
+        @setEvalBranchQuota(n + 1000);
         var out: [s.len * n]u8 = undefined;
         for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
         const final = out;
