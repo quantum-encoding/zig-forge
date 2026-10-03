@@ -283,6 +283,7 @@ pub const ZDedupeProgress = extern struct {
     total: u64,
     bytes_done: u64,
     bytes_total: u64,
+    stalled_ms: u64,
 };
 
 pub export fn zdedupe_get_progress(ctx: ?*const ZDedupeContext, out: ?*ZDedupeProgress) void {
@@ -296,6 +297,7 @@ pub export fn zdedupe_get_progress(ctx: ?*const ZDedupeContext, out: ?*ZDedupePr
         .total = internal.monitor.total.load(.acquire),
         .bytes_done = internal.monitor.bytes_done.load(.acquire),
         .bytes_total = internal.monitor.bytes_total.load(.acquire),
+        .stalled_ms = internal.monitor.stalledNs() / std.time.ns_per_ms,
     };
 }
 

@@ -393,6 +393,14 @@ pub const Progress = struct {
     }
 };
 
+/// Monotonic clock, nanoseconds.
+pub fn nowNs() u64 {
+    const c = @import("sys.zig").c;
+    var ts: c.timespec = undefined;
+    _ = c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
 /// Live view of a running scan, and the way to stop one.
 ///
 /// Every field is an atomic, so any thread may read progress or request
@@ -417,6 +425,8 @@ pub const Monitor = struct {
     slots: [slot_count]PathSlot = @splat(.{}),
     /// Orders the items in `slots` by when they began.
     next_ticket: std.atomic.Value(u64) = .init(1),
+    /// When each slot's item began (`nowNs`), 0 when idle; see `stalledNs`.
+    started_ns: [slot_count]std.atomic.Value(u64) = @splat(.init(0)),
 
     /// Workers with an index at or past this are not shown.
     pub const slot_count = 64;
@@ -448,12 +458,28 @@ pub const Monitor = struct {
         if (worker >= slot_count) return;
         const ticket = self.next_ticket.fetchAdd(1, .monotonic);
         self.slots[worker].set(ticket, path);
+        self.started_ns[worker].store(nowNs(), .release);
     }
 
     /// Worker `worker` is done with its item.
     pub fn end(self: *Monitor, worker: usize) void {
         if (worker >= slot_count) return;
+        self.started_ns[worker].store(0, .release);
         self.slots[worker].set(0, "");
+    }
+
+    /// How long the item in progress longest (the one `longestRunning`
+    /// names) has been going; 0 when nothing is in progress. A walk held up
+    /// by one folder - a consent dialog waiting for an answer, a stalled
+    /// network mount - shows here while every count stands still.
+    pub fn stalledNs(self: *const Monitor) u64 {
+        var oldest: u64 = 0;
+        for (&self.started_ns) |*slot| {
+            const t = slot.load(.acquire);
+            if (t != 0 and (oldest == 0 or t < oldest)) oldest = t;
+        }
+        if (oldest == 0) return 0;
+        return nowNs() -| oldest;
     }
 
     pub const Current = struct {
@@ -856,4 +882,17 @@ test "DuplicateGroup" {
 
     try group.addFile("/path/c");
     try std.testing.expectEqual(@as(u64, 2048), group.savings);
+}
+
+test "stalledNs follows the oldest item in progress and is 0 when idle" {
+    var monitor: Monitor = .{};
+    try std.testing.expectEqual(@as(u64, 0), monitor.stalledNs());
+    monitor.begin(3, "/a");
+    monitor.started_ns[3].store(nowNs() - 7 * std.time.ns_per_s, .release);
+    monitor.begin(5, "/b");
+    try std.testing.expect(monitor.stalledNs() >= 7 * std.time.ns_per_s);
+    monitor.end(3);
+    try std.testing.expect(monitor.stalledNs() < std.time.ns_per_s);
+    monitor.end(5);
+    try std.testing.expectEqual(@as(u64, 0), monitor.stalledNs());
 }

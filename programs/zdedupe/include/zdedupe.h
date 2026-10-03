@@ -222,6 +222,11 @@ int zdedupe_add_exclude_path(zdedupe_ctx* ctx, const char* path);
  * `bytes_total` are the hashing phases' reads in bytes: allocated bytes, so
  * a sparse disk image counts what is on disk. A progress bar should follow
  * bytes - one big file can hold a phase up while the file count barely moves.
+ * `stalled_ms` is how long the item zdedupe_get_current_path names has been
+ * in progress. While finding files, several seconds on one folder usually
+ * means macOS is waiting for the user to answer a permission dialog for it:
+ * a host should say so, naming the folder. zdedupe_cancel still returns
+ * promptly then; the stuck open is abandoned.
  */
 typedef struct {
     uint32_t phase;
@@ -231,6 +236,7 @@ typedef struct {
     uint64_t total;
     uint64_t bytes_done;
     uint64_t bytes_total;
+    uint64_t stalled_ms;
 } zdedupe_progress;
 
 /**

@@ -178,9 +178,15 @@ const ParentMark = struct {
     kind: MarkKind,
 };
 
-/// Work shared between the workers of one `walk()` call.
+/// Work shared between the workers of one `walk()` call. Lives in a `Crew`
+/// on the heap, so a worker abandoned in a blocked open can still reach it.
 const Shared = struct {
     walker: *FastWalker,
+    /// The walker's allocator, copied: an abandoned worker must not read the
+    /// walker, which may be gone by the time its open returns.
+    allocator: std.mem.Allocator,
+    no_materialize: bool = false,
+    crew: ?*Crew = null,
     mutex: Mutex = .{},
     work_available: Condition = .{},
     /// Directories waiting to be read. A stack: depth-first keeps it small.
@@ -209,8 +215,18 @@ const Shared = struct {
     fn push(self: *Shared, path: []const u8) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        try self.pending.append(self.walker.allocator, path);
+        try self.pending.append(self.allocator, path);
         self.work_available.signal();
+    }
+
+    /// Stop every worker: idle ones wake and leave, busy ones leave at their
+    /// next check. The walk's supervisor uses it on cancel, when the workers
+    /// still running may all be waiting for one that is stuck in an open.
+    fn stop(self: *Shared, err: anyerror) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.failure == null) self.failure = err;
+        self.work_available.broadcast();
     }
 
     fn done(self: *Shared, failure: ?anyerror) void {
@@ -235,9 +251,24 @@ const DT_REG = dirstream.DT_REG;
 const DT_LNK = dirstream.DT_LNK;
 const DT_OTHER = dirstream.DT_OTHER;
 
+/// Where a worker is, as its supervisor (`FastWalker.supervise`) sees it.
+const WorkerState = enum(u8) {
+    running,
+    /// Inside an open that may block indefinitely (a consent dialog nobody
+    /// answers, a security agent holding the call).
+    in_open,
+    /// Given up on by the supervisor while `in_open`: the walk has returned
+    /// without it. When its open does return it touches nothing but its crew.
+    abandoned,
+    finished,
+};
+
 /// One thread's private state.
 const Worker = struct {
     shared: *Shared,
+    state: std.atomic.Value(WorkerState) = .init(.running),
+    /// Its results were moved into the walker; the crew must not free them.
+    absorbed: bool = false,
     /// Position among the walk's workers; names its Monitor slot.
     index: usize = 0,
     arena: std.heap.ArenaAllocator,
@@ -250,12 +281,34 @@ const Worker = struct {
     path_buf: [max_path + 64]u8 = undefined,
 
     fn run(self: *Worker) void {
-        // Worker 0 is the caller's thread, which `walk` sets and restores.
-        if (self.index != 0 and self.shared.walker.no_materialize) _ = noMaterializeThisThread();
         while (self.shared.take()) |path| {
             const failure: ?anyerror = if (self.readDir(path)) |_| null else |err| err;
+            // Abandoned: the walk is over and nothing outside the crew may
+            // be touched, not even the shared queue's bookkeeping.
+            if (failure) |err| if (err == error.Abandoned) return;
             self.shared.done(failure);
         }
+    }
+
+    /// Thread entry: run, then let go of the crew (which the last one out frees).
+    fn threadMain(self: *Worker) void {
+        if (self.shared.no_materialize) _ = noMaterializeThisThread();
+        self.run();
+        if (self.state.cmpxchgStrong(.running, .finished, .acq_rel, .acquire) != null) {
+            // Abandoned while in an open, so the supervisor has detached
+            // this thread; it only reaches here once the open returned.
+        }
+        self.shared.crew.?.release();
+    }
+
+    /// Mark the start of an open that may block; see `WorkerState`.
+    fn enterOpen(self: *Worker) void {
+        self.state.store(.in_open, .release);
+    }
+
+    /// False if the supervisor abandoned this worker while it was blocked.
+    fn leaveOpen(self: *Worker) bool {
+        return self.state.cmpxchgStrong(.in_open, .running, .acq_rel, .acquire) == null;
     }
 
     fn strings(self: *Worker) std.mem.Allocator {
@@ -263,7 +316,7 @@ const Worker = struct {
     }
 
     fn scratch(self: *const Worker) std.mem.Allocator {
-        return self.shared.walker.allocator;
+        return self.shared.allocator;
     }
 
     /// `path` NUL-terminated in the scratch buffer.
@@ -281,7 +334,17 @@ const Worker = struct {
             if (m.cancelled()) return error.Cancelled;
             m.begin(self.index, dir_path);
         }
-        defer if (w.monitor) |m| m.end(self.index);
+        // Not touched again once abandoned: the monitor may be gone.
+        var abandoned = false;
+        defer if (!abandoned) if (w.monitor) |m| m.end(self.index);
+
+        // Refused when the walk asked first (see `probeProtected`): no second
+        // prompt, no second wait.
+        if (w.isDenied(dir_path)) {
+            self.stats.errors += 1;
+            try self.markParent(dir_path, .incomplete);
+            return;
+        }
 
         // The checks that need the directory itself happen here, in whichever
         // worker picked it up; what they find is reported to the parent's
@@ -298,7 +361,18 @@ const Worker = struct {
             return;
         }
 
-        var stream = DirStream.open(self.pathZ(dir_path)) orelse {
+        self.enterOpen();
+        if (builtin.is_test) testing_hooks.beforeOpen(dir_path);
+        const opened = DirStream.open(self.pathZ(dir_path));
+        if (!self.leaveOpen()) {
+            abandoned = true;
+            if (opened) |o| {
+                var s = o;
+                s.close();
+            }
+            return error.Abandoned;
+        }
+        var stream = opened orelse {
             self.stats.errors += 1;
             try self.markParent(dir_path, .incomplete);
             return;
@@ -552,6 +626,153 @@ const Worker = struct {
     }
 };
 
+/// The workers of one walk and what they share, on the heap and reference
+/// counted: the walk holds one reference and each started thread another.
+/// When a cancelled walk gives up on a worker stuck in an open, it returns
+/// without it; that thread drops its reference when its open finally comes
+/// back, and whoever drops the last one frees the crew - including the
+/// abandoned worker's buffers, which its open was using until then.
+const Crew = struct {
+    allocator: std.mem.Allocator,
+    shared: Shared,
+    workers: []Worker,
+    threads: []std.Thread,
+    refs: std.atomic.Value(usize) = .init(1),
+
+    fn create(allocator: std.mem.Allocator, walker: *FastWalker, count: usize) !*Crew {
+        const crew = try allocator.create(Crew);
+        errdefer allocator.destroy(crew);
+        const workers = try allocator.alloc(Worker, count);
+        errdefer allocator.free(workers);
+        const threads = try allocator.alloc(std.Thread, count);
+        crew.* = .{
+            .allocator = allocator,
+            .shared = .{ .walker = walker, .allocator = allocator, .no_materialize = walker.no_materialize },
+            .workers = workers,
+            .threads = threads,
+        };
+        crew.shared.crew = crew;
+        for (workers, 0..) |*worker, index| {
+            worker.* = .{ .shared = &crew.shared, .index = index, .arena = std.heap.ArenaAllocator.init(allocator) };
+        }
+        return crew;
+    }
+
+    fn release(self: *Crew) void {
+        if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        const allocator = self.allocator;
+        for (self.workers) |*worker| {
+            // An absorbed worker's arena and lists now belong to the walker.
+            if (worker.absorbed) continue;
+            worker.arena.deinit();
+            worker.files.deinit(allocator);
+            worker.dirs.deinit(allocator);
+            worker.links.deinit(allocator);
+            worker.marks.deinit(allocator);
+        }
+        self.shared.pending.deinit(allocator);
+        allocator.free(self.workers);
+        allocator.free(self.threads);
+        allocator.destroy(self);
+        if (builtin.is_test) _ = testing_hooks.freed.fetchAdd(1, .release);
+    }
+};
+
+/// Opens a list of directories one after another on a thread of its own, so
+/// a walk can give up on an open that never returns. Reference counted like
+/// `Crew`: the walk and the thread each hold one.
+const ProbeJob = struct {
+    allocator: std.mem.Allocator,
+    paths: []const [:0]const u8,
+    /// errno of each open, 0 for success; valid once `finished`.
+    results: []c_int,
+    /// Index of the path being opened, for the monitor.
+    current: std.atomic.Value(usize) = .init(0),
+    state: std.atomic.Value(WorkerState) = .init(.running),
+    refs: std.atomic.Value(usize) = .init(2),
+    no_materialize: bool,
+
+    fn threadMain(self: *ProbeJob) void {
+        if (self.no_materialize) _ = noMaterializeThisThread();
+        for (self.paths, self.results, 0..) |path, *result, i| {
+            self.current.store(i, .release);
+            self.state.store(.in_open, .release);
+            if (builtin.is_test) testing_hooks.beforeOpen(path);
+            const fd = libc.open(path.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, @as(libc.mode_t, 0));
+            const err: c_int = if (fd < 0) @intFromEnum(libc.errno(fd)) else 0;
+            if (fd >= 0) _ = libc.close(fd);
+            if (self.state.cmpxchgStrong(.in_open, .running, .acq_rel, .acquire) != null) break; // abandoned
+            result.* = err;
+        }
+        _ = self.state.cmpxchgStrong(.running, .finished, .acq_rel, .acquire);
+        self.release();
+    }
+
+    fn release(self: *ProbeJob) void {
+        if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        for (self.paths) |path| self.allocator.free(path);
+        self.allocator.free(self.paths);
+        self.allocator.free(self.results);
+        self.allocator.destroy(self);
+        if (builtin.is_test) _ = testing_hooks.freed.fetchAdd(1, .release);
+    }
+};
+
+/// Test-only: an open that hangs on demand, standing in for a consent dialog
+/// nobody answers.
+const testing_hooks = struct {
+    /// Opens of a path ending in this hang until `release` is set.
+    var hang_suffix: ?[]const u8 = null;
+    var release: std.atomic.Value(bool) = .init(false);
+    var hung: std.atomic.Value(usize) = .init(0);
+    /// Crews and probe jobs freed.
+    var freed: std.atomic.Value(usize) = .init(0);
+
+    fn beforeOpen(path: []const u8) void {
+        const suffix = hang_suffix orelse return;
+        if (!std.mem.endsWith(u8, path, suffix)) return;
+        _ = hung.fetchAdd(1, .release);
+        while (!release.load(.acquire)) sleepTick();
+    }
+};
+
+/// How long a cancelled walk waits for a worker stuck in an open before it
+/// gives up on it.
+const abandon_grace_ns: u64 = 250 * std.time.ns_per_ms;
+const supervise_tick_ms: u32 = 10;
+
+fn sleepTick() void {
+    if (comptime builtin.os.tag == .windows) {
+        const Sleep = @extern(*const fn (ms: u32) callconv(.winapi) void, .{ .name = "Sleep", .library_name = "kernel32" });
+        Sleep(supervise_tick_ms);
+    } else {
+        const usleep = @extern(*const fn (us: c_uint) callconv(.c) c_int, .{ .name = "usleep" });
+        _ = usleep(supervise_tick_ms * 1000);
+    }
+}
+
+/// `path` lies below `root` (not at it).
+fn isStrictlyInside(path: []const u8, root: []const u8) bool {
+    if (root.len == 1 and root[0] == '/') return path.len > 1;
+    return path.len > root.len + 1 and std.mem.startsWith(u8, path, root) and path[root.len] == '/';
+}
+
+/// Folders macOS guards with a consent prompt, or with Full Disk Access,
+/// relative to the home directory. `probeProtected` opens those inside a
+/// root one at a time before the parallel walk, so at most one dialog is
+/// pending and the monitor names it; one refused then is not asked again.
+const protected_folders = [_][]const u8{
+    "Desktop",                     "Documents",           "Downloads",
+    "Pictures",                    "Movies",              "Music",
+    "Public",                      "Library/Mobile Documents", "Library/CloudStorage",
+    "Library/Mail",                "Library/Messages",    "Library/Safari",
+    "Library/Calendars",           "Library/Reminders",   "Library/HomeKit",
+    "Library/Containers",          "Library/Group Containers",
+};
+/// Of those, folders whose every child is another app's data, each guarded
+/// on its own: their children are opened one at a time too.
+const protected_parents = [_][]const u8{ "Library/Containers", "Library/Group Containers" };
+
 extern "c" fn getiopolicy_np(iotype: c_int, scope: c_int) c_int;
 extern "c" fn setiopolicy_np(iotype: c_int, scope: c_int, policy: c_int) c_int;
 
@@ -614,6 +835,9 @@ pub const FastWalker = struct {
     monitor: ?*types.Monitor = null,
     /// Worker threads; 0 = one per CPU.
     thread_count: u32 = 0,
+    /// Folders whose open was refused when `probeProtected` asked first;
+    /// workers skip them (unreadable) instead of asking again.
+    denied: std.ArrayListUnmanaged([]const u8) = .empty,
 
     // Results. `files` is final (hard links resolved) only after `finish()`.
     /// Every file found, in walk order: a worker's records are appended as
@@ -651,6 +875,14 @@ pub const FastWalker = struct {
         self.roots.deinit(self.allocator);
         self.root_devs.deinit(self.allocator);
         self.seen_dirs.deinit(self.allocator);
+        self.denied.deinit(self.allocator);
+    }
+
+    fn isDenied(self: *const FastWalker, path: []const u8) bool {
+        for (self.denied.items) |d| {
+            if (std.mem.eql(u8, d, path)) return true;
+        }
+        return false;
     }
 
     /// Configure size filters
@@ -744,22 +976,20 @@ pub const FastWalker = struct {
         std.debug.assert(!self.finished);
         if (root_path.len > max_path) return error.PathTooLong;
 
-        // Remove trailing slash if present
         const previous_policy: c_int = if (self.no_materialize) noMaterializeThisThread() else -1;
         defer if (self.no_materialize) restoreMaterialize(previous_policy);
 
+        // Remove trailing slash if present
         var trimmed = root_path;
         if (trimmed.len > 1 and trimmed[trimmed.len - 1] == '/') trimmed = trimmed[0 .. trimmed.len - 1];
 
-        var shared: Shared = .{ .walker = self };
-        defer shared.pending.deinit(self.allocator);
-
-        // The calling thread is worker 0.
-        var first: Worker = .{ .shared = &shared, .arena = std.heap.ArenaAllocator.init(self.allocator) };
+        // The root's own bookkeeping (its path string, a root that is a
+        // file) is done here, by a worker that never runs on a thread.
+        var root_shared: Shared = .{ .walker = self, .allocator = self.allocator };
+        var first: Worker = .{ .shared = &root_shared, .arena = std.heap.ArenaAllocator.init(self.allocator) };
         // Whatever happens below, what this worker recorded — at the very least
         // the root's own path string — ends up owned by the walker.
-        var first_absorbed = false;
-        defer if (!first_absorbed) self.absorb(&first) catch {};
+        defer self.absorb(&first) catch {};
 
         const root = try first.strings().dupe(u8, trimmed);
 
@@ -776,56 +1006,252 @@ pub const FastWalker = struct {
             return error.NotADirectory;
         }
 
-        // An unopenable root is an error for the caller, not a silently empty
-        // walk — find out now, before any thread is started.
-        const probe = libc.opendir(first.pathZ(root)) orelse return error.CannotOpenDirectory;
-        _ = libc.closedir(probe);
+        // The root and the guarded folders inside it are opened one at a
+        // time first. An unopenable root is an error for the caller, not a
+        // silently empty walk.
+        try self.probeProtected(&first, root);
 
         try self.roots.append(self.allocator, root);
         try self.root_devs.append(self.allocator, root_stat.dev);
-        try shared.pending.append(self.allocator, root);
 
         const wanted: usize = if (self.thread_count == 0)
             std.Thread.getCpuCount() catch 4
         else
             self.thread_count;
-        const extra = @max(1, @min(wanted, 64)) - 1;
+        const count = @max(1, @min(wanted, 64));
 
-        // Only the extra workers get threads, so a single-threaded walk starts
-        // none at all.
-        const workers = try self.allocator.alloc(Worker, extra);
-        defer self.allocator.free(workers);
-        const threads = try self.allocator.alloc(std.Thread, extra);
-        defer self.allocator.free(threads);
+        const crew = try Crew.create(self.allocator, self, count);
+        // The walk's own reference; detached threads hold theirs.
+        defer crew.release();
+        try crew.shared.pending.append(self.allocator, root);
 
-        for (workers, 1..) |*worker, index| {
-            worker.* = .{ .shared = &shared, .index = index, .arena = std.heap.ArenaAllocator.init(self.allocator) };
-        }
+        // Every worker gets a thread, so that this one can stop waiting for a
+        // worker whose open never returns. Fewer threads than asked for is
+        // slower, not wrong.
         var started: usize = 0;
-        for (threads, workers) |*thread, *worker| {
-            // Fewer threads than asked for is slower, not wrong.
-            thread.* = std.Thread.spawn(.{}, Worker.run, .{worker}) catch break;
+        for (crew.threads, crew.workers) |*thread, *worker| {
+            _ = crew.refs.fetchAdd(1, .acq_rel);
+            thread.* = std.Thread.spawn(.{}, Worker.threadMain, .{worker}) catch {
+                _ = crew.refs.fetchSub(1, .acq_rel);
+                break;
+            };
             started += 1;
         }
+        if (started == 0) {
+            crew.workers[0].run();
+            crew.workers[0].state.store(.finished, .release);
+        }
 
-        first.run();
-        for (threads[0..started]) |thread| thread.join();
+        const abandoned = self.supervise(crew, started);
+
+        if (abandoned) {
+            // The stuck threads were detached; the crew goes with the last of
+            // them. Nothing they found is kept: the walk was cancelled.
+            return error.Cancelled;
+        }
 
         // Merge even after a failure: every arena must end up somewhere it
         // will be freed.
         var merge_error: ?anyerror = null;
-        first_absorbed = true;
-        self.absorb(&first) catch |err| {
-            merge_error = err;
-        };
-        for (workers) |*worker| {
+        for (crew.workers) |*worker| {
+            worker.absorbed = true;
             self.absorb(worker) catch |err| {
                 if (merge_error == null) merge_error = err;
             };
         }
 
-        if (shared.failure) |err| return err;
+        if (crew.shared.failure) |err| return err;
         if (merge_error) |err| return err;
+    }
+
+    /// Wait for the crew's threads. On cancel, idle workers are woken and
+    /// told to stop; a worker still inside an open `abandon_grace_ns` later
+    /// is given up on (its thread detached). True if any was.
+    fn supervise(self: *FastWalker, crew: *Crew, started: usize) bool {
+        var cancel_at: ?u64 = null;
+        while (true) {
+            var live: usize = 0;
+            for (crew.workers[0..started]) |*worker| {
+                switch (worker.state.load(.acquire)) {
+                    .finished, .abandoned => {},
+                    .running, .in_open => live += 1,
+                }
+            }
+            if (live == 0) break;
+            if (self.monitor) |m| if (m.cancelled()) {
+                const now = types.nowNs();
+                if (cancel_at == null) {
+                    cancel_at = now;
+                    crew.shared.stop(error.Cancelled);
+                } else if (now - cancel_at.? >= abandon_grace_ns) {
+                    for (crew.workers[0..started]) |*worker| {
+                        _ = worker.state.cmpxchgStrong(.in_open, .abandoned, .acq_rel, .acquire);
+                    }
+                }
+            };
+            sleepTick();
+        }
+        var abandoned = false;
+        for (crew.workers[0..started], crew.threads[0..started]) |*worker, thread| {
+            if (worker.state.load(.acquire) == .abandoned) {
+                thread.detach();
+                abandoned = true;
+            } else {
+                thread.join();
+            }
+        }
+        return abandoned;
+    }
+
+    /// Open `root`, and the guarded folders inside it (`protected_folders`,
+    /// macOS), one at a time on a thread of their own, before the parallel
+    /// walk. A consent dialog then appears for one folder at a time, with
+    /// that folder named by the monitor, instead of eight workers each
+    /// parking on a different one; and a cancel can return while one is
+    /// pending. Folders refused (EPERM / EACCES: denied before, or now) are
+    /// recorded in `denied` and skipped by the walk, never asked again.
+    fn probeProtected(self: *FastWalker, first: *Worker, root: []const u8) !void {
+        var paths: std.ArrayListUnmanaged([:0]const u8) = .empty;
+        errdefer {
+            for (paths.items) |p| self.allocator.free(p);
+            paths.deinit(self.allocator);
+        }
+        try paths.append(self.allocator, try self.allocator.dupeZ(u8, root));
+
+        if (comptime builtin.os.tag.isDarwin()) {
+            if (libc.getenv("HOME")) |home_z| {
+                const home = std.mem.span(home_z);
+                for (protected_folders) |rel| {
+                    const full = try std.fmt.allocPrintSentinel(self.allocator, "{s}/{s}", .{ home, rel }, 0);
+                    if (!isStrictlyInside(full, root) or self.isExcludedPath(full)) {
+                        self.allocator.free(full);
+                        continue;
+                    }
+                    try paths.append(self.allocator, full);
+                }
+            }
+        }
+
+        const results = try self.runProbe(try paths.toOwnedSlice(self.allocator));
+        defer self.allocator.free(results.errnos);
+        defer {
+            for (results.paths) |p| self.allocator.free(p);
+            self.allocator.free(results.paths);
+        }
+        if (results.errnos[0] != 0) return error.CannotOpenDirectory;
+        try self.recordDenied(first, results.paths[1..], results.errnos[1..]);
+
+        // Second round: each app's own container, below the parents that
+        // were opened.
+        if (comptime builtin.os.tag.isDarwin()) {
+            var children: std.ArrayListUnmanaged([:0]const u8) = .empty;
+            errdefer {
+                for (children.items) |p| self.allocator.free(p);
+                children.deinit(self.allocator);
+            }
+            for (results.paths[1..], results.errnos[1..]) |path, err| {
+                if (err != 0) continue;
+                const is_parent = for (protected_parents) |rel| {
+                    if (std.mem.endsWith(u8, path, rel)) break true;
+                } else false;
+                if (!is_parent) continue;
+                const dir = libc.opendir(path.ptr) orelse continue;
+                defer _ = libc.closedir(dir);
+                while (libc.readdir(dir)) |entry| {
+                    const name: [*:0]const u8 = @ptrCast(&entry.name);
+                    if (name[0] == '.') continue;
+                    const full = try std.fmt.allocPrintSentinel(self.allocator, "{s}/{s}", .{ path, std.mem.span(name) }, 0);
+                    if (entry.type != DT_DIR or self.isExcludedPath(full)) {
+                        self.allocator.free(full);
+                        continue;
+                    }
+                    try children.append(self.allocator, full);
+                }
+            }
+            if (children.items.len > 0) {
+                const more = try self.runProbe(try children.toOwnedSlice(self.allocator));
+                defer self.allocator.free(more.errnos);
+                defer {
+                    for (more.paths) |p| self.allocator.free(p);
+                    self.allocator.free(more.paths);
+                }
+                try self.recordDenied(first, more.paths, more.errnos);
+            } else children.deinit(self.allocator);
+        }
+    }
+
+    fn recordDenied(self: *FastWalker, first: *Worker, paths: []const [:0]const u8, errnos: []const c_int) !void {
+        for (paths, errnos) |path, err| {
+            if (err == @intFromEnum(libc.E.PERM) or err == @intFromEnum(libc.E.ACCES)) {
+                try self.denied.append(self.allocator, try first.strings().dupe(u8, path));
+            }
+        }
+    }
+
+    const ProbeResults = struct { paths: []const [:0]const u8, errnos: []c_int };
+
+    /// Open each of `paths` (taken over) in turn on a thread of its own and
+    /// wait, naming the one being opened in monitor slot 0. On cancel, an
+    /// open still pending after `abandon_grace_ns` is given up on.
+    fn runProbe(self: *FastWalker, paths: []const [:0]const u8) !ProbeResults {
+        const results = self.allocator.alloc(c_int, paths.len) catch |err| {
+            for (paths) |p| self.allocator.free(p);
+            self.allocator.free(paths);
+            return err;
+        };
+        @memset(results, 0);
+        const job = self.allocator.create(ProbeJob) catch |err| {
+            for (paths) |p| self.allocator.free(p);
+            self.allocator.free(paths);
+            self.allocator.free(results);
+            return err;
+        };
+        job.* = .{ .allocator = self.allocator, .paths = paths, .results = results, .no_materialize = self.no_materialize };
+
+        const thread = std.Thread.spawn(.{}, ProbeJob.threadMain, .{job}) catch {
+            // No thread: open them here, without the protection.
+            _ = job.refs.fetchSub(1, .acq_rel);
+            job.threadMain();
+            return self.takeProbe(job);
+        };
+
+        var cancel_at: ?u64 = null;
+        var shown: ?usize = null;
+        defer if (shown != null) if (self.monitor) |m| m.end(0);
+        while (job.state.load(.acquire) != .finished) {
+            if (self.monitor) |m| {
+                const i = job.current.load(.acquire);
+                if (shown != i) {
+                    m.begin(0, paths[i]);
+                    shown = i;
+                }
+                if (m.cancelled()) {
+                    const now = types.nowNs();
+                    if (cancel_at == null) cancel_at = now;
+                    if (now - cancel_at.? >= abandon_grace_ns and
+                        job.state.cmpxchgStrong(.in_open, .abandoned, .acq_rel, .acquire) == null)
+                    {
+                        thread.detach();
+                        job.release();
+                        return error.Cancelled;
+                    }
+                }
+            }
+            sleepTick();
+        }
+        thread.join();
+        return self.takeProbe(job);
+    }
+
+    /// The results of a finished probe; the job is released.
+    fn takeProbe(self: *FastWalker, job: *ProbeJob) !ProbeResults {
+        const out: ProbeResults = .{ .paths = job.paths, .errnos = job.results };
+        // The paths and results now belong to the caller.
+        job.paths = &.{};
+        job.results = &.{};
+        _ = self;
+        job.release();
+        return out;
     }
 
     /// Move a worker's results into the walker.
@@ -1171,4 +1597,108 @@ test "an excluded path skips that folder with its contents, or that one file" {
     try fw.finish();
     try std.testing.expectEqual(@as(usize, 1), fw.files.items.len);
     try std.testing.expectEqual(@as(u64, 2), fw.stats.excluded);
+}
+
+fn cancelAfter(monitor: *types.Monitor, opens_hung: usize) void {
+    while (testing_hooks.hung.load(.acquire) < opens_hung) sleepTick();
+    monitor.cancel();
+}
+
+/// Run a walk of `root` that hangs in the open of a path ending `suffix`,
+/// cancel it once the open is stuck, and check that the walk returns without
+/// waiting for the open - then let the open finish and the abandoned thread
+/// free what it held.
+fn expectCancelReturnsDespiteStuckOpen(root: []const u8, suffix: []const u8, freed_after: usize) !void {
+    testing_hooks.hang_suffix = suffix;
+    testing_hooks.release.store(false, .release);
+    testing_hooks.hung.store(0, .release);
+    defer testing_hooks.hang_suffix = null;
+    const freed_before = testing_hooks.freed.load(.acquire);
+
+    var monitor: types.Monitor = .{};
+    var walker = FastWalker.init(std.testing.allocator);
+    defer walker.deinit();
+    walker.setMonitor(&monitor);
+    walker.setThreads(4);
+    const canceller = try std.Thread.spawn(.{}, cancelAfter, .{ &monitor, 1 });
+    defer canceller.join();
+
+    const started = types.nowNs();
+    try std.testing.expectError(error.Cancelled, walker.walk(root));
+    // Back within the grace period plus a few ticks, the open still stuck.
+    try std.testing.expect(types.nowNs() - started < 5 * std.time.ns_per_s);
+    try std.testing.expect(!testing_hooks.release.load(.acquire));
+
+    // The open returns; the abandoned thread frees its crew or job and ends.
+    testing_hooks.release.store(true, .release);
+    var waited: usize = 0;
+    while (testing_hooks.freed.load(.acquire) < freed_before + freed_after) : (waited += 1) {
+        if (waited > 500) return error.AbandonedThreadNeverFinished;
+        sleepTick();
+    }
+}
+
+test "a cancelled walk returns while a worker is stuck in an open, and that worker cleans up after itself" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    var scratch = try Scratch.init(std.testing.allocator, "walk-stuck");
+    defer scratch.deinit();
+    try scratch.makeDir("a");
+    try scratch.writeFile("a/f", "x");
+    try scratch.makeDir("stuck");
+    // The probe frees its job; the crew is freed by the abandoned worker.
+    try expectCancelReturnsDespiteStuckOpen(scratch.path, "/stuck", 2);
+}
+
+test "a cancelled walk returns while the first open of its root is stuck" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    var scratch = try Scratch.init(std.testing.allocator, "walk-stuck-root");
+    defer scratch.deinit();
+    try scratch.makeDir("root");
+    const root = try scratch.join("root");
+    defer std.testing.allocator.free(root);
+    try expectCancelReturnsDespiteStuckOpen(root, "/root", 1);
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn chmod(path: [*:0]const u8, mode: libc.mode_t) c_int;
+
+test "a guarded folder refused when first asked is recorded and skipped, not asked again" {
+    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "walk-denied");
+    defer scratch.deinit();
+    try scratch.makeDir("Documents");
+    try scratch.writeFile("Documents/secret", "x");
+    try scratch.makeDir("Music");
+    try scratch.writeFile("Music/song", "y");
+    const docs = try scratch.joinZ("Documents");
+    defer allocator.free(docs);
+    // Refused like a folder the user said no to: EACCES on open.
+    if (chmod(docs, 0) != 0) return error.SkipZigTest;
+    defer _ = chmod(docs, 0o700);
+
+    // The scratch directory plays the home directory.
+    const old_home = libc.getenv("HOME");
+    const old_home_copy = if (old_home) |h| try allocator.dupeZ(u8, std.mem.span(h)) else null;
+    defer if (old_home_copy) |h| allocator.free(h);
+    defer if (old_home_copy) |h| {
+        _ = setenv("HOME", h, 1);
+    };
+    _ = setenv("HOME", scratch.path, 1);
+
+    var walker = FastWalker.init(allocator);
+    defer walker.deinit();
+    walker.setThreads(2);
+    walker.enableTreeRecording();
+    try walker.walk(scratch.path);
+    try walker.finish();
+
+    try std.testing.expectEqual(@as(usize, 1), walker.denied.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, walker.denied.items[0], "/Documents"));
+    // Music was asked and allowed: its file is found; Documents is unreadable.
+    try std.testing.expectEqual(@as(u64, 1), walker.stats.files_found);
+    try std.testing.expect(walker.stats.errors >= 1);
 }
