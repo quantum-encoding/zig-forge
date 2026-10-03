@@ -125,7 +125,7 @@ fn cmdTrash(allocator: std.mem.Allocator, io: Io, first_arg: []const u8, args_it
     var errors: u32 = 0;
 
     for (paths.items) |path| {
-        const path_z = allocator.dupeZ(u8, path) catch {
+        const path_z = allocator.dupeSentinel(u8, path, 0) catch {
             errors += 1;
             continue;
         };
@@ -162,7 +162,7 @@ fn cmdTrash(allocator: std.mem.Allocator, io: Io, first_arg: []const u8, args_it
             if (is_symlink) {
                 const dir_name = std.fs.path.dirname(path) orelse ".";
                 const base_name = std.fs.path.basename(path);
-                const dir_z = allocator.dupeZ(u8, dir_name) catch break :blk null;
+                const dir_z = allocator.dupeSentinel(u8, dir_name, 0) catch break :blk null;
                 defer allocator.free(dir_z);
                 const parent = c.realpath(dir_z, &rp_buf) orelse break :blk null;
                 const parent_s = std.mem.span(parent);
@@ -835,7 +835,7 @@ const trashMacOS = if (builtin.os.tag == .macos) struct {
 
         const fm: id = msg(id, Class, NSFileManager, sel_registerName("defaultManager"), .{});
 
-        const path_z = try std.heap.page_allocator.dupeZ(u8, path);
+        const path_z = try std.heap.page_allocator.dupeSentinel(u8, path, 0);
         defer std.heap.page_allocator.free(path_z);
         const ns_path: id = msg(id, Class, NSString, sel_registerName("stringWithUTF8String:"), .{path_z.ptr});
         const url: id = msg(id, Class, NSURL, sel_registerName("fileURLWithPath:"), .{ns_path});
@@ -889,10 +889,10 @@ const trashLinux = if (builtin.os.tag == .linux) struct {
         defer allocator.free(info_dir);
 
         // Ensure directories exist
-        const files_z = try allocator.dupeZ(u8, files_dir);
+        const files_z = try allocator.dupeSentinel(u8, files_dir, 0);
         defer allocator.free(files_z);
         _ = c.mkdir(files_z, 0o700);
-        const info_dir_z = try allocator.dupeZ(u8, info_dir);
+        const info_dir_z = try allocator.dupeSentinel(u8, info_dir, 0);
         defer allocator.free(info_dir_z);
         _ = c.mkdir(info_dir_z, 0o700);
 
@@ -904,7 +904,7 @@ const trashLinux = if (builtin.os.tag == .linux) struct {
         while (true) {
             const dest = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ files_dir, final_name });
             defer allocator.free(dest);
-            const dest_z = try allocator.dupeZ(u8, dest);
+            const dest_z = try allocator.dupeSentinel(u8, dest, 0);
             defer allocator.free(dest_z);
             if (c.access(dest_z, 0) == 0) {
                 allocator.free(final_name);
@@ -918,9 +918,9 @@ const trashLinux = if (builtin.os.tag == .linux) struct {
         const dest_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ files_dir, final_name });
         defer allocator.free(dest_path);
 
-        const src_z = try allocator.dupeZ(u8, path);
+        const src_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(src_z);
-        const dst_z = try allocator.dupeZ(u8, dest_path);
+        const dst_z = try allocator.dupeSentinel(u8, dest_path, 0);
         defer allocator.free(dst_z);
 
         if (c.rename(src_z, dst_z) != 0) return error.RenameFailed;
@@ -936,7 +936,7 @@ const trashLinux = if (builtin.os.tag == .linux) struct {
         const content = try std.fmt.allocPrint(allocator, "[Trash Info]\nPath={s}\nDeletionDate={s}\n", .{ encoded, &now });
         defer allocator.free(content);
 
-        const info_file_z = try allocator.dupeZ(u8, info_file);
+        const info_file_z = try allocator.dupeSentinel(u8, info_file, 0);
         defer allocator.free(info_file_z);
 
         // Write using C file API
@@ -1023,7 +1023,7 @@ fn writeTrashInfo(allocator: std.mem.Allocator, io: Io, trash_filename: []const 
 
 pub fn readTrashInfo(allocator: std.mem.Allocator, path: []const u8) ?TrashEntry {
     // Use C file API for simplicity — .trashinfo files are tiny
-    const path_z = allocator.dupeZ(u8, path) catch return null;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return null;
     defer allocator.free(path_z);
 
     const fp = c.fopen(path_z, "r") orelse return null;
@@ -1248,7 +1248,7 @@ pub fn humanSize(bytes: u64, buf: []u8) []const u8 {
 
 fn allocPrintZ(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) ![:0]u8 {
     const s = try std.fmt.allocPrint(allocator, fmt, args);
-    const z = try allocator.dupeZ(u8, s);
+    const z = try allocator.dupeSentinel(u8, s, 0);
     allocator.free(s);
     return z;
 }

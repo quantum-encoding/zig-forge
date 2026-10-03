@@ -314,7 +314,7 @@ test "drawSpan basic" {
     var cmap: [256]u8 = undefined;
     for (&cmap, 0..) |*v, i| v.* = @intCast(i);
 
-    const flat = [_]u8{100} ** 4096;
+    const flat = @as([4096]u8, @splat(100));
 
     const ds = DrawSpanContext{
         .source = &flat,

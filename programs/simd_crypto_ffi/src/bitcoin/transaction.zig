@@ -695,7 +695,7 @@ test "parseTransaction frees witness array when a witness item read fails (no le
         0x02, 0x00, 0x00, 0x00, // version 2
         0x00, 0x01, // SegWit marker + flag
         0x01, // input count = 1
-    } ++ [_]u8{0x11} ** 32 // prev txid
+    } ++ @as([32]u8, @splat(0x11)) // prev txid
     ++ [_]u8{
         0x00, 0x00, 0x00, 0x00, // vout 0
         0x00, // scriptSig len 0

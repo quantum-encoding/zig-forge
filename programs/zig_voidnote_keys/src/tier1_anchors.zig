@@ -95,7 +95,7 @@ fn try_len_is_64(len: u32) void {
 }
 
 test "HMAC-SHA256 RFC 4231 TC1" {
-    const key = [_]u8{0x0b} ** 20;
+    const key = @as([20]u8, @splat(0x0b));
     try testing.expectEqualStrings(
         "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
         hmacHex(&key, "Hi There"),
@@ -110,8 +110,8 @@ test "HMAC-SHA256 RFC 4231 TC2 (Jefe)" {
 }
 
 test "HMAC-SHA256 RFC 4231 TC3 (0xdd x50)" {
-    const key = [_]u8{0xaa} ** 20;
-    const data = [_]u8{0xdd} ** 50;
+    const key = @as([20]u8, @splat(0xaa));
+    const data = @as([50]u8, @splat(0xdd));
     try testing.expectEqualStrings(
         "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe",
         hmacHex(&key, &data),
@@ -124,7 +124,7 @@ test "HMAC-SHA256 RFC 4231 TC4 (25-byte key, 0xcd x50)" {
         0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12,
         0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
     };
-    const data = [_]u8{0xcd} ** 50;
+    const data = @as([50]u8, @splat(0xcd));
     try testing.expectEqualStrings(
         "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b",
         hmacHex(&key, &data),
@@ -135,13 +135,13 @@ test "HMAC-SHA256 RFC 4231 TC5 (truncation — compare 128-bit prefix)" {
     // RFC 4231 TC5 publishes only the 128-bit truncated MAC. The module
     // always emits the full 256-bit hex, so we compare the first 32 hex
     // chars (16 bytes) against the published truncated value.
-    const key = [_]u8{0x0c} ** 20;
+    const key = @as([20]u8, @splat(0x0c));
     const full = hmacHex(&key, "Test With Truncation");
     try testing.expectEqualStrings("a3b6167473100ee06e0c796c2955552b", full[0..32]);
 }
 
 test "HMAC-SHA256 RFC 4231 TC6 (131-byte key — hash-key-first branch)" {
-    const key = [_]u8{0xaa} ** 131;
+    const key = @as([131]u8, @splat(0xaa));
     try testing.expectEqualStrings(
         "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
         hmacHex(&key, "Test Using Larger Than Block-Size Key - Hash Key First"),
@@ -149,7 +149,7 @@ test "HMAC-SHA256 RFC 4231 TC6 (131-byte key — hash-key-first branch)" {
 }
 
 test "HMAC-SHA256 RFC 4231 TC7 (131-byte key, long message)" {
-    const key = [_]u8{0xaa} ** 131;
+    const key = @as([131]u8, @splat(0xaa));
     const data = "This is a test using a larger than block-size key and a " ++
         "larger than block-size data. The key needs to be hashed before " ++
         "being used by the HMAC algorithm.";
@@ -164,7 +164,7 @@ test "HMAC-SHA256 RFC 4231 TC7 (131-byte key, long message)" {
 // ==========================================================================
 
 test "hmac_sha256_verify accepts the correct MAC and rejects a wrong one" {
-    const key = [_]u8{0x0b} ** 20;
+    const key = @as([20]u8, @splat(0x0b));
     const msg = "Hi There";
     const good = "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7";
     const bad = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -180,7 +180,7 @@ test "hmac_sha256_verify accepts the correct MAC and rejects a wrong one" {
 }
 
 test "hmac_sha256_verify wipes the result buffer (F4 — no MAC oracle)" {
-    const key = [_]u8{0x0b} ** 20;
+    const key = @as([20]u8, @splat(0x0b));
     const msg = "Hi There";
     const good = "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7";
 

@@ -724,7 +724,7 @@ fn createArchive(config: *const Config, allocator: std.mem.Allocator) !void {
     // Change directory if specified
     if (config.directory) |dir| {
         var dir_buf: [4096]u8 = undefined;
-        const dir_z = std.fmt.bufPrintZ(&dir_buf, "{s}", .{dir}) catch return error.PathTooLong;
+        const dir_z = std.fmt.bufPrintSentinel(&dir_buf, "{s}", .{dir}, 0) catch return error.PathTooLong;
         if (chdir(dir_z) != 0) {
             writeStderr("ztar: cannot change to directory\n");
             return error.ChdirFailed;
@@ -743,7 +743,7 @@ fn createArchive(config: *const Config, allocator: std.mem.Allocator) !void {
         }
 
         // Write two zero blocks to end archive
-        tar_data.appendSlice(allocator, &[_]u8{0} ** 1024) catch {
+        tar_data.appendSlice(allocator, &@as([1024]u8, @splat(0))) catch {
             writeStderr("ztar: memory allocation error\n");
             return error.OutOfMemory;
         };
@@ -757,7 +757,7 @@ fn createArchive(config: *const Config, allocator: std.mem.Allocator) !void {
 
         // Write compressed data to file
         var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{archive_file}) catch return error.PathTooLong;
+        const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{archive_file}, 0) catch return error.PathTooLong;
 
         const fd = open(path_z.ptr, O_WRONLY_CREAT_TRUNC, @as(c_int, 0o644));
         if (fd < 0) {
@@ -780,7 +780,7 @@ fn createArchive(config: *const Config, allocator: std.mem.Allocator) !void {
     } else {
         // No compression - write directly to file
         var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{archive_file}) catch return error.PathTooLong;
+        const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{archive_file}, 0) catch return error.PathTooLong;
 
         const fd = open(path_z.ptr, O_WRONLY_CREAT_TRUNC, @as(c_int, 0o644));
         if (fd < 0) {
@@ -804,7 +804,7 @@ fn createArchive(config: *const Config, allocator: std.mem.Allocator) !void {
 
 fn addToArchiveFd(fd: c_int, path: []const u8, config: *const Config, allocator: std.mem.Allocator) void {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return;
     // allocator used in recursive call
 
     // Get file info using lstat
@@ -917,7 +917,7 @@ fn addToArchiveFd(fd: c_int, path: []const u8, config: *const Config, allocator:
 /// Add file/directory to archive in memory (for compression)
 fn addToArchiveMem(tar_data: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, path: []const u8, config: *const Config) void {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return;
 
     // Get file info using lstat
     var stat_buf: Stat = undefined;
@@ -1037,7 +1037,7 @@ fn extractArchive(config: *const Config, allocator: std.mem.Allocator) !void {
     // Change directory if specified
     if (config.directory) |dir| {
         var dir_buf: [4096]u8 = undefined;
-        const dir_z = std.fmt.bufPrintZ(&dir_buf, "{s}", .{dir}) catch return error.PathTooLong;
+        const dir_z = std.fmt.bufPrintSentinel(&dir_buf, "{s}", .{dir}, 0) catch return error.PathTooLong;
         if (chdir(dir_z) != 0) {
             writeStderr("ztar: cannot change to directory\n");
             return error.ChdirFailed;
@@ -1046,7 +1046,7 @@ fn extractArchive(config: *const Config, allocator: std.mem.Allocator) !void {
 
     // Read entire archive file into memory
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{archive_file}) catch return error.PathTooLong;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{archive_file}, 0) catch return error.PathTooLong;
 
     const fd = open(path_z.ptr, O_RDONLY);
     if (fd < 0) {
@@ -1146,7 +1146,7 @@ fn extractArchive(config: *const Config, allocator: std.mem.Allocator) !void {
 
         // Create path
         var name_buf: [4096]u8 = undefined;
-        const name_z = std.fmt.bufPrintZ(&name_buf, "{s}", .{name}) catch {
+        const name_z = std.fmt.bufPrintSentinel(&name_buf, "{s}", .{name}, 0) catch {
             const blocks = (size + 511) / 512;
             pos += blocks * 512;
             continue;
@@ -1273,7 +1273,7 @@ fn listArchive(config: *const Config, allocator: std.mem.Allocator) !void {
 
     // Read entire archive file into memory
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{archive_file}) catch return error.PathTooLong;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{archive_file}, 0) catch return error.PathTooLong;
 
     const fd = open(path_z.ptr, O_RDONLY);
     if (fd < 0) {
@@ -1460,7 +1460,7 @@ test "setName performs the POSIX name/prefix split for paths > 100 bytes" {
     // Path with a single '/' at index 120: the spec mandates the trailing
     // component (<=100) goes in `name` and the leading directory (<=155) in
     // `prefix`. leaf = "leaf.txt" (8 bytes), dir = 120 'p's.
-    const dir = "p" ** 120;
+    const dir = &@as([120]u8, @splat('p'));
     const path = dir ++ "/leaf.txt";
     try testing.expect(path.len > 100);
     var h = TarHeader.init();
@@ -1522,7 +1522,7 @@ test "compressGzip emits a real gzip stream (magic + trailer), decodable" {
     // gzip (RFC 1952): stream begins with 0x1f 0x8b. A finalized stream is
     // decodable back to the original; a stream missing the final block/footer
     // (the pre-fix bug) is not. We assert both the magic and decodability.
-    const input = "the quick brown fox jumps over the lazy dog\n" ** 8;
+    const input = repeatStr("the quick brown fox jumps over the lazy dog\n", 8);
     const gz = try compressGzip(testing.allocator, input);
     defer testing.allocator.free(gz);
     try testing.expect(gz.len >= 18);
@@ -1531,4 +1531,14 @@ test "compressGzip emits a real gzip stream (magic + trailer), decodable" {
     const back = try decompressGzip(testing.allocator, gz);
     defer testing.allocator.free(back);
     try testing.expectEqualStrings(input, back);
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

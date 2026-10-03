@@ -79,7 +79,7 @@ pub const TcpServer = struct {
             .family = linux.AF.INET,
             .port = std.mem.nativeToBig(u16, ip.ip4.port),
             .addr = @bitCast(ip.ip4.bytes),
-            .zero = [_]u8{0} ** 8,
+            .zero = @as([8]u8, @splat(0)),
         };
 
         // Bind

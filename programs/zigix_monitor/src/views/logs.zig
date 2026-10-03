@@ -18,9 +18,9 @@ pub const Severity = enum {
 };
 
 const LogEntry = struct {
-    timestamp: [19]u8 = [_]u8{' '} ** 19, // "YYYY-MM-DD HH:MM:SS"
+    timestamp: [19]u8 = @splat(' '), // "YYYY-MM-DD HH:MM:SS"
     severity: Severity = .info,
-    message: [96]u8 = [_]u8{0} ** 96,
+    message: [96]u8 = @splat(0),
     message_len: usize = 0,
 };
 

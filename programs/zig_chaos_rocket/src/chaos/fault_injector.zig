@@ -223,7 +223,7 @@ pub const FaultInjector = struct {
         // QF72's ADIRU emitted a spike that indexed an AoA lookup table out of range.
         // Observe the bounds check: a corrupted index past the table length is caught
         // before it can read adjacent memory.
-        var aoa_table = [_]f64{0.0} ** 8;
+        var aoa_table = @as([8]f64, @splat(0.0));
         const corrupted_index: usize = 12; // spike drove the index past the table
         const caught = corrupted_index >= aoa_table.len;
         _ = &aoa_table;
@@ -285,7 +285,7 @@ pub const FaultInjector = struct {
     // ====================================================================
     pub fn injectCrowdStrikeOOB(self: *FaultInjector) InjectionResult {
         // Channel File 291: index 20 on array of length 20
-        var config_values = [_]u64{0} ** 20;
+        var config_values = @as([20]u64, @splat(0));
         const index: usize = 20; // One past the end
         // In C: config_values[20] reads garbage → BSOD
         // In Zig: bounds check catches it

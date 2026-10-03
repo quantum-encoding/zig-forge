@@ -277,7 +277,7 @@ pub const MockRegs = struct {
     regs: [REG_COUNT]u32,
 
     pub fn init() MockRegs {
-        return .{ .regs = [_]u32{0} ** REG_COUNT };
+        return .{ .regs = @as([REG_COUNT]u32, @splat(0)) };
     }
 
     pub fn read32(ctx: *anyopaque, offset: u32) u32 {

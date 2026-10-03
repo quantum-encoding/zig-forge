@@ -2543,14 +2543,14 @@ export fn main() noreturn {
                 const lfd = sys.open("/tmp/lock_test.txt\x00", sys.O_RDWR, 0);
                 if (lfd >= 0) {
                     // struct flock: l_type(2) + l_whence(2) + pad(4) + l_start(8) + l_len(8) + l_pid(4) = 28 bytes
-                    var flock_buf: [32]u8 = [_]u8{0} ** 32;
+                    var flock_buf: [32]u8 = @splat(0);
                     // Set F_WRLCK (1)
                     flock_buf[0] = 1; // l_type = F_WRLCK
                     // l_whence = SEEK_SET (0), l_start = 0, l_len = 0 (whole file)
                     const sr2 = sys.fcntl(@intCast(lfd), sys.F_SETLK, @intFromPtr(&flock_buf));
                     if (sr2 == 0) {
                         // Check F_GETLK — should say no conflict (same pid)
-                        var check_buf: [32]u8 = [_]u8{0} ** 32;
+                        var check_buf: [32]u8 = @splat(0);
                         check_buf[0] = 1; // query F_WRLCK
                         const gr = sys.fcntl(@intCast(lfd), sys.F_GETLK, @intFromPtr(&check_buf));
                         if (gr == 0 and check_buf[0] == 2) { // l_type should be F_UNLCK (no conflict)
@@ -2674,7 +2674,7 @@ export fn main() noreturn {
     // SMP stress test — fork+exec to give each worker its own address space
     if (false) { // Debug: skip stress test but keep code compiled (binary layout test)
         puts("[smp-test] Spawning 16 workers via fork+exec...\n");
-        var child_pids: [16]isize = [_]isize{0} ** 16;
+        var child_pids: [16]isize = @splat(0);
         var spawned: usize = 0;
 
         for (0..16) |w| {

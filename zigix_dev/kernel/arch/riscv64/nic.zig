@@ -12,7 +12,7 @@ const gvnic = @import("gvnic.zig");
 const Backend = enum { none, virtio, rtl8126, gvnic };
 var backend: Backend = .none;
 
-pub var mac: [6]u8 = .{0} ** 6;
+pub var mac: [6]u8 = @splat(0);
 pub var irq: u32 = 0;
 
 /// Register virtio-net as the active NIC (QEMU path).

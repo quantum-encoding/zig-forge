@@ -46,7 +46,7 @@ fn writeTempFile(buf: *[80]u8, data: []const u8) ![:0]const u8 {
     if (temp_base == 0) temp_base = @truncate(@intFromPtr(&temp_counter));
     temp_counter += 1;
     const id: u64 = temp_base ^ (temp_counter *% 0x9E3779B97F4A7C15);
-    const path = try std.fmt.bufPrintZ(buf, "/tmp/zcksum_parity_{x}_{x}", .{ id, temp_counter });
+    const path = try std.fmt.bufPrintSentinel(buf, "/tmp/zcksum_parity_{x}_{x}", .{ id, temp_counter }, 0);
     const fd = try std.posix.openatZ(
         std.posix.AT.FDCWD,
         path,
@@ -99,7 +99,7 @@ fn runBin(allocator: std.mem.Allocator, bin: []const u8, args: []const []const u
 fn findGnu() ?[]const u8 {
     for (GNU_CANDIDATES) |cand| {
         var path_buf: [256]u8 = undefined;
-        const cand_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{cand}) catch continue;
+        const cand_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{cand}, 0) catch continue;
         const fd = std.posix.openatZ(std.posix.AT.FDCWD, cand_z, .{ .ACCMODE = .RDONLY }, 0) catch continue;
         _ = close(fd);
         return cand;

@@ -19,18 +19,15 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run zunexpand");
     run_step.dependOn(&run_cmd.step);
 
     // --- Tests: GNU-parity vectors that shell out to the built binary and
     //     diff its output against the real GNU `unexpand`. ---
-    const exe_path = b.getInstallPath(.bin, "zunexpand");
     const build_opts = b.addOptions();
-    build_opts.addOption([]const u8, "zunexpand_path", exe_path);
+    build_opts.addOptionPath("zunexpand_path", exe.getEmittedBin());
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -49,4 +46,12 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run GNU-parity tests");
     test_step.dependOn(&run_tests.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

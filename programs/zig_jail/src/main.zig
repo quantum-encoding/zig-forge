@@ -194,13 +194,13 @@ pub fn main(init: std.process.Init) !void {
         defer allocator.free(argv);
 
         for (command_args, 0..) |cmd_arg, i| {
-            const c_str = try allocator.dupeZ(u8, cmd_arg);
+            const c_str = try allocator.dupeSentinel(u8, cmd_arg, 0);
             argv[i] = c_str.ptr;
         }
         argv[command_args.len] = null; // Null terminate the array
 
         // Get path (first arg)
-        const path = try allocator.dupeZ(u8, command_args[0]);
+        const path = try allocator.dupeSentinel(u8, command_args[0], 0);
 
         // execve - this replaces the current process
         // Use linux syscall directly since std.process.execve was removed

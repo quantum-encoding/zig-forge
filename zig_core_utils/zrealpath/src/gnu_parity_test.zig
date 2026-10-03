@@ -127,7 +127,7 @@ const Case = struct {
 /// Build the shared filesystem fixture and return its (absolute) root. The
 /// caller must pass the returned root to `cleanupFixture`.
 fn makeFixture(allocator: std.mem.Allocator) ![]u8 {
-    var tmpl = [_]u8{0} ** 32;
+    var tmpl = @as([32]u8, @splat(0));
     const seed = "/tmp/zrealpathXXXXXX";
     @memcpy(tmpl[0..seed.len], seed);
     const made = mkdtemp(@ptrCast(&tmpl)) orelse return error.FixtureFailed;
@@ -150,7 +150,7 @@ fn makeFixture(allocator: std.mem.Allocator) ![]u8 {
 fn mkSymlink(allocator: std.mem.Allocator, root: []const u8, target: []const u8, name: []const u8) !void {
     const link = try std.fs.path.joinZ(allocator, &.{ root, name });
     defer allocator.free(link);
-    const tz = try allocator.dupeZ(u8, target);
+    const tz = try allocator.dupeSentinel(u8, target, 0);
     defer allocator.free(tz);
     _ = unlink(link.ptr);
     _ = symlink(tz.ptr, link.ptr);
@@ -167,7 +167,7 @@ fn cleanupFixture(allocator: std.mem.Allocator, root: []const u8) void {
         defer allocator.free(d);
         _ = rmdir(d.ptr);
     }
-    const rz = allocator.dupeZ(u8, root) catch return;
+    const rz = allocator.dupeSentinel(u8, root, 0) catch return;
     defer allocator.free(rz);
     _ = rmdir(rz.ptr);
 }

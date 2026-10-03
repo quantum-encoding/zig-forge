@@ -27,8 +27,9 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    const run_tests = b.addRunArtifact(tests);
-    run_tests.setEnvironmentVariable("ZTAC_BIN", b.getInstallPath(.bin, "ztac"));
+    const run_tests = b.addSystemCommand(&.{"env"});
+    run_tests.addPrefixedFileArg("ZTAC_BIN=", exe.getEmittedBin());
+    run_tests.addArtifactArg(tests);
     run_tests.step.dependOn(b.getInstallStep());
     run_tests.has_side_effects = true;
 

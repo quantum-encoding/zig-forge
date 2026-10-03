@@ -473,7 +473,7 @@ test "M4: malformed or illegal character references stay literal" {
 test "M1: oversized entity text is chunked, not truncated" {
     // 300 '&amp;' entities decoded through a 16-byte buffer: every chunk must
     // be whole and the concatenation must equal the full decoded text.
-    const input = "&amp;" ** 300;
+    const input = repeatStr("&amp;", 300);
     var buf: [16]u8 = undefined;
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(std.testing.allocator);
@@ -537,4 +537,14 @@ test "M2: attribute overflow is flagged, not silent" {
     const e = parser.next().?;
     try std.testing.expectEqual(XmlParser.max_attrs, e.element_start.attrs.len);
     try std.testing.expect(e.element_start.attrs_truncated);
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

@@ -208,7 +208,7 @@ fn fillResponse(out: *CLiveResponse, result: *live_mod.LiveResponse) void {
 
     // Text
     if (result.text.len > 0) {
-        const duped = allocator.dupeZ(u8, result.text) catch {
+        const duped = allocator.dupeSentinel(u8, result.text, 0) catch {
             out.text = .{ .ptr = null, .len = 0 };
             result.deinit();
             return;
@@ -228,7 +228,7 @@ fn fillResponse(out: *CLiveResponse, result: *live_mod.LiveResponse) void {
 
     // Output transcription
     if (result.output_transcript.len > 0) {
-        const duped = allocator.dupeZ(u8, result.output_transcript) catch {
+        const duped = allocator.dupeSentinel(u8, result.output_transcript, 0) catch {
             out.output_transcript = .{ .ptr = null, .len = 0 };
             result.deinit();
             return;
@@ -303,13 +303,13 @@ fn mapError(err: anyerror) i32 {
 }
 
 fn makeErrorString(msg: []const u8) CString {
-    const duped = allocator.dupeZ(u8, msg) catch return .{ .ptr = null, .len = 0 };
+    const duped = allocator.dupeSentinel(u8, msg, 0) catch return .{ .ptr = null, .len = 0 };
     return .{ .ptr = duped.ptr, .len = msg.len };
 }
 
 fn makeCString(s: []const u8) CString {
     if (s.len == 0) return .{ .ptr = null, .len = 0 };
-    const duped = allocator.dupeZ(u8, s) catch return .{ .ptr = null, .len = 0 };
+    const duped = allocator.dupeSentinel(u8, s, 0) catch return .{ .ptr = null, .len = 0 };
     return .{ .ptr = duped.ptr, .len = s.len };
 }
 

@@ -287,7 +287,7 @@ pub const Queen = struct {
 test "Queen initialization" {
     const allocator = std.heap.c_allocator;
 
-    const target = [_]u8{0} ** 32;
+    const target = @as([32]u8, @splat(0));
     // GPU-gated: skip on any machine without a usable CUDA device rather than
     // failing the whole `zig build test` run in a GPU-less CI environment.
     var queen = Queen.init(allocator, 0, 1000, .numeric_hash, &target) catch |err| switch (err) {

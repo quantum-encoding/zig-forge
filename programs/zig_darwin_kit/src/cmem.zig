@@ -60,7 +60,7 @@ pub const CString = struct {
 pub fn takeString(allocator: std.mem.Allocator, ptr: ?[*:0]u8) error{OutOfMemory}![:0]u8 {
     var s = CString{ .ptr = ptr };
     defer s.deinit();
-    return allocator.dupeZ(u8, s.slice());
+    return allocator.dupeSentinel(u8, s.slice(), 0);
 }
 
 // ───────────────────────────── tests ─────────────────────────────

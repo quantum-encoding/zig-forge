@@ -186,7 +186,7 @@ pub fn saveGame(
     defer buf.deinit();
 
     // Write description (24 bytes, null-padded)
-    var desc_buf: [SAVE_DESC_LEN]u8 = [_]u8{0} ** SAVE_DESC_LEN;
+    var desc_buf: [SAVE_DESC_LEN]u8 = @splat(0);
     const copy_len = @min(description.len, SAVE_DESC_LEN);
     @memcpy(desc_buf[0..copy_len], description[0..copy_len]);
     buf.writeBytes(&desc_buf);

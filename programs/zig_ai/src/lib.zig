@@ -158,7 +158,7 @@ export fn zig_ai_text_session_create(config: *const CTextConfig) ?*CTextSession 
         .max_tokens = config.max_tokens,
         .system_prompt = dupeString(config.system_prompt.toSlice()) catch null,
         .api_key = dupeString(config.api_key.toSlice()) catch null,
-        .conversation = .{ .items = &.{}, .capacity = 0 },
+        .conversation = .empty,
     };
 
     return @ptrCast(session);
@@ -843,7 +843,7 @@ export fn zig_ai_structured_generate(
     defer result.deinit();
 
     // Dupe the json_output for the caller (result.deinit frees the original)
-    const output_copy = ffi_allocator.dupeZ(u8, result.json_output) catch {
+    const output_copy = ffi_allocator.dupeSentinel(u8, result.json_output, 0) catch {
         response_out.success = false;
         response_out.error_code = ErrorCode.OUT_OF_MEMORY;
         response_out.error_message = makeErrorString("Out of memory copying output");
@@ -1336,7 +1336,7 @@ export fn zig_ai_research_response_free(response: *CResearchResponse) void {
 
 fn fillResearchResponse(response_out: *CResearchResponse, result: *research_types.ResearchResponse) void {
     // Dupe content
-    const content_copy = ffi_allocator.dupeZ(u8, result.content) catch {
+    const content_copy = ffi_allocator.dupeSentinel(u8, result.content, 0) catch {
         response_out.success = false;
         response_out.error_code = ErrorCode.OUT_OF_MEMORY;
         response_out.error_message = makeErrorString("Out of memory");
@@ -1369,7 +1369,7 @@ fn fillResearchResponse(response_out: *CResearchResponse, result: *research_type
         response_out.error_code = ErrorCode.OUT_OF_MEMORY;
         return;
     };
-    const sources_z = ffi_allocator.dupeZ(u8, sources_slice) catch {
+    const sources_z = ffi_allocator.dupeSentinel(u8, sources_slice, 0) catch {
         ffi_allocator.free(sources_slice);
         ffi_allocator.free(content_copy);
         response_out.success = false;
@@ -1453,7 +1453,7 @@ export fn zig_ai_search_response_free(response: *CSearchResponse) void {
 
 fn fillSearchResponse(response_out: *CSearchResponse, result: *search_types.SearchResponse) void {
     // Dupe content
-    const content_copy = ffi_allocator.dupeZ(u8, result.content) catch {
+    const content_copy = ffi_allocator.dupeSentinel(u8, result.content, 0) catch {
         response_out.success = false;
         response_out.error_code = ErrorCode.OUT_OF_MEMORY;
         response_out.error_message = makeErrorString("Out of memory");
@@ -1485,7 +1485,7 @@ fn fillSearchResponse(response_out: *CSearchResponse, result: *search_types.Sear
         response_out.error_code = ErrorCode.OUT_OF_MEMORY;
         return;
     };
-    const sources_z = ffi_allocator.dupeZ(u8, sources_slice) catch {
+    const sources_z = ffi_allocator.dupeSentinel(u8, sources_slice, 0) catch {
         ffi_allocator.free(sources_slice);
         ffi_allocator.free(content_copy);
         response_out.success = false;
@@ -1497,7 +1497,7 @@ fn fillSearchResponse(response_out: *CSearchResponse, result: *search_types.Sear
     // Dupe response_id
     var rid_cstr: CString = .{ .ptr = null, .len = 0 };
     if (result.response_id) |rid| {
-        const rid_z = ffi_allocator.dupeZ(u8, rid) catch {
+        const rid_z = ffi_allocator.dupeSentinel(u8, rid, 0) catch {
             ffi_allocator.free(content_copy);
             ffi_allocator.free(sources_z);
             response_out.success = false;
@@ -1547,7 +1547,7 @@ fn fillBatchApiInfo(out: *CBatchApiInfo, info: *batch_api_types.BatchInfo) void 
 }
 
 fn makeCString(s: []const u8) ffi_types.CString {
-    const duped = ffi_allocator.dupeZ(u8, s) catch return .{ .ptr = null, .len = 0 };
+    const duped = ffi_allocator.dupeSentinel(u8, s, 0) catch return .{ .ptr = null, .len = 0 };
     return .{ .ptr = duped.ptr, .len = s.len };
 }
 
@@ -1714,7 +1714,7 @@ export fn zig_ai_batch_api_results(
         result_out.error_code = ErrorCode.OUT_OF_MEMORY;
         return;
     };
-    const jsonl_z = ffi_allocator.dupeZ(u8, jsonl) catch {
+    const jsonl_z = ffi_allocator.dupeSentinel(u8, jsonl, 0) catch {
         ffi_allocator.free(jsonl);
         result_out.success = false;
         result_out.error_code = ErrorCode.OUT_OF_MEMORY;
@@ -1834,7 +1834,7 @@ export fn zig_ai_batch_api_list(
         result_out.error_code = ErrorCode.OUT_OF_MEMORY;
         return;
     };
-    const json_z = ffi_allocator.dupeZ(u8, json) catch {
+    const json_z = ffi_allocator.dupeSentinel(u8, json, 0) catch {
         ffi_allocator.free(json);
         result_out.success = false;
         result_out.error_code = ErrorCode.OUT_OF_MEMORY;
@@ -2123,7 +2123,7 @@ fn dupeString(s: []const u8) !?[]const u8 {
 }
 
 fn makeErrorString(msg: []const u8) CString {
-    const duped = ffi_allocator.dupeZ(u8, msg) catch return .{ .ptr = null, .len = 0 };
+    const duped = ffi_allocator.dupeSentinel(u8, msg, 0) catch return .{ .ptr = null, .len = 0 };
     return .{ .ptr = duped.ptr, .len = msg.len };
 }
 

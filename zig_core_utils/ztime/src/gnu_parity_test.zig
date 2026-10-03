@@ -53,14 +53,14 @@ fn runZtime(a: std.mem.Allocator, extra_args: []const []const u8) !RunResult {
     // Unique temp file for this run's stderr capture.
     var name_buf: [128]u8 = undefined;
     counter += 1;
-    const err_path = try std.fmt.bufPrintZ(&name_buf, "/tmp/ztime_parity_{d}_{d}.err", .{
+    const err_path = try std.fmt.bufPrintSentinel(&name_buf, "/tmp/ztime_parity_{d}_{d}.err", .{
         std.c.getpid(), counter,
-    });
+    }, 0);
 
     // Build argv: ZTIME + extra_args + null.
     var argv = std.ArrayListUnmanaged(?[*:0]const u8).empty;
     defer argv.deinit(a);
-    const ztime_z = try a.dupeZ(u8, ZTIME);
+    const ztime_z = try a.dupeSentinel(u8, ZTIME, 0);
     defer a.free(ztime_z);
     try argv.append(a, ztime_z.ptr);
     var dups = std.ArrayListUnmanaged([:0]u8).empty;
@@ -69,7 +69,7 @@ fn runZtime(a: std.mem.Allocator, extra_args: []const []const u8) !RunResult {
         dups.deinit(a);
     }
     for (extra_args) |arg| {
-        const z = try a.dupeZ(u8, arg);
+        const z = try a.dupeSentinel(u8, arg, 0);
         try dups.append(a, z);
         try argv.append(a, z.ptr);
     }

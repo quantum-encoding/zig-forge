@@ -964,7 +964,7 @@ pub fn combineShares(allocator: Allocator, shares: []const Share, passphrase: []
     // implementation, which keeps shares in a set.
     var group_indices: [MAX_SHARE_COUNT]u4 = undefined;
     var group_members: [MAX_SHARE_COUNT][MAX_SHARE_COUNT]usize = undefined;
-    var group_member_counts = [_]usize{0} ** MAX_SHARE_COUNT;
+    var group_member_counts = @as([MAX_SHARE_COUNT]usize, @splat(0));
     var group_count: usize = 0;
 
     outer: for (shares, 0..) |share, share_pos| {
@@ -2429,8 +2429,8 @@ test "split/recover round-trips for every threshold and detects a tampered share
 }
 
 test "interpolate rejects duplicate x-coordinates" {
-    var y = [_]u8{0} ** 16;
-    var out = [_]u8{0} ** 16;
+    var y = @as([16]u8, @splat(0));
+    var out = @as([16]u8, @splat(0));
     const points = [_]RawShare{
         .{ .x = 3, .y = &y },
         .{ .x = 3, .y = &y },
@@ -2461,7 +2461,7 @@ test "Feistel encryption is invertible with and without a passphrase" {
 
 test "ext=0 binds the identifier into the encryption salt" {
     const allocator = testing.allocator;
-    const master_secret = [_]u8{0x42} ** 16;
+    const master_secret = @as([16]u8, @splat(0x42));
 
     // With ext = 0 the id salts PBKDF2, so two ids give different ciphertexts.
     const a = try encryptMasterSecret(allocator, &master_secret, "", 0, 1, false);
@@ -2559,7 +2559,7 @@ test "generate/combine round-trip: 2-of-3 groups with independent member thresho
 
 test "generate rejects invalid configurations" {
     const allocator = testing.allocator;
-    const ms = [_]u8{0x11} ** 16;
+    const ms = @as([16]u8, @splat(0x11));
     const one_group = [_]GroupSpec{.{ .member_threshold = 1, .member_count = 1 }};
 
     // 1-of-N with N > 1 (spec: GenerateShares step 1).
@@ -2573,13 +2573,13 @@ test "generate rejects invalid configurations" {
         .groups = &one_group,
     }));
     // Master secret below 128 bits.
-    const short = [_]u8{0x11} ** 14;
+    const short = @as([14]u8, @splat(0x11));
     try testing.expectError(Error.InvalidMasterSecretLength, generateShares(allocator, &short, .{
         .group_threshold = 1,
         .groups = &one_group,
     }));
     // Master secret with an odd byte length.
-    const odd = [_]u8{0x11} ** 17;
+    const odd = @as([17]u8, @splat(0x11));
     try testing.expectError(Error.InvalidMasterSecretLength, generateShares(allocator, &odd, .{
         .group_threshold = 1,
         .groups = &one_group,
@@ -2594,7 +2594,7 @@ test "generate rejects invalid configurations" {
 
 test "combine rejects a share set assembled from two different splits" {
     const allocator = testing.allocator;
-    const ms = [_]u8{0x5A} ** 16;
+    const ms = @as([16]u8, @splat(0x5A));
     const opts = GenerateOptions{
         .group_threshold = 1,
         .groups = &.{.{ .member_threshold = 2, .member_count = 3 }},
@@ -2615,7 +2615,7 @@ test "combine rejects a share set assembled from two different splits" {
 
 test "combine folds exact duplicate mnemonics and rejects conflicting ones" {
     const allocator = testing.allocator;
-    const ms = [_]u8{0x77} ** 16;
+    const ms = @as([16]u8, @splat(0x77));
     const mnemonics = try generateMnemonics(allocator, &ms, .{
         .group_threshold = 1,
         .groups = &.{.{ .member_threshold = 2, .member_count = 3 }},

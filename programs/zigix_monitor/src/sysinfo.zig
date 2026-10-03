@@ -7,7 +7,7 @@ pub const MAX_CORES: u8 = 16;
 pub const MAX_NET_IFACES: u8 = 8;
 
 pub const NetInterface = struct {
-    name: [16]u8 = [_]u8{0} ** 16,
+    name: [16]u8 = @splat(0),
     name_len: usize = 0,
     rx_bytes: u64 = 0,
     tx_bytes: u64 = 0,
@@ -22,7 +22,7 @@ pub const NetInterface = struct {
 pub const SystemSnapshot = struct {
     // CPU
     cpu_count: u8 = 0,
-    cpu_usage: [MAX_CORES]f32 = [_]f32{0} ** MAX_CORES,
+    cpu_usage: [MAX_CORES]f32 = @splat(0),
     cpu_total: f32 = 0,
 
     // Memory (kilobytes)
@@ -43,11 +43,11 @@ pub const SystemSnapshot = struct {
     uptime_secs: u64 = 0,
 
     // System identity
-    hostname: [64]u8 = [_]u8{0} ** 64,
+    hostname: [64]u8 = @splat(0),
     hostname_len: usize = 0,
-    kernel_version: [64]u8 = [_]u8{0} ** 64,
+    kernel_version: [64]u8 = @splat(0),
     kernel_version_len: usize = 0,
-    machine: [16]u8 = [_]u8{0} ** 16,
+    machine: [16]u8 = @splat(0),
     machine_len: usize = 0,
 
     // Disk (root filesystem)
@@ -90,11 +90,11 @@ pub const SysInfoCollector = struct {
     has_prev: bool = false,
     identity_loaded: bool = false,
     // Cached identity (only read once)
-    cached_hostname: [64]u8 = [_]u8{0} ** 64,
+    cached_hostname: [64]u8 = @splat(0),
     cached_hostname_len: usize = 0,
-    cached_kernel: [64]u8 = [_]u8{0} ** 64,
+    cached_kernel: [64]u8 = @splat(0),
     cached_kernel_len: usize = 0,
-    cached_machine: [16]u8 = [_]u8{0} ** 16,
+    cached_machine: [16]u8 = @splat(0),
     cached_machine_len: usize = 0,
 
     pub fn collect(self: *SysInfoCollector) SystemSnapshot {

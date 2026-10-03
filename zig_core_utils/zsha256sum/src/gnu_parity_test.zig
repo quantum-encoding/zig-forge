@@ -123,7 +123,7 @@ fn makeFixture() !Fixture {
     errdefer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "hello.txt", .data = "hello" });
     try tmp.dir.writeFile(io, .{ .sub_path = "empty.txt", .data = "" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "big.bin", .data = "The quick brown fox jumps over the lazy dog\n" ** 5000 });
+    try tmp.dir.writeFile(io, .{ .sub_path = "big.bin", .data = repeatStr("The quick brown fox jumps over the lazy dog\n", 5000) });
     try tmp.dir.createDirPath(io, "adir");
     return .{ .tmp = tmp };
 }
@@ -305,4 +305,14 @@ test "parity: check mode referencing a directory reports FAILED" {
     defer fx.deinit();
     try fx.write("dir.txt", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  adir\n");
     try expectParity(testing.allocator, &.{ "-c", "dir.txt" }, fx.dir(), .ignore);
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

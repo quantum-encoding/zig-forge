@@ -35,6 +35,7 @@
 //! ```
 
 const std = @import("std");
+const compat = @import("zig_compat.zig");
 const invoice = @import("invoice.zig");
 const crypto_receipt = @import("crypto_receipt.zig");
 const types = @import("types.zig");
@@ -229,7 +230,7 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
             (if (lv == .object) lv.object else null)
         else
             null;
-        inline for (@typeInfo(invoice.Labels).@"struct".fields) |f| {
+        inline for (compat.fields(invoice.Labels)) |f| {
             const default_val = @field(data.labels, f.name);
             @field(data.labels, f.name) = if (labels_obj) |lo|
                 try dupeJsonString(allocator, lo, f.name) orelse try allocator.dupe(u8, default_val)
@@ -514,7 +515,7 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
             (if (bv == .object) bv.object else null)
         else
             null;
-        inline for (@typeInfo(invoice.BankDetails).@"struct".fields) |f| {
+        inline for (compat.fields(invoice.BankDetails)) |f| {
             const key = f.name;
             @field(data.bank_details, key) = if (bd_obj) |bo|
                 try dupeJsonString(allocator, bo, key) orelse
@@ -538,7 +539,7 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
 }
 
 fn parseTheme(name: []const u8) invoice.Theme {
-    inline for (@typeInfo(invoice.Theme).@"enum".fields) |f| {
+    inline for (compat.fields(invoice.Theme)) |f| {
         if (std.mem.eql(u8, name, f.name)) return @enumFromInt(f.value);
     }
     return .classic;
@@ -638,7 +639,7 @@ pub fn freeInvoiceData(allocator: std.mem.Allocator, data: *const invoice.Invoic
     if (data.currency_symbol.len > 0) allocator.free(data.currency_symbol);
     allocator.free(data.number_format.thousands);
     allocator.free(data.number_format.decimal);
-    inline for (@typeInfo(invoice.Labels).@"struct".fields) |f| {
+    inline for (compat.fields(invoice.Labels)) |f| {
         const s = @field(data.labels, f.name);
         if (s.len > 0) allocator.free(s);
     }
@@ -660,7 +661,7 @@ pub fn freeInvoiceData(allocator: std.mem.Allocator, data: *const invoice.Invoic
     allocator.free(data.subject);
     allocator.free(data.payment_date);
     allocator.free(data.payment_method);
-    inline for (@typeInfo(invoice.BankDetails).@"struct".fields) |f| {
+    inline for (compat.fields(invoice.BankDetails)) |f| {
         allocator.free(@field(data.bank_details, f.name));
     }
     allocator.free(data.signature_name);

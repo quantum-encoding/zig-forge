@@ -104,7 +104,7 @@ pub const WarpCode = struct {
 
     /// Convert to human-readable string
     pub fn toString(self: *const Self) [STRING_LEN]u8 {
-        var buf: [STRING_LEN]u8 = [_]u8{' '} ** STRING_LEN;
+        var buf: [STRING_LEN]u8 = @splat(' ');
 
         // Extract number (10 bits from first 2 bytes)
         const number: u16 = (@as(u16, self.bytes[0]) << 2) | (self.bytes[1] >> 6);

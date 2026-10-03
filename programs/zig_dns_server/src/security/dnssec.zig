@@ -504,7 +504,7 @@ pub const ZoneSigner = struct {
             pos += 1;
 
             // Set bits for types present
-            var bitmap: [7]u8 = [_]u8{0} ** 7;
+            var bitmap: [7]u8 = @splat(0);
             for (zone.records.items) |record| {
                 if (record.name.eql(&name)) {
                     const type_num = @intFromEnum(record.rtype);

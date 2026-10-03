@@ -37,7 +37,7 @@ pub const CpuLocal = struct {
     online: bool = false,
     dedicated_pid: u64 = 0,
     // Per-CPU SSE/FPU save area (512 bytes, 64-byte aligned for fxsave)
-    fxsave_area: [512]u8 align(64) = [_]u8{0} ** 512,
+    fxsave_area: [512]u8 align(64) = @as([512]u8, @splat(0)),
 };
 
 /// Offsets for assembly access via GS segment override.

@@ -112,7 +112,7 @@ pub fn encryptWithSeq(
     }
 
     // Derive nonce from sequence
-    var nonce: [NONCE_SIZE]u8 = [_]u8{0} ** NONCE_SIZE;
+    var nonce: [NONCE_SIZE]u8 = @splat(0);
     std.mem.writeInt(u64, nonce[4..12], sequence, .big);
 
     var tag: [TAG_SIZE]u8 = undefined;
@@ -145,7 +145,7 @@ pub fn decryptWithSeq(
     }
 
     // Derive nonce from sequence
-    var nonce: [NONCE_SIZE]u8 = [_]u8{0} ** NONCE_SIZE;
+    var nonce: [NONCE_SIZE]u8 = @splat(0);
     std.mem.writeInt(u64, nonce[4..12], sequence, .big);
 
     const tag = ciphertext[plaintext_len..][0..TAG_SIZE].*;
@@ -202,7 +202,7 @@ pub const KeyExchange = struct {
 // ═══════════════════════════════════════════════════════════════════════════
 
 test "encrypt/decrypt round-trip" {
-    const key = [_]u8{0x42} ** KEY_SIZE;
+    const key = @as([KEY_SIZE]u8, @splat(0x42));
     const plaintext = "Hello, Warp Gate!";
 
     const encrypted = try encrypt(&key, plaintext);
@@ -215,8 +215,8 @@ test "encrypt/decrypt round-trip" {
 }
 
 test "decrypt with wrong key fails" {
-    const key1 = [_]u8{0x42} ** KEY_SIZE;
-    const key2 = [_]u8{0x43} ** KEY_SIZE;
+    const key1 = @as([KEY_SIZE]u8, @splat(0x42));
+    const key2 = @as([KEY_SIZE]u8, @splat(0x43));
     const plaintext = "Secret message";
 
     const encrypted = try encrypt(&key1, plaintext);
@@ -226,7 +226,7 @@ test "decrypt with wrong key fails" {
 }
 
 test "sequence-based encryption" {
-    const key = [_]u8{0x42} ** KEY_SIZE;
+    const key = @as([KEY_SIZE]u8, @splat(0x42));
     const plaintext = "Chunk data";
     var output: [256]u8 = undefined;
     var decrypted: [256]u8 = undefined;

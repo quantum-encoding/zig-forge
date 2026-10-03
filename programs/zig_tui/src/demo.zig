@@ -33,7 +33,7 @@ fn boldFg(fg: Color) Style {
 
 // Demo state
 var counter: u32 = 0;
-var input_text: [64]u8 = [_]u8{0} ** 64;
+var input_text: [64]u8 = @splat(0);
 var input_len: usize = 0;
 var selected_item: usize = 0;
 var running: bool = true;
@@ -81,7 +81,7 @@ const FbEntry = struct {
 
 // Command palette demo state
 var cp_visible: bool = false;
-var cp_query: [64]u8 = [_]u8{0} ** 64;
+var cp_query: [64]u8 = @splat(0);
 var cp_query_len: usize = 0;
 var cp_selected: usize = 0;
 var cp_filtered: [32]usize = undefined;

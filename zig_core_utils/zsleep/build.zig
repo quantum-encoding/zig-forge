@@ -42,8 +42,9 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    const run_parity = b.addRunArtifact(parity_tests);
-    run_parity.setEnvironmentVariable("ZSLEEP_BIN", b.getInstallPath(.bin, "zsleep"));
+    const run_parity = b.addSystemCommand(&.{"env"});
+    run_parity.addPrefixedFileArg("ZSLEEP_BIN=", exe.getEmittedBin());
+    run_parity.addArtifactArg(parity_tests);
     run_parity.step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_parity.step);
 }

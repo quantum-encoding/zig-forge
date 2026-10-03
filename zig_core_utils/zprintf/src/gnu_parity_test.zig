@@ -131,7 +131,7 @@ const gnu_candidates = [_][]const u8{
 fn findGnu() ?[]const u8 {
     for (gnu_candidates) |c| {
         var zbuf: [512]u8 = undefined;
-        const z = std.fmt.bufPrintZ(&zbuf, "{s}", .{c}) catch continue;
+        const z = std.fmt.bufPrintSentinel(&zbuf, "{s}", .{c}, 0) catch continue;
         if (access(z.ptr, 0) == 0) return c;
     }
     return null;

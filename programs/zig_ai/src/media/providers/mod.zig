@@ -2,6 +2,7 @@
 // Exports all provider implementations
 
 const std = @import("std");
+const compat = @import("../../zig_compat.zig");
 const types = @import("../types.zig");
 const ImageRequest = types.ImageRequest;
 const ImageResponse = types.ImageResponse;
@@ -100,7 +101,7 @@ pub fn getAvailableProviders(config: MediaConfig) []const ImageProvider {
     var count: usize = 0;
     var available: [9]ImageProvider = undefined;
 
-    inline for (std.meta.fields(ImageProvider)) |field| {
+    inline for (compat.fields(ImageProvider)) |field| {
         const provider: ImageProvider = @enumFromInt(field.value);
         if (config.hasProvider(provider)) {
             available[count] = provider;

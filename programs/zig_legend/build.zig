@@ -33,7 +33,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
-    if (b.args) |args| run_cmd.addArgs(args);
+    forwardArgs(b, run_cmd);
     b.step("run", "Run the zig_legend CLI").dependOn(&run_cmd.step);
 
     // Tests: unit tests in the library plus golden renders of the examples.
@@ -64,4 +64,12 @@ pub fn build(b: *std.Build) void {
     }
     const tests = b.addTest(.{ .root_module = test_mod });
     b.step("test", "Run unit tests and example goldens").dependOn(&b.addRunArtifact(tests).step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

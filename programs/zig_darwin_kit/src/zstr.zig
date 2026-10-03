@@ -24,7 +24,7 @@ pub fn pathZ(bytes: []const u8) error{NameTooLong}![max_path - 1:0]u8 {
 
 /// A heap NUL-terminated copy of `bytes`, cut at the first embedded NUL.
 pub fn dupeZ(allocator: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}![:0]u8 {
-    return allocator.dupeZ(u8, std.mem.sliceTo(bytes, 0));
+    return allocator.dupeSentinel(u8, std.mem.sliceTo(bytes, 0), 0);
 }
 
 /// Length of the C string a `[*:0]`-typed pointer holds, without allocating.
@@ -44,9 +44,9 @@ test "pathZ terminates and cuts at embedded NUL" {
 }
 
 test "pathZ rejects PATH_MAX and longer" {
-    const long = [_]u8{'x'} ** max_path;
+    const long = @as([max_path]u8, @splat('x'));
     try std.testing.expectError(error.NameTooLong, pathZ(&long));
-    const ok = [_]u8{'x'} ** (max_path - 1);
+    const ok = @as([(max_path - 1)]u8, @splat('x'));
     _ = try pathZ(&ok);
 }
 

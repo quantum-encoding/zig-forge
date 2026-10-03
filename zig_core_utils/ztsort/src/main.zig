@@ -342,7 +342,7 @@ pub fn main(init: std.process.Init) !void {
 
     const input = if (file_path) |path| blk: {
         // NUL-terminate via an allocation (no fixed-size stack buffer / no OOB).
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
         const fd = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
         if (fd < 0) {

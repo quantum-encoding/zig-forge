@@ -56,10 +56,10 @@ const CognitiveSession = struct {
     fn init(pid: u32) CognitiveSession {
         return CognitiveSession{
             .pid = pid,
-            .state = [_]u8{0} ** 64,
+            .state = @as([64]u8, @splat(0)),
             .state_len = 0,
             .tools = undefined,
-            .tool_lens = [_]usize{0} ** MAX_TOOLS_PER_SESSION,
+            .tool_lens = @as([MAX_TOOLS_PER_SESSION]usize, @splat(0)),
             .tool_count = 0,
             .start_time = 0,
             .last_activity = 0,
@@ -569,8 +569,8 @@ pub const CognitiveWatcher = struct {
         session.last_activity = now;
         session.turn_emitted = false; // fresh output → a new turn is in progress
 
-        var tool_name: [128]u8 = [_]u8{0} ** 128;
-        var tool_args: [1024]u8 = [_]u8{0} ** 1024;
+        var tool_name: [128]u8 = @splat(0);
+        var tool_args: [1024]u8 = @splat(0);
         var found_tool = false;
 
         // PRIORITY 1: Parse DEBUG hook pattern (most reliable)
@@ -584,7 +584,7 @@ pub const CognitiveWatcher = struct {
         }
 
         // PRIORITY 3: Parse spinner status (cognitive state)
-        var spinner_status: [64]u8 = [_]u8{0} ** 64;
+        var spinner_status: [64]u8 = @splat(0);
         var found_spinner = false;
         if (!found_tool and parseSpinnerStatus(clean_buffer, &spinner_status)) {
             found_spinner = true;
@@ -656,7 +656,7 @@ pub const CognitiveWatcher = struct {
         dbus.c.dbus_message_iter_init_append(msg, &args);
 
         // Append state string
-        const state_z = self.allocator.dupeZ(u8, state) catch {
+        const state_z = self.allocator.dupeSentinel(u8, state, 0) catch {
             std.debug.print("❌ Failed to allocate state string for D-Bus\n", .{});
             return;
         };
@@ -713,7 +713,7 @@ pub const CognitiveWatcher = struct {
             session.tools[session.tool_count - 1][0..session.tool_lens[session.tool_count - 1]]
         else
             session.getState();
-        const label_z = self.allocator.dupeZ(u8, label) catch return;
+        const label_z = self.allocator.dupeSentinel(u8, label, 0) catch return;
         defer self.allocator.free(label_z);
         const label_ptr: [*:0]const u8 = label_z.ptr;
         _ = dbus.c.dbus_message_iter_append_basic(&args, dbus.c.DBUS_TYPE_STRING, @ptrCast(&label_ptr));

@@ -66,7 +66,7 @@ const BRIGHT_CYAN = ESC ++ "[96m";
 const BRIGHT_WHITE = ESC ++ "[97m";
 
 // Separator line constants (Zig 0.16 does not support fill patterns)
-const SEPARATOR_DASH_40 = "─" ** 40;
+const SEPARATOR_DASH_40 = repeatStr("─", 40);
 
 const Config = struct {
     mode: chaos_engine.ChaosMode = .scripted,
@@ -469,4 +469,14 @@ test {
     _ = @import("chaos/engine.zig");
     _ = @import("chaos/report.zig");
     _ = @import("chaos/fuzzer.zig");
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

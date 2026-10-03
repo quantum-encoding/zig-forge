@@ -43,11 +43,11 @@ pub const FileHeader = extern struct {
             .version = VERSION,
             .flags = 0,
             .row_count = 0,
-            .column_offsets = [_]u64{0} ** 6,
-            .base_values = [_]i64{0} ** 6,
+            .column_offsets = @as([6]u64, @splat(0)),
+            .base_values = @as([6]i64, @splat(0)),
             .index_offset = 0,
             .checksum = 0,
-            ._padding = [_]u8{0} ** 3920,
+            ._padding = @as([3920]u8, @splat(0)),
         };
     }
 
@@ -81,7 +81,7 @@ pub const ColumnHeader = extern struct {
             .count = 0,
             .compressed_size = 0,
             .uncompressed_size = 0,
-            ._padding = [_]u8{0} ** 30,
+            ._padding = @as([30]u8, @splat(0)),
         };
     }
 };

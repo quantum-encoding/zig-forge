@@ -120,7 +120,7 @@ pub const Subsystem = enum(u8) {
 /// Messages below this level are eliminated entirely at compile time.
 /// Adjust these for release vs debug builds.
 const comptime_min_levels: [Subsystem.COUNT]Level = init: {
-    var levels: [Subsystem.COUNT]Level = .{Level.trace} ** Subsystem.COUNT;
+    var levels: [Subsystem.COUNT]Level = @splat(Level.trace);
 
     // Default: everything at .debug (strip trace in normal builds)
     for (&levels) |*l| l.* = .debug;

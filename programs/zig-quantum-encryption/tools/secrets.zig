@@ -25,15 +25,7 @@ const argon2 = crypto.pwhash.argon2;
 const mem = std.mem;
 const fs = std.fs;
 
-const c = @cImport({
-    @cInclude("unistd.h");
-    @cInclude("termios.h");
-    @cInclude("stdlib.h");
-    @cInclude("string.h");
-    @cInclude("sys/stat.h");
-    @cInclude("errno.h");
-    @cInclude("fcntl.h");
-});
+const c = @import("c"); // tools/secrets_c.h
 
 /// Cross-platform secure random bytes. Fails closed: a short/failed read of the
 /// kernel CSPRNG aborts the process rather than leaving the AES-GCM salt/nonce
@@ -952,7 +944,7 @@ test "decryptVault rejects bad magic / unknown version / truncation" {
     // Too short for a header.
     try testing.expect(decryptVault("QVLT", "p", &out) == null);
     // Valid length, wrong magic.
-    var bad = [_]u8{0} ** HEADER_LEN;
+    var bad = @as([HEADER_LEN]u8, @splat(0));
     try testing.expect(decryptVault(&bad, "p", &out) == null);
     // Right magic, unknown version byte.
     @memcpy(bad[0..4], &MAGIC);
@@ -963,10 +955,10 @@ test "decryptVault rejects bad magic / unknown version / truncation" {
 // External anchor: RFC 9106 §5.3 Argon2id test vector. Pins the KDF this vault
 // depends on to an output produced by neither this repo nor its author.
 test "argon2id RFC 9106 known-answer (external anchor)" {
-    const password = [_]u8{0x01} ** 32;
-    const salt = [_]u8{0x02} ** 16;
-    const secret = [_]u8{0x03} ** 8;
-    const ad = [_]u8{0x04} ** 12;
+    const password = @as([32]u8, @splat(0x01));
+    const salt = @as([16]u8, @splat(0x02));
+    const secret = @as([8]u8, @splat(0x03));
+    const ad = @as([12]u8, @splat(0x04));
 
     var dk: [32]u8 = undefined;
     try argon2.kdf(

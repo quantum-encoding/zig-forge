@@ -112,7 +112,7 @@ test "file creation succeeds and creates a real regular file (Darwin O_CREAT)" {
     const path = r.line();
     try std.testing.expect(path.len > 0);
     // A null-terminated copy for libc calls.
-    const pz = try alloc.dupeZ(u8, path);
+    const pz = try alloc.dupeSentinel(u8, path, 0);
     defer alloc.free(pz);
     // File exists...
     try std.testing.expectEqual(@as(c_int, 0), access(pz.ptr, 0));
@@ -121,7 +121,7 @@ test "file creation succeeds and creates a real regular file (Darwin O_CREAT)" {
     var gr = try runFmt("{s} tmp.XXXXXXXX 2>/dev/null", .{g});
     defer gr.deinit();
     try std.testing.expectEqual(@as(u8, 0), gr.exit);
-    const gpz = try alloc.dupeZ(u8, gr.line());
+    const gpz = try alloc.dupeSentinel(u8, gr.line(), 0);
     defer alloc.free(gpz);
     try std.testing.expectEqual(@as(c_int, 0), access(gpz.ptr, 0));
     _ = unlink(gpz.ptr);
@@ -136,7 +136,7 @@ test "directory creation with -d creates a real directory" {
     var r = try runFmt("{s} -d tmp.XXXXXXXX 2>/dev/null", .{ZMKTEMP});
     defer r.deinit();
     try std.testing.expectEqual(@as(u8, 0), r.exit);
-    const pz = try alloc.dupeZ(u8, r.line());
+    const pz = try alloc.dupeSentinel(u8, r.line(), 0);
     defer alloc.free(pz);
     try std.testing.expectEqual(@as(c_int, 0), access(pz.ptr, 0));
     // Removing as a directory must succeed (proves it is a dir, not a file).
@@ -148,7 +148,7 @@ test "directory creation with -d creates a real directory" {
 // Anchor: gmktemp accepts a 40-X run and emits a 40-char alnum run.
 // ---------------------------------------------------------------------------
 test "40 X's does not crash and yields a 40-char alnum run" {
-    const xs = "X" ** 40;
+    const xs = &@as([40]u8, @splat('X'));
     var r = try runFmt("{s} -u tmp." ++ xs ++ " 2>/dev/null", .{ZMKTEMP});
     defer r.deinit();
     try std.testing.expectEqual(@as(u8, 0), r.exit);

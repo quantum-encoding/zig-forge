@@ -21,9 +21,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run duck-agent-scribe");
     run_step.dependOn(&run_cmd.step);
@@ -36,4 +34,12 @@ pub fn build(b: *std.Build) void {
     const run_test = b.addRunArtifact(test_exe);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_test.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

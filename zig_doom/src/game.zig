@@ -78,7 +78,7 @@ pub const Game = struct {
     // Players
     players: [MAXPLAYERS]Player = [_]Player{.{}} ** MAXPLAYERS,
     player_in_game: [MAXPLAYERS]bool = blk: {
-        var arr = [_]bool{false} ** MAXPLAYERS;
+        var arr = @as([MAXPLAYERS]bool, @splat(false));
         arr[0] = true; // Player 1 is always in game
         break :blk arr;
     },
@@ -101,7 +101,7 @@ pub const Game = struct {
     // Save/load
     save_slot: u8 = 0,
     quicksave_slot: i8 = -1, // -1 = not set
-    save_description: [24]u8 = [_]u8{0} ** 24,
+    save_description: [24]u8 = @splat(0),
 
     // Misc
     paused: bool = false,

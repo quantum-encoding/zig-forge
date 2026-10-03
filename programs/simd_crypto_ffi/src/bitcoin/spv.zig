@@ -167,7 +167,7 @@ pub fn requiredMerkleDepth(tx_count: u32) u32 {
 /// for invalid encodings: the "negative" bit set, exponent out of range, or a
 /// zero mantissa.
 pub fn decodeCompactTarget(bits: u32) Hash {
-    var target: Hash = [_]u8{0} ** 32;
+    var target: Hash = @as([32]u8, @splat(0));
 
     const exponent = @as(u8, @truncate(bits >> 24));
     const mantissa = bits & 0x007fffff;
@@ -427,8 +427,8 @@ test "Double SHA-256" {
 }
 
 test "Hash Pair" {
-    const left = [_]u8{0xAA} ** 32;
-    const right = [_]u8{0xBB} ** 32;
+    const left = @as([32]u8, @splat(0xAA));
+    const right = @as([32]u8, @splat(0xBB));
 
     const result = hashPair(left, right);
 
@@ -440,8 +440,8 @@ test "Hash Pair" {
 test "Block Header Serialization Roundtrip" {
     const header = BlockHeader{
         .version = 0x20000000,
-        .prev_block_hash = [_]u8{0x11} ** 32,
-        .merkle_root = [_]u8{0x22} ** 32,
+        .prev_block_hash = @as([32]u8, @splat(0x11)),
+        .merkle_root = @as([32]u8, @splat(0x22)),
         .timestamp = 1600000000,
         .bits = 0x1d00ffff,
         .nonce = 12345,
@@ -484,9 +484,9 @@ test "Merkle Proof Verification - Valid" {
 }
 
 test "Merkle Proof Verification - Invalid" {
-    const tx_hash = [_]u8{1} ** 32;
-    const root = [_]u8{2} ** 32;
-    const fake_hashes = [_]Hash{[_]u8{3} ** 32};
+    const tx_hash = @as([32]u8, @splat(1));
+    const root = @as([32]u8, @splat(2));
+    const fake_hashes = [_]Hash{@as([32]u8, @splat(3))};
 
     const proof = MerkleProof{
         .hashes = &fake_hashes,
@@ -530,7 +530,7 @@ test "Merkle Proof - single-tx block" {
     try std.testing.expect(verifyMerkleProof(tx_hash, tx_hash, proof));
 
     // A non-empty proof for a single-tx block must be rejected.
-    const stray = [_]Hash{[_]u8{0xff} ** 32};
+    const stray = [_]Hash{@as([32]u8, @splat(0xff))};
     const bogus = MerkleProof{
         .hashes = &stray,
         .index = 0,
@@ -556,7 +556,7 @@ test "Merkle Proof - reject index >= tx_count" {
 }
 
 test "Merkle Proof - reject zero tx_count" {
-    const tx_hash = [_]u8{0x42} ** 32;
+    const tx_hash = @as([32]u8, @splat(0x42));
     const proof_hashes = [_]Hash{};
     const proof = MerkleProof{
         .hashes = &proof_hashes,
@@ -615,11 +615,11 @@ test "requiredMerkleDepth" {
 }
 
 test "Header Linkage - Valid" {
-    const prev_hash = [_]u8{0xAA} ** 32;
+    const prev_hash = @as([32]u8, @splat(0xAA));
     const header = BlockHeader{
         .version = 1,
         .prev_block_hash = prev_hash,
-        .merkle_root = [_]u8{0} ** 32,
+        .merkle_root = @as([32]u8, @splat(0)),
         .timestamp = 0,
         .bits = 0x1d00ffff,
         .nonce = 0,
@@ -629,12 +629,12 @@ test "Header Linkage - Valid" {
 }
 
 test "Header Linkage - Broken Chain" {
-    const prev_hash = [_]u8{0xAA} ** 32;
-    const wrong_hash = [_]u8{0xBB} ** 32;
+    const prev_hash = @as([32]u8, @splat(0xAA));
+    const wrong_hash = @as([32]u8, @splat(0xBB));
     const header = BlockHeader{
         .version = 1,
         .prev_block_hash = wrong_hash,
-        .merkle_root = [_]u8{0} ** 32,
+        .merkle_root = @as([32]u8, @splat(0)),
         .timestamp = 0,
         .bits = 0x1d00ffff,
         .nonce = 0,
@@ -736,7 +736,7 @@ test "SPV Full Verification" {
     const tx_hash = hashDoubleSha256("Payment: 1 BTC");
     const sibling = hashDoubleSha256("Other TX");
     const merkle_root = hashPair(tx_hash, sibling);
-    const prev_hash = [_]u8{0x00} ** 32;
+    const prev_hash = @as([32]u8, @splat(0x00));
 
     const header = BlockHeader{
         .version = 1,
@@ -759,9 +759,9 @@ test "SPV Full Verification" {
 }
 
 test "Hash Comparison" {
-    const smaller = [_]u8{0x00} ** 31 ++ [_]u8{0x01};
-    const larger = [_]u8{0x00} ** 31 ++ [_]u8{0x02};
-    const equal = [_]u8{0x00} ** 31 ++ [_]u8{0x01};
+    const smaller = @as([31]u8, @splat(0x00)) ++ [_]u8{0x01};
+    const larger = @as([31]u8, @splat(0x00)) ++ [_]u8{0x02};
+    const equal = @as([31]u8, @splat(0x00)) ++ [_]u8{0x01};
 
     try std.testing.expectEqual(@as(i32, -1), compareHash(smaller, larger));
     try std.testing.expectEqual(@as(i32, 1), compareHash(larger, smaller));

@@ -212,7 +212,7 @@ fn printResults(config: *ScanConfig) !void {
     std.debug.print("Scan Results for {s}:\n", .{config.host});
     std.debug.print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n", .{});
     std.debug.print("{s:<10} {s:<10} {s}\n", .{ "PORT", "STATE", "SERVICE" });
-    std.debug.print("{s}\n", .{"─" ** 40});
+    std.debug.print("{s}\n", .{repeatStr("─", 40)});
 
     for (config.results.items) |result| {
         std.debug.print("{d:<10} {s:<10} {s}\n", .{ result.port, result.status.toString(), result.service });
@@ -491,4 +491,14 @@ pub fn main(init: std.process.Init) !void {
 
 fn handleSignal(_: posix.SIG) callconv(.c) void {
     running.store(false, .seq_cst);
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

@@ -905,7 +905,7 @@ test "FFI SLIP-39 generate rejects a too-short secret and a bad group spec" {
     defer zsss_free(too_short);
     try std.testing.expectEqual(ZSSS_ERR_SLIP39_INVALID_CONFIG, too_short.error_code);
 
-    const secret = [_]u8{0x42} ** 16;
+    const secret = @as([16]u8, @splat(0x42));
     // Group threshold above the number of groups.
     const bad_gt = zsss_slip39_generate(&secret, secret.len, 3, &specs, 1, null, 0, 1, true);
     defer zsss_free(bad_gt);
@@ -918,7 +918,7 @@ test "FFI SLIP-39 generate rejects a too-short secret and a bad group spec" {
 }
 
 test "FFI SLIP-39 multi-group round-trip" {
-    const master_secret = [_]u8{0x5A} ** 32;
+    const master_secret = @as([32]u8, @splat(0x5A));
     // Three groups: 1of1, 2of3, 2of2; two groups required.
     const specs = [_]u8{ 1, 1, 2, 3, 2, 2 };
 

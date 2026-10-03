@@ -170,7 +170,7 @@ const LineReader = struct {
 
         if (!std.mem.eql(u8, path, "-")) {
             var path_buf: [4096]u8 = undefined;
-            const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return error.PathTooLong;
+            const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return error.PathTooLong;
             const fd_ret = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
             if (fd_ret < 0) return error.OpenFailed;
             reader.fd = fd_ret;

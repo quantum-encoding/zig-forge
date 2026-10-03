@@ -41,7 +41,7 @@ pub const Ctl = struct {
 pub fn socketPath(alloc: std.mem.Allocator) ![:0]u8 {
     if (c.getenv("ZTERM_SOCKET")) |p| {
         const s = std.mem.sliceTo(p, 0);
-        if (s.len > 0) return alloc.dupeZ(u8, s);
+        if (s.len > 0) return alloc.dupeSentinel(u8, s, 0);
     }
     return std.fmt.allocPrintSentinel(alloc, "/tmp/zterm-{d}.sock", .{c.getuid()}, 0);
 }

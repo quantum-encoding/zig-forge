@@ -20,9 +20,7 @@ pub fn build(b: *std.Build) void {
     // Run command
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run zdu");
     run_step.dependOn(&run_cmd.step);
@@ -46,7 +44,7 @@ pub fn build(b: *std.Build) void {
     // a build option so the test can shell out to it; the parity step depends on
     // the install so the binary exists when the tests run.
     const parity_opts = b.addOptions();
-    parity_opts.addOption([]const u8, "zdu_bin", b.getInstallPath(.bin, "zdu"));
+    parity_opts.addOptionPath("zdu_bin", exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -79,4 +77,12 @@ pub fn build(b: *std.Build) void {
     const bench_install = b.addInstallArtifact(bench_exe, .{});
     const bench_step = b.step("bench", "Build optimized benchmark binary");
     bench_step.dependOn(&bench_install.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

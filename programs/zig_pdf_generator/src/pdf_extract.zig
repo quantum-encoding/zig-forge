@@ -676,7 +676,7 @@ fn aesCbcDecrypt(arena: std.mem.Allocator, key: []const u8, data: []const u8) Ex
         @memcpy(&k, key[0..32]);
         cbcDecrypt(std.crypto.core.aes.Aes256.initDec(k), iv, ct, out);
     } else {
-        var k: [16]u8 = [_]u8{0} ** 16;
+        var k: [16]u8 = @splat(0);
         @memcpy(k[0..@min(key.len, 16)], key[0..@min(key.len, 16)]);
         cbcDecrypt(std.crypto.core.aes.Aes128.initDec(k), iv, ct, out);
     }
@@ -706,7 +706,7 @@ fn computeFileKeyRC4(dec: *Decryptor, o_str: []const u8, p: i64, id0: []const u8
     var h = Md5.init(.{});
     h.update(&pad_string); // empty password → padding only
 
-    var o32: [32]u8 = [_]u8{0} ** 32;
+    var o32: [32]u8 = @splat(0);
     @memcpy(o32[0..@min(o_str.len, 32)], o_str[0..@min(o_str.len, 32)]);
     h.update(&o32);
 
@@ -4423,7 +4423,7 @@ test "pngWrap: CMYK (4 components) returns error" {
     defer arena_state.deinit();
     const a = arena_state.allocator();
 
-    const samples = [_]u8{0} ** 16; // 2×2 CMYK
+    const samples = @as([16]u8, @splat(0)); // 2×2 CMYK
     try testing.expectError(ExtractError.UnsupportedFilter, pngWrap(a, 2, 2, 8, 4, &samples));
 }
 

@@ -347,9 +347,9 @@ test "hashBytesSha256 empty data" {
 }
 
 test "hashLessThan sorting" {
-    const hash_a: Hash = [_]u8{0x00} ** 32;
-    const hash_b: Hash = [_]u8{0xff} ** 32;
-    const hash_c: Hash = [_]u8{0x80} ** 32;
+    const hash_a: Hash = @as([32]u8, @splat(0x00));
+    const hash_b: Hash = @as([32]u8, @splat(0xff));
+    const hash_c: Hash = @as([32]u8, @splat(0x80));
 
     try std.testing.expect(hashLessThan({}, hash_a, hash_b));
     try std.testing.expect(!hashLessThan({}, hash_b, hash_a));
@@ -366,7 +366,7 @@ test "BatchHasher initialization" {
 }
 
 test "hashToHex all zeros" {
-    const hash: Hash = [_]u8{0x00} ** 32;
+    const hash: Hash = @as([32]u8, @splat(0x00));
     var buf: [64]u8 = undefined;
     const hex = hashToHex(&hash, &buf);
 
@@ -377,7 +377,7 @@ test "hashToHex all zeros" {
 }
 
 test "hashToHex all ones" {
-    const hash: Hash = [_]u8{0xff} ** 32;
+    const hash: Hash = @as([32]u8, @splat(0xff));
     var buf: [64]u8 = undefined;
     const hex = hashToHex(&hash, &buf);
 

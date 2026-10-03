@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     // Absolute install path: the tests change the child's cwd into a temp
     // fixture dir, so a relative exe path would fail to exec.
     const options = b.addOptions();
-    options.addOption([]const u8, "zreadlink_path", b.getInstallPath(.bin, "zreadlink"));
+    options.addOptionPath("zreadlink_path", exe.getEmittedBin());
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{

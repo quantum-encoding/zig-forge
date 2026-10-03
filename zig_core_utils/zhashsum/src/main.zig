@@ -134,7 +134,7 @@ fn computeDigest(
     if (is_stdin) {
         fd = libc.STDIN_FILENO;
     } else {
-        const path_z = allocator.dupeZ(u8, path) catch {
+        const path_z = allocator.dupeSentinel(u8, path, 0) catch {
             errno_out.* = @intFromEnum(libc.E.NOMEM);
             return null;
         };
@@ -297,7 +297,7 @@ fn checkFile(
     if (is_stdin) {
         fd = libc.STDIN_FILENO;
     } else {
-        const sums_z = allocator.dupeZ(u8, sums_path) catch return false;
+        const sums_z = allocator.dupeSentinel(u8, sums_path, 0) catch return false;
         defer allocator.free(sums_z);
         fd = libc.open(sums_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
         if (fd < 0) {

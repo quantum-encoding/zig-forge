@@ -55,7 +55,7 @@ const TuiState = struct {
     render_rows: u32 = 50, // 100 pixel rows / 2 = 50 cells, but capped to terminal
 
     // Palette mapping
-    palette_cache: PaletteCache = [_]u8{0} ** 256,
+    palette_cache: PaletteCache = @as([256]u8, @splat(0)),
     palette_valid: bool = false,
 
     // 24-bit truecolor output (exact DOOM palette) vs xterm-256 quantization.
@@ -81,8 +81,8 @@ const TuiState = struct {
     // Synthetic key-hold tracking. A terminal only delivers key *presses*
     // (auto-repeated bytes while held), never releases. We treat a key as held
     // while its bytes keep arriving and release it after KEY_HOLD_MS of silence.
-    key_down: [256]bool = [_]bool{false} ** 256,
-    key_seen_ms: [256]i64 = [_]i64{0} ** 256,
+    key_down: [256]bool = @splat(false),
+    key_seen_ms: [256]i64 = @splat(0),
 
     // Video initialized flag
     video_init: bool = false,
@@ -490,7 +490,7 @@ fn tuiFinishUpdate(ctx: *anyopaque, screen: *const [SCREENSIZE]u8, palette: *con
             if (b != 0) pal_nonzero += 1;
         }
         // Also count unique palette indices used in screen
-        var idx_used: [256]bool = [_]bool{false} ** 256;
+        var idx_used: [256]bool = @splat(false);
         for (screen) |px| {
             idx_used[px] = true;
         }

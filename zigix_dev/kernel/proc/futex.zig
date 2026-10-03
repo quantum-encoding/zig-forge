@@ -31,7 +31,7 @@ var wait_queue: [MAX_WAITERS]WaitEntry = [_]WaitEntry{.{
 }} ** MAX_WAITERS;
 
 /// Hash bucket heads — each points to the first WaitEntry index in the chain (0xFF = empty).
-var hash_buckets: [HASH_BUCKETS]u8 = [_]u8{0xFF} ** HASH_BUCKETS;
+var hash_buckets: [HASH_BUCKETS]u8 = @splat(0xFF);
 
 /// Hash a physical address to a bucket index.
 fn futexHash(phys: types.PhysAddr) usize {

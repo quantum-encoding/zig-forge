@@ -194,7 +194,7 @@ fn sysCompress(plain: []const u8, dst_zst: []const u8) !void {
 test "zzstd decodes a system-zstd frame to exact plaintext (external encoder)" {
     if (!haveSystemZstd()) return error.SkipZigTest;
 
-    const payload = "hello zstd world\n" ** 60 ++ "tail line no newline"; // compressible + odd tail
+    const payload = repeatStr("hello zstd world\n", 60) ++ "tail line no newline"; // compressible + odd tail
 
     const dir = try makeTmpDir();
     defer {
@@ -481,4 +481,14 @@ test "binary payload: system-compressed frame decompresses byte-exact to file" {
     defer std.testing.allocator.free(got);
     try std.testing.expectEqualSlices(u8, &payload, got);
     try std.testing.expect(!existsAbs(zst)); // default: source removed after success
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

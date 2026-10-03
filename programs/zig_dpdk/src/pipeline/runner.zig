@@ -204,7 +204,7 @@ pub const Runner = struct {
 
     /// Run one watchdog tick — aggregate TX stats and check health.
     pub fn tickWatchdog(self: *Runner) void {
-        var tx_packets: [MAX_QUEUES]u64 = [_]u64{0} ** MAX_QUEUES;
+        var tx_packets: [MAX_QUEUES]u64 = @splat(0);
         for (0..self.cfg.num_tx_queues) |i| {
             tx_packets[i] = self.tx_stats[i].tx_pkts;
         }

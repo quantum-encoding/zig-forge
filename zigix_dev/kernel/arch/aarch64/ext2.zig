@@ -158,7 +158,7 @@ fn init_block_cache() [BLOCK_CACHE_SIZE]BlockCacheEntry {
         .valid = false,
         .dirty = false,
         .block_num = 0,
-        .data = [_]u8{0} ** MAX_BLOCK_SIZE,
+        .data = @as([MAX_BLOCK_SIZE]u8, @splat(0)),
         .lru_prev = LRU_NONE,
         .lru_next = LRU_NONE,
     });
@@ -675,7 +675,7 @@ var desc_size: u16 = 32; // 32 for ext2/ext3, 64+ for ext4 with INCOMPAT_64BIT
 var is_64bit_mode: bool = false;
 
 // ext4 HTree directory hash seed (from superblock s_hash_seed at offset 0xEC)
-var hash_seed: [4]u32 = [_]u32{0} ** 4;
+var hash_seed: [4]u32 = @splat(0);
 var hash_version: u8 = 0;
 
 // ext4 delayed allocation — per-inode dirty range tracking
@@ -1986,7 +1986,7 @@ fn ext2Readdir(desc: *vfs.FileDescription, entry: *vfs.DirEntry) bool {
         }
 
         // Fill VFS DirEntry
-        entry.name = [_]u8{0} ** 256;
+        entry.name = @as([256]u8, @splat(0));
         const name_start = block_offset + EXT2_DIR_HEADER_SIZE;
         const name_len: usize = @min(de_name_len, 255);
         for (0..name_len) |i| {

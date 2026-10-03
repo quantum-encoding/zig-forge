@@ -52,7 +52,7 @@ pub const Socket = struct {
     so_keepalive: bool,
 };
 
-var sockets: [MAX_SOCKETS]Socket = [_]Socket{emptySocket()} ** MAX_SOCKETS;
+var sockets: [MAX_SOCKETS]Socket = @as([MAX_SOCKETS]Socket, @splat(emptySocket()));
 var socket_inodes: [MAX_SOCKETS]vfs.Inode = undefined;
 var inodes_initialized: bool = false;
 
@@ -72,17 +72,17 @@ fn emptySocket() Socket {
         .remote_ip = 0,
         .remote_port = 0,
         .tcp_conn_idx = 0,
-        .udp_rx_buf = [_]u8{0} ** UDP_RX_BUF_SIZE,
+        .udp_rx_buf = @as([UDP_RX_BUF_SIZE]u8, @splat(0)),
         .udp_rx_head = 0,
         .udp_rx_count = 0,
-        .icmp_rx_buf = [_]u8{0} ** 256,
+        .icmp_rx_buf = @as([256]u8, @splat(0)),
         .icmp_rx_len = 0,
         .icmp_rx_ready = false,
         .icmp_src_ip = 0,
         .blocked_pid = 0,
         .in_use = false,
         .listening = false,
-        .accept_queue = [_]usize{0} ** ACCEPT_QUEUE_SIZE,
+        .accept_queue = @as([ACCEPT_QUEUE_SIZE]usize, @splat(0)),
         .accept_head = 0,
         .accept_count = 0,
         .accept_waiting_pid = 0,

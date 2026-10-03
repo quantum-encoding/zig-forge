@@ -288,7 +288,7 @@ test "exec allowlist: null byte rejected" {
 }
 
 test "exec allowlist: oversized name rejected" {
-    const long = "a" ** 65;
+    const long = &@as([65]u8, @splat('a'));
     try testing.expectError(error.ExecutableNameTooLong, security.validateExecutable(long));
 }
 
@@ -319,7 +319,7 @@ test "exec args: null byte rejected" {
 }
 
 test "exec args: oversized rejected" {
-    const long = "a" ** (8 * 1024 + 1);
+    const long = &@as([(8 * 1024 + 1)]u8, @splat('a'));
     try testing.expectError(error.ArgumentTooLong, security.validateArgument(long));
 }
 
@@ -349,7 +349,7 @@ test "workspace ID sanitization: special chars blocked" {
 
 test "workspace ID sanitization: empty/too long blocked" {
     try testing.expect(security.sanitizeId("") == null);
-    const long = "a" ** 129;
+    const long = &@as([129]u8, @splat('a'));
     try testing.expect(security.sanitizeId(long) == null);
 }
 
@@ -363,7 +363,7 @@ test "FixedStr32: from slice and back" {
 }
 
 test "FixedStr32: truncates long strings" {
-    const long = "a" ** 100;
+    const long = &@as([100]u8, @splat('a'));
     const fs = types.FixedStr32.fromSlice(long);
     try testing.expectEqual(@as(u16, 32), fs.len);
 }
@@ -729,7 +729,7 @@ test "FixedStr32: account ID patterns" {
 }
 
 test "FixedStr32: boundary at exactly 32 chars" {
-    const exact = "a" ** 32;
+    const exact = &@as([32]u8, @splat('a'));
     const fs = types.FixedStr32.fromSlice(exact);
     try testing.expectEqual(@as(u16, 32), fs.len);
     try testing.expectEqualStrings(exact, fs.slice());
@@ -797,7 +797,7 @@ test "validateModelName: rejects path/JSON-escaping characters" {
     try testing.expect(security.validateModelName("has:colon") == null);
     try testing.expect(security.validateModelName("") == null);
     // Length bound (Limits.max_model_name == 128).
-    const too_long = "a" ** 129;
+    const too_long = &@as([129]u8, @splat('a'));
     try testing.expect(security.validateModelName(too_long) == null);
 }
 

@@ -82,7 +82,7 @@ pub const DBusServer = struct {
             c.dbus_message_iter_init_append(reply, &iter);
 
             // Append state_type string
-            const state_cstr = try self.allocator.dupeZ(u8, state.state_type);
+            const state_cstr = try self.allocator.dupeSentinel(u8, state.state_type, 0);
             defer self.allocator.free(state_cstr);
 
             const ptr: [*c]const u8 = state_cstr.ptr;
@@ -118,7 +118,7 @@ pub const DBusServer = struct {
             var reply_iter: c.DBusMessageIter = undefined;
             c.dbus_message_iter_init_append(reply, &reply_iter);
 
-            const state_cstr = try self.allocator.dupeZ(u8, state.state_type);
+            const state_cstr = try self.allocator.dupeSentinel(u8, state.state_type, 0);
             defer self.allocator.free(state_cstr);
 
             const ptr: [*c]const u8 = state_cstr.ptr;
@@ -169,7 +169,7 @@ pub const DBusServer = struct {
         }
         try jw.endArray();
 
-        const json_cstr = try self.allocator.dupeZ(u8, json_buf.written());
+        const json_cstr = try self.allocator.dupeSentinel(u8, json_buf.written(), 0);
         defer self.allocator.free(json_cstr);
 
         const ptr: [*c]const u8 = json_cstr.ptr;
@@ -201,7 +201,7 @@ pub const DBusServer = struct {
         }
         try json_buf.appendSlice(self.allocator, "]");
 
-        const json_cstr = try self.allocator.dupeZ(u8, json_buf.items);
+        const json_cstr = try self.allocator.dupeSentinel(u8, json_buf.items, 0);
         defer self.allocator.free(json_cstr);
 
         var reply_iter: c.DBusMessageIter = undefined;

@@ -74,7 +74,7 @@ fn writeOverview(allocator: std.mem.Allocator, report: *const models.ProjectRepo
     try appendFmt(allocator, &buf, "- **{d} files** across ", .{s.total_files});
 
     // Language breakdown
-    var lang_counts = [_]u32{0} ** 5;
+    var lang_counts = @as([5]u32, @splat(0));
     for (report.files.items) |*f| {
         lang_counts[@intFromEnum(f.language)] += 1;
     }

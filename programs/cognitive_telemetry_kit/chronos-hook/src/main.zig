@@ -317,7 +317,7 @@ fn gitOutput(allocator: std.mem.Allocator, argv: []const []const u8) !?[]const u
 /// Whether <root>/.gitignore exists.
 fn gitignoreExists(root: []const u8) bool {
     var buf: [4096]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&buf, "{s}/.gitignore", .{root}) catch return false;
+    const path = std.fmt.bufPrintSentinel(&buf, "{s}/.gitignore", .{root}, 0) catch return false;
     return c.access(path.ptr, c.F_OK) == 0;
 }
 
@@ -482,7 +482,7 @@ fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) !CommandRe
     // returning, so these never run there and there's no cross-fork double free.)
     defer for (0..built) |i| allocator.free(std.mem.sliceTo(argv_z[i].?, 0));
     for (argv, 0..) |arg, i| {
-        const z = try allocator.dupeZ(u8, arg);
+        const z = try allocator.dupeSentinel(u8, arg, 0);
         argv_z[i] = z.ptr;
         built = i + 1;
     }

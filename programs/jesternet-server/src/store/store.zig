@@ -649,7 +649,7 @@ test "Store: recover restores tokens from WAL" {
     Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
-    var hash: [32]u8 = .{0} ** 32;
+    var hash: [32]u8 = @splat(0);
     hash[31] = 42;
 
     // Phase 1: open, insert, drop the store.
@@ -726,7 +726,7 @@ test "Store: TokenStore adapter wires the pipeline shape" {
     var store = try Store.open(testing.allocator, io, dir);
     defer store.deinit(io);
 
-    var hash: [32]u8 = .{0} ** 32;
+    var hash: [32]u8 = @splat(0);
     hash[0] = 0xAB;
 
     var token: types.ApiTokenRow = .{
@@ -764,7 +764,7 @@ test "Store: insertEvent rejects oversize and non-JSON payloads" {
 
     // A >512-byte payload would be silently truncated by FixedStr512 and
     // corrupt the /api/notifications/recent JSON array — reject it.
-    const oversize = "[" ++ ("0," ** 300) ++ "0]"; // ~600+ bytes, valid JSON but too big
+    const oversize = "[" ++ (repeatStr("0,", 300)) ++ "0]"; // ~600+ bytes, valid JSON but too big
     try testing.expect(oversize.len > 512);
     try testing.expectError(error.PayloadTooLarge, store.insertEvent(io, .commit_pushed, "a", "big", oversize, 1));
 
@@ -844,4 +844,14 @@ test "Store: versioned event serialization round-trips" {
     try testing.expectEqual(row.created_at, back.created_at);
     // seq is NOT part of the payload — the caller overlays the WAL seq.
     try testing.expectEqual(@as(u64, 0), back.seq);
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

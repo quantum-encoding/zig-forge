@@ -289,7 +289,7 @@ pub fn embedTickets(
     }
 
     // Check for duplicate layers
-    var layer_used: [256]bool = [_]bool{false} ** 256;
+    var layer_used: [256]bool = @splat(false);
     for (tickets) |entry| {
         if (layer_used[entry.layer]) {
             return TicketError.DuplicateLayer;

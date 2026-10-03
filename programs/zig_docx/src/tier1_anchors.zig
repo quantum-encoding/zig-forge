@@ -86,7 +86,7 @@ test "anchor: LibreOffice-authored DOCX central directory matches CPython zipfil
     try std.testing.expectEqual(@as(usize, 4789), doc_xml.len);
     try std.testing.expectEqual(
         @as(u32, 0xd5b54de0),
-        std.hash.crc.Crc32.hash(doc_xml),
+        std.hash.Crc32.hash(doc_xml),
     );
 }
 
@@ -373,7 +373,7 @@ test "anchor: duplicate entry names are refused" {
     defer buf.deinit(allocator);
 
     const body = "<x/>";
-    const crc = std.hash.crc.Crc32.hash(body);
+    const crc = std.hash.Crc32.hash(body);
 
     // Local file header (APPNOTE §4.3.7), STORED.
     const local_offset: u32 = 0;

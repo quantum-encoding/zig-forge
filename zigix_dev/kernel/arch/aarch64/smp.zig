@@ -49,7 +49,7 @@ pub const PerCpu = extern struct {
     timer_ticks: u64 = 0,
     online: bool = false,
     idle: bool = true,
-    _pad1: [6]u8 = .{0} ** 6,
+    _pad1: [6]u8 = @splat(0),
     dedicated_pid: u64 = 0,
 
     pub const NO_PROCESS: usize = @import("std").math.maxInt(usize);

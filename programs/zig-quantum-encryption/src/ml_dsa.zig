@@ -115,7 +115,7 @@ pub const Poly = struct {
     coeffs: [N]i32,
 
     pub fn init() Poly {
-        return .{ .coeffs = [_]i32{0} ** N };
+        return .{ .coeffs = @as([N]i32, @splat(0)) };
     }
 
     /// Add two polynomials
@@ -1401,14 +1401,14 @@ fn unpackHints(hints: *[K][N]u1, count: *usize, input: []const u8) bool {
 // ============================================================================
 
 test "ML-DSA-65 key generation" {
-    const seed = [_]u8{0x42} ** 32;
+    const seed = @as([32]u8, @splat(0x42));
     const keypair = try keyGen(&seed);
     _ = keypair;
 }
 
 test "ML-DSA-65 sign and verify" {
     // Use deterministic seed for reproducible testing
-    const seed = [_]u8{0x42} ** 32;
+    const seed = @as([32]u8, @splat(0x42));
     const keypair = try keyGen(&seed);
 
     const msg = "Test message for ML-DSA-65 signature";
@@ -1456,7 +1456,7 @@ test "ML-DSA-65 decompose properties" {
 
 test "ML-DSA-65 sampleInBall" {
     var c: Poly = undefined;
-    const seed = [_]u8{0x55} ** CTILDE_BYTES;
+    const seed = @as([CTILDE_BYTES]u8, @splat(0x55));
     sampleInBall(&c, &seed);
 
     // Count non-zero coefficients

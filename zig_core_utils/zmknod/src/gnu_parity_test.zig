@@ -99,7 +99,7 @@ const NodeStat = struct {
 /// would open() the node — opening a FIFO read-only blocks forever).
 fn statNode(dir: Io.Dir, path: []const u8) !?NodeStat {
     var buf: [512]u8 = undefined;
-    const path_z = try std.fmt.bufPrintZ(&buf, "{s}", .{path});
+    const path_z = try std.fmt.bufPrintSentinel(&buf, "{s}", .{path}, 0);
     var st: std.c.Stat = undefined;
     if (std.c.fstatat(dir.handle, path_z, &st, 0) != 0) return null;
     const mode: u32 = @intCast(st.mode);

@@ -100,7 +100,7 @@ pub const Scratch = struct {
     /// `target` is interpreted relative to the link's own directory, as with
     /// `ln -s target link`.
     pub fn symLink(self: *const Scratch, target: []const u8, link_sub_path: []const u8) !void {
-        const target_z = try self.allocator.dupeZ(u8, target);
+        const target_z = try self.allocator.dupeSentinel(u8, target, 0);
         defer self.allocator.free(target_z);
         const link = try self.joinZ(link_sub_path);
         defer self.allocator.free(link);
@@ -167,7 +167,7 @@ test "scratch dir is created outside the repo and cleaned up" {
     try scratch.writeFile("nested/hello.txt", "hi");
     try std.testing.expect(try scratch.exists("nested/hello.txt"));
 
-    const path = try allocator.dupeZ(u8, scratch.path);
+    const path = try allocator.dupeSentinel(u8, scratch.path, 0);
     defer allocator.free(path);
 
     scratch.deinit();

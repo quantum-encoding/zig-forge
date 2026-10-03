@@ -385,7 +385,7 @@ test "a directory listing's stats agree with lstat, across several bulk reads" {
     // Long names, so the listing takes more than one 32 KB read.
     var name_buf: [300]u8 = undefined;
     for (0..400) |i| {
-        const name = try std.fmt.bufPrint(&name_buf, "sub/{s}-{d}", .{ "n" ** 200, i });
+        const name = try std.fmt.bufPrint(&name_buf, "sub/{s}-{d}", .{ &@as([200]u8, @splat('n')), i });
         try scratch.writeFile(name, name);
     }
 

@@ -71,9 +71,9 @@ pub const Appended = struct {
 pub const Chain = struct {
     allocator: std.mem.Allocator,
     seq: u64 = 0,
-    head: [HEAD_LEN]u8 = [_]u8{0} ** HEAD_LEN, // genesis = 32 zero bytes
+    head: [HEAD_LEN]u8 = @splat(0), // genesis = 32 zero bytes
     sk: ?ml_dsa.SecretKey = null,
-    key_id_hex: [32]u8 = [_]u8{'0'} ** 32, // hex of SHA-256(pk)[0..16]
+    key_id_hex: [32]u8 = @splat('0'), // hex of SHA-256(pk)[0..16]
 
     /// Client-side chain: forwards/builds events but cannot sign (no key).
     pub fn init(allocator: std.mem.Allocator) Chain {

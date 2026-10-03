@@ -229,8 +229,8 @@ pub fn hashV5(allocator: std.mem.Allocator, password: []const u8, salt: [8]u8, u
 /// PDF encrypted under a low-entropy key. Panicking here is not an option — this
 /// path is reachable through the C ABI, where an unhandled panic is UB.
 pub fn osSeed() [32]u8 {
-    var s: [32]u8 = [_]u8{0} ** 32;
-    if (!fillOsRandom(&s)) s = [_]u8{0} ** 32;
+    var s: [32]u8 = @splat(0);
+    if (!fillOsRandom(&s)) s = @as([32]u8, @splat(0));
     return s;
 }
 
@@ -326,7 +326,7 @@ pub fn computeEncryptDict(
 
     // /UE = AES-256-CBC-no-pad(key=hashV5(user_pw, U_key_salt, ""), IV=0, file_key)
     const u_ikey = try hashV5(allocator, user_pw, rnd.u_key_salt, "");
-    aes256CbcNoPad(.enc, u_ikey, [_]u8{0} ** 16, &rnd.file_key, &d.ue);
+    aes256CbcNoPad(.enc, u_ikey, @as([16]u8, @splat(0)), &rnd.file_key, &d.ue);
 
     // /O = hashV5(owner_pw, O_val_salt, /U[0..48]) ‖ O_val_salt ‖ O_key_salt
     const o_hash = try hashV5(allocator, owner_pw, rnd.o_val_salt, d.u[0..48]);
@@ -336,7 +336,7 @@ pub fn computeEncryptDict(
 
     // /OE = AES-256-CBC-no-pad(key=hashV5(owner_pw, O_key_salt, /U[0..48]), IV=0, file_key)
     const o_ikey = try hashV5(allocator, owner_pw, rnd.o_key_salt, d.u[0..48]);
-    aes256CbcNoPad(.enc, o_ikey, [_]u8{0} ** 16, &rnd.file_key, &d.oe);
+    aes256CbcNoPad(.enc, o_ikey, @as([16]u8, @splat(0)), &rnd.file_key, &d.oe);
 
     // /Perms = AES-256-ECB(file_key, cleartext)
     var perms_clear: [16]u8 = undefined;
@@ -392,7 +392,7 @@ pub fn recoverFileKeyUser(allocator: std.mem.Allocator, password: []const u8, u:
 
     const ikey = try hashV5(allocator, password, key_salt, "");
     var fk: FileKey = undefined;
-    aes256CbcNoPad(.dec, ikey, [_]u8{0} ** 16, &ue, &fk);
+    aes256CbcNoPad(.dec, ikey, @as([16]u8, @splat(0)), &ue, &fk);
     return fk;
 }
 
@@ -405,19 +405,19 @@ const testing = std.testing;
 
 fn testRand() Randomness {
     return .{
-        .file_key = [_]u8{0x11} ** 32,
-        .u_val_salt = [_]u8{0x22} ** 8,
-        .u_key_salt = [_]u8{0x33} ** 8,
-        .o_val_salt = [_]u8{0x44} ** 8,
-        .o_key_salt = [_]u8{0x55} ** 8,
-        .perms_rand = [_]u8{0x66} ** 4,
+        .file_key = @as([32]u8, @splat(0x11)),
+        .u_val_salt = @as([8]u8, @splat(0x22)),
+        .u_key_salt = @as([8]u8, @splat(0x33)),
+        .o_val_salt = @as([8]u8, @splat(0x44)),
+        .o_key_salt = @as([8]u8, @splat(0x55)),
+        .perms_rand = @as([4]u8, @splat(0x66)),
     };
 }
 
 test "AES-256-CBC pad round-trips arbitrary lengths" {
     const a = testing.allocator;
-    const key = [_]u8{0xAB} ** 32;
-    const iv = [_]u8{0xCD} ** 16;
+    const key = @as([32]u8, @splat(0xAB));
+    const iv = @as([16]u8, @splat(0xCD));
     for ([_]usize{ 0, 1, 15, 16, 17, 100 }) |n| {
         const pt = try a.alloc(u8, n);
         defer a.free(pt);
@@ -433,8 +433,8 @@ test "AES-256-CBC pad round-trips arbitrary lengths" {
 
 test "object encrypt/decrypt round-trips with IV prefix" {
     const a = testing.allocator;
-    const fk = [_]u8{0x77} ** 32;
-    const iv = [_]u8{0x88} ** 16;
+    const fk = @as([32]u8, @splat(0x77));
+    const iv = @as([16]u8, @splat(0x88));
     const msg = "BT /F0 12 Tf (Sealed invoice) Tj ET";
     const enc = try encryptObject(a, fk, iv, msg);
     defer a.free(enc);

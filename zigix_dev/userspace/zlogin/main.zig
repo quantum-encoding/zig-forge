@@ -59,9 +59,9 @@ fn lookupUser(username: []const u8) PasswdEntry {
     const result = PasswdEntry{
         .uid = 0,
         .gid = 0,
-        .home = [_]u8{0} ** 64,
+        .home = @as([64]u8, @splat(0)),
         .home_len = 0,
-        .shell = [_]u8{0} ** 64,
+        .shell = @as([64]u8, @splat(0)),
         .shell_len = 0,
         .found = false,
     };
@@ -147,9 +147,9 @@ fn parsePasswdLine(line: []const u8, username: []const u8) ?PasswdEntry {
     var result_entry = PasswdEntry{
         .uid = uid,
         .gid = gid,
-        .home = [_]u8{0} ** 64,
+        .home = @as([64]u8, @splat(0)),
         .home_len = @truncate(home_len),
-        .shell = [_]u8{0} ** 64,
+        .shell = @as([64]u8, @splat(0)),
         .shell_len = @truncate(shell_len),
         .found = true,
     };

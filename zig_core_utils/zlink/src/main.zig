@@ -133,9 +133,9 @@ pub fn main(init: std.process.Init) !void {
     const file1 = operands[0];
     const file2 = operands[1];
 
-    const file1_z = try allocator.dupeZ(u8, file1);
+    const file1_z = try allocator.dupeSentinel(u8, file1, 0);
     defer allocator.free(file1_z);
-    const file2_z = try allocator.dupeZ(u8, file2);
+    const file2_z = try allocator.dupeSentinel(u8, file2, 0);
     defer allocator.free(file2_z);
 
     if (link(file1_z, file2_z) != 0) {

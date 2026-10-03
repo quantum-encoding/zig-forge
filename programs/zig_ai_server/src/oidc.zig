@@ -526,7 +526,7 @@ test "base64url: buffer too small" {
 test "base64url: input exceeds tmp buffer" {
     var buf: [4096]u8 = undefined;
     // Input longer than 2048 chars should return null
-    const long_input = "A" ** 2050;
+    const long_input = &@as([2050]u8, @splat('A'));
     const result = base64UrlDecodeFixed(&buf, long_input);
     try std.testing.expect(result == null);
 }
@@ -756,7 +756,7 @@ test "RS256: wrong signature length rejected" {
         .e_len = 3,
     };
     // Signature length (128) != modulus_len (256)
-    const short_sig = [_]u8{0} ** 128;
+    const short_sig = @as([128]u8, @splat(0));
     try std.testing.expect(!verifyRS256(&key, "test message", &short_sig));
 
     // Empty signature
@@ -773,7 +773,7 @@ test "RS256: modulus below 2048-bit floor rejected (M9)" {
         .e_bytes = .{ 1, 0, 1, 0 },
         .e_len = 3,
     };
-    const sig = [_]u8{0} ** 128;
+    const sig = @as([128]u8, @splat(0));
     try std.testing.expect(!verifyRS256(&weak_key, "test message", &sig));
 }
 

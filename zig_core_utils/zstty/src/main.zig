@@ -652,7 +652,7 @@ fn setWinsize(fd: c_int, rows: ?u16, cols: ?u16) void {
 // ---------------------------------------------------------------------------
 
 fn flagBits(v: anytype) u64 {
-    const B = std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(v)));
+    const B = @Int(.unsigned, @bitSizeOf(@TypeOf(v)));
     return @as(B, @bitCast(v));
 }
 

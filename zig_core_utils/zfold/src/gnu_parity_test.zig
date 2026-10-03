@@ -174,7 +174,7 @@ test "empty input" {
 }
 
 test "default width 80" {
-    const long = "x" ** 200;
+    const long = &@as([200]u8, @splat('x'));
     try expectMatchesGnu(&.{}, long);
 }
 

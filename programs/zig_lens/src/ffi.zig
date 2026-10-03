@@ -533,7 +533,7 @@ export fn zig_lens_analyze_source(
     // Language-specific analysis
     switch (lang) {
         .zig => {
-            const source_z = allocator.dupeZ(u8, source) catch {
+            const source_z = allocator.dupeSentinel(u8, source, 0) catch {
                 setLastError("out of memory");
                 return @intFromEnum(ZigLensResult.err_oom);
             };

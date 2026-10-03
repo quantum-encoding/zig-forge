@@ -223,7 +223,7 @@ const BWT = struct {
             (@as(u32, input[n + 3]) << 24);
 
         // Count occurrences of each character
-        var counts: [256]usize = [_]usize{0} ** 256;
+        var counts: [256]usize = @splat(0);
         for (bwt) |c| counts[c] += 1;
 
         // Cumulative counts (first occurrence of each char in sorted first column)
@@ -238,7 +238,7 @@ const BWT = struct {
         var transform = try allocator.alloc(usize, n);
         defer allocator.free(transform);
 
-        var occ: [256]usize = [_]usize{0} ** 256;
+        var occ: [256]usize = @splat(0);
         for (bwt, 0..) |c, i| {
             transform[i] = first[c] + occ[c];
             occ[c] += 1;
@@ -421,7 +421,7 @@ const Huffman = struct {
         if (input.len == 0) return try allocator.alloc(u8, 0);
 
         // Count frequencies
-        var freq: [MAX_SYMBOLS]u32 = [_]u32{0} ** MAX_SYMBOLS;
+        var freq: [MAX_SYMBOLS]u32 = @splat(0);
         for (input) |c| freq[c] += 1;
 
         // Count unique symbols
@@ -523,7 +523,7 @@ const Huffman = struct {
         const root = active[0];
 
         // Calculate code lengths via tree traversal
-        var code_len: [MAX_SYMBOLS]u8 = [_]u8{0} ** MAX_SYMBOLS;
+        var code_len: [MAX_SYMBOLS]u8 = @splat(0);
         var stack: [MAX_CODE_LEN * 2]struct { node: u16, depth: u8 } = undefined;
         var stack_top: usize = 1;
         stack[0] = .{ .node = root, .depth = 0 };
@@ -551,7 +551,7 @@ const Huffman = struct {
 
         // Build canonical codes from lengths
         // Count code lengths
-        var bl_count: [MAX_CODE_LEN + 1]u16 = [_]u16{0} ** (MAX_CODE_LEN + 1);
+        var bl_count: [MAX_CODE_LEN + 1]u16 = @as([(MAX_CODE_LEN + 1)]u16, @splat(0));
         for (0..MAX_SYMBOLS) |i| {
             if (code_len[i] > 0) {
                 bl_count[code_len[i]] += 1;
@@ -559,7 +559,7 @@ const Huffman = struct {
         }
 
         // Calculate starting codes for each length
-        var next_code: [MAX_CODE_LEN + 1]u16 = [_]u16{0} ** (MAX_CODE_LEN + 1);
+        var next_code: [MAX_CODE_LEN + 1]u16 = @as([(MAX_CODE_LEN + 1)]u16, @splat(0));
         var code: u16 = 0;
         for (1..MAX_CODE_LEN + 1) |bits| {
             code = (code + bl_count[bits - 1]) << 1;
@@ -567,7 +567,7 @@ const Huffman = struct {
         }
 
         // Assign codes
-        var codes: [MAX_SYMBOLS]u16 = [_]u16{0} ** MAX_SYMBOLS;
+        var codes: [MAX_SYMBOLS]u16 = @splat(0);
         for (0..MAX_SYMBOLS) |i| {
             const len = code_len[i];
             if (len > 0) {
@@ -654,21 +654,21 @@ const Huffman = struct {
         if (orig_len == 0) return try allocator.alloc(u8, 0);
 
         // Build canonical codes (same as encoder)
-        var bl_count: [MAX_CODE_LEN + 1]u16 = [_]u16{0} ** (MAX_CODE_LEN + 1);
+        var bl_count: [MAX_CODE_LEN + 1]u16 = @as([(MAX_CODE_LEN + 1)]u16, @splat(0));
         for (0..MAX_SYMBOLS) |i| {
             if (code_len[i] > 0) {
                 bl_count[code_len[i]] += 1;
             }
         }
 
-        var next_code: [MAX_CODE_LEN + 1]u16 = [_]u16{0} ** (MAX_CODE_LEN + 1);
+        var next_code: [MAX_CODE_LEN + 1]u16 = @as([(MAX_CODE_LEN + 1)]u16, @splat(0));
         var code: u16 = 0;
         for (1..MAX_CODE_LEN + 1) |bits| {
             code = (code + bl_count[bits - 1]) << 1;
             next_code[bits] = code;
         }
 
-        var codes: [MAX_SYMBOLS]u16 = [_]u16{0} ** MAX_SYMBOLS;
+        var codes: [MAX_SYMBOLS]u16 = @splat(0);
         for (0..MAX_SYMBOLS) |i| {
             const len = code_len[i];
             if (len > 0) {
@@ -743,7 +743,7 @@ const Arithmetic = struct {
         if (input.len == 0) return try allocator.alloc(u8, 0);
 
         // Count frequencies
-        var freq: [256]u32 = [_]u32{0} ** 256;
+        var freq: [256]u32 = @splat(0);
         for (input) |c| freq[c] += 1;
 
         // Build cumulative frequency table

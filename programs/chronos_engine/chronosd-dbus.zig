@@ -155,7 +155,7 @@ pub const ChronosDaemon = struct {
             defer self.allocator.free(formatted);
 
             // Convert to null-terminated string
-            const formatted_z = try self.allocator.dupeZ(u8, formatted);
+            const formatted_z = try self.allocator.dupeSentinel(u8, formatted, 0);
             defer self.allocator.free(formatted_z);
 
             var reply = msg.newMethodReturn() orelse return error.DBusReplyFailed;
@@ -193,7 +193,7 @@ pub const ChronosDaemon = struct {
             defer self.allocator.free(log_json);
 
             // Convert to null-terminated string
-            const log_json_z = try self.allocator.dupeZ(u8, log_json);
+            const log_json_z = try self.allocator.dupeSentinel(u8, log_json, 0);
             defer self.allocator.free(log_json_z);
 
             var reply = msg.newMethodReturn() orelse return error.DBusReplyFailed;
@@ -218,7 +218,7 @@ pub const ChronosDaemon = struct {
 
         // Introspect method (D-Bus standard)
         if (msg.isMethodCall("org.freedesktop.DBus.Introspectable", "Introspect")) {
-            const introspect_z = try self.allocator.dupeZ(u8, dbus_if.INTROSPECTION_XML);
+            const introspect_z = try self.allocator.dupeSentinel(u8, dbus_if.INTROSPECTION_XML, 0);
             defer self.allocator.free(introspect_z);
 
             var reply = msg.newMethodReturn() orelse return error.DBusReplyFailed;

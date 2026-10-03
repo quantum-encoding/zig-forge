@@ -198,7 +198,8 @@ test "macOS pbcopy/pbpaste roundtrip preserves bytes" {
 // ===========================================================================
 
 fn binPath(alloc: std.mem.Allocator, name: []const u8) ![]u8 {
-    return std.fmt.allocPrint(alloc, "{s}/{s}", .{ build_options.bin_dir, name });
+    const path = if (std.mem.eql(u8, name, "zcopy")) build_options.zcopy_bin else build_options.zpaste_bin;
+    return alloc.dupe(u8, path);
 }
 
 const RunResult = struct { stdout: []u8, term: std.process.Child.Term };

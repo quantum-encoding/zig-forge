@@ -6,7 +6,7 @@ const gvnic = @import("gvnic.zig");
 
 var use_gvnic: bool = false;
 
-pub var mac: [6]u8 = .{0} ** 6;
+pub var mac: [6]u8 = @splat(0);
 
 pub fn registerVirtio() void {
     use_gvnic = false;

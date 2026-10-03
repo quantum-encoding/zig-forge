@@ -210,7 +210,7 @@ fn writePidFile() !void {
     const pid_path = "/tmp/claude-shepherd.pid";
 
     var path_buf: [256]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{pid_path}) catch return;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{pid_path}, 0) catch return;
 
     const fd = c.open(@ptrCast(path_z.ptr), c.O_WRONLY | c.O_CREAT | c.O_TRUNC, @as(c_uint, 0o644));
     if (fd < 0) return;
@@ -233,7 +233,7 @@ fn log(comptime level: []const u8, comptime fmt: []const u8, args: anytype) void
     // Write to log file
     const log_path = "/tmp/claude-shepherd.log";
     var path_buf: [256]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{log_path}) catch return;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{log_path}, 0) catch return;
 
     const fd = c.open(@ptrCast(path_z.ptr), c.O_WRONLY | c.O_CREAT | c.O_APPEND, @as(c_uint, 0o644));
     if (fd < 0) return;
@@ -360,7 +360,7 @@ fn showStatus(allocator: std.mem.Allocator) !void {
     // Read state from exported JSON status file
     var status_buf: [4096]u8 = undefined;
     var status_path: [256]u8 = undefined;
-    const status_z = std.fmt.bufPrintZ(&status_path, "/tmp/claude-shepherd-status.json", .{}) catch {
+    const status_z = std.fmt.bufPrintSentinel(&status_path, "/tmp/claude-shepherd-status.json", .{}, 0) catch {
         writeStdout("  Active Claude instances: 0\n");
         writeStdout("  Pending permissions: 0\n");
         writeStdout("  Queued tasks: 0\n");

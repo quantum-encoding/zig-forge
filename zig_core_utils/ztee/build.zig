@@ -19,24 +19,20 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run ztee");
     run_step.dependOn(&run_cmd.step);
 
     // --- Tests: externally anchored against the real GNU `tee` binary --------
 
-    // Absolute path of the ztee binary the tests will exec.
-    const ztee_bin = b.getInstallPath(.bin, "ztee");
-
     // Discover a GNU `tee` on the build host (Homebrew coreutils). If none is
     // found, the differential parity tests skip gracefully.
     const gtee_bin = findGnuTee() orelse "";
 
     const options = b.addOptions();
-    options.addOption([]const u8, "ztee_bin", ztee_bin);
+    // Path of the built ztee binary the tests will exec.
+    options.addOptionPath("ztee_bin", exe.getEmittedBin());
     options.addOption([]const u8, "gtee_bin", gtee_bin);
 
     const test_mod = b.createModule(.{
@@ -70,4 +66,12 @@ fn findGnuTee() ?[]const u8 {
         return c;
     }
     return null;
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

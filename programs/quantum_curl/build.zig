@@ -58,9 +58,7 @@ pub fn build(b: *std.Build) void {
 
     // Run step
     const run_cmd = b.addRunArtifact(exe);
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
     const run_step = b.step("run", "Run quantum-curl HTTP engine");
     run_step.dependOn(&run_cmd.step);
 
@@ -113,9 +111,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(echo_server);
 
     const run_echo = b.addRunArtifact(echo_server);
-    if (b.args) |args| {
-        run_echo.addArgs(args);
-    }
+    forwardArgs(b, run_echo);
     const echo_step = b.step("echo-server", "Run benchmark echo server");
     echo_step.dependOn(&run_echo.step);
 
@@ -133,9 +129,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(bench_runner);
 
     const run_bench = b.addRunArtifact(bench_runner);
-    if (b.args) |args| {
-        run_bench.addArgs(args);
-    }
+    forwardArgs(b, run_bench);
     const bench_step = b.step("bench", "Run performance benchmarks");
     bench_step.dependOn(&run_bench.step);
 
@@ -153,9 +147,15 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(sustained_bench);
 
     const run_sustained = b.addRunArtifact(sustained_bench);
-    if (b.args) |args| {
-        run_sustained.addArgs(args);
-    }
+    forwardArgs(b, run_sustained);
     const sustained_step = b.step("sustained", "Run sustained performance benchmark");
     sustained_step.dependOn(&run_sustained.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

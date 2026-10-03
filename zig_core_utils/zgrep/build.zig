@@ -26,12 +26,13 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    const run_parity = b.addRunArtifact(parity_tests);
+    const run_parity = b.addSystemCommand(&.{"env"});
+    run_parity.addPrefixedFileArg("ZGREP_BIN=", exe.getEmittedBin());
+    run_parity.addArtifactArg(parity_tests);
     // The tests spawn the installed binary (zig-out/bin/zgrep) and read fixtures
     // relative to the build root, so ensure it is installed first and pass its
     // resolved path explicitly via ZGREP_BIN.
     run_parity.step.dependOn(b.getInstallStep());
-    run_parity.setEnvironmentVariable("ZGREP_BIN", b.getInstallPath(.bin, "zgrep"));
 
     const test_step = b.step("test", "Run GNU-parity tests");
     test_step.dependOn(&run_parity.step);

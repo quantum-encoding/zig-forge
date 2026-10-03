@@ -107,7 +107,7 @@ pub const Target = struct {
 
     /// Parse from nbits compact representation
     pub fn fromNBits(nbits: u32) Target {
-        var target = Target{ .bits = [_]u8{0} ** 32 };
+        var target = Target{ .bits = @as([32]u8, @splat(0)) };
 
         const exponent: u8 = @intCast((nbits >> 24) & 0xFF);
         const mantissa: u32 = nbits & 0x00FFFFFF;

@@ -1371,7 +1371,7 @@ test "FFI: zdedupe_hash_file agrees with the scan and refuses what the scan refu
 
     // Every file of the group hashes, now, to the hash the scan recorded.
     for (group.file_infos.items) |info| {
-        const path_z = try allocator.dupeZ(u8, info.path);
+        const path_z = try allocator.dupeSentinel(u8, info.path, 0);
         defer allocator.free(path_z);
         var digest: [32]u8 = undefined;
         try testing.expectEqual(@as(c_int, 0), lib.zdedupe_hash_file(path_z.ptr, false, &digest));
@@ -1416,7 +1416,7 @@ test "empty and unique-size files are never read; the counts say what was hashed
     try scratch.writeFile("u2", "abcdefghijk");
     try scratch.writeFile("s1", "same");
     try scratch.writeFile("s2", "same");
-    const medium = [_]u8{'m'} ** 8192;
+    const medium = @as([8192]u8, @splat('m'));
     try scratch.writeFile("m1", &medium);
     try scratch.writeFile("m2", &medium);
     const big = try allocator.alloc(u8, hasher.BUFFER_SIZE + 4096);

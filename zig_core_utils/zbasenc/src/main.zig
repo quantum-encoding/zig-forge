@@ -386,7 +386,7 @@ fn readInput(allocator: std.mem.Allocator, file: ?[]const u8) ![]const u8 {
         return content.toOwnedSlice(allocator);
     } else {
         var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{file.?}) catch return error.PathTooLong;
+        const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{file.?}, 0) catch return error.PathTooLong;
 
         const fd = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
         if (fd < 0) {

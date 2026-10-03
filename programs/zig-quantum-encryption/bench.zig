@@ -14,16 +14,13 @@ const hybrid = @import("src/hybrid.zig");
 
 const ITERATIONS = 1000;
 
-// Zig 0.16+ removed std.io, use posix directly
-const c = @cImport({
-    @cInclude("time.h");
-    @cInclude("unistd.h");
-});
+// Zig 0.16+ removed std.io, use libc directly
+const c = std.c;
 
 fn nanoTimestamp() i128 {
-    var ts: c.struct_timespec = undefined;
-    _ = c.clock_gettime(c.CLOCK_MONOTONIC, &ts);
-    return @as(i128, ts.tv_sec) * 1_000_000_000 + ts.tv_nsec;
+    var ts: c.timespec = undefined;
+    _ = c.clock_gettime(.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * 1_000_000_000 + ts.nsec;
 }
 
 fn print(comptime fmt: []const u8, args: anytype) void {

@@ -20,7 +20,7 @@ pub fn build(b: *std.Build) void {
     // Externally-anchored parity tests shell out to the installed zwho binary
     // and the real GNU `who`, so they need the exe's absolute install path.
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "zwho_path", b.getInstallPath(.bin, "zwho"));
+    test_opts.addOptionPath("zwho_path", exe.getEmittedBin());
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{

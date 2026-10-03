@@ -352,7 +352,7 @@ fn readLines(path: []const u8, config: *const Config, allocator: std.mem.Allocat
     var fd: c_int = 0;
     if (!is_stdin) {
         // Allocate the NUL-terminated path (no fixed-size stack cap).
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
         fd = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
         if (fd < 0) {
@@ -951,7 +951,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Write to -o FILE if given, else stdout.
     if (config.output_file) |ofile| {
-        const ofz = try allocator.dupeZ(u8, ofile);
+        const ofz = try allocator.dupeSentinel(u8, ofile, 0);
         defer allocator.free(ofz);
         const out_fd = libc.open(
             ofz.ptr,

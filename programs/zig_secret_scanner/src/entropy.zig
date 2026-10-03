@@ -11,7 +11,7 @@ pub fn calculate(data: []const u8) f32 {
     if (data.len == 0) return 0.0;
 
     // Count byte frequencies
-    var freq: [256]u32 = [_]u32{0} ** 256;
+    var freq: [256]u32 = @splat(0);
     for (data) |b| {
         freq[b] += 1;
     }
@@ -35,7 +35,7 @@ pub fn calculate(data: []const u8) f32 {
 pub fn calculateAlphanumeric(data: []const u8) f32 {
     if (data.len == 0) return 0.0;
 
-    var freq: [62]u32 = [_]u32{0} ** 62; // 26 lower + 26 upper + 10 digits
+    var freq: [62]u32 = @splat(0); // 26 lower + 26 upper + 10 digits
     var count: u32 = 0;
 
     for (data) |c| {
@@ -66,7 +66,7 @@ pub fn calculateAlphanumeric(data: []const u8) f32 {
 pub fn calculateBase64(data: []const u8) f32 {
     if (data.len == 0) return 0.0;
 
-    var freq: [64]u32 = [_]u32{0} ** 64;
+    var freq: [64]u32 = @splat(0);
     var count: u32 = 0;
 
     for (data) |c| {
@@ -97,7 +97,7 @@ pub fn calculateBase64(data: []const u8) f32 {
 pub fn calculateHex(data: []const u8) f32 {
     if (data.len == 0) return 0.0;
 
-    var freq: [16]u32 = [_]u32{0} ** 16;
+    var freq: [16]u32 = @splat(0);
     var count: u32 = 0;
 
     for (data) |c| {

@@ -31,6 +31,7 @@
 //!     `dispatch_async`) take their own reference via `_Block_copy`.
 
 const std = @import("std");
+const compat = @import("zig_compat.zig");
 
 pub const flags = struct {
     pub const has_copy_dispose: i32 = 1 << 25;
@@ -76,8 +77,8 @@ pub fn Block(comptime Ctx: type, comptime handler: anytype) type {
         .@"fn" => |f| f,
         else => @compileError("Block handler must be a function, got " ++ @typeName(Fn)),
     };
-    const params = fn_info.params;
-    if (params.len == 0 or params[0].type != *Ctx)
+    const params = compat.paramTypes(Fn);
+    if (params.len == 0 or params[0] != *Ctx)
         @compileError("Block handler's first parameter must be *" ++ @typeName(Ctx));
     if (params.len > 5)
         @compileError("Block supports at most four arguments after the context");
@@ -98,7 +99,7 @@ pub fn Block(comptime Ctx: type, comptime handler: anytype) type {
         const descriptor_storage = Descriptor{ .size = @sizeOf(Self) };
 
         fn Param(comptime i: usize) type {
-            return params[i].type.?;
+            return params[i].?;
         }
 
         const Thunks = struct {

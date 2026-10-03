@@ -25,7 +25,7 @@ const known_services = [_]ServiceDef{
 };
 
 // Cache for port listening state (refreshed externally)
-var listening_ports: [65536]bool = [_]bool{false} ** 65536;
+var listening_ports: [65536]bool = @splat(false);
 var ports_loaded: bool = false;
 
 pub fn refresh() void {

@@ -135,7 +135,7 @@ pub fn parsePacket(data: []u8) ?ParseResult {
 
 /// Format an IPv4 address as "A.B.C.D" from a host-order u32.
 pub fn formatAddr(addr: u32) [15]u8 {
-    var buf: [15]u8 = [_]u8{' '} ** 15;
+    var buf: [15]u8 = @splat(' ');
     _ = std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{
         @as(u8, @intCast((addr >> 24) & 0xFF)),
         @as(u8, @intCast((addr >> 16) & 0xFF)),

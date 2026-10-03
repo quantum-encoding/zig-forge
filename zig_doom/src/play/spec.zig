@@ -834,8 +834,8 @@ test "playerInSpecialSector secret" {
         .lightlevel = 200,
         .special = 9, // Secret
         .tag = 0,
-        .floor_name = [_]u8{0} ** 8,
-        .ceiling_name = [_]u8{0} ** 8,
+        .floor_name = @as([8]u8, @splat(0)),
+        .ceiling_name = @as([8]u8, @splat(0)),
     };
 
     playerInSpecialSector(&player, &sector);
@@ -863,8 +863,8 @@ test "playerInSpecialSector damage" {
         .lightlevel = 200,
         .special = 5, // -10% damage
         .tag = 0,
-        .floor_name = [_]u8{0} ** 8,
-        .ceiling_name = [_]u8{0} ** 8,
+        .floor_name = @as([8]u8, @splat(0)),
+        .ceiling_name = @as([8]u8, @splat(0)),
     };
 
     @import("world.zig").leveltime = 0; // hurt tic (leveltime & 0x1f == 0)

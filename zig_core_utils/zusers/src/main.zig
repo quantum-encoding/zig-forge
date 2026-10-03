@@ -138,7 +138,7 @@ pub fn main(init: std.process.Init) void {
     // for a missing/unreadable database rather than erroring, so a failed
     // utmpxname just yields no users.
     if (file) |path| {
-        const z = allocator.dupeZ(u8, path) catch {
+        const z = allocator.dupeSentinel(u8, path, 0) catch {
             std.process.exit(1);
         };
         defer allocator.free(z);

@@ -49,10 +49,8 @@ fn realpathInto(allocator: std.mem.Allocator, path: []const u8, buf: *[std.fs.ma
     return std.mem.span(res);
 }
 
-const cdir = @cImport({
-    @cInclude("dirent.h");
-    @cInclude("sys/stat.h");
-});
+/// libc directory iteration (opendir/readdir/closedir, dirent, DT).
+const cdir = std.c;
 
 /// Extract all Claude Code sessions from projects_dir into output_dir.
 /// projects_dir should be ~/.claude/projects or a single project subdirectory.
@@ -98,14 +96,14 @@ pub fn extractAll(
     defer _ = cdir.closedir(dir);
 
     while (cdir.readdir(dir)) |entry| {
-        const d_name: [*]const u8 = @ptrCast(&entry.*.d_name);
+        const d_name: [*]const u8 = @ptrCast(&entry.*.name);
         const name_len = std.mem.indexOfScalar(u8, d_name[0..256], 0) orelse 256;
         const name = d_name[0..name_len];
 
         if (name.len == 0 or name[0] == '.') continue;
 
         // Only directories
-        if (entry.*.d_type != cdir.DT_DIR and entry.*.d_type != cdir.DT_UNKNOWN) continue;
+        if (entry.*.type != cdir.DT.DIR and entry.*.type != cdir.DT.UNKNOWN) continue;
 
         if (options.only_project) |filter| {
             if (!std.mem.eql(u8, name, filter)) continue;
@@ -148,7 +146,7 @@ fn extractProject(
     defer _ = cdir.closedir(dir);
 
     while (cdir.readdir(dir)) |entry| {
-        const d_name: [*]const u8 = @ptrCast(&entry.*.d_name);
+        const d_name: [*]const u8 = @ptrCast(&entry.*.name);
         const name_len = std.mem.indexOfScalar(u8, d_name[0..256], 0) orelse 256;
         const name = d_name[0..name_len];
 
@@ -300,8 +298,8 @@ fn extractSession(
         const role = getStr(message, "role") orelse "";
 
         // Role header
-        const role_display = if (std.mem.eql(u8, role, "user")) "**You**"
-            else if (std.mem.eql(u8, role, "assistant")) "**Claude**"
+        const role_display = if (std.mem.eql(u8, role, "userrepeatStr(")) ", You)**"
+            else if (std.mem.eql(u8, role, "assistantrepeatStr(")) ", Claude)**"
             else "**System**";
 
         const msg_header = try std.fmt.allocPrint(allocator, "## {s}\n\n*{s}*\n\n", .{ role_display, timestamp });
@@ -520,7 +518,7 @@ fn loadSubagents(
     defer _ = cdir.closedir(dir);
 
     while (cdir.readdir(dir)) |entry| {
-        const d_name: [*]const u8 = @ptrCast(&entry.*.d_name);
+        const d_name: [*]const u8 = @ptrCast(&entry.*.name);
         const name_len = std.mem.indexOfScalar(u8, d_name[0..256], 0) orelse 256;
         const name = d_name[0..name_len];
 
@@ -556,7 +554,7 @@ fn loadSubagents(
             const msg = parsed.value.object.get("message") orelse continue;
             if (msg != .object) continue;
             const role = getStr(msg, "role") orelse "";
-            const role_label = if (std.mem.eql(u8, role, "user")) "**Prompt:**" else "**Subagent:**";
+            const role_label = if (std.mem.eql(u8, role, "userrepeatStr(")) ", Prompt):**repeatStr(" else ", Subagent):**";
             try buf.appendSlice(allocator, role_label);
             try buf.appendSlice(allocator, "\n");
 
@@ -599,7 +597,7 @@ fn containsJsonlFiles(allocator: std.mem.Allocator, path: []const u8) bool {
     defer _ = cdir.closedir(dir);
 
     while (cdir.readdir(dir)) |entry| {
-        const d_name: [*]const u8 = @ptrCast(&entry.*.d_name);
+        const d_name: [*]const u8 = @ptrCast(&entry.*.name);
         const name_len = std.mem.indexOfScalar(u8, d_name[0..256], 0) orelse 256;
         const name = d_name[0..name_len];
         if (std.mem.endsWith(u8, name, ".jsonl")) return true;
@@ -736,4 +734,14 @@ fn sanitizeName(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     }
 
     return buf.toOwnedSlice(allocator);
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

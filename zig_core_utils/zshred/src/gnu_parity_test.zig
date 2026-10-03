@@ -339,7 +339,7 @@ test "literal anchor: -x -z -n0 writes exactly the file's length as zero bytes" 
     try std.testing.expectEqual(@as(u8, 0), r.exit_code);
 
     const bytes = (try readBack(arena, io, tmp.dir, "z.bin")).?;
-    const expected = [_]u8{0} ** 16;
+    const expected = @as([16]u8, @splat(0));
     try std.testing.expectEqualSlices(u8, &expected, bytes);
 }
 

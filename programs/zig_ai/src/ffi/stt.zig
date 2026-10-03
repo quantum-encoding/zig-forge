@@ -101,7 +101,7 @@ export fn zig_ai_stt_openai(
     defer result.deinit();
 
     // Copy text for C ownership
-    const text_copy = allocator.dupeZ(u8, result.text) catch {
+    const text_copy = allocator.dupeSentinel(u8, result.text, 0) catch {
         response_out.success = false;
         response_out.error_code = ErrorCode.OUT_OF_MEMORY;
         response_out.error_message = makeErrorString("Out of memory");
@@ -113,7 +113,7 @@ export fn zig_ai_stt_openai(
     response_out.text = .{ .ptr = text_copy.ptr, .len = result.text.len };
 
     if (result.language) |lang| {
-        const lang_copy = allocator.dupeZ(u8, lang) catch null;
+        const lang_copy = allocator.dupeSentinel(u8, lang, 0) catch null;
         if (lang_copy) |lc| {
             response_out.language = .{ .ptr = lc.ptr, .len = lang.len };
         }
@@ -157,7 +157,7 @@ fn mapError(err: anyerror) i32 {
 }
 
 fn makeErrorString(msg: []const u8) CString {
-    const duped = allocator.dupeZ(u8, msg) catch return .{ .ptr = null, .len = 0 };
+    const duped = allocator.dupeSentinel(u8, msg, 0) catch return .{ .ptr = null, .len = 0 };
     return .{ .ptr = duped.ptr, .len = msg.len };
 }
 

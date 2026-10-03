@@ -71,14 +71,14 @@ pub fn build(b: *std.Build) void {
     // Run commands
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run the daemon (polling mode)");
     run_step.dependOn(&run_cmd.step);
 
     const run_ebpf_cmd = b.addRunArtifact(ebpf_exe);
     run_ebpf_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_ebpf_cmd.addArgs(args);
+    forwardArgs(b, run_ebpf_cmd);
 
     const run_ebpf_step = b.step("run-ebpf", "Run the daemon (eBPF mode, requires root)");
     run_ebpf_step.dependOn(&run_ebpf_cmd.step);
@@ -95,4 +95,12 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

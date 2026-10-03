@@ -122,7 +122,7 @@ pub const Midstate = struct {
         sha256Compress(&state, &w);
 
         // Prepare Block 2 template
-        var block2: [64]u8 = [_]u8{0} ** 64;
+        var block2: [64]u8 = @splat(0);
         @memcpy(block2[0..16], header[64..80]); // Last 16 bytes of header
         block2[16] = 0x80; // Padding start
         // Length in bits: 80 * 8 = 640 = 0x0280 (big-endian at end)
@@ -162,7 +162,7 @@ pub const Midstate = struct {
         state = H_INIT;
 
         // Prepare 32-byte message with padding
-        var double_block: [64]u8 = [_]u8{0} ** 64;
+        var double_block: [64]u8 = @splat(0);
         @memcpy(double_block[0..32], &first_hash);
         double_block[32] = 0x80; // Padding
         // Length: 32 * 8 = 256 = 0x0100 (big-endian at end)

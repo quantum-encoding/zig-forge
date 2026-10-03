@@ -27,6 +27,7 @@
 //! Fixed roles use the neutral palette constants below.
 
 const std = @import("std");
+const compat = @import("zig_compat.zig");
 const document = @import("document.zig");
 const proposal = @import("proposal.zig");
 const qrcode = @import("qrcode.zig");
@@ -821,7 +822,7 @@ fn parseProposalJsonLocal(allocator: std.mem.Allocator, json_str: []const u8) !P
     // overrides its English default (arena-allocated, freed with the arena).
     if (root.get("labels")) |lv| {
         if (lv == .object) {
-            inline for (@typeInfo(QuoteLabels).@"struct".fields) |f| {
+            inline for (compat.fields(QuoteLabels)) |f| {
                 if (lv.object.get(f.name)) |v| {
                     if (v == .string) @field(data.labels, f.name) = try allocator.dupe(u8, v.string);
                 }

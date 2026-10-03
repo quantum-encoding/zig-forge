@@ -144,7 +144,7 @@ pub fn keyGenDeterministic(
     var result: HybridKeyPair = undefined;
 
     const mlkem_kp = mlkem.keyGenInternal768(d, z) catch return HybridError.KeyGenFailed;
-    const x25519_pk = X25519.recoverPublicKey(x25519_sk.*) catch return HybridError.KeyGenFailed;
+    const x25519_pk = x25519PublicKey(x25519_sk.*) catch return HybridError.KeyGenFailed;
 
     // Encapsulation key: [ML-KEM ek (1184)] ‖ [X25519 pk (32)]
     @memcpy(result.ek[0..MLKEM_EK_SIZE], &mlkem_kp.ek.data);
@@ -209,7 +209,7 @@ pub fn encapsDeterministic(
     defer scrub(&mlkem_result.K);
 
     // X25519 (RFC 7748) with the ephemeral scalar
-    const ct_x = X25519.recoverPublicKey(eph_sk.*) catch return HybridError.EncapsFailed;
+    const ct_x = x25519PublicKey(eph_sk.*) catch return HybridError.EncapsFailed;
     var ss_x = X25519.scalarmult(eph_sk.*, pk_x.*) catch return HybridError.InvalidPublicKey;
     defer scrub(&ss_x);
 
@@ -269,7 +269,7 @@ pub fn decapsVersioned(dk: *const HybridDecapsulationKey, ct: *const HybridCiphe
     var ss_m = mlkem.decaps768(&mlkem_dk, &mlkem_ct);
     defer scrub(&ss_m);
 
-    var ss_x: [X25519_KEY_SIZE]u8 = X25519.scalarmult(x25519_sk.*, ct_x.*) catch [_]u8{0} ** X25519_KEY_SIZE;
+    var ss_x: [X25519_KEY_SIZE]u8 = X25519.scalarmult(x25519_sk.*, ct_x.*) catch @as([X25519_KEY_SIZE]u8, @splat(0));
     defer scrub(&ss_x);
 
     switch (version) {
@@ -278,7 +278,7 @@ pub fn decapsVersioned(dk: *const HybridDecapsulationKey, ct: *const HybridCiphe
             // The decapsulation key stores only the X25519 scalar (the layout
             // predates v2), so the recipient public key the combiner binds is
             // recomputed here. A clamped scalar cannot produce the identity.
-            const pk_x = X25519.recoverPublicKey(x25519_sk.*) catch [_]u8{0} ** X25519_KEY_SIZE;
+            const pk_x = x25519PublicKey(x25519_sk.*) catch @as([X25519_KEY_SIZE]u8, @splat(0));
             return combineSecretsV2(&ss_m, &ss_x, ct_x, &pk_x);
         },
     }
@@ -346,11 +346,11 @@ pub const kat_ct_x = hexToArray(32, "404142434445464748494a4b4c4d4e4f50515253545
 pub const kat_pk_x = hexToArray(32, "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f");
 
 /// Fixed seeds for the full-path vector (keyGen -> encaps -> decaps).
-pub const kat_seed_d = [_]u8{0xa1} ** 32;
-pub const kat_seed_z = [_]u8{0xa2} ** 32;
-pub const kat_seed_x25519_sk = [_]u8{0xa3} ** 32;
-pub const kat_seed_m = [_]u8{0xa4} ** 32;
-pub const kat_seed_eph_sk = [_]u8{0xa5} ** 32;
+pub const kat_seed_d = @as([32]u8, @splat(0xa1));
+pub const kat_seed_z = @as([32]u8, @splat(0xa2));
+pub const kat_seed_x25519_sk = @as([32]u8, @splat(0xa3));
+pub const kat_seed_m = @as([32]u8, @splat(0xa4));
+pub const kat_seed_eph_sk = @as([32]u8, @splat(0xa5));
 
 pub fn hexToArray(comptime n: usize, hex: *const [2 * n]u8) [n]u8 {
     var out: [n]u8 = undefined;
@@ -441,7 +441,7 @@ test "hybrid combiner v2 KAT" {
 
 test "hybrid combiner v2 KAT with all-zero ss_X (low-order X25519 point path)" {
     const expected = hexToArray(32, "3047921a56cb394acade1101753eb5ba5843f1ac8d6108eba9be2432f6b947be");
-    const zero = [_]u8{0} ** 32;
+    const zero = @as([32]u8, @splat(0));
     const got = combineSecretsV2(&kat_ss_m, &zero, &kat_ct_x, &kat_pk_x);
     try testing.expectEqualSlices(u8, &expected, &got);
 }
@@ -486,3 +486,9 @@ const KAT_DK_SHA3 = "df93eed15f3a736854e002ec6f3ddfd9ec28dda5674ea6664c499015d2a
 const KAT_CT_SHA3 = "1efb4b6fa294d4df8dc87f5bf7277e698b557303c4c21db33da71801cee0356d";
 const KAT_K_V1 = "ece5edee3b04bc365a58066bc579e46de88ccb700fa20cdb44fd6289e9a56a02";
 const KAT_K_V2 = "554119be4c831483f20bc6050d4e5c243a3e45fa91093bdd86e4a5fc1a64db5b";
+
+/// X25519 public key for a secret key. Zig 0.17 made this infallible (clamping
+/// keeps the product off the identity); 0.16 still declares IdentityElementError.
+fn x25519PublicKey(sk: [X25519_KEY_SIZE]u8) ![X25519_KEY_SIZE]u8 {
+    return X25519.recoverPublicKey(sk);
+}

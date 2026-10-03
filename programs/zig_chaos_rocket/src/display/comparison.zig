@@ -21,9 +21,9 @@ const BRIGHT_CYAN = ESC ++ "[96m";
 const BRIGHT_WHITE = ESC ++ "[97m";
 
 // Separator line constants (Zig 0.16 does not support fill patterns)
-const SEPARATOR_EQ_72 = "=" ** 72;
-const SEPARATOR_DASH_34 = "─" ** 34;
-const SEPARATOR_DASH_72 = "─" ** 72;
+const SEPARATOR_EQ_72 = &@as([72]u8, @splat('='));
+const SEPARATOR_DASH_34 = repeatStr("─", 34);
+const SEPARATOR_DASH_72 = repeatStr("─", 72);
 
 pub const ComparisonEntry = struct {
     scenario: *const scenarios.Scenario,
@@ -72,4 +72,14 @@ pub fn renderAllComparisons(writer: anytype) void {
         const entry = ComparisonEntry{ .scenario = scenario };
         renderComparison(&entry, writer);
     }
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

@@ -35,7 +35,7 @@ pub fn build(b: *std.Build) void {
     // implementation) plus literal expected bytes taken from POSIX ERE / GNU
     // grep documented behavior. Needs the installed exe path.
     const parity_opts = b.addOptions();
-    parity_opts.addOption([]const u8, "zregex_exe", b.getInstallPath(.bin, "zregex"));
+    parity_opts.addOptionPath("zregex_exe", exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{

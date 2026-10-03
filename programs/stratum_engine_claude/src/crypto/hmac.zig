@@ -25,7 +25,7 @@ const OPAD: u8 = 0x5C;
 ///
 /// Performance: ~2-3μs on modern CPUs (target: <1μs with optimization)
 pub fn hmacSha256(key: []const u8, message: []const u8, output: *[HASH_SIZE]u8) void {
-    var key_padded: [BLOCK_SIZE]u8 = [_]u8{0} ** BLOCK_SIZE;
+    var key_padded: [BLOCK_SIZE]u8 = @splat(0);
 
     // Step 1: Prepare key
     if (key.len > BLOCK_SIZE) {
@@ -74,7 +74,7 @@ pub const HmacContext = struct {
 
     /// Initialize HMAC context with secret key (do this once at startup)
     pub fn init(key: []const u8) HmacContext {
-        var key_padded: [BLOCK_SIZE]u8 = [_]u8{0} ** BLOCK_SIZE;
+        var key_padded: [BLOCK_SIZE]u8 = @splat(0);
 
         // Prepare key
         if (key.len > BLOCK_SIZE) {
@@ -150,7 +150,7 @@ pub fn signCoinbase(
     // Prepare K': pad/hash the key to BLOCK_SIZE the same way as
     // hmacSha256 does internally. We can't call hmacSha256 directly
     // because its API takes a single contiguous message slice.
-    var key_padded: [BLOCK_SIZE]u8 = [_]u8{0} ** BLOCK_SIZE;
+    var key_padded: [BLOCK_SIZE]u8 = @splat(0);
     if (secret.len > BLOCK_SIZE) {
         var key_hash: [HASH_SIZE]u8 = undefined;
         Sha256.hash(secret, &key_hash, .{});
@@ -212,7 +212,7 @@ test "HMAC-SHA256 RFC 2104 test vector 1" {
 }
 
 test "HMAC-SHA256 RFC 2104 test vector 2" {
-    const key = [_]u8{0x0b} ** 20;
+    const key = @as([20]u8, @splat(0x0b));
     const data = "Hi There";
     const expected_hex = "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7";
 

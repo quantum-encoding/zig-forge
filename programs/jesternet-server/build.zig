@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
 
     // Run step.
     const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
+    forwardArgs(b, run);
     const run_step = b.step("run", "Start the jesternet server");
     run_step.dependOn(&run.step);
 
@@ -47,4 +47,12 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run server tests");
     test_step.dependOn(&run_tests.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

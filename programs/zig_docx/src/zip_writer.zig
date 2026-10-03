@@ -51,7 +51,7 @@ pub const ZipWriter = struct {
 
     /// Add a file entry, using DEFLATE for compressible content or STORE for images.
     pub fn addFile(self: *ZipWriter, filename: []const u8, data: []const u8) !void {
-        const crc = std.hash.crc.Crc32.hash(data);
+        const crc = std.hash.Crc32.hash(data);
         const uncompressed_size: u32 = @intCast(data.len);
         const offset: u32 = @intCast(self.buffer.items.len);
 

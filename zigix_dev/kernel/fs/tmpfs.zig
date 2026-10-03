@@ -24,9 +24,9 @@ pub const MAX_XATTR_VAL: usize = 256;
 
 pub const Xattr = struct {
     in_use: bool = false,
-    name: [MAX_XATTR_NAME]u8 = [_]u8{0} ** MAX_XATTR_NAME,
+    name: [MAX_XATTR_NAME]u8 = @splat(0),
     name_len: u8 = 0,
-    value: [MAX_XATTR_VAL]u8 = [_]u8{0} ** MAX_XATTR_VAL,
+    value: [MAX_XATTR_VAL]u8 = @splat(0),
     value_len: u16 = 0,
 };
 
@@ -39,7 +39,7 @@ const HardLinkEntry = struct {
     in_use: bool = false,
     parent: ?*TmpfsNode = null,
     target: ?*TmpfsNode = null,
-    name: [256]u8 = [_]u8{0} ** 256,
+    name: [256]u8 = @splat(0),
     name_len: u8 = 0,
 };
 var hard_links: [MAX_HARD_LINKS]HardLinkEntry = [_]HardLinkEntry{.{}} ** MAX_HARD_LINKS;
@@ -431,7 +431,7 @@ fn tmpfsReaddir(desc: *vfs.FileDescription, entry: *vfs.DirEntry) bool {
     if (idx < node.child_count) {
         const cp = node.children_ptr orelse return false;
         const child = cp[idx] orelse return false;
-        entry.name = [_]u8{0} ** 256;
+        entry.name = @as([256]u8, @splat(0));
         for (0..child.name_len) |i| entry.name[i] = child.name[i];
         entry.name_len = child.name_len;
         entry.ino = child.inode.ino;
@@ -446,7 +446,7 @@ fn tmpfsReaddir(desc: *vfs.FileDescription, entry: *vfs.DirEntry) bool {
         if (hard_links[i].in_use and hard_links[i].parent == node) {
             if (hl_idx == 0) {
                 const target = hard_links[i].target.?;
-                entry.name = [_]u8{0} ** 256;
+                entry.name = @as([256]u8, @splat(0));
                 for (0..hard_links[i].name_len) |j| entry.name[j] = hard_links[i].name[j];
                 entry.name_len = hard_links[i].name_len;
                 entry.ino = target.inode.ino;

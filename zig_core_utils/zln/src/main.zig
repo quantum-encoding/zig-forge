@@ -102,9 +102,9 @@ fn dirnameOf(path: []const u8) []const u8 {
 fn sameName(allocator: std.mem.Allocator, a: []const u8, b: []const u8) bool {
     if (!std.mem.eql(u8, basename(a), basename(b))) return false;
 
-    const da = allocator.dupeZ(u8, dirnameOf(a)) catch return false;
+    const da = allocator.dupeSentinel(u8, dirnameOf(a), 0) catch return false;
     defer allocator.free(da);
-    const db = allocator.dupeZ(u8, dirnameOf(b)) catch return false;
+    const db = allocator.dupeSentinel(u8, dirnameOf(b), 0) catch return false;
     defer allocator.free(db);
 
     const sa = statPath(da) orelse return false;
@@ -144,16 +144,16 @@ fn makeLink(allocator: std.mem.Allocator, target: []const u8, link_name: []const
         effective_target = relative_buf.?;
     }
 
-    const target_z = try allocator.dupeZ(u8, effective_target);
+    const target_z = try allocator.dupeSentinel(u8, effective_target, 0);
     defer allocator.free(target_z);
 
-    const link_z = try allocator.dupeZ(u8, link_name);
+    const link_z = try allocator.dupeSentinel(u8, link_name, 0);
     defer allocator.free(link_z);
 
     if (!config.symbolic) {
         // GNU checks that a hard-link target is accessible (dereferencing
         // symlinks) before anything else: "failed to access 'X': ...".
-        const raw_target_z = try allocator.dupeZ(u8, target);
+        const raw_target_z = try allocator.dupeSentinel(u8, target, 0);
         defer allocator.free(raw_target_z);
         const tst = statPath(raw_target_z) orelse {
             printErrorFmt("failed to access '{s}': {s}", .{ target, errString(errnoNow()) });
@@ -206,7 +206,7 @@ fn makeLink(allocator: std.mem.Allocator, target: []const u8, link_name: []const
         // Same inode already? Unlink+relink would recreate the identical
         // state; GNU replaces atomically. Treat as success without touching
         // the destination so no failure mode can destroy it.
-        const raw_target_z = try allocator.dupeZ(u8, target);
+        const raw_target_z = try allocator.dupeSentinel(u8, target, 0);
         defer allocator.free(raw_target_z);
         if (statPath(raw_target_z)) |tst| {
             if (lstatPath(link_z)) |dst| {
@@ -573,7 +573,7 @@ pub fn main(init: std.process.Init) void {
     var error_occurred = false;
 
     if (config.target_directory) |target_dir| {
-        const target_z = allocator.dupeZ(u8, target_dir) catch {
+        const target_z = allocator.dupeSentinel(u8, target_dir, 0) catch {
             printError("memory allocation failed");
             std.process.exit(1);
         };
@@ -598,7 +598,7 @@ pub fn main(init: std.process.Init) void {
             };
         }
     } else if (config.destination) |dest| {
-        const dest_z = allocator.dupeZ(u8, dest) catch {
+        const dest_z = allocator.dupeSentinel(u8, dest, 0) catch {
             printError("memory allocation failed");
             std.process.exit(1);
         };

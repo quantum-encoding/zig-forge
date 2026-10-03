@@ -1481,9 +1481,9 @@ fn dirOf(path: []const u8) []const u8 {
 }
 
 fn renameZ(allocator: std.mem.Allocator, old: []const u8, new: []const u8) !void {
-    const old_z = try allocator.dupeZ(u8, old);
+    const old_z = try allocator.dupeSentinel(u8, old, 0);
     defer allocator.free(old_z);
-    const new_z = try allocator.dupeZ(u8, new);
+    const new_z = try allocator.dupeSentinel(u8, new, 0);
     defer allocator.free(new_z);
     if (libc.rename(old_z.ptr, new_z.ptr) != 0) return error.RenameFailed;
 }
@@ -1525,7 +1525,7 @@ fn processFile(
     if (is_stdin) {
         fd = libc.STDIN_FILENO;
     } else {
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
         fd = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
         if (fd < 0) {
@@ -1551,7 +1551,7 @@ fn processFile(
         // clobbered (TOCTOU). mkstemp rewrites the trailing XXXXXX in place.
         const template_str = try std.fmt.allocPrint(allocator, "{s}.zsed_tmpXXXXXX", .{dir});
         defer allocator.free(template_str);
-        const template = try allocator.dupeZ(u8, template_str);
+        const template = try allocator.dupeSentinel(u8, template_str, 0);
         defer allocator.free(template);
         tmp_fd = mkstemp(template.ptr);
         if (tmp_fd < 0) {
@@ -2061,7 +2061,7 @@ pub fn main(init: std.process.Init) void {
 
     // Read script files (-f) and add their contents as expressions
     for (config.script_files.items) |script_path| {
-        const script_path_z = allocator.dupeZ(u8, script_path) catch {
+        const script_path_z = allocator.dupeSentinel(u8, script_path, 0) catch {
             std.debug.print("zsed: out of memory\n", .{});
             std.process.exit(1);
         };

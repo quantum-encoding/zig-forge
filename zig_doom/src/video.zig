@@ -48,7 +48,7 @@ pub const VideoState = struct {
 
     /// Write screen as PPM file
     pub fn writePPM(self: *const VideoState, screen_num: usize, path: []const u8, alloc: std.mem.Allocator) bool {
-        const path_z = alloc.dupeZ(u8, path) catch return false;
+        const path_z = alloc.dupeSentinel(u8, path, 0) catch return false;
         defer alloc.free(path_z);
 
         const file = c.fopen(path_z.ptr, "wb") orelse return false;

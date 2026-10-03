@@ -36,6 +36,12 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.linkSystemLibrary("EndpointSecurity", .{});
     test_mod.addIncludePath(b.path("include"));
+    const es_core_h = b.addTranslateC(.{
+        .root_source_file = b.path("include/es_core.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_mod.addImport("es_core_h", es_core_h.createModule());
     const tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests and layout anchors (macOS only)");
@@ -50,6 +56,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "darwin_kit", .module = darwin_kit_mod }},
     });
     capi_mod.addIncludePath(b.path("include"));
+    capi_mod.addImport("es_core_h", es_core_h.createModule());
     const capi = b.addLibrary(.{
         .linkage = .static,
         .name = "es_core_zig",

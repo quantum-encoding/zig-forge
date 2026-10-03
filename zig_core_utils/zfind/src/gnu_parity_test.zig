@@ -73,7 +73,7 @@ fn run(alloc: std.mem.Allocator, argv: []const []const u8) !RunResult {
         cargv.deinit(alloc);
     }
     for (argv) |a| {
-        const z = try alloc.dupeZ(u8, a);
+        const z = try alloc.dupeSentinel(u8, a, 0);
         try cargv.append(alloc, z.ptr);
     }
     try cargv.append(alloc, null);

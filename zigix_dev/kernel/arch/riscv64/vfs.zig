@@ -217,7 +217,7 @@ pub const MountPoint = struct {
 
 const MAX_MOUNTS: usize = 8;
 var mounts: [MAX_MOUNTS]MountPoint = [_]MountPoint{.{
-    .path = [_]u8{0} ** 256,
+    .path = @as([256]u8, @splat(0)),
     .path_len = 0,
     .root_inode = undefined,
     .in_use = false,
@@ -347,7 +347,7 @@ pub fn resolvePath(path: []const u8) ResolveResult {
     var result = ResolveResult{
         .inode = null,
         .parent = null,
-        .leaf_name = [_]u8{0} ** 256,
+        .leaf_name = @as([256]u8, @splat(0)),
         .leaf_len = 0,
     };
 
@@ -460,7 +460,7 @@ pub fn resolvePathFrom(start: *Inode, path: []const u8) ResolveResult {
     var result = ResolveResult{
         .inode = null,
         .parent = null,
-        .leaf_name = [_]u8{0} ** 256,
+        .leaf_name = @as([256]u8, @splat(0)),
         .leaf_len = 0,
     };
 

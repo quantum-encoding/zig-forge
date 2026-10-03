@@ -98,7 +98,7 @@ pub const Process = struct {
     sig_actions: [MAX_SIGNALS]SignalAction = [_]SignalAction{.{}} ** MAX_SIGNALS,
     in_signal_handler: bool = false, // True during signal delivery (prevents recursive SIGSEGV)
     vfork_blocked: bool = false, // True when parent is blocked waiting for vfork child
-    exe_path: [256]u8 = [_]u8{0} ** 256,
+    exe_path: [256]u8 = @splat(0),
     exe_path_len: u8 = 0,
     uid: u16 = 0,
     gid: u16 = 0,
@@ -138,7 +138,7 @@ fn rdtsc() u64 {
 pub const MAX_PROCESSES = 256;
 
 var processes: [MAX_PROCESSES]?Process = [_]?Process{null} ** MAX_PROCESSES;
-var slot_in_use: [MAX_PROCESSES]bool = [_]bool{false} ** MAX_PROCESSES;
+var slot_in_use: [MAX_PROCESSES]bool = @splat(false);
 var next_pid: types.ProcessId = 1;
 
 // --- Free list for O(1) slot allocation ---
@@ -300,7 +300,7 @@ pub fn createFromCode(code: []const u8) !*Process {
         .heap_start = heap_start,
         .heap_current = heap_start,
         .fds = [_]?*vfs.FileDescription{null} ** fd_table.MAX_FDS,
-        .cwd = [_]u8{0} ** 256,
+        .cwd = @as([256]u8, @splat(0)),
         .cwd_len = 1,
     };
 
@@ -417,7 +417,7 @@ pub fn createFromElf(elf_data: []const u8) !*Process {
         .heap_current = heap_start,
         .mmap_hint = aslrMmapBase(),
         .fds = [_]?*vfs.FileDescription{null} ** fd_table.MAX_FDS,
-        .cwd = [_]u8{0} ** 256,
+        .cwd = @as([256]u8, @splat(0)),
         .cwd_len = 1,
         .capabilities = capability.CAP_ALL, // Boot processes get all capabilities
     };
@@ -522,7 +522,7 @@ pub fn initSlot(idx: usize) *Process {
         .heap_start = 0,
         .heap_current = 0,
         .fds = [_]?*vfs.FileDescription{null} ** fd_table.MAX_FDS,
-        .cwd = [_]u8{0} ** 256,
+        .cwd = @as([256]u8, @splat(0)),
         .cwd_len = 0,
     };
     return &(processes[idx].?);

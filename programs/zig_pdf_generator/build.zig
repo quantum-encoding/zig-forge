@@ -404,9 +404,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run the PDF generator CLI");
     run_step.dependOn(&run_cmd.step);
@@ -473,4 +471,12 @@ fn beaconAssetsModule(b: *std.Build, dir: ?[]const u8) *std.Build.Module {
     }
     const root = wf.add("beacon_assets.zig", zig_src.items);
     return b.createModule(.{ .root_source_file = root });
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

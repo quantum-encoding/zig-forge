@@ -104,9 +104,7 @@ pub fn build(b: *std.Build) void {
 
     // Run CLI
     const run_cli = b.addRunArtifact(cli);
-    if (b.args) |args| {
-        run_cli.addArgs(args);
-    }
+    forwardArgs(b, run_cli);
     const cli_step = b.step("cli", "Run AI Providers CLI");
     cli_step.dependOn(&run_cli.step);
 
@@ -115,9 +113,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(attack);
 
     const run_attack = b.addRunArtifact(attack);
-    if (b.args) |args| {
-        run_attack.addArgs(args);
-    }
+    forwardArgs(b, run_attack);
     const attack_step = b.step("attack", "Run security attack test suite");
     attack_step.dependOn(&run_attack.step);
 
@@ -131,9 +127,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(bench);
 
     const run_bench = b.addRunArtifact(bench);
-    if (b.args) |args| {
-        run_bench.addArgs(args);
-    }
+    forwardArgs(b, run_bench);
     const bench_step = b.step("bench", "Run HTTP benchmark suite");
     bench_step.dependOn(&run_bench.step);
 
@@ -142,9 +136,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(quantum_curl);
 
     const run_quantum = b.addRunArtifact(quantum_curl);
-    if (b.args) |args| {
-        run_quantum.addArgs(args);
-    }
+    forwardArgs(b, run_quantum);
     const quantum_step = b.step("quantum", "Run Quantum Curl HTTP Engine");
     quantum_step.dependOn(&run_quantum.step);
 
@@ -174,7 +166,7 @@ pub fn build(b: *std.Build) void {
         std.builtin.OptimizeMode,
         "recon-optimize",
         "Recon optimize mode (default ReleaseSmall for max dead-code-elim)",
-    ) orelse .ReleaseSmall;
+    ) orelse std.builtin.OptimizeMode.ReleaseSmall;
 
     const recon_module = b.addModule("http-sentinel-recon", .{
         .root_source_file = b.path("src/lib.zig"),
@@ -222,7 +214,7 @@ pub fn build(b: *std.Build) void {
         std.builtin.OptimizeMode,
         "zigix-optimize",
         "Zigix optimize mode (default ReleaseSmall)",
-    ) orelse .ReleaseSmall;
+    ) orelse std.builtin.OptimizeMode.ReleaseSmall;
 
     const zigix_url = b.option(
         []const u8,
@@ -271,4 +263,12 @@ pub fn build(b: *std.Build) void {
     });
     const zigix_step = b.step("zigix", "Build the Zigix userspace HTTP demo (.linux/.none, no libc)");
     zigix_step.dependOn(&b.addInstallArtifact(zigix_exe, .{}).step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

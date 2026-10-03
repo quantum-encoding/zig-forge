@@ -65,8 +65,8 @@ const alphSwitchList = [_]SwitchPair{
 
 fn makePair(comptime n1: []const u8, comptime n2: []const u8, episode: i16) SwitchPair {
     var p = SwitchPair{
-        .name1 = [_]u8{0} ** 9,
-        .name2 = [_]u8{0} ** 9,
+        .name1 = @as([9]u8, @splat(0)),
+        .name2 = @as([9]u8, @splat(0)),
         .episode = episode,
     };
     for (n1, 0..) |ch, idx| {
@@ -84,8 +84,8 @@ fn makePair(comptime n1: []const u8, comptime n2: []const u8, episode: i16) Swit
 
 const MAX_SWITCH_PAIRS = 50;
 
-var switch_tex1: [MAX_SWITCH_PAIRS]i16 = [_]i16{0} ** MAX_SWITCH_PAIRS;
-var switch_tex2: [MAX_SWITCH_PAIRS]i16 = [_]i16{0} ** MAX_SWITCH_PAIRS;
+var switch_tex1: [MAX_SWITCH_PAIRS]i16 = @splat(0);
+var switch_tex2: [MAX_SWITCH_PAIRS]i16 = @splat(0);
 var num_switches: usize = 0;
 
 /// Initialize the switch list from the alphSwitchList table.

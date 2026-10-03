@@ -193,7 +193,7 @@ fn sha256_full(input: []const u8, output: *[32]u8) void {
     }
 
     // Final block with padding
-    var final_block: [64]u8 = [_]u8{0} ** 64;
+    var final_block: [64]u8 = @splat(0);
     const remaining = len - offset;
 
     if (remaining > 0) {
@@ -234,7 +234,7 @@ pub fn sha256d(input: *const [80]u8, output: *[32]u8) void {
 }
 
 test "SHA256d basic" {
-    const input = [_]u8{0} ** 80;
+    const input = @as([80]u8, @splat(0));
     var output: [32]u8 = undefined;
     sha256d(&input, &output);
 

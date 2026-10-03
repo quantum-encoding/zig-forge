@@ -72,7 +72,7 @@ pub const KeyScope = struct {
 };
 
 pub const ApiKey = struct {
-    key_hash: [32]u8 = .{0} ** 32,
+    key_hash: [32]u8 = @splat(0),
     account_id: FixedStr64 = .{},
     name: FixedStr128 = .{},
     prefix: FixedStr16 = .{}, // "qai_k_" + first 8 hex
@@ -89,7 +89,7 @@ pub const ApiKey = struct {
 pub const Reservation = struct {
     id: u64 = 0,
     account_id: FixedStr64 = .{},
-    key_hash: [32]u8 = .{0} ** 32,
+    key_hash: [32]u8 = @splat(0),
     amount_ticks: i64 = 0,
     endpoint: FixedStr64 = .{},
     model: FixedStr128 = .{},
@@ -130,7 +130,7 @@ pub const WalOp = enum(u8) {
 
 pub fn FixedString(comptime max_len: usize) type {
     return struct {
-        buf: [max_len]u8 = .{0} ** max_len,
+        buf: [max_len]u8 = @splat(0),
         len: u16 = 0,
 
         const Self = @This();

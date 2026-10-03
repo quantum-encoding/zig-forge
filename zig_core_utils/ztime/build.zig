@@ -20,9 +20,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run ztime");
     run_step.dependOn(&run_cmd.step);
@@ -43,7 +41,7 @@ pub fn build(b: *std.Build) void {
     // and compare its bytes/exit codes against documented GNU behavior and
     // independently-computed system values (page size, shell exit status).
     const build_options = b.addOptions();
-    build_options.addOption([]const u8, "ztime_path", b.getInstallPath(.bin, "ztime"));
+    build_options.addOptionPath("ztime_path", exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -59,4 +57,12 @@ pub fn build(b: *std.Build) void {
     // The parity tests exec the built binary, so ensure it is installed first.
     run_parity_tests.step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_parity_tests.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

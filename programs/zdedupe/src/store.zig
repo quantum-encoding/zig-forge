@@ -224,8 +224,8 @@ pub fn write(path: []const u8, source: Source) WriteError!void {
     var final_buf: [4096]u8 = undefined;
     if (path.len >= final_buf.len) return error.PathTooLong;
 
-    const final_z = std.fmt.bufPrintZ(&final_buf, "{s}", .{path}) catch return error.PathTooLong;
-    const partial_z = std.fmt.bufPrintZ(&partial_buf, "{s}.partial", .{path}) catch return error.PathTooLong;
+    const final_z = std.fmt.bufPrintSentinel(&final_buf, "{s}", .{path}, 0) catch return error.PathTooLong;
+    const partial_z = std.fmt.bufPrintSentinel(&partial_buf, "{s}.partial", .{path}, 0) catch return error.PathTooLong;
 
     // 0600: results list the user's files; nobody else needs to read them.
     const fd = libc.open(partial_z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(libc.mode_t, 0o600));
@@ -840,7 +840,7 @@ test "the reader refuses a wrong magic, version or length" {
         // Longer than the header claims: the file was replaced or extended.
         const short = try emptyStore(gpa);
         defer gpa.free(short);
-        const bytes = try std.mem.concat(gpa, u8, &.{ short, &[_]u8{0} ** 64 });
+        const bytes = try std.mem.concat(gpa, u8, &.{ short, &@as([64]u8, @splat(0)) });
         defer gpa.free(bytes);
         var why: Reader.Rejection = undefined;
         try std.testing.expectError(error.Invalid, Reader.init(bytes, &why));
@@ -848,7 +848,7 @@ test "the reader refuses a wrong magic, version or length" {
     }
     {
         var why: Reader.Rejection = undefined;
-        try std.testing.expectError(error.Invalid, Reader.init(&[_]u8{0} ** 10, &why));
+        try std.testing.expectError(error.Invalid, Reader.init(&@as([10]u8, @splat(0)), &why));
         try std.testing.expectEqual(Reader.Rejection.shorter_than_a_header, why);
     }
 }

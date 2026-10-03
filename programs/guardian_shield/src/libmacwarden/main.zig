@@ -108,15 +108,15 @@ const EMERGENCY_KILL_SWITCH = "/tmp/.warden_emergency_disable";
 
 // Static path storage (no allocator needed)
 var protected_paths_storage: [MAX_PATHS][MAX_PATH_LEN]u8 = undefined;
-var protected_paths_lens: [MAX_PATHS]usize = [_]usize{0} ** MAX_PATHS;
+var protected_paths_lens: [MAX_PATHS]usize = @splat(0);
 var protected_paths_count: usize = 0;
 
 var whitelist_storage: [MAX_PATHS][MAX_PATH_LEN]u8 = undefined;
-var whitelist_lens: [MAX_PATHS]usize = [_]usize{0} ** MAX_PATHS;
+var whitelist_lens: [MAX_PATHS]usize = @splat(0);
 var whitelist_count: usize = 0;
 
 var self_preserve_storage: [MAX_PATHS][MAX_PATH_LEN]u8 = undefined;
-var self_preserve_lens: [MAX_PATHS]usize = [_]usize{0} ** MAX_PATHS;
+var self_preserve_lens: [MAX_PATHS]usize = @splat(0);
 var self_preserve_count: usize = 0;
 
 var config_enabled: bool = true;
@@ -394,7 +394,7 @@ fn ctkInit() void {
         .sin_family = 2, // AF_INET
         .sin_port = @byteSwap(@as(u16, CTK_UDP_PORT)), // network byte order
         .sin_addr = @byteSwap(@as(u32, 0x7F000001)), // 127.0.0.1
-        .sin_zero = [_]u8{0} ** 8,
+        .sin_zero = @as([8]u8, @splat(0)),
     };
 }
 

@@ -43,7 +43,7 @@ const XID: u32 = 0x5A494749; // "ZIGI" as transaction ID
 /// Send DHCP DISCOVER and wait for OFFER. Returns IP config or null on timeout.
 pub fn discover(timeout_ticks: u32) ?DhcpResult {
     // Build and send DHCP DISCOVER
-    var pkt: [590]u8 = .{0} ** 590;
+    var pkt: [590]u8 = @splat(0);
     const pkt_len = buildDiscover(&pkt);
 
     if (!nic.transmit(pkt[0..pkt_len])) {

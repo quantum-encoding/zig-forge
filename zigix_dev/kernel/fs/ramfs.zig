@@ -29,7 +29,7 @@ pub const RamfsNode = struct {
     parent: ?*RamfsNode,
     in_use: bool,
     // Symlink target (only used when inode.mode & S_IFMT == S_IFLNK)
-    symlink_target: [256]u8 = [_]u8{0} ** 256,
+    symlink_target: [256]u8 = @splat(0),
     symlink_len: u8 = 0,
 
     pub fn dataPages(self: *RamfsNode) ?[*]?types.PhysAddr {
@@ -394,7 +394,7 @@ fn ramfsReaddir(desc: *vfs.FileDescription, entry: *vfs.DirEntry) bool {
 
     const child = cp[idx] orelse return false;
 
-    entry.name = [_]u8{0} ** 256;
+    entry.name = @as([256]u8, @splat(0));
     for (0..child.name_len) |i| {
         entry.name[i] = child.name[i];
     }

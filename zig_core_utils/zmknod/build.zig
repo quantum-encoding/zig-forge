@@ -18,9 +18,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run zmknod");
     run_step.dependOn(&run_cmd.step);
@@ -39,7 +37,7 @@ pub fn build(b: *std.Build) void {
     // GNU parity tests: shell out to the installed zmknod binary and diff
     // its behavior against the real GNU coreutils `mknod` binary.
     const test_options = b.addOptions();
-    test_options.addOption([]const u8, "zmknod_bin", b.getInstallPath(.bin, "zmknod"));
+    test_options.addOptionPath("zmknod_bin", exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -57,4 +55,12 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit + GNU parity tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_parity_tests.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

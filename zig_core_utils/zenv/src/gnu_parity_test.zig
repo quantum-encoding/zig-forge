@@ -62,7 +62,7 @@ const RunResult = struct {
 };
 
 fn dupZ(a: std.mem.Allocator, s: []const u8) ![:0]const u8 {
-    return a.dupeZ(u8, s);
+    return a.dupeSentinel(u8, s, 0);
 }
 
 /// Build a null-terminated C string vector from a slice of NUL-terminated slices.
@@ -99,7 +99,7 @@ fn run(
     argv: []const [:0]const u8,
     env: []const [:0]const u8,
 ) !RunResult {
-    const path_z = try a.dupeZ(u8, path);
+    const path_z = try a.dupeSentinel(u8, path, 0);
     defer a.free(path_z);
     const argv_c = try argvVec(a, argv);
     defer a.free(argv_c);
@@ -223,7 +223,7 @@ const PATH_ENV = [_][:0]const u8{"PATH=/usr/bin:/bin"};
 /// Create a fresh temp directory via mkdtemp(3). Returns the NUL-terminated
 /// absolute path (owned by the caller).
 fn makeTempDir(a: std.mem.Allocator) ![:0]u8 {
-    const template = try a.dupeZ(u8, "/tmp/zenv_test_XXXXXX");
+    const template = try a.dupeSentinel(u8, "/tmp/zenv_test_XXXXXX", 0);
     errdefer a.free(template);
     if (mkdtemp(template.ptr) == null) return error.MkdtempFailed;
     return template;

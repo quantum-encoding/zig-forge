@@ -482,7 +482,7 @@ pub fn main(init: std.process.Init) !void {
 
     const fd: c_int = if (cfg.file) |path| blk: {
         var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch {
+        const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch {
             writeStderr("zbase64: path too long\n");
             std.process.exit(1);
         };

@@ -10,11 +10,11 @@ const Rect = tui.Rect;
 const Style = tui.Style;
 
 // Previous byte counters for rate calculation
-var prev_rx: [sysinfo.MAX_NET_IFACES]u64 = [_]u64{0} ** sysinfo.MAX_NET_IFACES;
-var prev_tx: [sysinfo.MAX_NET_IFACES]u64 = [_]u64{0} ** sysinfo.MAX_NET_IFACES;
+var prev_rx: [sysinfo.MAX_NET_IFACES]u64 = @splat(0);
+var prev_tx: [sysinfo.MAX_NET_IFACES]u64 = @splat(0);
 var prev_timestamp: i64 = 0;
-var rx_rate: [sysinfo.MAX_NET_IFACES]u64 = [_]u64{0} ** sysinfo.MAX_NET_IFACES;
-var tx_rate: [sysinfo.MAX_NET_IFACES]u64 = [_]u64{0} ** sysinfo.MAX_NET_IFACES;
+var rx_rate: [sysinfo.MAX_NET_IFACES]u64 = @splat(0);
+var tx_rate: [sysinfo.MAX_NET_IFACES]u64 = @splat(0);
 var has_prev: bool = false;
 
 pub fn updateRates(snap: *const sysinfo.SystemSnapshot) void {

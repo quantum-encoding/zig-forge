@@ -562,7 +562,7 @@ fn lsmHasBpf(lsm: []const u8) bool {
 // Read a whole small (proc/sys) file into `buf` via libc; return trimmed slice.
 fn readSmall(path: []const u8, buf: []u8) ![]const u8 {
     var zbuf: [MAX_PATH_BYTES]u8 = undefined;
-    const zpath = try std.fmt.bufPrintZ(&zbuf, "{s}", .{path});
+    const zpath = try std.fmt.bufPrintSentinel(&zbuf, "{s}", .{path}, 0);
     const fd = c.open(zpath.ptr, c.O_RDONLY);
     if (fd < 0) return error.OpenFailed;
     defer _ = c.close(fd);
@@ -599,7 +599,7 @@ fn resolveObjPath(alloc: std.mem.Allocator, override: ?[]const u8) ![]u8 {
     for (candidates) |cand| {
         const p = try std.fs.path.join(alloc, &.{ dir, cand });
         var zbuf: [MAX_PATH_BYTES]u8 = undefined;
-        const zp = std.fmt.bufPrintZ(&zbuf, "{s}", .{p}) catch {
+        const zp = std.fmt.bufPrintSentinel(&zbuf, "{s}", .{p}, 0) catch {
             alloc.free(p);
             continue;
         };
@@ -646,7 +646,7 @@ const Loader = struct {
 
     fn open(self: *Loader, path: []const u8) !void {
         var pbuf: [MAX_PATH_BYTES]u8 = undefined;
-        const z = try std.fmt.bufPrintZ(&pbuf, "{s}", .{path});
+        const z = try std.fmt.bufPrintSentinel(&pbuf, "{s}", .{path}, 0);
         const o = c.bpf_object__open_file(z.ptr, null);
         if (o == null) {
             std.log.err("bpf_object__open_file failed for {s}", .{path});
@@ -896,7 +896,7 @@ const Loader = struct {
         // Every configured trusted exe...
         var buf: [MAX_PATH_BYTES]u8 = undefined;
         for (self.cfg.trusted_exes) |p| {
-            const zp = std.fmt.bufPrintZ(&buf, "{s}", .{p}) catch continue;
+            const zp = std.fmt.bufPrintSentinel(&buf, "{s}", .{p}, 0) catch continue;
             insertInode(fd, zp);
         }
         // ...AND the loader's own binary (canonical), so it trusts itself no
@@ -1056,7 +1056,7 @@ const Loader = struct {
 
             // Pin the link so it survives loader exit.
             var pbuf: [MAX_PATH_BYTES]u8 = undefined;
-            const pin_path = std.fmt.bufPrintZ(&pbuf, "{s}/{s}", .{ self.cfg.pin_dir, std.mem.span(name) }) catch {
+            const pin_path = std.fmt.bufPrintSentinel(&pbuf, "{s}/{s}", .{ self.cfg.pin_dir, std.mem.span(name) }, 0) catch {
                 self.teardownLinks();
                 return error.PinPathTooLong;
             };
@@ -1163,7 +1163,7 @@ const Loader = struct {
         out_first.* = null;
         for (self.pin_paths.items) |path| {
             var zbuf: [MAX_PATH_BYTES]u8 = undefined;
-            const zp = std.fmt.bufPrintZ(&zbuf, "{s}", .{path}) catch continue;
+            const zp = std.fmt.bufPrintSentinel(&zbuf, "{s}", .{path}, 0) catch continue;
             if (c.access(zp.ptr, c.F_OK) != 0) {
                 missing += 1;
                 if (out_first.* == null) out_first.* = path;
@@ -1241,9 +1241,9 @@ const Loader = struct {
         const written = buf[0..n];
 
         var tmp_path: [512]u8 = undefined;
-        const tmp = std.fmt.bufPrintZ(&tmp_path, "{s}.stats.tmp", .{self.cfg.log_file}) catch return;
+        const tmp = std.fmt.bufPrintSentinel(&tmp_path, "{s}.stats.tmp", .{self.cfg.log_file}, 0) catch return;
         var final_path: [512]u8 = undefined;
-        const final = std.fmt.bufPrintZ(&final_path, "{s}.stats", .{self.cfg.log_file}) catch return;
+        const final = std.fmt.bufPrintSentinel(&final_path, "{s}.stats", .{self.cfg.log_file}, 0) catch return;
 
         const tfd = c.open(tmp.ptr, c.O_WRONLY | c.O_CREAT | c.O_TRUNC, @as(c_uint, 0o644));
         if (tfd < 0) return;
@@ -1305,7 +1305,7 @@ fn exeEntryCheck(path: []const u8) EntryCheck {
     var end: usize = path.len;
     var is_leaf = true;
     while (true) {
-        const zp = std.fmt.bufPrintZ(&buf, "{s}", .{path[0..end]}) catch
+        const zp = std.fmt.bufPrintSentinel(&buf, "{s}", .{path[0..end]}, 0) catch
             return .{ .verdict = .unsafe, .reason = "longer than the map key" };
 
         var st: c.struct_stat = undefined;
@@ -1393,7 +1393,7 @@ fn readProcPpid(pid: u32) u32 {
 /// for processes that exit mid-sweep - both are simply skipped.
 fn readProcExe(pid: u32, buf: []u8) ?[]const u8 {
     var pbuf: [64]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&pbuf, "/proc/{d}/exe", .{pid}) catch return null;
+    const path = std.fmt.bufPrintSentinel(&pbuf, "/proc/{d}/exe", .{pid}, 0) catch return null;
     const n = c.readlink(path.ptr, buf.ptr, buf.len);
     if (n <= 0) return null;
     var len: usize = @intCast(n);
@@ -1468,7 +1468,7 @@ fn insertCidr(fd: c_int, cidr: []const u8) bool {
         return false;
     }
     var zip: [64]u8 = undefined;
-    const zip_s = std.fmt.bufPrintZ(&zip, "{s}", .{ip_str}) catch return false;
+    const zip_s = std.fmt.bufPrintSentinel(&zip, "{s}", .{ip_str}, 0) catch return false;
     var key = std.mem.zeroes(EgressKey);
     key.prefixlen = prefix;
     if (c.inet_pton(c.AF_INET, zip_s.ptr, &key.addr) != 1) {
@@ -1480,7 +1480,7 @@ fn insertCidr(fd: c_int, cidr: []const u8) bool {
 
 fn makePinDir(dir: []const u8) !void {
     var zbuf: [MAX_PATH_BYTES]u8 = undefined;
-    const zdir = try std.fmt.bufPrintZ(&zbuf, "{s}", .{dir});
+    const zdir = try std.fmt.bufPrintSentinel(&zbuf, "{s}", .{dir}, 0);
     if (c.mkdir(zdir.ptr, 0o755) != 0) {
         const e = std.c._errno().*;
         if (e != c.EEXIST) return error.MkdirFailed;
@@ -1489,7 +1489,7 @@ fn makePinDir(dir: []const u8) !void {
 
 fn teardown(pin_dir: []const u8) !void {
     var zbuf: [MAX_PATH_BYTES]u8 = undefined;
-    const zdir = try std.fmt.bufPrintZ(&zbuf, "{s}", .{pin_dir});
+    const zdir = try std.fmt.bufPrintSentinel(&zbuf, "{s}", .{pin_dir}, 0);
 
     // Collect pin names first (do not mutate the dir mid-iteration).
     var names: std.ArrayListUnmanaged([]u8) = .empty;
@@ -1525,7 +1525,7 @@ fn teardown(pin_dir: []const u8) !void {
     var detached: usize = 0;
     for (names.items) |name| {
         var fbuf: [MAX_PATH_BYTES]u8 = undefined;
-        const fp = std.fmt.bufPrintZ(&fbuf, "{s}/{s}", .{ pin_dir, name }) catch continue;
+        const fp = std.fmt.bufPrintSentinel(&fbuf, "{s}/{s}", .{ pin_dir, name }, 0) catch continue;
         const link = c.bpf_link__open(fp.ptr);
         if (link != null and c.libbpf_get_error(link) == 0) {
             _ = c.bpf_link__detach(link); // no-op (-EOPNOTSUPP) for LSM; harmless
@@ -1647,7 +1647,7 @@ fn handleExec(_: ?*anyopaque, data: ?*anyopaque, size: usize) callconv(.c) c_int
 
 fn loadConfig(path: []const u8) !std.json.Parsed(RawConfig) {
     var zbuf: [MAX_PATH_BYTES]u8 = undefined;
-    const zpath = try std.fmt.bufPrintZ(&zbuf, "{s}", .{path});
+    const zpath = try std.fmt.bufPrintSentinel(&zbuf, "{s}", .{path}, 0);
     const fd = c.open(zpath.ptr, c.O_RDONLY);
     if (fd < 0) return error.ConfigOpenFailed;
     defer _ = c.close(fd);

@@ -145,7 +145,7 @@ pub const ChronosClient = struct {
 
     /// Get Phi timestamp for agent
     pub fn getPhiTimestamp(self: *ChronosClient, agent_id: []const u8) ![]u8 {
-        const agent_id_z = try self.allocator.dupeZ(u8, agent_id);
+        const agent_id_z = try self.allocator.dupeSentinel(u8, agent_id, 0);
         defer self.allocator.free(agent_id_z);
 
         const msg = dbus.c.dbus_message_new_method_call(

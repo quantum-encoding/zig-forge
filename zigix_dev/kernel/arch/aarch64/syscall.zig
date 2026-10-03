@@ -691,7 +691,7 @@ fn resolveWithDirfd(proc: *process.Process, dirfd: u64, path: []const u8) vfs.Re
         if (fd_table.fdGet(&proc.fds, @truncate(dirfd))) |desc| {
             return vfs.resolvePathFrom(desc.inode, path);
         }
-        return vfs.ResolveResult{ .inode = null, .parent = null, .leaf_name = [_]u8{0} ** 256, .leaf_len = 0 };
+        return vfs.ResolveResult{ .inode = null, .parent = null, .leaf_name = @as([256]u8, @splat(0)), .leaf_len = 0 };
     } else {
         var abs_buf: [512]u8 = undefined;
         const cwd = proc.cwd[0..proc.cwd_len];
@@ -5848,7 +5848,7 @@ fn sysAccept(frame: *exception.TrapFrame) i64 {
     // Write peer address to user if requested
     if (addr_ptr != 0) {
         if (vmm.translate(vmm.PhysAddr.from(current.page_table), vmm.VirtAddr.from(addr_ptr)) != null) {
-            var sa_buf: [16]u8 = [_]u8{0} ** 16;
+            var sa_buf: [16]u8 = @splat(0);
             sa_buf[0] = @truncate(socket.AF_INET); // sa_family low byte
             sa_buf[1] = @truncate(socket.AF_INET >> 8);
             ethernet.putU16BE(sa_buf[2..4], conn.remote_port);

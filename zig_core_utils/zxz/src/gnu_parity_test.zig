@@ -66,13 +66,13 @@ fn baseDir() []const u8 {
     const dir = std.fmt.bufPrint(&base_buf, "{s}/zig-out/zxz-parity-tmp", .{cwd_slice}) catch @panic("path too long");
     // best-effort create (ignore EEXIST)
     var zbuf: [4096]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&zbuf, "{s}", .{dir}) catch @panic("path too long");
+    const z = std.fmt.bufPrintSentinel(&zbuf, "{s}", .{dir}, 0) catch @panic("path too long");
     _ = mkdir(z.ptr, 0o755);
     return dir;
 }
 
 fn joinZ(buf: []u8, dir: []const u8, name: []const u8) [:0]const u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, name }) catch @panic("path too long");
+    return std.fmt.bufPrintSentinel(buf, "{s}/{s}", .{ dir, name }, 0) catch @panic("path too long");
 }
 
 fn writeFile(pathZ: [:0]const u8, data: []const u8) void {
@@ -119,7 +119,7 @@ fn zxzBin() []const u8 {
 fn xzBin() ?[]const u8 {
     const b = envVar("XZ_BIN") orelse return null;
     var buf: [4096]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{b}) catch return null;
+    const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{b}, 0) catch return null;
     if (access(z.ptr, 1) != 0) return null; // X_OK
     return b;
 }

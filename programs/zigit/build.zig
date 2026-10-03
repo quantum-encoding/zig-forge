@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
+    forwardArgs(b, run);
     const run_step = b.step("run", "Run zigit");
     run_step.dependOn(&run.step);
 
@@ -37,19 +37,24 @@ pub fn build(b: *std.Build) void {
 
     // Parity harness: runs tests/parity.sh, which shells out to the real
     // `git` binary and diffs its output byte-for-byte against the freshly
-    // built `zigit`. It needs the installed executable on disk (the script
-    // resolves $ZIGIT_BIN to zig-out/bin/zigit), so depend on the install
-    // step. Kept OUT of `zig build test` because it requires a system `git`
+    // built `zigit`. The script execs $ZIGIT_BIN, which `env` sets to the
+    // built executable. Kept OUT of `zig build test` because it requires a system `git`
     // (and, for the clone/push sections, network + git-http-backend) that a
     // hermetic unit-test run can't assume — invoke it explicitly with
     // `zig build parity`.
-    const parity = b.addSystemCommand(&.{"bash"});
+    const parity = b.addSystemCommand(&.{"env"});
+    parity.addPrefixedFileArg("ZIGIT_BIN=", exe.getEmittedBin());
+    parity.addArg("bash");
     parity.addFileArg(b.path("tests/parity.sh"));
-    parity.setEnvironmentVariable(
-        "ZIGIT_BIN",
-        b.getInstallPath(.bin, exe.out_filename),
-    );
     parity.step.dependOn(b.getInstallStep());
     const parity_step = b.step("parity", "Run the git-parity harness (requires system git)");
     parity_step.dependOn(&parity.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

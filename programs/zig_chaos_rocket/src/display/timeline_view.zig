@@ -14,7 +14,7 @@ const BRIGHT_GREEN = ESC ++ "[92m";
 const BRIGHT_CYAN = ESC ++ "[96m";
 
 // Separator line constants (Zig 0.16 does not support fill patterns)
-const SEPARATOR_DASH_68 = "─" ** 68;
+const SEPARATOR_DASH_68 = repeatStr("─", 68);
 
 pub fn renderTimeline(tl: *const timeline_mod.Timeline, writer: anytype) void {
     writer.print("\n{s}{s}  MISSION TIMELINE{s}\n", .{ BOLD, BRIGHT_CYAN, RESET }) catch {};
@@ -36,4 +36,14 @@ pub fn renderTimeline(tl: *const timeline_mod.Timeline, writer: anytype) void {
         }
     }
     writer.print("\n", .{}) catch {};
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

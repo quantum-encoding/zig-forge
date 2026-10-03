@@ -31,7 +31,7 @@ var idt_ptr: IdtPtr = undefined;
 // Static XSAVE buffer for SSE/AVX state save/restore in interrupt handler.
 // TODO(SMP Step 3): Replace with per-CPU fxsave via GS_BASE + CpuLocal.fxsave_area
 // when swapgs is added to commonStub. Safe for single-CPU (Step 1-2).
-export var fxsave_area: [512]u8 align(64) = [_]u8{0} ** 512;
+export var fxsave_area: [512]u8 align(64) = @as([512]u8, @splat(0));
 
 fn makeGate(handler: u64, ist: u3) IdtEntry {
     return .{

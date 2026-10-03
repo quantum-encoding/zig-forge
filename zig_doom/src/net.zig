@@ -45,10 +45,10 @@ pub const NetState = struct {
     netcmds: [MAXPLAYERS][BACKUPTICS]TicCmd = [_][BACKUPTICS]TicCmd{[_]TicCmd{.{}} ** BACKUPTICS} ** MAXPLAYERS,
 
     // Input state tracking
-    gamekeydown: [256]bool = [_]bool{false} ** 256,
-    mousebuttons: [3]bool = [_]bool{false} ** 3,
+    gamekeydown: [256]bool = @splat(false),
+    mousebuttons: [3]bool = @splat(false),
     mouse_x: i32 = 0,
-    joybuttons: [4]bool = [_]bool{false} ** 4,
+    joybuttons: [4]bool = @splat(false),
 
     // Turn tracking for slow-turn acceleration
     turnheld: i32 = 0,

@@ -244,7 +244,7 @@ test "avx512 single hash matches scalar" {
     const testing = std.testing;
 
     // Test input
-    const input = [_]u8{0} ** 80;
+    const input = @as([80]u8, @splat(0));
 
     // Scalar reference
     var expected: [32]u8 = undefined;

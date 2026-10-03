@@ -6,8 +6,8 @@ const fault_injector = @import("fault_injector.zig");
 const fuzzer_mod = @import("fuzzer.zig");
 
 // Separator line constants (Zig 0.16 does not support fill patterns)
-const SEPARATOR_EQ_72 = "=" ** 72;
-const SEPARATOR_DASH_68 = "─" ** 68;
+const SEPARATOR_EQ_72 = &@as([72]u8, @splat('='));
+const SEPARATOR_DASH_68 = repeatStr("─", 68);
 
 pub const ChaosReport = struct {
     total_injected: u32 = 0,
@@ -146,4 +146,14 @@ test "addFuzzResult accumulates iterations, errors, and safety catches" {
     try testing.expectEqual(@as(u64, 8), report.fuzz_errors_handled);
     try testing.expectEqual(@as(u64, 3), report.fuzz_safety_catches);
     try testing.expectEqual(@as(u64, 0), report.fuzz_crashes);
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

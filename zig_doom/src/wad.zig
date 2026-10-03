@@ -52,7 +52,7 @@ pub const Wad = struct {
     /// Open and parse a WAD file
     pub fn open(path: []const u8, alloc: std.mem.Allocator) WadError!Wad {
         // Use C file I/O for Zig 0.16 compatibility
-        const path_z = alloc.dupeZ(u8, path) catch return WadError.OutOfMemory;
+        const path_z = alloc.dupeSentinel(u8, path, 0) catch return WadError.OutOfMemory;
         defer alloc.free(path_z);
 
         const file = c.fopen(path_z.ptr, "rb") orelse return WadError.FileNotFound;
@@ -118,7 +118,7 @@ pub const Wad = struct {
 
     /// Find a lump by name (case-insensitive, null-padded 8-char comparison)
     pub fn findLump(self: *const Wad, name: []const u8) ?usize {
-        var search: [8]u8 = [_]u8{0} ** 8;
+        var search: [8]u8 = @splat(0);
         const len = @min(name.len, 8);
         for (0..len) |i| {
             search[i] = std.ascii.toUpper(name[i]);
@@ -134,7 +134,7 @@ pub const Wad = struct {
 
     /// Find a lump starting from a given index (for map lumps)
     pub fn findLumpAfter(self: *const Wad, name: []const u8, start: usize) ?usize {
-        var search: [8]u8 = [_]u8{0} ** 8;
+        var search: [8]u8 = @splat(0);
         const len = @min(name.len, 8);
         for (0..len) |i| {
             search[i] = std.ascii.toUpper(name[i]);

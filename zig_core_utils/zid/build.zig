@@ -19,9 +19,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run zid");
     run_step.dependOn(&run_cmd.step);
@@ -36,7 +34,7 @@ pub fn build(b: *std.Build) void {
     const test_opts = b.addOptions();
     // Absolute path of the freshly-installed zid, so the test drives the build
     // it belongs to rather than whatever is on PATH.
-    test_opts.addOption([]const u8, "zid_path", b.getInstallPath(.bin, "zid"));
+    test_opts.addOptionPath("zid_path", exe.getEmittedBin());
     test_opts.addOption([]const u8, "gid_path", gid_path);
 
     const test_mod = b.createModule(.{
@@ -54,4 +52,12 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run GNU-parity tests");
     test_step.dependOn(&run_tests.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

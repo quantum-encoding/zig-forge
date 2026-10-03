@@ -1442,7 +1442,7 @@ test "GF multiply" {
 test "encode large data uses higher version" {
     const allocator = std.testing.allocator;
     // 250 bytes needs version > 10 at EC-M (force byte mode since A is alphanumeric)
-    const data = "A" ** 250;
+    const data = &@as([250]u8, @splat('A'));
     var qr = try encode(allocator, data, .{ .ec_level = .M, .max_version = 25, .mode = .byte });
     defer qr.deinit(allocator);
     try std.testing.expect(qr.version > 10);
@@ -1452,7 +1452,7 @@ test "encode large data uses higher version" {
 test "version 25 capacity" {
     const allocator = std.testing.allocator;
     // Version 25 EC-L can hold 1273 bytes
-    const data = "X" ** 1000;
+    const data = &@as([1000]u8, @splat('X'));
     var qr = try encode(allocator, data, .{ .ec_level = .L, .max_version = 25 });
     defer qr.deinit(allocator);
     try std.testing.expect(qr.version <= 25);
@@ -1461,7 +1461,7 @@ test "version 25 capacity" {
 test "v40 capacity" {
     const allocator = std.testing.allocator;
     // Version 40 EC-L can hold 2894 bytes in byte mode
-    const data = "Z" ** 2800;
+    const data = &@as([2800]u8, @splat('Z'));
     var qr = try encode(allocator, data, .{ .ec_level = .L, .mode = .byte });
     defer qr.deinit(allocator);
     try std.testing.expect(qr.version >= 37);

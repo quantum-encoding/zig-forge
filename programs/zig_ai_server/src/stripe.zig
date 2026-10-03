@@ -445,7 +445,7 @@ test "Stripe webhook HMAC: RFC 4231 Test Case 7 vector accepts, tamper rejects" 
     // or the constant-time compare is wrong, accept-on-match fails.
     const allocator = std.testing.allocator;
 
-    const secret = [_]u8{0xaa} ** 131; // RFC 4231 TC7 key
+    const secret = @as([131]u8, @splat(0xaa)); // RFC 4231 TC7 key
     // RFC 4231 TC7 data = t ++ "." ++ body :
     //   "This is a test using a larger than block-size key and a larger than
     //    block-size data. The key needs to be hashed before being used by
@@ -468,7 +468,7 @@ test "Stripe webhook HMAC: RFC 4231 Test Case 7 vector accepts, tamper rejects" 
     try std.testing.expect(!verifySignature(allocator, bad_header, body, &secret));
 
     // Negative 3: wrong secret → reject.
-    const wrong_secret = [_]u8{0xbb} ** 131;
+    const wrong_secret = @as([131]u8, @splat(0xbb));
     try std.testing.expect(!verifySignature(allocator, header, body, &wrong_secret));
 
     // Negative 4: malformed header (no v1) → reject.

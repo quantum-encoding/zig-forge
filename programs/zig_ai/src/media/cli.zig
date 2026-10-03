@@ -1,6 +1,7 @@
 // Media CLI - Command-line interface for image and video generation
 
 const std = @import("std");
+const compat = @import("../zig_compat.zig");
 const Allocator = std.mem.Allocator;
 const types = @import("types.zig");
 const storage = @import("storage.zig");
@@ -1010,7 +1011,7 @@ pub fn listProviders() void {
         \\
     , .{});
 
-    inline for (std.meta.fields(ImageProvider)) |field| {
+    inline for (compat.fields(ImageProvider)) |field| {
         const provider: ImageProvider = @enumFromInt(field.value);
         const available = config.hasProvider(provider);
         const status = if (available) "\x1b[32m✓\x1b[0m" else "\x1b[31m✗\x1b[0m";
@@ -1028,7 +1029,7 @@ pub fn listProviders() void {
         \\
     , .{});
 
-    inline for (std.meta.fields(VideoProvider)) |field| {
+    inline for (compat.fields(VideoProvider)) |field| {
         const provider: VideoProvider = @enumFromInt(field.value);
         const available = config.hasVideoProvider(provider);
         const status = if (available) "\x1b[32m✓\x1b[0m" else "\x1b[31m✗\x1b[0m";
@@ -1046,7 +1047,7 @@ pub fn listProviders() void {
         \\
     , .{});
 
-    inline for (std.meta.fields(MusicProvider)) |field| {
+    inline for (compat.fields(MusicProvider)) |field| {
         const provider: MusicProvider = @enumFromInt(field.value);
         const available = config.hasMusicProvider(provider);
         const status = if (available) "\x1b[32m✓\x1b[0m" else "\x1b[31m✗\x1b[0m";

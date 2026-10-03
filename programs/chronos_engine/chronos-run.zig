@@ -332,7 +332,7 @@ fn eql(a: []const u8, b: []const u8) bool {
 }
 
 fn stateFilePath(buf: *[64]u8, pid: c_int) [:0]const u8 {
-    return std.fmt.bufPrintZ(buf, "/tmp/cognitive-state-{d}", .{pid}) catch unreachable;
+    return std.fmt.bufPrintSentinel(buf, "/tmp/cognitive-state-{d}", .{pid}, 0) catch unreachable;
 }
 
 /// Write "<ts>:<state>" atomically (temp + rename) so the reader never sees a
@@ -341,7 +341,7 @@ fn writeStateFile(pid: c_int, state: []const u8) void {
     var pbuf: [64]u8 = undefined;
     const path = stateFilePath(&pbuf, pid);
     var tbuf: [80]u8 = undefined;
-    const tmp = std.fmt.bufPrintZ(&tbuf, "/tmp/.cognitive-state-{d}.tmp", .{pid}) catch return;
+    const tmp = std.fmt.bufPrintSentinel(&tbuf, "/tmp/.cognitive-state-{d}.tmp", .{pid}, 0) catch return;
 
     var line: [128]u8 = undefined;
     const out = std.fmt.bufPrint(&line, "{d}:{s}", .{ time(null), state }) catch return;

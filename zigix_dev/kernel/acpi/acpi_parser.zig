@@ -23,7 +23,7 @@ pub const AcpiConfig = struct {
     lapic_addr: u32 = 0, // Local APIC base from MADT header
     ioapic_addr: u32 = 0,
     ioapic_gsi_base: u32 = 0,
-    apic_ids: [16]u8 = [_]u8{0} ** 16, // up to 16 Local APIC IDs
+    apic_ids: [16]u8 = @splat(0), // up to 16 Local APIC IDs
     apic_count: u8 = 0,
 
     // MCFG — PCIe ECAM configuration
@@ -41,8 +41,8 @@ pub const AcpiConfig = struct {
 
     // Table directory — for future lookups by signature
     table_count: u8 = 0,
-    table_sigs: [MAX_TABLES][4]u8 = [_][4]u8{[_]u8{0} ** 4} ** MAX_TABLES,
-    table_addrs: [MAX_TABLES]u64 = [_]u64{0} ** MAX_TABLES,
+    table_sigs: [MAX_TABLES][4]u8 = [_][4]u8{@as([4]u8, @splat(0))} ** MAX_TABLES,
+    table_addrs: [MAX_TABLES]u64 = @splat(0),
 };
 
 const MAX_TABLES = 16;

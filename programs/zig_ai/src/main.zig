@@ -889,7 +889,7 @@ fn runFileCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
                     return;
                 }
                 std.debug.print("{s:<30} {s:<30} {s:>10}\n", .{ "ID", "Filename", "Size" });
-                std.debug.print("{s}\n", .{"-" ** 72});
+                std.debug.print("{s}\n", .{&@as([72]u8, @splat('-'))});
                 for (data.array.items) |item| {
                     const id = if (item.object.get("id")) |v| (if (v == .string) v.string else "?") else "?";
                     const fname = if (item.object.get("filename")) |v| (if (v == .string) v.string else "?") else "?";
@@ -1060,7 +1060,7 @@ fn runGeminiFileCommand(allocator: std.mem.Allocator, args: []const []const u8) 
                     return;
                 }
                 std.debug.print("{s:<30} {s:<20} {s:<12} {s}\n", .{ "Name", "Display Name", "State", "MIME" });
-                std.debug.print("{s}\n", .{"-" ** 80});
+                std.debug.print("{s}\n", .{&@as([80]u8, @splat('-'))});
                 for (files.array.items) |item| {
                     const name = if (item.object.get("name")) |v| (if (v == .string) v.string else "?") else "?";
                     const display = if (item.object.get("displayName")) |v| (if (v == .string) v.string else "?") else "?";

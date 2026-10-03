@@ -14,7 +14,7 @@ const stats_mod = @import("stats.zig");
 /// Latency histogram buckets (nanoseconds).
 pub const LatencyHistogram = struct {
     /// Bucket boundaries: <500ns, <1µs, <2µs, <5µs, <10µs, >10µs
-    buckets: [6]u64 = [_]u64{0} ** 6,
+    buckets: [6]u64 = @splat(0),
     total_samples: u64 = 0,
     sum_ns: u64 = 0,
     min_ns: u64 = std.math.maxInt(u64),

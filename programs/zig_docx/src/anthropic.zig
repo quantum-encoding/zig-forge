@@ -80,7 +80,7 @@ pub fn extractExport(
             const msg_created = getStr(message, "created_at") orelse "";
 
             // Role header
-            const role_icon = if (std.mem.eql(u8, sender, "human")) "**You**" else "**Claude**";
+            const role_icon = if (std.mem.eql(u8, sender, "humanrepeatStr(")) ", You)**repeatStr(" else ", Claude)**";
             const msg_header = std.fmt.allocPrint(allocator,
                 "## {s}\n\n*{s}*\n\n",
                 .{ role_icon, msg_created },
@@ -234,4 +234,14 @@ fn sanitizeName(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     }
 
     return buf.toOwnedSlice(allocator);
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

@@ -375,7 +375,7 @@ fn authenticateUser(username: []const u8, non_interactive: bool, custom_prompt: 
         .appdata_ptr = null,
     };
 
-    const username_z = allocator.dupeZ(u8, username) catch return false;
+    const username_z = allocator.dupeSentinel(u8, username, 0) catch return false;
     defer allocator.free(username_z);
 
     var pamh: *pam_handle_t = undefined;
@@ -415,7 +415,7 @@ fn checkTimestamp(username: []const u8) bool {
     var path_buf: [256]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ TIMESTAMP_DIR, username }) catch return false;
 
-    const path_z = std.heap.c_allocator.dupeZ(u8, path) catch return false;
+    const path_z = std.heap.c_allocator.dupeSentinel(u8, path, 0) catch return false;
     defer std.heap.c_allocator.free(path_z);
 
     var stat_buf: StatBuf = undefined;
@@ -436,14 +436,14 @@ fn updateTimestamp(username: []const u8) void {
     const allocator = std.heap.c_allocator;
 
     // Create directory if it doesn't exist
-    const dir_z = allocator.dupeZ(u8, TIMESTAMP_DIR) catch return;
+    const dir_z = allocator.dupeSentinel(u8, TIMESTAMP_DIR, 0) catch return;
     defer allocator.free(dir_z);
 
     _ = mkdir(dir_z.ptr, 0o700);
 
     var path_buf: [256]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ TIMESTAMP_DIR, username }) catch return;
-    const path_z = allocator.dupeZ(u8, path) catch return;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return;
     defer allocator.free(path_z);
 
     // Create or update timestamp file
@@ -458,7 +458,7 @@ fn invalidateTimestamp(username: []const u8) void {
 
     var path_buf: [256]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ TIMESTAMP_DIR, username }) catch return;
-    const path_z = allocator.dupeZ(u8, path) catch return;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return;
     defer allocator.free(path_z);
 
     _ = unlink(path_z.ptr);
@@ -466,7 +466,7 @@ fn invalidateTimestamp(username: []const u8) void {
 
 fn logAuthFailure(username: []const u8) void {
     const allocator = std.heap.c_allocator;
-    const username_z = allocator.dupeZ(u8, username) catch return;
+    const username_z = allocator.dupeSentinel(u8, username, 0) catch return;
     defer allocator.free(username_z);
 
     openlog("zsudo", LOG_PID, LOG_AUTH);
@@ -488,13 +488,13 @@ fn logCommand(username: []const u8, target_user: []const u8, command: []const []
         pos += to_copy;
     }
 
-    const username_z = allocator.dupeZ(u8, username) catch return;
+    const username_z = allocator.dupeSentinel(u8, username, 0) catch return;
     defer allocator.free(username_z);
 
-    const target_z = allocator.dupeZ(u8, target_user) catch return;
+    const target_z = allocator.dupeSentinel(u8, target_user, 0) catch return;
     defer allocator.free(target_z);
 
-    const cmd_z = allocator.dupeZ(u8, cmd_buf[0..pos]) catch return;
+    const cmd_z = allocator.dupeSentinel(u8, cmd_buf[0..pos], 0) catch return;
     defer allocator.free(cmd_z);
 
     openlog("zsudo", LOG_PID, LOG_AUTH);
@@ -505,7 +505,7 @@ fn logCommand(username: []const u8, target_user: []const u8, command: []const []
 /// This avoids a Zig std.c bug where getgrnam() is declared with wrong return type.
 fn resolveGroupGid(name: []const u8) ?libc.gid_t {
     const allocator = std.heap.c_allocator;
-    const path_z = allocator.dupeZ(u8, "/etc/group") catch return null;
+    const path_z = allocator.dupeSentinel(u8, "/etc/group", 0) catch return null;
     defer allocator.free(path_z);
 
     const f = fopen(path_z.ptr, "r");
@@ -541,7 +541,7 @@ fn isUserAuthorized(username: []const u8, target_user: []const u8) bool {
     const allocator = std.heap.c_allocator;
 
     // Check if user is in sudo or wheel group
-    const username_z = allocator.dupeZ(u8, username) catch return false;
+    const username_z = allocator.dupeSentinel(u8, username, 0) catch return false;
     defer allocator.free(username_z);
 
     const pw = getpwnam(username_z.ptr) orelse return false;
@@ -623,7 +623,7 @@ fn checkSudoers(username: []const u8, target_user: []const u8) bool {
 
     // Read /etc/sudoers using C file operations
     const sudoers_path = "/etc/sudoers";
-    const sudoers_z = allocator.dupeZ(u8, sudoers_path) catch return false;
+    const sudoers_z = allocator.dupeSentinel(u8, sudoers_path, 0) catch return false;
     defer allocator.free(sudoers_z);
 
     const file = fopen(sudoers_z.ptr, "r");
@@ -648,7 +648,7 @@ fn checkSudoers(username: []const u8, target_user: []const u8) bool {
     };
 
     for (sudoers_d_files) |path| {
-        const path_z = allocator.dupeZ(u8, path) catch continue;
+        const path_z = allocator.dupeSentinel(u8, path, 0) catch continue;
         defer allocator.free(path_z);
 
         const f = fopen(path_z.ptr, "r");
@@ -752,7 +752,7 @@ fn executeCommand(config: *const Config, target_pw: *const Passwd) !void {
     } else {
         // Direct command execution
         for (config.command) |arg| {
-            const arg_z = try allocator.dupeZ(u8, arg);
+            const arg_z = try allocator.dupeSentinel(u8, arg, 0);
             try cmd_args.append(allocator, arg_z.ptr);
         }
     }
@@ -774,24 +774,24 @@ fn executeCommand(config: *const Config, target_pw: *const Passwd) !void {
 
     // Basic environment
     var home_buf: [256]u8 = undefined;
-    const home_env = try std.fmt.bufPrintZ(&home_buf, "HOME={s}", .{std.mem.span(target_pw.pw_dir)});
+    const home_env = try std.fmt.bufPrintSentinel(&home_buf, "HOME={s}", .{std.mem.span(target_pw.pw_dir)}, 0);
     try env_list.append(allocator, home_env.ptr);
 
     var user_buf: [256]u8 = undefined;
-    const user_env = try std.fmt.bufPrintZ(&user_buf, "USER={s}", .{std.mem.span(target_pw.pw_name)});
+    const user_env = try std.fmt.bufPrintSentinel(&user_buf, "USER={s}", .{std.mem.span(target_pw.pw_name)}, 0);
     try env_list.append(allocator, user_env.ptr);
 
     var logname_buf: [256]u8 = undefined;
-    const logname_env = try std.fmt.bufPrintZ(&logname_buf, "LOGNAME={s}", .{std.mem.span(target_pw.pw_name)});
+    const logname_env = try std.fmt.bufPrintSentinel(&logname_buf, "LOGNAME={s}", .{std.mem.span(target_pw.pw_name)}, 0);
     try env_list.append(allocator, logname_env.ptr);
 
     var shell_buf: [256]u8 = undefined;
-    const shell_env = try std.fmt.bufPrintZ(&shell_buf, "SHELL={s}", .{std.mem.span(target_pw.pw_shell)});
+    const shell_env = try std.fmt.bufPrintSentinel(&shell_buf, "SHELL={s}", .{std.mem.span(target_pw.pw_shell)}, 0);
     try env_list.append(allocator, shell_env.ptr);
 
     // Preserve PATH
     if (std.c.getenv("PATH")) |path| {
-        const path_env = try std.fmt.bufPrintZ(&path_buf, "PATH={s}", .{std.mem.span(path)});
+        const path_env = try std.fmt.bufPrintSentinel(&path_buf, "PATH={s}", .{std.mem.span(path)}, 0);
         try env_list.append(allocator, path_env.ptr);
     } else {
         try env_list.append(allocator, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
@@ -799,7 +799,7 @@ fn executeCommand(config: *const Config, target_pw: *const Passwd) !void {
 
     // Preserve TERM
     if (std.c.getenv("TERM")) |term| {
-        const term_env = try std.fmt.bufPrintZ(&term_buf, "TERM={s}", .{std.mem.span(term)});
+        const term_env = try std.fmt.bufPrintSentinel(&term_buf, "TERM={s}", .{std.mem.span(term)}, 0);
         try env_list.append(allocator, term_env.ptr);
     }
 
@@ -821,15 +821,15 @@ fn executeCommand(config: *const Config, target_pw: *const Passwd) !void {
     const calling_pw = getpwuid(libc.getuid()) orelse return error.GetpwuidFailed;
 
     var sudo_user_buf: [256]u8 = undefined;
-    const sudo_user = try std.fmt.bufPrintZ(&sudo_user_buf, "SUDO_USER={s}", .{std.mem.span(calling_pw.pw_name)});
+    const sudo_user = try std.fmt.bufPrintSentinel(&sudo_user_buf, "SUDO_USER={s}", .{std.mem.span(calling_pw.pw_name)}, 0);
     try env_list.append(allocator, sudo_user.ptr);
 
     var sudo_uid_buf: [64]u8 = undefined;
-    const sudo_uid = try std.fmt.bufPrintZ(&sudo_uid_buf, "SUDO_UID={d}", .{libc.getuid()});
+    const sudo_uid = try std.fmt.bufPrintSentinel(&sudo_uid_buf, "SUDO_UID={d}", .{libc.getuid()}, 0);
     try env_list.append(allocator, sudo_uid.ptr);
 
     var sudo_gid_buf: [64]u8 = undefined;
-    const sudo_gid = try std.fmt.bufPrintZ(&sudo_gid_buf, "SUDO_GID={d}", .{libc.getgid()});
+    const sudo_gid = try std.fmt.bufPrintSentinel(&sudo_gid_buf, "SUDO_GID={d}", .{libc.getgid()}, 0);
     try env_list.append(allocator, sudo_gid.ptr);
 
     try env_list.append(allocator, null);
@@ -1028,7 +1028,7 @@ pub fn main(init: std.process.Init) !void {
         writeStderr(" is not in the sudoers file. This incident will be reported.\n");
 
         openlog("zsudo", LOG_PID, LOG_AUTH);
-        const username_z = allocator.dupeZ(u8, calling_username) catch {
+        const username_z = allocator.dupeSentinel(u8, calling_username, 0) catch {
             std.process.exit(1);
         };
         syslog(LOG_ERR, "unauthorized sudo attempt by %s", username_z.ptr);
@@ -1057,7 +1057,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Get target user info
-    const target_user_z = allocator.dupeZ(u8, config.target_user) catch {
+    const target_user_z = allocator.dupeSentinel(u8, config.target_user, 0) catch {
         std.process.exit(1);
     };
     defer allocator.free(target_user_z);

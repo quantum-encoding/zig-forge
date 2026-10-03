@@ -24,13 +24,14 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     const tests = b.addTest(.{ .root_module = test_mod });
-    const run_tests = b.addRunArtifact(tests);
+    const run_tests = b.addSystemCommand(&.{"env"});
+    run_tests.addPrefixedFileArg("ZPATHCHK_BIN=", exe.getEmittedBin());
+    run_tests.addArtifactArg(tests);
 
     // The test shells out to the freshly-built zpathchk binary. Install it
     // first and hand the test its absolute path via ZPATHCHK_BIN.
     const install_exe = b.addInstallArtifact(exe, .{});
     run_tests.step.dependOn(&install_exe.step);
-    run_tests.setEnvironmentVariable("ZPATHCHK_BIN", b.getInstallPath(.bin, "zpathchk"));
 
     const test_step = b.step("test", "Run GNU-parity tests");
     test_step.dependOn(&run_tests.step);

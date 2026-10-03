@@ -134,7 +134,7 @@ fn writePermissionsJson(w: *std.Io.Writer, requests: []const PermissionRequest) 
 
 fn writeFile(path: []const u8, data: []const u8) void {
     var path_buf: [256]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return;
 
     const fd = c.open(@ptrCast(path_z.ptr), c.O_WRONLY | c.O_CREAT | c.O_TRUNC, @as(c_uint, 0o644));
     if (fd < 0) return;

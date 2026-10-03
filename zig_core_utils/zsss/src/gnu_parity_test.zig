@@ -283,7 +283,7 @@ test "Ticket: fromBytes parses the documented ZSSS_TICKET_V1 key=value format" {
         "seat=A12\n" ++
         "tier=VIP\n" ++
         "expires_at=1800000000\n" ++
-        "signature=" ++ ("ab" ** 64) ++ "\n";
+        "signature=" ++ (repeatStr("ab", 64)) ++ "\n";
 
     var td = try ticket.TicketData.fromBytes(allocator, wire);
     defer td.deinit(allocator);
@@ -302,11 +302,21 @@ test "Ticket: control-character field is rejected on serialization (injection gu
     // An event_id carrying a newline would, pre-fix, inject a second
     // key=value line (e.g. override expires_at or signature) on the next parse.
     const td = ticket.TicketData{
-        .event_id = "evil\nexpires_at=0\nsignature=" ++ ("00" ** 64),
+        .event_id = "evil\nexpires_at=0\nsignature=" ++ (repeatStr("00", 64)),
         .ticket_id = "id",
         .issued_at = 1,
-        .signature = "ab" ** 64,
+        .signature = repeatStr("ab", 64),
     };
 
     try testing.expectError(error.InvalidTicketField, td.toBytes(allocator));
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

@@ -229,7 +229,7 @@ fn dupeFromCStringOpt(allocator: std.mem.Allocator, cs: CString) !?[]const u8 {
 }
 
 fn makeCString(s: []const u8) CString {
-    const duped = ffi_allocator.dupeZ(u8, s) catch return .{ .ptr = null, .len = 0 };
+    const duped = ffi_allocator.dupeSentinel(u8, s, 0) catch return .{ .ptr = null, .len = 0 };
     return .{ .ptr = duped.ptr, .len = s.len };
 }
 

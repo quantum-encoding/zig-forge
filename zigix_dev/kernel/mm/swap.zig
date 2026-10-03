@@ -22,7 +22,7 @@ const PAGE_SIZE = types.PAGE_SIZE;
 const MAX_SWAP_SLOTS: usize = 4096;
 
 /// Swap bitmap: 1 = free, 0 = used. 512 bytes for 4096 slots.
-var swap_bitmap: [MAX_SWAP_SLOTS / 8]u8 = [_]u8{0xFF} ** (MAX_SWAP_SLOTS / 8);
+var swap_bitmap: [MAX_SWAP_SLOTS / 8]u8 = @as([(MAX_SWAP_SLOTS / 8)]u8, @splat(0xFF));
 var swap_active: bool = false;
 var swap_inode: ?*vfs.Inode = null;
 var swap_used: u32 = 0;

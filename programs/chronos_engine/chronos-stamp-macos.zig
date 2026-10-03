@@ -58,13 +58,13 @@ const ChronosClock = struct {
         if (std.fs.path.dirname(self.tick_path)) |dir| {
             // Use mkdir -p equivalent
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const dir_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{dir}) catch return;
+            const dir_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{dir}, 0) catch return;
             _ = std.c.mkdir(dir_z.ptr, 0o755);
         }
 
         // Write tick to file atomically (write to temp, then rename)
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const tmp_path = std.fmt.bufPrintZ(&path_buf, "{s}.tmp", .{self.tick_path}) catch return;
+        const tmp_path = std.fmt.bufPrintSentinel(&path_buf, "{s}.tmp", .{self.tick_path}, 0) catch return;
 
         const fd = posix.openatZ(c.AT.FDCWD, tmp_path, .{
             .ACCMODE = .WRONLY,
@@ -79,13 +79,13 @@ const ChronosClock = struct {
 
         // Rename temp to actual path
         var path_buf2: [std.fs.max_path_bytes]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf2, "{s}", .{self.tick_path}) catch return;
+        const path_z = std.fmt.bufPrintSentinel(&path_buf2, "{s}", .{self.tick_path}, 0) catch return;
         _ = std.c.rename(tmp_path.ptr, path_z.ptr);
     }
 
     fn loadTickFromFile(path: []const u8) !u64 {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return error.InvalidPath;
+        const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return error.InvalidPath;
 
         const fd = posix.openatZ(c.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0) catch return error.FileNotFound;
         defer _ = std.c.close(fd);

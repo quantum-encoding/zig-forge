@@ -108,7 +108,7 @@ const UTIME_OMIT: i64 = switch (builtin.os.tag) {
 extern "c" fn utimensat(dirfd: c_int, pathname: [*:0]const u8, times: ?*const [2]Timespec, flags: c_int) c_int;
 
 fn touchFile(allocator: std.mem.Allocator, path: []const u8, config: *const Config) !void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     // Check if file exists
@@ -126,7 +126,7 @@ fn touchFile(allocator: std.mem.Allocator, path: []const u8, config: *const Conf
     var times: [2]Timespec = undefined;
 
     if (config.reference_file) |ref| {
-        const ref_z = try allocator.dupeZ(u8, ref);
+        const ref_z = try allocator.dupeSentinel(u8, ref, 0);
         defer allocator.free(ref_z);
 
         const ref_times = getFileTimes(ref_z) catch {

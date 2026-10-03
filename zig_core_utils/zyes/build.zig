@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) void {
     // against the real GNU `yes`, so they need the install path and must run
     // after the artifact is installed.
     const opts = b.addOptions();
-    opts.addOption([]const u8, "zyes_path", b.getInstallPath(.bin, "zyes"));
+    opts.addOptionPath("zyes_path", exe.getEmittedBin());
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{

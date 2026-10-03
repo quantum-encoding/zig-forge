@@ -42,7 +42,7 @@ export fn main() noreturn {
     }
 
     // Bind to port
-    var sa: [16]u8 = [_]u8{0} ** 16;
+    var sa: [16]u8 = @splat(0);
     sa[0] = 2; // AF_INET (little-endian)
     sa[1] = 0;
     sa[2] = @truncate(port >> 8); // port big-endian

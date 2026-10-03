@@ -773,7 +773,7 @@ test "Progress percentComplete" {
 
 test "DuplicateGroup" {
     const allocator = std.testing.allocator;
-    var group = DuplicateGroup.init(allocator, 1024, [_]u8{0} ** 32);
+    var group = DuplicateGroup.init(allocator, 1024, @as([32]u8, @splat(0)));
     defer group.deinit();
 
     try group.addFile("/path/a");

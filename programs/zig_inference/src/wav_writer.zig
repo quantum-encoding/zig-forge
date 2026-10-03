@@ -10,7 +10,7 @@ pub const WavParams = struct {
 /// Write f32 audio samples to a WAV file (PCM 16-bit).
 /// Samples are expected in range [-1.0, 1.0].
 pub fn writeWav(allocator: Allocator, path: []const u8, samples: []const f32, params: WavParams) !void {
-    const c_path = try allocator.dupeZ(u8, path);
+    const c_path = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(c_path);
 
     const fp = std.c.fopen(c_path.ptr, "wb") orelse return error.FileOpenFailed;

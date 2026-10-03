@@ -129,16 +129,16 @@ test "-b a: number all lines including blank" {
 
 test "-w 40: wide field must not drop the number (HIGH bug regression)" {
     // GNU right-justifies into 40 columns: 39 spaces then '1'.
-    const line1 = " " ** 39 ++ "1\talpha\n";
-    const line2 = " " ** 39 ++ "2\t\n";
-    const line3 = " " ** 39 ++ "3\tbeta\n";
+    const line1 = &@as([39]u8, @splat(' ')) ++ "1\talpha\n";
+    const line2 = &@as([39]u8, @splat(' ')) ++ "2\t\n";
+    const line3 = &@as([39]u8, @splat(' ')) ++ "3\tbeta\n";
     try expectOutput(&.{ "-w", "40", "-b", "a" }, three_lines, line1 ++ line2 ++ line3);
 }
 
 test "-w 100: very wide field" {
-    const line1 = " " ** 99 ++ "1\talpha\n";
-    const line2 = " " ** 99 ++ "2\t\n";
-    const line3 = " " ** 99 ++ "3\tbeta\n";
+    const line1 = &@as([99]u8, @splat(' ')) ++ "1\talpha\n";
+    const line2 = &@as([99]u8, @splat(' ')) ++ "2\t\n";
+    const line3 = &@as([99]u8, @splat(' ')) ++ "3\tbeta\n";
     try expectOutput(&.{ "-w", "100", "-b", "a" }, three_lines, line1 ++ line2 ++ line3);
 }
 
@@ -154,8 +154,8 @@ test "-n ln: left justified, no leading zeros" {
 
 test "-s long separator: unnumbered pad tracks width+separator (MED bug regression)" {
     // 70-char separator; pad on the blank line must be width(6)+sep(70) spaces.
-    const sep = "X" ** 70;
-    const pad = " " ** (6 + 70);
+    const sep = &@as([70]u8, @splat('X'));
+    const pad = &@as([(6 + 70)]u8, @splat(' '));
     const expected = "     1" ++ sep ++ "alpha\n" ++ pad ++ "\n" ++ "     2" ++ sep ++ "beta\n";
     try expectOutput(&.{ "-s", sep }, three_lines, expected);
 }

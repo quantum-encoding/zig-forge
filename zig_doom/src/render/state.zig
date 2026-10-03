@@ -36,8 +36,8 @@ pub const RenderState = struct {
 
     // Screen clip arrays — these track which columns are still open for rendering
     // Each entry stores the top/bottom clip for that screen column
-    ceilingclip: [SCREENWIDTH]i16 = [_]i16{-1} ** SCREENWIDTH,
-    floorclip: [SCREENWIDTH]i16 = [_]i16{@intCast(SCREENHEIGHT)} ** SCREENWIDTH,
+    ceilingclip: [SCREENWIDTH]i16 = @splat(-1),
+    floorclip: [SCREENWIDTH]i16 = @as([SCREENWIDTH]i16, @splat(@intCast(SCREENHEIGHT))),
 
     // Solid segs list — tracks fully occluded column ranges
     solidsegs: [SCREENWIDTH / 2 + 2]ClipRange = undefined,

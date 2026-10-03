@@ -1527,7 +1527,7 @@ test "GF multiply" {
 test "encode large data uses higher version" {
     const allocator = std.testing.allocator;
     // 250 bytes needs version > 10 at EC-M (force byte mode since A is alphanumeric)
-    const data = "A" ** 250;
+    const data = &@as([250]u8, @splat('A'));
     var qr = try encode(allocator, data, .{ .ec_level = .M, .max_version = 25, .mode = .byte });
     defer qr.deinit(allocator);
     try std.testing.expect(qr.version > 10);
@@ -1537,7 +1537,7 @@ test "encode large data uses higher version" {
 test "version 25 capacity" {
     const allocator = std.testing.allocator;
     // Version 25 EC-L can hold 1273 bytes
-    const data = "X" ** 1000;
+    const data = &@as([1000]u8, @splat('X'));
     var qr = try encode(allocator, data, .{ .ec_level = .L, .max_version = 25 });
     defer qr.deinit(allocator);
     try std.testing.expect(qr.version <= 25);
@@ -1546,7 +1546,7 @@ test "version 25 capacity" {
 test "v40 capacity" {
     const allocator = std.testing.allocator;
     // Version 40 EC-L can hold 2894 bytes in byte mode
-    const data = "Z" ** 2800;
+    const data = &@as([2800]u8, @splat('Z'));
     var qr = try encode(allocator, data, .{ .ec_level = .L, .mode = .byte });
     defer qr.deinit(allocator);
     try std.testing.expect(qr.version >= 37);
@@ -1692,7 +1692,7 @@ test "format information strings match ISO 18004 Table C.1" {
 test "version selection accounts for ECI header overhead" {
     const allocator = std.testing.allocator;
     // Byte capacity for V1-M is 14 bytes; 14 bytes with no header fits V1.
-    const data = "A" ** 14;
+    const data = &@as([14]u8, @splat('A'));
     var no_eci = try encode(allocator, data, .{ .ec_level = .M, .mode = .byte, .max_version = 40 });
     defer no_eci.deinit(allocator);
     try std.testing.expectEqual(@as(u8, 1), no_eci.version);
@@ -1718,7 +1718,7 @@ test "24-bit ECI value emits without panic" {
 }
 
 test "writeBits reports overflow instead of dropping bits" {
-    var buf = [_]u8{0} ** 2; // 16 bits of capacity
+    var buf = @as([2]u8, @splat(0)); // 16 bits of capacity
     var bit_pos: usize = 0;
     try writeBits(&buf, &bit_pos, 0xFFFF, 16); // exactly fills the buffer
     try std.testing.expectEqual(@as(usize, 16), bit_pos);

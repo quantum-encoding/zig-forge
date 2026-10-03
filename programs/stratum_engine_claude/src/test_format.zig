@@ -6,7 +6,7 @@ pub fn main() !void {
     const allocator = std.heap.c_allocator;
 
     // Test 1: Fixed array to slice formatting
-    const sec_key = [_]u8{'a'} ** 24;
+    const sec_key = @as([24]u8, @splat('a'));
 
     // Method 1: Using slice operator
     var buffer1: [1024]u8 = undefined;

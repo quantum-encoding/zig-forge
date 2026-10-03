@@ -413,8 +413,8 @@ test "movePlane ceiling down" {
         .lightlevel = 200,
         .special = 0,
         .tag = 0,
-        .floor_name = [_]u8{0} ** 8,
-        .ceiling_name = [_]u8{0} ** 8,
+        .floor_name = @as([8]u8, @splat(0)),
+        .ceiling_name = @as([8]u8, @splat(0)),
     }};
     var lvl = testLevelOneSector(&sectors);
 
@@ -433,8 +433,8 @@ test "movePlane ceiling pastdest" {
         .lightlevel = 200,
         .special = 0,
         .tag = 0,
-        .floor_name = [_]u8{0} ** 8,
-        .ceiling_name = [_]u8{0} ** 8,
+        .floor_name = @as([8]u8, @splat(0)),
+        .ceiling_name = @as([8]u8, @splat(0)),
     }};
     var lvl = testLevelOneSector(&sectors);
 

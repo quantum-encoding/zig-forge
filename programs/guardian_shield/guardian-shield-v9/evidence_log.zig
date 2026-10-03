@@ -113,7 +113,7 @@ pub const Sink = struct {
     ev_withheld: u64 = 0,
 
     seq: u64 = 0,
-    prev: [32]u8 = [_]u8{0} ** 32,
+    prev: [32]u8 = @splat(0),
     chain_started: bool = false,
 
     lost_feed: u64 = 0,
@@ -267,7 +267,7 @@ pub const Sink = struct {
     fn openFeed(self: *Sink) void {
         if (self.cfg.feed_path.len == 0) return;
         var zb: [512]u8 = undefined;
-        const z = std.fmt.bufPrintZ(&zb, "{s}", .{self.cfg.feed_path}) catch return;
+        const z = std.fmt.bufPrintSentinel(&zb, "{s}", .{self.cfg.feed_path}, 0) catch return;
         const fd = c.open(z.ptr, c.O_WRONLY | c.O_CREAT | c.O_APPEND | c.O_CLOEXEC, @as(c_uint, 0o644));
         if (fd < 0) return;
         var st: c.struct_stat = undefined;
@@ -301,8 +301,8 @@ pub const Sink = struct {
     fn rotateFeed(self: *Sink) void {
         var zb: [512]u8 = undefined;
         var zb1: [520]u8 = undefined;
-        const z = std.fmt.bufPrintZ(&zb, "{s}", .{self.cfg.feed_path}) catch return;
-        const z1 = std.fmt.bufPrintZ(&zb1, "{s}.1", .{self.cfg.feed_path}) catch return;
+        const z = std.fmt.bufPrintSentinel(&zb, "{s}", .{self.cfg.feed_path}, 0) catch return;
+        const z1 = std.fmt.bufPrintSentinel(&zb1, "{s}.1", .{self.cfg.feed_path}, 0) catch return;
         _ = c.close(self.feed_fd);
         self.feed_fd = -1;
         _ = c.rename(z.ptr, z1.ptr);
@@ -313,7 +313,7 @@ pub const Sink = struct {
         if (!self.cfg.require_mount) return true;
         const parent = std.fs.path.dirname(self.cfg.evidence_dir) orelse return false;
         var zb: [512]u8 = undefined;
-        const z = std.fmt.bufPrintZ(&zb, "{s}", .{parent}) catch return false;
+        const z = std.fmt.bufPrintSentinel(&zb, "{s}", .{parent}, 0) catch return false;
         var st_parent: c.struct_stat = undefined;
         var st_root: c.struct_stat = undefined;
         if (c.stat(z.ptr, &st_parent) != 0) return false;
@@ -332,7 +332,7 @@ pub const Sink = struct {
             return;
         }
         var zb: [512]u8 = undefined;
-        const zdir = std.fmt.bufPrintZ(&zb, "{s}", .{self.cfg.evidence_dir}) catch return;
+        const zdir = std.fmt.bufPrintSentinel(&zb, "{s}", .{self.cfg.evidence_dir}, 0) catch return;
         // 0750 and no wider — but KEEP the setgid bit a group-owned parent
         // hands down (a plain chmod 0750 would clear it, and files created
         // after that would lose the reader group). openSegment also sets each
@@ -363,7 +363,7 @@ pub const Sink = struct {
         var name_buf: [256]u8 = undefined;
         const newest = self.newestSegment(&name_buf) orelse return;
         var pb: [768]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&pb, "{s}/{s}", .{ self.cfg.evidence_dir, newest }) catch return;
+        const path = std.fmt.bufPrintSentinel(&pb, "{s}/{s}", .{ self.cfg.evidence_dir, newest }, 0) catch return;
         const fd = c.open(path.ptr, c.O_RDONLY | c.O_CLOEXEC);
         if (fd < 0) return;
         defer _ = c.close(fd);
@@ -382,7 +382,7 @@ pub const Sink = struct {
 
     fn newestSegment(self: *Sink, out: *[256]u8) ?[]const u8 {
         var zb: [512]u8 = undefined;
-        const z = std.fmt.bufPrintZ(&zb, "{s}", .{self.cfg.evidence_dir}) catch return null;
+        const z = std.fmt.bufPrintSentinel(&zb, "{s}", .{self.cfg.evidence_dir}, 0) catch return null;
         const d = c.opendir(z.ptr) orelse return null;
         defer _ = c.closedir(d);
         var best_len: usize = 0;
@@ -415,7 +415,7 @@ pub const Sink = struct {
         }) catch return;
         self.ev_segment_len = name.len;
         var pb: [768]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&pb, "{s}/{s}", .{ self.cfg.evidence_dir, name }) catch return;
+        const path = std.fmt.bufPrintSentinel(&pb, "{s}/{s}", .{ self.cfg.evidence_dir, name }, 0) catch return;
         const fd = c.open(path.ptr, c.O_WRONLY | c.O_CREAT | c.O_APPEND | c.O_CLOEXEC, @as(c_uint, 0o640));
         if (fd < 0) return;
         _ = c.fchmod(fd, 0o640);
@@ -423,7 +423,7 @@ pub const Sink = struct {
         // reader set (e.g. the operator's `evidence` group), however the file
         // happened to be created.
         var zb: [512]u8 = undefined;
-        if (std.fmt.bufPrintZ(&zb, "{s}", .{self.cfg.evidence_dir})) |zdir| {
+        if (std.fmt.bufPrintSentinel(&zb, "{s}", .{self.cfg.evidence_dir}, 0)) |zdir| {
             var dst: c.struct_stat = undefined;
             if (c.stat(zdir.ptr, &dst) == 0) _ = c.fchown(fd, @bitCast(@as(i32, -1)), dst.st_gid);
         } else |_| {}
@@ -593,7 +593,7 @@ pub fn verifyDir(alloc: std.mem.Allocator, dir: []const u8) !DirReport {
     }
     {
         var zb: [512]u8 = undefined;
-        const z = try std.fmt.bufPrintZ(&zb, "{s}", .{dir});
+        const z = try std.fmt.bufPrintSentinel(&zb, "{s}", .{dir}, 0);
         const d = c.opendir(z.ptr) orelse return error.OpenDirFailed;
         defer _ = c.closedir(d);
         while (c.readdir(d)) |ent| {
@@ -609,7 +609,7 @@ pub fn verifyDir(alloc: std.mem.Allocator, dir: []const u8) !DirReport {
     }.lt);
 
     var rep: DirReport = .{};
-    var prev = [_]u8{0} ** 32;
+    var prev = @as([32]u8, @splat(0));
     var seq: u64 = 0;
     const chunk = try alloc.alloc(u8, 1 << 16);
     defer alloc.free(chunk);
@@ -619,7 +619,7 @@ pub fn verifyDir(alloc: std.mem.Allocator, dir: []const u8) !DirReport {
     for (names.items) |name| {
         rep.segments += 1;
         var pb: [768]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&pb, "{s}/{s}", .{ dir, name });
+        const path = try std.fmt.bufPrintSentinel(&pb, "{s}/{s}", .{ dir, name }, 0);
         const fd = c.open(path.ptr, c.O_RDONLY | c.O_CLOEXEC);
         if (fd < 0) return error.OpenFailed;
         defer _ = c.close(fd);
@@ -672,7 +672,7 @@ const testing = std.testing;
 
 fn tmpDir(buf: []u8) ![:0]const u8 {
     var tmpl: [64]u8 = undefined;
-    const t = try std.fmt.bufPrintZ(&tmpl, "/tmp/gs-evtest-XXXXXX", .{});
+    const t = try std.fmt.bufPrintSentinel(&tmpl, "/tmp/gs-evtest-XXXXXX", .{}, 0);
     const p = c.mkdtemp(@constCast(t.ptr)) orelse return error.MkdtempFailed;
     const s = std.mem.sliceTo(p, 0);
     @memcpy(buf[0..s.len], s);
@@ -682,7 +682,7 @@ fn tmpDir(buf: []u8) ![:0]const u8 {
 
 fn readFile(path: []const u8, out: []u8) ![]u8 {
     var zb: [512]u8 = undefined;
-    const z = try std.fmt.bufPrintZ(&zb, "{s}", .{path});
+    const z = try std.fmt.bufPrintSentinel(&zb, "{s}", .{path}, 0);
     const fd = c.open(z.ptr, c.O_RDONLY);
     if (fd < 0) return error.OpenFailed;
     defer _ = c.close(fd);
@@ -701,7 +701,7 @@ fn allSegments(dir: []const u8, out: []u8) ![]u8 {
     var lens: [16]usize = undefined;
     var n: usize = 0;
     var zb: [512]u8 = undefined;
-    const z = try std.fmt.bufPrintZ(&zb, "{s}", .{dir});
+    const z = try std.fmt.bufPrintSentinel(&zb, "{s}", .{dir}, 0);
     const d = c.opendir(z.ptr) orelse return error.OpenDirFailed;
     while (c.readdir(d)) |ent| {
         const name = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&ent.*.d_name)), 0);
@@ -790,7 +790,7 @@ test "evidence lines are hash-chained and the chain survives a restart" {
     var rb: [1 << 16]u8 = undefined;
     const data = try allSegments(ev, &rb);
     var bad: usize = 0;
-    const r = try verifyChain(data, [_]u8{0} ** 32, 0, &bad);
+    const r = try verifyChain(data, @as([32]u8, @splat(0)), 0, &bad);
     try testing.expect(r.lines >= 5); // chain_start, a, b, chain_start, c
     try testing.expect(std.mem.indexOf(u8, data, "\"reason\":\"loader_start\"") != null);
 
@@ -799,7 +799,7 @@ test "evidence lines are hash-chained and the chain survives a restart" {
     @memcpy(tampered[0..data.len], data);
     const i = std.mem.indexOf(u8, tampered[0..data.len], "\"event\":\"b\"").?;
     tampered[i + 9] = 'x';
-    try testing.expectError(error.ChainBroken, verifyChain(tampered[0..data.len], [_]u8{0} ** 32, 0, &bad));
+    try testing.expectError(error.ChainBroken, verifyChain(tampered[0..data.len], @as([32]u8, @splat(0)), 0, &bad));
 }
 
 test "segments rotate at the size cap and keep the chain across the boundary" {
@@ -823,7 +823,7 @@ test "segments rotate at the size cap and keep the chain across the boundary" {
     var ab: [1 << 16]u8 = undefined;
     const whole = try allSegments(ev, &ab);
     var bad: usize = 0;
-    const r = try verifyChain(whole, [_]u8{0} ** 32, 0, &bad);
+    const r = try verifyChain(whole, @as([32]u8, @splat(0)), 0, &bad);
     try testing.expect(r.lines >= 21);
 
     const rep = try verifyDir(testing.allocator, ev);
@@ -885,7 +885,7 @@ test "segments take the evidence dir's group, and setgid survives" {
     var db: [128]u8 = undefined;
     const dir = try tmpDir(&db);
     var eb: [256]u8 = undefined;
-    const ev = try std.fmt.bufPrintZ(&eb, "{s}/evidence", .{dir});
+    const ev = try std.fmt.bufPrintSentinel(&eb, "{s}/evidence", .{dir}, 0);
     try testing.expect(c.mkdir(ev.ptr, 0o750) == 0);
     try testing.expect(c.chown(ev.ptr, @bitCast(@as(i32, -1)), gid) == 0);
     try testing.expect(c.chmod(ev.ptr, 0o2750) == 0);
@@ -913,12 +913,12 @@ test "the feed is capped and keeps one previous generation" {
     for (0..500) |k| _ = s.record(@intCast(k), "{\"event\":\"distinct-event-padding-padding\"}", 10 + k);
     s.deinit(1000);
     var zb: [300]u8 = undefined;
-    const z = try std.fmt.bufPrintZ(&zb, "{s}", .{feed});
+    const z = try std.fmt.bufPrintSentinel(&zb, "{s}", .{feed}, 0);
     var st: c.struct_stat = undefined;
     try testing.expect(c.stat(z.ptr, &st) == 0);
     try testing.expect(st.st_size <= 1000);
     var z1b: [300]u8 = undefined;
-    const z1 = try std.fmt.bufPrintZ(&z1b, "{s}.1", .{feed});
+    const z1 = try std.fmt.bufPrintSentinel(&z1b, "{s}.1", .{feed}, 0);
     try testing.expect(c.stat(z1.ptr, &st) == 0);
     try testing.expect(st.st_size <= 1000);
 }

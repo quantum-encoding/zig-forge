@@ -128,7 +128,7 @@ const zstdbuf_candidates = [_][]const u8{
 fn firstExisting(paths: []const []const u8) ?[]const u8 {
     var buf: [512]u8 = undefined;
     for (paths) |p| {
-        const z = std.fmt.bufPrintZ(&buf, "{s}", .{p}) catch continue;
+        const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{p}, 0) catch continue;
         if (access(z.ptr, F_OK) == 0) return p;
     }
     return null;
@@ -181,7 +181,7 @@ fn buildCmd(a: std.mem.Allocator, bin: []const u8, args: []const []const u8) ![:
         try s.appendSlice(a, arg);
         try s.append(a, '\'');
     }
-    return try a.dupeZ(u8, s.items);
+    return try a.dupeSentinel(u8, s.items, 0);
 }
 
 fn runBin(a: std.mem.Allocator, bin: []const u8, args: []const []const u8) !Captured {

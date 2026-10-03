@@ -41,7 +41,7 @@ pub fn main() !void {
     try line(io, out, "v2_info", hybrid.V2_INFO);
 
     try out.writeStreamingAll(io, "# combiner KAT outputs\n");
-    const zero = [_]u8{0} ** 32;
+    const zero = @as([32]u8, @splat(0));
     try line(io, out, "K_v1", &hybrid.combineSecretsV1(&hybrid.kat_ss_m, &hybrid.kat_ss_x));
     try line(io, out, "K_v2", &hybrid.combineSecretsV2(&hybrid.kat_ss_m, &hybrid.kat_ss_x, &hybrid.kat_ct_x, &hybrid.kat_pk_x));
     try line(io, out, "K_v2_zero_ss_x", &hybrid.combineSecretsV2(&hybrid.kat_ss_m, &zero, &hybrid.kat_ct_x, &hybrid.kat_pk_x));

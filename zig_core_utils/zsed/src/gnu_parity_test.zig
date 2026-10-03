@@ -63,7 +63,7 @@ fn joinArgs(args: []const []const u8) !std.ArrayListUnmanaged(u8) {
 }
 
 fn systemZ(cmd: []const u8) !c_int {
-    const cz = try a.dupeZ(u8, cmd);
+    const cz = try a.dupeSentinel(u8, cmd, 0);
     defer a.free(cz);
     return system(cz.ptr);
 }
@@ -118,7 +118,7 @@ fn zsedExit(args: []const []const u8, input: []const u8, code: u8) !void {
 
 fn gsedAvailable() bool {
     var buf: [512]u8 = undefined;
-    const cmd = std.fmt.bufPrintZ(&buf, "test -x {s}", .{gsedBin()}) catch return false;
+    const cmd = std.fmt.bufPrintSentinel(&buf, "test -x {s}", .{gsedBin()}, 0) catch return false;
     return system(cmd.ptr) == 0;
 }
 
@@ -240,7 +240,7 @@ test "D sliding window does not overflow the stack (finding: D recursion)" {
         \\seq 1 200000 | {s} '$!N;$!D' | tail -1
     , .{zsedBin()});
     defer a.free(cmd);
-    const cz = try a.dupeZ(u8, cmd);
+    const cz = try a.dupeSentinel(u8, cmd, 0);
     defer a.free(cz);
     // Just assert it exits cleanly (0) rather than crashing (139).
     const wrapped = try std.fmt.allocPrint(a, "out=$({s}); test \"$out\" = 200000", .{cmd});

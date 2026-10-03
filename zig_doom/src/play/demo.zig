@@ -42,7 +42,7 @@ pub const DemoState = struct {
     fast: bool = false,
     nomonsters: bool = false,
     consoleplayer: u8 = 0,
-    player_in_game: [MAXPLAYERS]bool = [_]bool{false} ** MAXPLAYERS,
+    player_in_game: [MAXPLAYERS]bool = @splat(false),
 
     // Recording buffer
     rec_buffer: ?RecBuffer = null,

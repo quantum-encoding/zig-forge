@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) void {
     // GNU mktemp, so they need (a) the installed exe path and (b) the exe to be
     // installed on disk before they run.
     const options = b.addOptions();
-    options.addOption([]const u8, "zmktemp_path", b.getInstallPath(.bin, "zmktemp"));
+    options.addOptionPath("zmktemp_path", exe.getEmittedBin());
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/gnu_parity_test.zig"),

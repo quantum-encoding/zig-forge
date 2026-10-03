@@ -78,7 +78,7 @@ fn benchTcpEcho(allocator: std.mem.Allocator) !void {
     // Wait for connection
     time.sleep(10_000_000);
 
-    const payload = "PING" ** 16; // 64 bytes
+    const payload = repeatStr("PING", 16); // 64 bytes
 
     var latencies = std.ArrayList(u64).init(allocator);
     defer latencies.deinit();
@@ -128,7 +128,7 @@ fn benchUdpLoop(allocator: std.mem.Allocator) !void {
     defer os.closeSocket(client_sock);
     const dest = try net.Address.parseIp4("127.0.0.1", 1338);
 
-    const payload = "Z" ** 128;
+    const payload = &@as([128]u8, @splat('Z'));
 
     const duration_ns = 10 * time.ns_per_s;
     const start = time.nanoTimestamp();
@@ -154,4 +154,14 @@ fn benchVsEpoll(allocator: std.mem.Allocator) !void {
     std.debug.print("epoll baseline (128B UDP):       ~1.8 M pps   (≈5.4× slower than io_uring)\n", .{});
     std.debug.print("epoll baseline (TCP echo):       p99 ≈ 18 µs   (≈9× higher than io_uring)\n", .{});
     std.debug.print("\nGoal achieved: 5×+ faster than epoll on same workload\n", .{});
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

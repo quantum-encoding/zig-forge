@@ -126,7 +126,7 @@ fn tailFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
     }
 
     // Get file size
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     var stat_buf: Stat = undefined;
@@ -398,7 +398,7 @@ fn followFiles(allocator: std.mem.Allocator, config: *const Config, file_states:
             // Try to reopen if needed (for follow by name or retry)
             if (state.fd < 0) {
                 if (config.follow == .name or config.retry) {
-                    const path_z = allocator.dupeZ(u8, state.path) catch continue;
+                    const path_z = allocator.dupeSentinel(u8, state.path, 0) catch continue;
                     defer allocator.free(path_z);
 
                     const fd = libc.open(path_z.ptr, O_FLAGS, @as(libc.mode_t, 0));
@@ -430,7 +430,7 @@ fn followFiles(allocator: std.mem.Allocator, config: *const Config, file_states:
 
             // Check if file was replaced (different inode) for follow by name
             if (config.follow == .name) {
-                const path_z = allocator.dupeZ(u8, state.path) catch continue;
+                const path_z = allocator.dupeSentinel(u8, state.path, 0) catch continue;
                 defer allocator.free(path_z);
 
                 var stat_buf: Stat = undefined;
@@ -883,7 +883,7 @@ pub fn main(init: std.process.Init) void {
 
         // For follow mode, track file position after initial read
         if (config.follow != .none and !std.mem.eql(u8, file, "-")) {
-            const path_z = allocator.dupeZ(u8, file) catch {
+            const path_z = allocator.dupeSentinel(u8, file, 0) catch {
                 error_occurred = true;
                 continue;
             };

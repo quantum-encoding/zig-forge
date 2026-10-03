@@ -61,7 +61,7 @@ pub fn main(init: std.process.Init) !void {
 
     var start_val: u64 = 0;
     var end_val: u64 = 100_000_000; // Default: 100 million
-    var target_hash: [32]u8 = .{0} ** 32;
+    var target_hash: [32]u8 = @splat(0);
     var benchmark_mode = false;
     var show_help = false;
 
@@ -193,7 +193,7 @@ fn runBenchmark(allocator: std.mem.Allocator) !void {
     };
 
     // Create a dummy search to benchmark
-    const target = [_]u8{0xDE, 0xAD, 0xBE, 0xEF} ++ ([_]u8{0} ** 28);
+    const target = [_]u8{0xDE, 0xAD, 0xBE, 0xEF} ++ (@as([28]u8, @splat(0)));
     var q = try queen.Queen.init(allocator, 0, 10_000_000, .numeric_hash, &target);
     defer q.deinit();
 

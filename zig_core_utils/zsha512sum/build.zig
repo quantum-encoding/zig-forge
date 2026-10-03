@@ -20,7 +20,7 @@ pub fn build(b: *std.Build) void {
     // live GNU sha512sum diff). The test binary shells out to the installed
     // zsha512sum, so it needs the install path.
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "z_exe", b.getInstallPath(.bin, "zsha512sum"));
+    test_opts.addOptionPath("z_exe", exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{

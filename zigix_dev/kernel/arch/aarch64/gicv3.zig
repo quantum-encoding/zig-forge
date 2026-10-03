@@ -675,7 +675,7 @@ pub fn mapDevice(device_id: u32, num_vectors: u16) u32 {
     // DW2 bits [63:32] of full 64-bit = target PE affinity
     // Format: cmd[0..3]=opcode, cmd[8..11]=unused, cmd[16..19]=target_aff|valid, cmd[20..23]=ICID
     {
-        var cmd: [32]u8 = .{0} ** 32;
+        var cmd: [32]u8 = @splat(0);
         cmd[0] = ITS_CMD_MAPC;
         // DWORD 2 (bytes 16-23): RDbase (target PE) in bits [47:16] of DW2, Valid in bit 63
         // GICv3 ITS MAPC: DW2[63]=Valid, DW2[51:16]=RDbase (redistributor number or affinity)
@@ -699,7 +699,7 @@ pub fn mapDevice(device_id: u32, num_vectors: u16) u32 {
     // DW1: [4:0]=size (log2(num_entries))
     // DW2: [51:8]=ITT_addr (physical >> 8), [63]=Valid
     {
-        var cmd: [32]u8 = .{0} ** 32;
+        var cmd: [32]u8 = @splat(0);
         cmd[0] = ITS_CMD_MAPD;
         // DeviceID in DW0 bits [31:0] — little-endian
         cmd[4] = @truncate(device_id);
@@ -725,7 +725,7 @@ pub fn mapDevice(device_id: u32, num_vectors: u16) u32 {
     // MAPTI: Map each MSI-X vector to an LPI
     var vec: u16 = 0;
     while (vec < num_vectors and vec < 16) : (vec += 1) {
-        var cmd: [32]u8 = .{0} ** 32;
+        var cmd: [32]u8 = @splat(0);
         cmd[0] = ITS_CMD_MAPTI;
         // DW0: DeviceID [31:0]
         cmd[4] = @truncate(device_id);
@@ -748,7 +748,7 @@ pub fn mapDevice(device_id: u32, num_vectors: u16) u32 {
     // INV: Invalidate LPI config cache for each mapped vector
     vec = 0;
     while (vec < num_vectors and vec < 16) : (vec += 1) {
-        var cmd: [32]u8 = .{0} ** 32;
+        var cmd: [32]u8 = @splat(0);
         cmd[0] = ITS_CMD_INV;
         cmd[4] = @truncate(device_id);
         cmd[5] = @truncate(device_id >> 8);
@@ -762,7 +762,7 @@ pub fn mapDevice(device_id: u32, num_vectors: u16) u32 {
 
     // SYNC: Ensure all commands complete
     {
-        var cmd: [32]u8 = .{0} ** 32;
+        var cmd: [32]u8 = @splat(0);
         cmd[0] = ITS_CMD_SYNC;
         // DW2: target RDbase (same affinity as MAPC)
         const dw2: u64 = @as(u64, cpu_aff) << 16;

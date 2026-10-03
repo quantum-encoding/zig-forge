@@ -85,7 +85,7 @@ pub const PriceLevel = struct {
             .price = price,
             .total_quantity = Decimal.zero(),
             .order_count = 0,
-            .orders = .{ .items = &.{}, .capacity = 0 },
+            .orders = .empty,
             .allocator = allocator,
         };
     }
@@ -130,9 +130,9 @@ pub const OrderBook = struct {
     pub fn init(allocator: std.mem.Allocator, symbol: []const u8) Self {
         return .{
             .symbol = symbol,
-            .bids = .{ .items = &.{}, .capacity = 0 },
-            .asks = .{ .items = &.{}, .capacity = 0 },
-            .trades = .{ .items = &.{}, .capacity = 0 },
+            .bids = .empty,
+            .asks = .empty,
+            .trades = .empty,
             .orders = std.AutoHashMap(u64, *Order).init(allocator),
             .allocator = allocator,
             .next_order_id = 1,

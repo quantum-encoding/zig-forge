@@ -104,7 +104,7 @@ pub fn halfMd4Hash(name: [*]const u8, name_len: u32, seed: [4]u32) u32 {
 
     // Handle remaining bytes
     if (offset < name_len) {
-        var input: [8]u32 = [_]u32{0} ** 8;
+        var input: [8]u32 = @splat(0);
         var idx: u32 = 0;
         var remaining = name_len - offset;
         while (remaining > 0) {
@@ -144,7 +144,7 @@ pub fn teaHash(name: [*]const u8, name_len: u32, seed: [4]u32) u32 {
 
     // Handle remaining
     if (offset < name_len) {
-        var k: [4]u32 = [_]u32{0} ** 4;
+        var k: [4]u32 = @splat(0);
         var idx: u32 = 0;
         while (offset + idx < name_len) : (idx += 1) {
             const word_idx = idx / 4;

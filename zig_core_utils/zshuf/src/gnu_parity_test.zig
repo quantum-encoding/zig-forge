@@ -46,7 +46,7 @@ fn gbin() []const u8 {
 
 /// Run a shell command via popen, capturing stdout and the exit code.
 fn run(a: std.mem.Allocator, cmd: []const u8) !Result {
-    const cmd_z = try a.dupeZ(u8, cmd);
+    const cmd_z = try a.dupeSentinel(u8, cmd, 0);
     defer a.free(cmd_z);
 
     const stream = popen(cmd_z.ptr, "r") orelse return error.PopenFailed;

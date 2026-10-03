@@ -27,7 +27,7 @@ pub const Pipe = struct {
 };
 
 var pipes: [MAX_PIPES]Pipe = [_]Pipe{.{
-    .buffer = [_]u8{0} ** PIPE_BUF_SIZE,
+    .buffer = @as([PIPE_BUF_SIZE]u8, @splat(0)),
     .read_pos = 0,
     .write_pos = 0,
     .count = 0,

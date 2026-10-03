@@ -187,7 +187,7 @@ var aq_phys: u64 = 0;
 var aq_prod: u32 = 0; // Producer counter
 
 // Device descriptor (from DESCRIBE_DEVICE)
-pub var mac: [6]u8 = .{0} ** 6;
+pub var mac: [6]u8 = @splat(0);
 var mtu: u16 = 1500;
 var default_num_queues: u16 = 1;
 var tx_queue_entries: u16 = 256;
@@ -220,7 +220,7 @@ pub var rx_comp_head: u16 = 0;
 pub var rx_comp_gen: u1 = 0;
 
 // RX packet buffers (DMA)
-var rx_bufs_phys: [NUM_RX_BUFS]u64 = .{0} ** NUM_RX_BUFS;
+var rx_bufs_phys: [NUM_RX_BUFS]u64 = @splat(0);
 var rx_bufs_virt: [NUM_RX_BUFS][*]u8 = undefined;
 
 // Doorbell indices (from queue resources, converted from BE)
@@ -248,7 +248,7 @@ var pci_func: u8 = 0;
 
 // Kernel-side receive ring (same pattern as virtio-net)
 var rx_ring: [RX_RING_SLOTS][MAX_PKT_SIZE]u8 = undefined;
-var rx_ring_len: [RX_RING_SLOTS]u16 = .{0} ** RX_RING_SLOTS;
+var rx_ring_len: [RX_RING_SLOTS]u16 = @splat(0);
 pub var rx_ring_head: u32 = 0;
 pub var rx_ring_tail: u32 = 0;
 
@@ -593,7 +593,7 @@ fn aqVerifyDriver() bool {
     }
     uart.writeString("\n");
 
-    var cmd: AdminCmd = .{ .opcode = @byteSwap(@as(u32, AQ_VERIFY_DRIVER)), .status = 0, .payload = .{0} ** 56 };
+    var cmd: AdminCmd = .{ .opcode = @byteSwap(@as(u32, AQ_VERIFY_DRIVER)), .status = 0, .payload = @splat(0) };
     // Linux: struct gve_adminq_verify_driver_compatibility {
     //   __be64 driver_info_len;   // offset 0
     //   __be64 driver_info_addr;  // offset 8
@@ -607,7 +607,7 @@ fn aqDescribeDevice() bool {
     // Allocate DMA buffer for device descriptor
     const desc_dma = allocDmaPage();
 
-    var cmd: AdminCmd = .{ .opcode = @byteSwap(@as(u32, AQ_DESCRIBE_DEVICE)), .status = 0, .payload = .{0} ** 56 };
+    var cmd: AdminCmd = .{ .opcode = @byteSwap(@as(u32, AQ_DESCRIBE_DEVICE)), .status = 0, .payload = @splat(0) };
     // payload[0:8] = device_descriptor_addr (be64)
     const addr = desc_dma.phys;
     cmd.payload[0] = @truncate(addr >> 56);
@@ -744,7 +744,7 @@ fn aqConfigureResources() bool {
     //  28: ntfy_blk_msix_base_idx (be32) - 0 (ntfy blocks at vectors 0..N-1, mgmt at N)
     //  32: queue_format (u8)
     const irq_db_stride: u32 = 64; // cacheline-aligned struct gve_irq_db
-    var cmd: AdminCmd = .{ .opcode = @byteSwap(@as(u32, AQ_CONFIGURE_RESOURCES)), .status = 0, .payload = .{0} ** 56 };
+    var cmd: AdminCmd = .{ .opcode = @byteSwap(@as(u32, AQ_CONFIGURE_RESOURCES)), .status = 0, .payload = @splat(0) };
     writeBe64InPayload(&cmd.payload, 0, counter_array_phys);
     if (num_ntfy_blks > 0) {
         writeBe64InPayload(&cmd.payload, 8, irq_db_phys);
@@ -788,7 +788,7 @@ fn aqCreateTxQueue() bool {
     tx_buf_virt = buf_dma.virt;
     tx_buf_phys = buf_dma.phys;
 
-    var cmd: AdminCmd = .{ .opcode = @byteSwap(@as(u32, AQ_CREATE_TX_QUEUE)), .status = 0, .payload = .{0} ** 56 };
+    var cmd: AdminCmd = .{ .opcode = @byteSwap(@as(u32, AQ_CREATE_TX_QUEUE)), .status = 0, .payload = @splat(0) };
     // payload[0:4] = queue_id (be32) = 0
     writeBe32InPayload(&cmd.payload, 0, 0);
     // payload[4:8] = reserved = 0
@@ -861,7 +861,7 @@ fn aqCreateRxQueue() bool {
     // CRITICAL: In DQO mode, the field semantics are SWAPPED from their GQI names!
     //   rx_desc_ring_addr = completion queue (NOT descriptors)
     //   rx_data_ring_addr = buffer queue (NOT data ring)
-    var cmd: AdminCmd = .{ .opcode = @byteSwap(@as(u32, AQ_CREATE_RX_QUEUE)), .status = 0, .payload = .{0} ** 56 };
+    var cmd: AdminCmd = .{ .opcode = @byteSwap(@as(u32, AQ_CREATE_RX_QUEUE)), .status = 0, .payload = @splat(0) };
     writeBe32InPayload(&cmd.payload, 0, 0); // queue_id = 0
     // index = 0 (payload[4:8])
     // ntfy_id = 1 (RX gets second notification block; TX gets 0)

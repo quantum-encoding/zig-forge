@@ -449,7 +449,7 @@ fn effectivePath(config: *const Config) ?[]const u8 {
 fn findExecutable(cmd: []const u8, search_path: ?[]const u8, path_buf: []u8) ?[*:0]const u8 {
     // If the command contains a slash, use it directly
     if (std.mem.indexOfScalar(u8, cmd, '/') != null) {
-        const path_z = std.fmt.bufPrintZ(path_buf, "{s}", .{cmd}) catch return null;
+        const path_z = std.fmt.bufPrintSentinel(path_buf, "{s}", .{cmd}, 0) catch return null;
         if (access(path_z.ptr, X_OK) == 0) {
             return path_z.ptr;
         }
@@ -460,7 +460,7 @@ fn findExecutable(cmd: []const u8, search_path: ?[]const u8, path_buf: []u8) ?[*
     var path_iter = std.mem.splitScalar(u8, path_val, ':');
     while (path_iter.next()) |dir| {
         if (dir.len == 0) continue;
-        const full_path = std.fmt.bufPrintZ(path_buf, "{s}/{s}", .{ dir, cmd }) catch continue;
+        const full_path = std.fmt.bufPrintSentinel(path_buf, "{s}/{s}", .{ dir, cmd }, 0) catch continue;
         if (access(full_path.ptr, X_OK) == 0) {
             return full_path.ptr;
         }
@@ -533,11 +533,11 @@ fn runCommand(config: *const Config, allocator: std.mem.Allocator) !void {
     var argv: std.ArrayListUnmanaged(?[*:0]const u8) = .empty;
     const argv0 = config.argv0 orelse cmd[0];
     {
-        const arg0_z = try allocator.dupeZ(u8, argv0);
+        const arg0_z = try allocator.dupeSentinel(u8, argv0, 0);
         try argv.append(allocator, arg0_z.ptr);
     }
     for (cmd[1..]) |arg| {
-        const arg_z = try allocator.dupeZ(u8, arg);
+        const arg_z = try allocator.dupeSentinel(u8, arg, 0);
         try argv.append(allocator, arg_z.ptr);
     }
     try argv.append(allocator, null);
@@ -584,7 +584,7 @@ pub fn main(init: std.process.Init) !void {
     // directory change fails), so apply it before either branch.
     if (config.chdir_path) |path| {
         var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch {
+        const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch {
             writeStderr("zenv: path too long\n");
             std.process.exit(125);
         };

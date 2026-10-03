@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) void {
     // Win32 there instead (src/sys_windows.zig).
     const link_libc = target.result.os.tag != .windows;
     static_lib.root_module.link_libc = link_libc;
-    static_lib.root_module.strip = optimize != .Debug;
+    static_lib.root_module.strip = optimize != std.builtin.OptimizeMode.Debug;
     // The results session parses its queries with std.json, whose integer
     // path falls back to f128 (`sliceToInt`), and f128 arithmetic is
     // compiler_rt (__divtf3, __fixtfti, roundq, ...). Nothing in a host's
@@ -57,7 +57,7 @@ pub fn build(b: *std.Build) void {
         .use_lld = use_lld,
     });
     shared_lib.root_module.link_libc = link_libc;
-    shared_lib.root_module.strip = optimize != .Debug;
+    shared_lib.root_module.strip = optimize != std.builtin.OptimizeMode.Debug;
 
     const shared_install = b.addInstallArtifact(shared_lib, .{
         .dest_dir = .{ .override = .{ .custom = "lib/shared" } },
@@ -93,9 +93,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run the CLI tool");
     run_step.dependOn(&run_cmd.step);
@@ -159,7 +157,8 @@ pub fn build(b: *std.Build) void {
 
     const fmt_step = b.step("fmt", "Format source files");
     const fmt = b.addFmt(.{
-        .paths = &.{"src"},
+        // Zig 0.17 takes LazyPath lists (b.pathList); 0.16 takes strings.
+        .paths = if (comptime @hasDecl(std.Build, "pathList")) b.pathList(&.{"src"}) else &.{"src"},
     });
     fmt_step.dependOn(&fmt.step);
 
@@ -170,4 +169,12 @@ pub fn build(b: *std.Build) void {
     const header_step = b.step("header", "Install C header for FFI");
     const header_install = b.addInstallFile(b.path("include/zdedupe.h"), "include/zdedupe.h");
     header_step.dependOn(&header_install.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

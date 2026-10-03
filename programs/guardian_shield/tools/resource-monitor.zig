@@ -54,7 +54,7 @@ pub const ResourceMonitor = struct {
             .fd_count = 0,
             .network_connections = 0,
             .timestamp_sec = @intCast(std.time.timestamp()),
-            .command = [_]u8{0} ** 256,
+            .command = @as([256]u8, @splat(0)),
         };
 
         // Read /proc/[pid]/stat for CPU and memory

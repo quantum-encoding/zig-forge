@@ -6,6 +6,7 @@
 //! one shows up here as a failing offset, not as a silent misread in production.
 
 const std = @import("std");
+const compat = @import("zig_compat.zig");
 const sys = @import("sys.zig");
 const anchors = @import("layout_anchors.zig");
 const darwin = @import("darwin_kit");
@@ -22,7 +23,7 @@ fn resolveSegment(comptime T: type, comptime name: []const u8) ?Resolved {
     if (@hasField(T, name)) {
         return .{ .offset = fieldOffset(T, name), .type = @FieldType(T, name) };
     }
-    inline for (std.meta.fields(T)) |f| {
+    inline for (compat.fields(T)) |f| {
         switch (@typeInfo(f.type)) {
             .@"struct", .@"union" => if (resolveSegment(f.type, name)) |inner| {
                 return .{ .offset = fieldOffset(T, f.name) + inner.offset, .type = inner.type };
@@ -151,7 +152,7 @@ test "the events union covers every non-reserved event type" {
     @setEvalBranchQuota(20_000);
     // Each ES_EVENT_TYPE_{AUTH,NOTIFY}_X must have an `x` member in es_events_t.
     var missing: usize = 0;
-    inline for (std.meta.fields(sys.es_event_type_t)) |f| {
+    inline for (compat.fields(sys.es_event_type_t)) |f| {
         const prefix_auth = "ES_EVENT_TYPE_AUTH_";
         const prefix_notify = "ES_EVENT_TYPE_NOTIFY_";
         const member: ?[]const u8 = comptime blk: {

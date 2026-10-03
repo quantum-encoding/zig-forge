@@ -51,18 +51,22 @@ pub fn build(b: *std.Build) void {
     // Main MFD executable
     const mfd = addExample(b, "zig-flight", "src/main.zig", target, optimize, zig_flight_module);
     const run_mfd = b.addRunArtifact(mfd);
-    if (b.args) |args| {
-        run_mfd.addArgs(args);
-    }
+    forwardArgs(b, run_mfd);
     const mfd_step = b.step("run", "Run MFD client");
     mfd_step.dependOn(&run_mfd.step);
 
     // Dataref dump utility
     const dump = addExample(b, "zig-flight-dump", "src/main_dump.zig", target, optimize, zig_flight_module);
     const run_dump = b.addRunArtifact(dump);
-    if (b.args) |args| {
-        run_dump.addArgs(args);
-    }
+    forwardArgs(b, run_dump);
     const dump_step = b.step("run-dump", "Run dataref dumper");
     dump_step.dependOn(&run_dump.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

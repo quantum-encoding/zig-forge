@@ -19,9 +19,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run zlink");
     run_step.dependOn(&run_cmd.step);
@@ -29,7 +27,7 @@ pub fn build(b: *std.Build) void {
     // GNU parity tests: shell out to the installed zlink binary and diff
     // its behavior against the real GNU coreutils `link` binary.
     const test_options = b.addOptions();
-    test_options.addOption([]const u8, "zlink_bin", b.getInstallPath(.bin, "zlink"));
+    test_options.addOptionPath("zlink_bin", exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -46,4 +44,12 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run GNU parity tests");
     test_step.dependOn(&run_parity_tests.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

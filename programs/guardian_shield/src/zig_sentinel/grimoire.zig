@@ -232,14 +232,14 @@ pub const GrimoirePattern = struct {
 
     /// Create pattern name from string (zero-padded)
     pub fn makeName(comptime name: []const u8) [MAX_PATTERN_NAME_LEN]u8 {
-        var result = [_]u8{0} ** MAX_PATTERN_NAME_LEN;
+        var result = @as([MAX_PATTERN_NAME_LEN]u8, @splat(0));
         @memcpy(result[0..@min(name.len, MAX_PATTERN_NAME_LEN)], name[0..@min(name.len, MAX_PATTERN_NAME_LEN)]);
         return result;
     }
 
     /// Create fixed string for constraint
     pub fn makeConstraintStr(comptime str: []const u8) [MAX_CONSTRAINT_STR_LEN]u8 {
-        var result = [_]u8{0} ** MAX_CONSTRAINT_STR_LEN;
+        var result = @as([MAX_CONSTRAINT_STR_LEN]u8, @splat(0));
         @memcpy(result[0..@min(str.len, MAX_CONSTRAINT_STR_LEN)], str[0..@min(str.len, MAX_CONSTRAINT_STR_LEN)]);
         return result;
     }
@@ -610,7 +610,7 @@ pub const GrimoireEngine = struct {
             .syscall_counts = std.AutoHashMap(u32, u64).init(allocator),
             .binary_cache = std.AutoHashMap(u32, []u8).init(allocator),
             .total_matches = 0,
-            .matches_by_severity = [_]u64{0} ** 5,
+            .matches_by_severity = @as([5]u64, @splat(0)),
             .patterns_checked = 0,
             .debug_mode = debug_mode,
         };
@@ -1117,12 +1117,12 @@ test "grimoire: detect reverse shell pattern" {
     // -> execve. For dup2, arg_index 1 is the target fd (2=stderr, 1=stdout,
     // 0=stdin — Metasploit redirects stderr first, stdin last). Timestamps are
     // 1 ms apart, well inside every per-step delta and the 5 s sequence window.
-    _ = try engine.processSyscall(pid, Syscall.socket, 1_000_000, [_]u64{0} ** 6);
+    _ = try engine.processSyscall(pid, Syscall.socket, 1_000_000, @as([6]u64, @splat(0)));
     _ = try engine.processSyscall(pid, Syscall.connect, 2_000_000, [_]u64{ 3, 0, 0, 0, 0, 0 });
     _ = try engine.processSyscall(pid, Syscall.dup2, 3_000_000, [_]u64{ 3, 2, 0, 0, 0, 0 });
     _ = try engine.processSyscall(pid, Syscall.dup2, 4_000_000, [_]u64{ 3, 1, 0, 0, 0, 0 });
     _ = try engine.processSyscall(pid, Syscall.dup2, 5_000_000, [_]u64{ 3, 0, 0, 0, 0, 0 });
-    const result = try engine.processSyscall(pid, Syscall.execve, 6_000_000, [_]u64{0} ** 6);
+    const result = try engine.processSyscall(pid, Syscall.execve, 6_000_000, @as([6]u64, @splat(0)));
 
     try std.testing.expect(result != null);
     if (result) |r| {

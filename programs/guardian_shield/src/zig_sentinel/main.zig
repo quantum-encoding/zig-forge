@@ -757,7 +757,7 @@ fn displayResults(
 
     std.debug.print("Top {d} syscalls (by frequency):\n\n", .{display_count});
     std.debug.print("{s:<8} {s:<15} {s:>12}\n", .{ "PID", "SYSCALL", "COUNT" });
-    std.debug.print("{s}\n", .{"─" ** 40});
+    std.debug.print("{s}\n", .{repeatStr("─", 40)});
 
     for (entries.items[0..display_count]) |entry| {
         const syscall_name = getSyscallName(entry.syscall_nr);
@@ -1059,4 +1059,14 @@ fn printUsage(prog_name: []const u8) void {
     std.debug.print("\n  # Phase 6: Grimoire with enforcement (EXPERIMENTAL!)\n", .{});
     std.debug.print("  sudo {s} --enable-grimoire --grimoire-enforce\n", .{prog_name});
     std.debug.print("\nNote: Requires root privileges (CAP_BPF) to load eBPF programs.\n\n", .{});
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

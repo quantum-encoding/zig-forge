@@ -288,7 +288,7 @@ test "check: mismatch warning uses GNU singular/plural wording" {
     defer fx.deinit();
 
     // One wrong digest (all zeros) → singular "1 computed checksum did NOT match".
-    const zeros = "0" ** abc_512.len;
+    const zeros = &@as([abc_512.len]u8, @splat('0'));
     const body1 = try std.fmt.allocPrint(gpa, "{s}  {s}\n", .{ zeros, fx.abc });
     defer gpa.free(body1);
     const sum1 = try fx.writeFile("bad1.sum", body1);
@@ -444,7 +444,7 @@ test "gnu-diff: check-mode exit codes and stdout match (OK / FAILED / missing)" 
     defer fx.deinit();
 
     // A good line, a tampered line, and a missing file, all in one manifest.
-    const zeros = "0" ** abc_512.len;
+    const zeros = &@as([abc_512.len]u8, @splat('0'));
     const body = try std.fmt.allocPrint(
         gpa,
         "{s}  {s}\n{s}  {s}\n{s}  {s}/nope\n",

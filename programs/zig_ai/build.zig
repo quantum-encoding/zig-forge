@@ -82,9 +82,7 @@ pub fn build(b: *std.Build) void {
         // Run step
         const run_cmd = b.addRunArtifact(exe);
         run_cmd.step.dependOn(b.getInstallStep());
-        if (b.args) |args| {
-            run_cmd.addArgs(args);
-        }
+        forwardArgs(b, run_cmd);
         const run_step = b.step("run", "Run zig-ai CLI");
         run_step.dependOn(&run_cmd.step);
     }
@@ -164,9 +162,7 @@ pub fn build(b: *std.Build) void {
 
     const run_model_tests = b.addRunArtifact(model_test_exe);
     run_model_tests.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_model_tests.addArgs(args);
-    }
+    forwardArgs(b, run_model_tests);
     const model_test_step = b.step("test-models", "Run model connectivity tests");
     model_test_step.dependOn(&run_model_tests.step);
 
@@ -192,9 +188,15 @@ pub fn build(b: *std.Build) void {
 
     const run_tool_tests = b.addRunArtifact(tool_test_exe);
     run_tool_tests.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_tool_tests.addArgs(args);
-    }
+    forwardArgs(b, run_tool_tests);
     const tool_test_step = b.step("test-tools", "Run tool calling smoke tests");
     tool_test_step.dependOn(&run_tool_tests.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

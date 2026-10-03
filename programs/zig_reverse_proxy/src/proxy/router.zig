@@ -472,6 +472,6 @@ test "regex matcher is bounded against catastrophic backtracking (ReDoS)" {
     // exponentially and hang the proxy; with it, the match simply terminates
     // and reports no match.
     const pattern = ".*.*.*.*.*.*.*.*x";
-    const text = "a" ** 128; // no trailing 'x'
+    const text = &@as([128]u8, @splat('a')); // no trailing 'x'
     try std.testing.expect(!regexMatch(pattern, text));
 }

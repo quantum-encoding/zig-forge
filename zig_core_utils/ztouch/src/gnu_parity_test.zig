@@ -139,7 +139,7 @@ const Harness = struct {
         const gtouch = getBin("GTOUCH_BIN", "/opt/homebrew/bin/gtouch");
         if (!haveGnu(gtouch)) return error.SkipZigTest;
 
-        var tmpl = [_]u8{0} ** 40;
+        var tmpl = @as([40]u8, @splat(0));
         const prefix = "/tmp/ztouch_parity_XXXXXX";
         @memcpy(tmpl[0..prefix.len], prefix);
         const made = mkdtemp(@ptrCast(&tmpl)) orelse return error.MkdtempFailed;

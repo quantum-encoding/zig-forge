@@ -73,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
     // the hostname is >= len. Zero-initialize the buffer and reserve the final
     // byte as a guaranteed terminator (pass buf.len - 1), so std.mem.sliceTo
     // can never scan past the buffer into adjacent stack memory.
-    var buf: [257]u8 = [_]u8{0} ** 257;
+    var buf: [257]u8 = @splat(0);
     if (gethostname(&buf, buf.len - 1) != 0) {
         const msg = "zhostname: cannot get hostname\n";
         writeErr(msg);

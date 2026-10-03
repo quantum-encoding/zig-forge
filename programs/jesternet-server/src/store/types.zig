@@ -48,7 +48,7 @@ pub const ApiTokenRow = struct {
     user_handle: FixedStr64 = .{},
     /// SHA-256 of the whole raw token (not hex; raw bytes). The lookup
     /// table keys on this.
-    hash: [32]u8 = .{0} ** 32,
+    hash: [32]u8 = @splat(0),
     /// Free-form label users set at issue time.
     label: FixedStr128 = .{},
     /// Scope flags. Mirrors the TS reference's `scopes: string[]`
@@ -256,7 +256,7 @@ test "FixedString round-trip" {
 }
 
 test "FixedString truncation on too-long input" {
-    const too_long = "x" ** 100;
+    const too_long = &@as([100]u8, @splat('x'));
     var s = FixedStr64.fromSlice(too_long);
     try std.testing.expectEqual(@as(usize, 64), s.slice().len);
 }

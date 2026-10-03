@@ -578,7 +578,7 @@ export fn quantum_secure_compare(a: [*c]const u8, b: [*c]const u8, len: usize) c
     // Convert to constant-time boolean check
     // If acc == 0, all bytes were equal
     const bits = @typeInfo(u8).int.bits;
-    const Cext = std.meta.Int(.unsigned, bits + 1);
+    const Cext = @Int(.unsigned, bits + 1);
     const equal = @as(bool, @bitCast(@as(u1, @truncate((@as(Cext, acc) -% 1) >> bits))));
 
     return if (equal) 0 else 1;
@@ -626,8 +626,8 @@ test "BLAKE3 correctness" {
     try std.testing.expect(!is_zero);
 }
 test "ChaCha20 encrypt/decrypt" {
-    const key = [_]u8{1} ** 32;
-    const nonce = [_]u8{2} ** 12;
+    const key = @as([32]u8, @splat(1));
+    const nonce = @as([12]u8, @splat(2));
     const plaintext = "Attack at dawn!";
     var ciphertext: [100]u8 = undefined;
     var decrypted: [100]u8 = undefined;
@@ -658,7 +658,7 @@ test "secure memory operations" {
     var secret = [_]u8{ 1, 2, 3, 4, 5 };
     // Zero memory
     quantum_secure_zero(&secret, secret.len);
-    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 5, &secret);
+    try std.testing.expectEqualSlices(u8, &@as([5]u8, @splat(0)), &secret);
     // Constant-time compare
     const a = [_]u8{ 1, 2, 3 };
     const b = [_]u8{ 1, 2, 3 };
@@ -813,15 +813,15 @@ test "SHA-256d known answer: abc" {
 
 test "HMAC-SHA256 RFC 4231 test cases 1-4" {
     // https://www.rfc-editor.org/rfc/rfc4231.txt sections 4.2 - 4.5
-    const key1 = [_]u8{0x0b} ** 20;
-    const key3 = [_]u8{0xaa} ** 20;
+    const key1 = @as([20]u8, @splat(0x0b));
+    const key3 = @as([20]u8, @splat(0xaa));
     const key4 = [_]u8{
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
         0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14,
         0x15, 0x16, 0x17, 0x18, 0x19,
     };
-    const data3 = [_]u8{0xdd} ** 50;
-    const data4 = [_]u8{0xcd} ** 50;
+    const data3 = @as([50]u8, @splat(0xdd));
+    const data4 = @as([50]u8, @splat(0xcd));
 
     const Case = struct { key: []const u8, data: []const u8, expected_hex: *const [64]u8 };
     const cases = [_]Case{
@@ -842,15 +842,15 @@ test "HMAC-SHA256 RFC 4231 test cases 1-4" {
 
 test "HMAC-SHA512 RFC 4231 test cases 1-4" {
     // https://www.rfc-editor.org/rfc/rfc4231.txt sections 4.2 - 4.5
-    const key1 = [_]u8{0x0b} ** 20;
-    const key3 = [_]u8{0xaa} ** 20;
+    const key1 = @as([20]u8, @splat(0x0b));
+    const key3 = @as([20]u8, @splat(0xaa));
     const key4 = [_]u8{
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
         0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14,
         0x15, 0x16, 0x17, 0x18, 0x19,
     };
-    const data3 = [_]u8{0xdd} ** 50;
-    const data4 = [_]u8{0xcd} ** 50;
+    const data3 = @as([50]u8, @splat(0xdd));
+    const data4 = @as([50]u8, @splat(0xcd));
 
     const Case = struct { key: []const u8, data: []const u8, expected_hex: *const [128]u8 };
     const cases = [_]Case{
@@ -1350,7 +1350,7 @@ export fn quantum_bitcoin_parse_tx(
         var c_output = CTxOutput{
             .value = output.value,
             .script_type = @enumFromInt(@intFromEnum(output.script_type)),
-            .address_hash = [_]u8{0} ** 32,
+            .address_hash = @as([32]u8, @splat(0)),
             .address_hash_len = 0,
             .script_offset = @intCast(@intFromPtr(output.script_pubkey.ptr) - @intFromPtr(raw_tx)),
             .script_len = @intCast(output.script_pubkey.len),
@@ -1555,10 +1555,10 @@ test "Merkle root with single branch" {
 
 test "Merkle root from transactions" {
     // Create 4 transaction hashes
-    var tx1: [32]u8 = [_]u8{1} ** 32;
-    var tx2: [32]u8 = [_]u8{2} ** 32;
-    var tx3: [32]u8 = [_]u8{3} ** 32;
-    var tx4: [32]u8 = [_]u8{4} ** 32;
+    var tx1: [32]u8 = @splat(1);
+    var tx2: [32]u8 = @splat(2);
+    var tx3: [32]u8 = @splat(3);
+    var tx4: [32]u8 = @splat(4);
 
     var tx_ptrs: [4][*]const u8 = .{ &tx1, &tx2, &tx3, &tx4 };
     var output: [32]u8 = undefined;
@@ -1578,7 +1578,7 @@ test "Merkle root from transactions" {
 }
 
 test "Merkle root single transaction" {
-    var tx: [32]u8 = [_]u8{0xAB} ** 32;
+    var tx: [32]u8 = @splat(0xAB);
     var tx_ptrs: [1][*]const u8 = .{&tx};
     var output: [32]u8 = undefined;
 
@@ -3008,10 +3008,10 @@ test "tx builder add input" {
     _ = quantum_tx_builder_init();
 
     const utxo = CSpendableUtxo{
-        .txid = [_]u8{0x01} ** 32,
+        .txid = @as([32]u8, @splat(0x01)),
         .vout = 0,
         .value = 100000,
-        .pubkey_hash = [_]u8{0x02} ** 20,
+        .pubkey_hash = @as([20]u8, @splat(0x02)),
         .derivation_index = 0,
     };
 
@@ -3024,7 +3024,7 @@ test "tx builder add input" {
 test "tx builder add output" {
     _ = quantum_tx_builder_init();
 
-    const dest_hash = [_]u8{0x03} ** 20;
+    const dest_hash = @as([20]u8, @splat(0x03));
     const result = quantum_tx_builder_add_p2wpkh_output(90000, &dest_hash);
     try std.testing.expectEqual(@as(c_int, 0), result);
     try std.testing.expectEqual(@as(usize, 1), quantum_tx_builder_output_count());
@@ -3036,16 +3036,16 @@ test "tx builder fee calculation" {
 
     // Add input: 100000 sats
     const utxo = CSpendableUtxo{
-        .txid = [_]u8{0x01} ** 32,
+        .txid = @as([32]u8, @splat(0x01)),
         .vout = 0,
         .value = 100000,
-        .pubkey_hash = [_]u8{0x02} ** 20,
+        .pubkey_hash = @as([20]u8, @splat(0x02)),
         .derivation_index = 0,
     };
     _ = quantum_tx_builder_add_input(&utxo);
 
     // Add output: 90000 sats
-    const dest_hash = [_]u8{0x03} ** 20;
+    const dest_hash = @as([20]u8, @splat(0x03));
     _ = quantum_tx_builder_add_p2wpkh_output(90000, &dest_hash);
 
     // Fee should be 10000 sats
@@ -3059,14 +3059,14 @@ test "tx builder handle API (2.2): independent handles, counts, fee, null-safety
     defer quantum_tx_builder_free(h2);
 
     const utxo = CSpendableUtxo{
-        .txid = [_]u8{0x01} ** 32,
+        .txid = @as([32]u8, @splat(0x01)),
         .vout = 0,
         .value = 100000,
-        .pubkey_hash = [_]u8{0x02} ** 20,
+        .pubkey_hash = @as([20]u8, @splat(0x02)),
         .derivation_index = 0,
     };
     try std.testing.expectEqual(@as(c_int, 0), quantum_tx_builder_add_input_ctx(h1, &utxo));
-    const dest_hash = [_]u8{0x03} ** 20;
+    const dest_hash = @as([20]u8, @splat(0x03));
     try std.testing.expectEqual(@as(c_int, 0), quantum_tx_builder_add_p2wpkh_output_ctx(h1, 90000, &dest_hash));
 
     // h1 carries state; h2 is independent and empty (proves the threadlocal is gone).
@@ -3430,7 +3430,7 @@ test "coin select FFI basic" {
         .output_count = 1,
         .min_change = 546,
         .prefer_no_change = 1,
-        ._reserved = [_]u8{0} ** 7,
+        ._reserved = @as([7]u8, @splat(0)),
     };
 
     var result: CSelectionResult = undefined;
@@ -3452,7 +3452,7 @@ test "coin select insufficient funds" {
         .output_count = 1,
         .min_change = 546,
         .prefer_no_change = 1,
-        ._reserved = [_]u8{0} ** 7,
+        ._reserved = @as([7]u8, @splat(0)),
     };
 
     var result: CSelectionResult = undefined;
@@ -3487,7 +3487,7 @@ test "quantum_bitcoin_parse_tx rejects output-value sum overflow" {
     const raw = [_]u8{
         0x02, 0x00, 0x00, 0x00, // version 2
         0x01, // input count = 1
-    } ++ [_]u8{0x11} ** 32 // prev txid
+    } ++ @as([32]u8, @splat(0x11)) // prev txid
     ++ [_]u8{
         0x00, 0x00, 0x00, 0x00, // vout 0
         0x00, // scriptSig len 0

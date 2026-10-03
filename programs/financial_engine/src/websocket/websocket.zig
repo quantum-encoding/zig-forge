@@ -58,7 +58,7 @@ test "frameText" {
     }
 
     {
-        const msg = "A" ** 130;
+        const msg = &@as([130]u8, @splat('A'));
         const framed = frameText(msg);
 
         try t.expectEqual(134, framed.len);
@@ -87,7 +87,7 @@ test "frameBin" {
     }
 
     {
-        const msg = "A" ** 130;
+        const msg = &@as([130]u8, @splat('A'));
         const framed = frameBin(msg);
 
         try t.expectEqual(134, framed.len);

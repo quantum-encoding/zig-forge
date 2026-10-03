@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
     // Externally-anchored parity tests (spec vectors + live GNU b2sum diff).
     // The test binary shells out to the installed zb2sum, so it needs the path.
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "zb_exe", b.getInstallPath(.bin, "zb2sum"));
+    test_opts.addOptionPath("zb_exe", exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{

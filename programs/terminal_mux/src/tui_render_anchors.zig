@@ -30,10 +30,10 @@ const TUI =
     "\x1b[?1049h\x1b[H\x1b[2J" ++
     "\x1b[>1u\x1b[>4;2m" ++
     "\x1b[38;2;180;180;190m" ++
-    "\u{256D}" ++ "\u{2500}" ** 20 ++ "\u{256E}\r\n" ++
+    "\u{256D}" ++ repeatStr("\u{2500}", 20) ++ "\u{256E}\r\n" ++
     "\u{2502} \x1b[0m\x1b[1m\u{2733} Claude\x1b[0m\r\n" ++
     "\u{2502} \x1b[0mSee https://docs.anthropic.com/claude for more.\r\n" ++
-    "\u{2570}" ++ "\u{2500}" ** 20 ++ "\u{2570}\r\n" ++
+    "\u{2570}" ++ repeatStr("\u{2500}", 20) ++ "\u{2570}\r\n" ++
     "\x1b[0m\u{23F5} auto-accept on   \u{26A0} 3 files\r\n";
 
 test "REAL composer replay: typed text must land unmangled in the grid" {
@@ -328,4 +328,14 @@ test "DEC 2026: sync flag tracks h/l and the REAL claude stream closes every blo
     // Full real capture: every opened block must be closed by stream end.
     feedFixture(sess, @embedFile("composer_fixture"));
     try std.testing.expect(!term.modes.synchronized);
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

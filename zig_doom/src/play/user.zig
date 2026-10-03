@@ -101,14 +101,14 @@ pub const Player = struct {
     armor_type: i32 = 0,
 
     // Keys
-    cards: [defs.NUMCARDS]bool = [_]bool{false} ** defs.NUMCARDS,
+    cards: [defs.NUMCARDS]bool = @splat(false),
     backpack: bool = false,
 
     // Weapons
     ready_weapon: defs.WeaponType = .pistol,
     pending_weapon: defs.WeaponType = .pistol,
     weapon_owned: [defs.NUMWEAPONS]bool = blk: {
-        var wep = [_]bool{false} ** defs.NUMWEAPONS;
+        var wep = @as([defs.NUMWEAPONS]bool, @splat(false));
         wep[@intFromEnum(defs.WeaponType.fist)] = true;
         wep[@intFromEnum(defs.WeaponType.pistol)] = true;
         break :blk wep;
@@ -117,7 +117,7 @@ pub const Player = struct {
     max_ammo: [defs.NUMAMMO]i32 = .{ 200, 50, 300, 50 },
 
     // Powers
-    powers: [defs.NUMPOWERS]i32 = [_]i32{0} ** defs.NUMPOWERS,
+    powers: [defs.NUMPOWERS]i32 = @splat(0),
 
     // Stats
     kill_count: i32 = 0,

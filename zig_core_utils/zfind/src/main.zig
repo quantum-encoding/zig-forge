@@ -980,7 +980,7 @@ fn walk(ctx: *WalkCtx, path: []const u8, depth: usize) void {
         if (depth > max) return;
     }
 
-    const path_z = ctx.allocator.dupeZ(u8, path) catch {
+    const path_z = ctx.allocator.dupeSentinel(u8, path, 0) catch {
         ctx.had_error = true;
         return;
     };
@@ -1026,7 +1026,7 @@ fn descend(ctx: *WalkCtx, path: []const u8, depth: usize, dev: i64, ino: u64) vo
     ctx.ancestors.append(ctx.allocator, .{ .dev = dev, .ino = ino }) catch {};
     defer _ = ctx.ancestors.pop();
 
-    const path_z = ctx.allocator.dupeZ(u8, path) catch {
+    const path_z = ctx.allocator.dupeSentinel(u8, path, 0) catch {
         ctx.had_error = true;
         return;
     };
@@ -1065,10 +1065,10 @@ fn executeCommand(allocator: std.mem.Allocator, path: []const u8, action: *const
 
     for (action.exec_args.items) |arg| {
         if (std.mem.eql(u8, arg, "{}")) {
-            const p = allocator.dupeZ(u8, path) catch return;
+            const p = allocator.dupeSentinel(u8, path, 0) catch return;
             argv.append(allocator, p.ptr) catch return;
         } else {
-            const a = allocator.dupeZ(u8, arg) catch return;
+            const a = allocator.dupeSentinel(u8, arg, 0) catch return;
             argv.append(allocator, a.ptr) catch return;
         }
     }
@@ -1175,7 +1175,7 @@ pub fn main(init: std.process.Init) void {
 
     for (config.starting_points.items) |start| {
         // Record this starting point's device for -xdev.
-        const sz = allocator.dupeZ(u8, start) catch continue;
+        const sz = allocator.dupeSentinel(u8, start, 0) catch continue;
         defer allocator.free(sz);
         if (statPath(sz.ptr, config.follow_symlinks)) |st| {
             ctx.root_dev = @intCast(st.dev);

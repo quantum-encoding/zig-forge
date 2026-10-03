@@ -31,7 +31,7 @@ extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int
 
 // A NAME longer than 255 bytes: the pre-fix code capped name copies at a 256-byte
 // buffer and silently skipped anything larger (audit finding #5).
-const LONG_NAME = "ZPTEST_LONG_" ++ ("x" ** 300);
+const LONG_NAME = "ZPTEST_LONG_" ++ (&@as([300]u8, @splat('x')));
 
 /// Populate a known, deterministic set of environment variables in THIS process
 /// so that both spawned children inherit identical state. Idempotent.

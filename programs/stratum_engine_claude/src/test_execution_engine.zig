@@ -96,7 +96,7 @@ pub fn main() !void {
     };
 
     const whale_tx = Transaction{
-        .hash = [_]u8{0xDE} ** 32,
+        .hash = @as([32]u8, @splat(0xDE)),
         .total_value_sats = 250_000_000, // 2.5 BTC
         .outputs = &outputs,
     };

@@ -25,7 +25,7 @@ const fmt = std.fmt;
 pub const UUID = struct {
     bytes: [16]u8,
 
-    pub const nil: UUID = .{ .bytes = .{0} ** 16 };
+    pub const nil: UUID = .{ .bytes = @splat(0) };
 
     /// UUID variant (RFC 4122)
     pub const Variant = enum {

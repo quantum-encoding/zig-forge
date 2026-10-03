@@ -221,7 +221,7 @@ pub const FolderComparator = struct {
 };
 
 fn getFileSize(allocator: std.mem.Allocator, path: []const u8) ?u64 {
-    const path_z = allocator.dupeZ(u8, path) catch return null;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return null;
     defer allocator.free(path_z);
 
     const stat_buf = pstat.stat(path_z.ptr) catch return null;

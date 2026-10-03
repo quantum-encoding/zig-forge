@@ -56,7 +56,7 @@ pub const Address = struct {
             .family = linux.AF.INET,
             .port = mem.nativeToBig(u16, port),
             .addr = @bitCast(addr_bytes),
-            .zero = [_]u8{0} ** 8,
+            .zero = @as([8]u8, @splat(0)),
         };
         return result;
     }
@@ -139,7 +139,7 @@ pub const Address = struct {
 
     /// Simple IPv6 parser for common forms ("::", "::1", full form)
     fn parseIp6(s: []const u8) ?[16]u8 {
-        var result: [16]u8 = [_]u8{0} ** 16;
+        var result: [16]u8 = @splat(0);
 
         // Handle "::" (all-zeros)
         if (mem.eql(u8, s, "::")) return result;

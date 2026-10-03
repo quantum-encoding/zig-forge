@@ -53,9 +53,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(demo);
 
     const run_demo = b.addRunArtifact(demo);
-    if (b.args) |args| {
-        run_demo.addArgs(args);
-    }
+    forwardArgs(b, run_demo);
     const demo_step = b.step("demo", "Run socket demo");
     demo_step.dependOn(&run_demo.step);
 
@@ -66,4 +64,12 @@ pub fn build(b: *std.Build) void {
     const run_bench = b.addRunArtifact(bench);
     const bench_step = b.step("bench", "Run socket benchmarks");
     bench_step.dependOn(&run_bench.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

@@ -33,9 +33,7 @@ pub fn build(b: *std.Build) void {
     // Run step
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
     const run_step = b.step("run", "Run zig-docx");
     run_step.dependOn(&run_cmd.step);
 
@@ -317,4 +315,12 @@ pub fn build(b: *std.Build) void {
         const so_install = b.addInstallArtifact(so_lib, .{ .dest_dir = .{ .override = .{ .custom = custom_path } } });
         android_so_step.dependOn(&so_install.step);
     }
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

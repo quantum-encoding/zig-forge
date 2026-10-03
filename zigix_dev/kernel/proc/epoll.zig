@@ -60,14 +60,14 @@ fn emptyEntry() EpollEntry {
 
 fn emptyInstance() EpollInstance {
     return .{
-        .entries = [_]EpollEntry{emptyEntry()} ** MAX_EPOLL_ENTRIES,
+        .entries = @as([MAX_EPOLL_ENTRIES]EpollEntry, @splat(emptyEntry())),
         .waiting_pid = 0,
         .deadline_tick = 0,
         .in_use = false,
     };
 }
 
-var instances: [MAX_EPOLL_INSTANCES]EpollInstance = [_]EpollInstance{emptyInstance()} ** MAX_EPOLL_INSTANCES;
+var instances: [MAX_EPOLL_INSTANCES]EpollInstance = @as([MAX_EPOLL_INSTANCES]EpollInstance, @splat(emptyInstance()));
 
 // --- VFS integration ---
 

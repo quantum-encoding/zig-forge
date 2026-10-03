@@ -1110,7 +1110,7 @@ fn buildFrameForTest(buf: []u8, command: []const u8, payload: []const u8) []u8 {
 
 test "nextFrame: returns null until the whole message has arrived" {
     var buf: [HEADER_LEN + 8]u8 = undefined;
-    const payload = [_]u8{0xAA} ** 8;
+    const payload = @as([8]u8, @splat(0xAA));
     const msg = buildFrameForTest(&buf, "ping", &payload);
 
     // Every strict prefix is incomplete — must ask for more, never parse.
@@ -1231,8 +1231,8 @@ test "forEachInvTxHash: yields only MSG_TX entries" {
     );
 
     try std.testing.expectEqual(@as(usize, 2), hashes.items.len);
-    try std.testing.expectEqualSlices(u8, &([_]u8{1} ** 32), &hashes.items[0]);
-    try std.testing.expectEqualSlices(u8, &([_]u8{3} ** 32), &hashes.items[1]);
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(1))), &hashes.items[0]);
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(3))), &hashes.items[1]);
 }
 
 test "forEachInvTxHash: empty payload errors instead of reading OOB" {

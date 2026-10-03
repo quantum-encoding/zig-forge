@@ -126,7 +126,7 @@ pub const GGUFFile = struct {
 
     pub fn open(allocator: Allocator, path: []const u8) !GGUFFile {
         // Open via C for cross-platform compat (Zig 0.16 file API limitations)
-        const c_path = try allocator.dupeZ(u8, path);
+        const c_path = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(c_path);
 
         const fd = std.c.open(c_path.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
@@ -427,7 +427,7 @@ pub const GGUFFile = struct {
 
     /// Get the dominant quantization type
     pub fn dominantQuantType(self: *const GGUFFile) GGMLType {
-        var counts = [_]u32{0} ** 32;
+        var counts = @as([32]u32, @splat(0));
         var it = self.tensors.valueIterator();
         while (it.next()) |info| {
             const idx = @intFromEnum(info.dtype);

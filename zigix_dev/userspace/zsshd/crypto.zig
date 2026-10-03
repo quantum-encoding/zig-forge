@@ -155,7 +155,7 @@ pub const Sha256 = struct {
 
     pub fn final(self: *Sha256) [32]u8 {
         // Pad: append 1 bit, zeros, 64-bit big-endian length
-        var pad: [128]u8 = .{0} ** 128;
+        var pad: [128]u8 = @splat(0);
         pad[0] = 0x80;
         const bit_len = self.total_len * 8;
         const bl: u8 = self.buf_len;
@@ -298,14 +298,14 @@ const Sha512 = struct {
     }
 
     fn final512(self: *Sha512) [64]u8 {
-        var pad: [256]u8 = .{0} ** 256;
+        var pad: [256]u8 = @splat(0);
         pad[0] = 0x80;
         const bit_len = self.total_len * 8;
         const bl: u8 = self.buf_len;
         const pad_len: u8 = if (bl < 112) (112 - bl) else (240 - bl);
         self.update(pad[0..pad_len]);
         // 128-bit length (upper 64 bits always 0 for our use)
-        var len_buf: [16]u8 = .{0} ** 16;
+        var len_buf: [16]u8 = @splat(0);
         store64be(len_buf[8..], bit_len);
         self.update(&len_buf);
 
@@ -329,7 +329,7 @@ pub fn sha512(data: []const u8) [64]u8 {
 
 const Fe = [16]i64; // Field element: 16 limbs of ~16 bits each
 
-const fe_zero: Fe = .{0} ** 16;
+const fe_zero: Fe = @splat(0);
 const fe_one: Fe = .{ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
 // The base point (9) in packed form
@@ -386,7 +386,7 @@ fn fe_sub(o: *Fe, a: *const Fe, b: *const Fe) void {
 }
 
 fn fe_mul(o: *Fe, a: *const Fe, b: *const Fe) void {
-    var t: [31]i64 = .{0} ** 31;
+    var t: [31]i64 = @splat(0);
     for (0..16) |i| {
         for (0..16) |j| {
             t[i + j] += a[i] * b[j];
@@ -594,7 +594,7 @@ pub fn poly1305_mac(tag: *[16]u8, msg: []const u8, key: *const [32]u8) void {
     r[3] = (@as(u64, load32le(key[9..])) >> 6) & 0x3f03fff;
     r[4] = (@as(u64, load32le(key[12..])) >> 8) & 0x00fffff;
 
-    var h: [5]u64 = .{0} ** 5;
+    var h: [5]u64 = @splat(0);
     const s: [4]u32 = .{
         load32le(key[16..]),
         load32le(key[20..]),
@@ -607,8 +607,8 @@ pub fn poly1305_mac(tag: *[16]u8, msg: []const u8, key: *const [32]u8) void {
         const rem = msg.len - off;
         const n = if (rem < 16) rem else 16;
         // Load block
-        var t: [5]u64 = .{0} ** 5;
-        var block: [17]u8 = .{0} ** 17;
+        var t: [5]u64 = @splat(0);
+        var block: [17]u8 = @splat(0);
         @memcpy(block[0..n], msg[off..][0..n]);
         block[n] = 1; // high bit
 
@@ -746,7 +746,7 @@ pub fn poly1305_mac(tag: *[16]u8, msg: []const u8, key: *const [32]u8) void {
 // ============================================================================
 
 pub fn openssh_nonce(seq: u32) [12]u8 {
-    var nonce: [12]u8 = .{0} ** 12;
+    var nonce: [12]u8 = @splat(0);
     store32be(nonce[8..], seq);
     return nonce;
 }
@@ -1032,7 +1032,7 @@ pub fn ed25519_sign(sig: *[64]u8, msg: []const u8, sk: *const [64]u8, pk: *const
     sc_reduce(&h_hash);
 
     // Compute S = (r + h * a) mod L using i64 arithmetic
-    var x: [64]i64 = .{0} ** 64;
+    var x: [64]i64 = @splat(0);
     for (0..32) |i| x[i] = @as(i64, nonce_hash[i]);
     for (0..32) |i| {
         for (0..32) |j| {

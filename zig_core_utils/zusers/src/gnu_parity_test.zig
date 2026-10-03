@@ -112,7 +112,7 @@ fn fixturePath(buf: []u8) [:0]const u8 {
     const dir: []const u8 = if (c.getenv("TMPDIR")) |d| std.mem.span(d) else "/tmp/";
     const pid = c.getpid();
     fixture_seq += 1;
-    const s = std.fmt.bufPrintZ(buf, "{s}zusers_fix_{d}_{d}.utmpx", .{ dir, pid, fixture_seq }) catch |err|
+    const s = std.fmt.bufPrintSentinel(buf, "{s}zusers_fix_{d}_{d}.utmpx", .{ dir, pid, fixture_seq }, 0) catch |err|
         std.debug.panic("fixture path did not fit in buffer: {t}", .{err});
     return s;
 }

@@ -108,7 +108,7 @@ pub const Verdict = struct {
     reason: []const u8,
     /// Hex of the signer's public key (when a seal was found) — pin this to a
     /// known business key for authenticity. Empty if no seal.
-    public_key_hex: [PK_HEX]u8 = [_]u8{0} ** PK_HEX,
+    public_key_hex: [PK_HEX]u8 = @splat(0),
     has_seal: bool = false,
     /// Result of pinning the embedded key to a known business key:
     ///   null  => no pinning was requested (integrity-only verification),
@@ -296,7 +296,7 @@ const SAMPLE_PDF =
 
 test "seal then verify: valid" {
     const a = testing.allocator;
-    const seed = [_]u8{0x07} ** 32;
+    const seed = @as([32]u8, @splat(0x07));
     const sealed = try seal(a, SAMPLE_PDF, seed);
     defer a.free(sealed);
     try testing.expect(std.mem.indexOf(u8, sealed, "/Type /QESeal") != null);
@@ -307,7 +307,7 @@ test "seal then verify: valid" {
 
 test "seal is deterministic for the same document + key" {
     const a = testing.allocator;
-    const seed = [_]u8{0x07} ** 32;
+    const seed = @as([32]u8, @splat(0x07));
     const s1 = try seal(a, SAMPLE_PDF, seed);
     defer a.free(s1);
     const s2 = try seal(a, SAMPLE_PDF, seed);
@@ -317,7 +317,7 @@ test "seal is deterministic for the same document + key" {
 
 test "single-byte tamper in the body breaks verification" {
     const a = testing.allocator;
-    const seed = [_]u8{0x07} ** 32;
+    const seed = @as([32]u8, @splat(0x07));
     const sealed = try seal(a, SAMPLE_PDF, seed);
     defer a.free(sealed);
     // Flip a byte inside the original content (covered by ByteRange span1).
@@ -330,7 +330,7 @@ test "single-byte tamper in the body breaks verification" {
 
 test "wrong key rejected (verify uses embedded pubkey; swap it)" {
     const a = testing.allocator;
-    const sealed = try seal(a, SAMPLE_PDF, [_]u8{0x07} ** 32);
+    const sealed = try seal(a, SAMPLE_PDF, @as([32]u8, @splat(0x07)));
     defer a.free(sealed);
     // Corrupt one byte of the embedded /PubKey hex → pubkey no longer matches
     // the signing key → verification must fail.
@@ -349,7 +349,7 @@ test "verify reports no seal on an unsealed PDF" {
 
 test "verifyPinned: matching business key passes" {
     const a = testing.allocator;
-    const seed = [_]u8{0x07} ** 32;
+    const seed = @as([32]u8, @splat(0x07));
     const sealed = try seal(a, SAMPLE_PDF, seed);
     defer a.free(sealed);
     const expected = try publicKeyFromSeed(seed);
@@ -361,10 +361,10 @@ test "verifyPinned: matching business key passes" {
 test "verifyPinned: a valid seal from a DIFFERENT key is rejected" {
     const a = testing.allocator;
     // Sealed with key A...
-    const sealed = try seal(a, SAMPLE_PDF, [_]u8{0x07} ** 32);
+    const sealed = try seal(a, SAMPLE_PDF, @as([32]u8, @splat(0x07)));
     defer a.free(sealed);
     // ...but pinned to key B. The signature is valid, yet it is not OUR key.
-    const expected_b = try publicKeyFromSeed([_]u8{0x42} ** 32);
+    const expected_b = try publicKeyFromSeed(@as([32]u8, @splat(0x42)));
     const v = try verifyPinned(a, sealed, &expected_b);
     try testing.expect(!v.valid); // authenticity fails even though integrity holds
     try testing.expect(v.pinned.? == false);
@@ -373,7 +373,7 @@ test "verifyPinned: a valid seal from a DIFFERENT key is rejected" {
 
 test "verifyPinned: tamper still caught even with the right key pinned" {
     const a = testing.allocator;
-    const seed = [_]u8{0x07} ** 32;
+    const seed = @as([32]u8, @splat(0x07));
     const sealed = try seal(a, SAMPLE_PDF, seed);
     defer a.free(sealed);
     const pos = std.mem.indexOf(u8, sealed, "/MediaBox").?;

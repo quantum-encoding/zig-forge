@@ -138,7 +138,7 @@ fn writeFixtures(io: Io, dir: Io.Dir, arena: std.mem.Allocator) !void {
         .{ .name = "t19.bin", .data = T19 },
         .{ .name = "hello.bin", .data = "Hello, World!" },
         .{ .name = "all256.bin", .data = &all256 },
-        .{ .name = "zeros.bin", .data = &([_]u8{0} ** 64) }, // exercises '*'
+        .{ .name = "zeros.bin", .data = &(@as([64]u8, @splat(0))) }, // exercises '*'
         .{ .name = "patt.bin", .data = &patt },
         .{ .name = "empty.bin", .data = "" },
         .{ .name = "one.bin", .data = "A" },

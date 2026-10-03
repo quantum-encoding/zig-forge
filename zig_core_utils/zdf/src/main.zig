@@ -471,7 +471,7 @@ fn collectAll(a: std.mem.Allocator, out: *std.ArrayList(Row)) bool {
 /// path), in which case the caller emits an error and sets exit status 1.
 fn collectPath(a: std.mem.Allocator, out: *std.ArrayList(Row), path: []const u8) bool {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return false;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return false;
     if (is_darwin) {
         var s: DarwinStatfs = undefined;
         if (statfs(path_z.ptr, &s) != 0) return false;
@@ -518,7 +518,7 @@ fn collectAllLinux(a: std.mem.Allocator, out: *std.ArrayList(Row)) bool {
 
 fn statvfsAppend(a: std.mem.Allocator, out: *std.ArrayList(Row), device: []const u8, mount_point: []const u8, fstype: []const u8) void {
     var mbuf: [4096]u8 = undefined;
-    const mz = std.fmt.bufPrintZ(&mbuf, "{s}", .{mount_point}) catch return;
+    const mz = std.fmt.bufPrintSentinel(&mbuf, "{s}", .{mount_point}, 0) catch return;
     var st: LinuxStatvfs = undefined;
     if (statvfs(mz.ptr, &st) != 0) return;
     if (st.f_blocks == 0) return;

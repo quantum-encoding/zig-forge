@@ -145,14 +145,14 @@ fn mkFile(gpa: std.mem.Allocator, base: []const u8, leaf: []const u8, ctx: []con
     const p = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base, leaf });
     var t = try run(gpa, &.{ "/usr/bin/touch", p });
     t.deinit();
-    const pz = try gpa.dupeZ(u8, p);
+    const pz = try gpa.dupeSentinel(u8, p, 0);
     defer gpa.free(pz);
     if (!rawSet(pz, ctx)) return error.SetXattrFailed;
     return p;
 }
 
 fn ctxOf(gpa: std.mem.Allocator, path: []const u8) !?[]const u8 {
-    const pz = try gpa.dupeZ(u8, path);
+    const pz = try gpa.dupeSentinel(u8, path, 0);
     defer gpa.free(pz);
     return rawGet(pz);
 }
@@ -457,7 +457,7 @@ test "more than 64 operands are all relabeled (no silent fixed-cap drop)" {
 // via mkdir -p); just sets the initial context. Returns owned abs path.
 fn mkDir(gpa: std.mem.Allocator, base: []const u8, leaf: []const u8, ctx: []const u8) ![]u8 {
     const p = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ base, leaf });
-    const pz = try gpa.dupeZ(u8, p);
+    const pz = try gpa.dupeSentinel(u8, p, 0);
     defer gpa.free(pz);
     if (!rawSet(pz, ctx)) return error.SetXattrFailed;
     return p;

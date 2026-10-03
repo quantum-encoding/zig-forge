@@ -114,7 +114,7 @@ pub const EbpfConsumer = struct {
 
         var found_path: ?[*:0]const u8 = null;
         for (paths) |path| {
-            const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch continue;
+            const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch continue;
             if (c.access(path_z, c.F_OK) == 0) {
                 found_path = path_z;
                 break;
@@ -302,7 +302,7 @@ fn log(comptime level: []const u8, comptime fmt: []const u8, args: anytype) void
 
     // Write to log file
     var path_buf: [256]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "/tmp/claude-shepherd.log", .{}) catch return;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "/tmp/claude-shepherd.log", .{}, 0) catch return;
 
     const fd = c.open(@ptrCast(path_z.ptr), c.O_WRONLY | c.O_CREAT | c.O_APPEND, @as(c_uint, 0o644));
     if (fd < 0) return;

@@ -85,7 +85,7 @@ fn parseModels() []const Model {
 fn parseLine(line: []const u8) ?Model {
     // CSV: Provider,Category,Internal ID,API Model ID,Display Name,Context Window,
     //      Input ($/1M),Output ($/1M),Cached ($/1M),Per Unit Price,Price Unit,RPM,Margin,Route,Notes
-    var fields: [15][]const u8 = .{""} ** 15;
+    var fields: [15][]const u8 = @splat("");
     var field_idx: usize = 0;
     var i: usize = 0;
 

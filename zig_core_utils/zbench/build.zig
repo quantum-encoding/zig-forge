@@ -20,9 +20,7 @@ pub fn build(b: *std.Build) void {
     // Run command
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run zbench");
     run_step.dependOn(&run_cmd.step);
@@ -46,7 +44,7 @@ pub fn build(b: *std.Build) void {
     // documented exit-code semantics and RFC 8259 JSON escaping. The binary's
     // install path is injected via a build-options module.
     const parity_options = b.addOptions();
-    parity_options.addOption([]const u8, "zbench_exe", b.getInstallPath(.bin, "zbench"));
+    parity_options.addOptionPath("zbench_exe", exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -62,4 +60,12 @@ pub fn build(b: *std.Build) void {
     // The parity tests execute the installed binary, so it must exist first.
     run_parity_tests.step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_parity_tests.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

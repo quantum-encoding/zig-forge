@@ -415,7 +415,7 @@ pub const DupeFinder = struct {
                 const entry = &self.files.items[idx];
 
                 // Use quick hash if available, otherwise use zero hash (will be unique)
-                const key = entry.quick_hash orelse [_]u8{0} ** 32;
+                const key = entry.quick_hash orelse @as([32]u8, @splat(0));
 
                 const gop = try quick_groups.getOrPut(key);
                 if (!gop.found_existing) {
@@ -586,7 +586,7 @@ pub fn coveringRootsOf(allocator: std.mem.Allocator, paths: []const []const u8) 
 }
 
 fn canonicalPath(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     var buf: [sys.c.PATH_MAX]u8 = undefined;

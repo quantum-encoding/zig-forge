@@ -36,9 +36,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run zig-lens");
     run_step.dependOn(&run_cmd.step);
@@ -61,7 +59,7 @@ pub fn build(b: *std.Build) void {
     });
 
     lib.root_module.link_libc = true;
-    lib.root_module.strip = optimize != .Debug;
+    lib.root_module.strip = optimize != std.builtin.OptimizeMode.Debug;
 
     b.installArtifact(lib);
 
@@ -142,4 +140,12 @@ pub fn build(b: *std.Build) void {
 
     const ffi_test_step = b.step("test-ffi", "Run FFI unit tests");
     ffi_test_step.dependOn(&b.addRunArtifact(ffi_tests).step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

@@ -28,7 +28,7 @@ pub const LinkStatus = struct {
 
 /// 6-byte MAC address.
 pub const MacAddr = extern struct {
-    bytes: [6]u8 = [_]u8{0} ** 6,
+    bytes: [6]u8 = @splat(0),
 
     pub fn format(self: MacAddr, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         try writer.print("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{
@@ -41,9 +41,9 @@ pub const MacAddr = extern struct {
 /// Configuration for NIC device initialization.
 pub const DeviceConfig = struct {
     /// PCI address string "DDDD:BB:DD.F" (for native PMDs)
-    pci_addr: [13]u8 = [_]u8{0} ** 13,
+    pci_addr: [13]u8 = @splat(0),
     /// Network interface name "eth0", "ens3f0" (for AF_XDP)
-    iface_name: [16]u8 = [_]u8{0} ** 16,
+    iface_name: [16]u8 = @splat(0),
     num_rx_queues: u8 = 1,
     num_tx_queues: u8 = 1,
     rx_ring_size: u32 = config.default_rx_ring_size,

@@ -348,7 +348,7 @@ fn applyChown(
 /// Non-recursive single-operand path. Preserves the historical (GNU-matching)
 /// behaviour of dereferencing a command-line symlink unless -h/--no-dereference.
 fn chownOne(allocator: std.mem.Allocator, path: []const u8, config: *const Config) ChownError!void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     const st = statAt(AT_FDCWD, path_z.ptr, config.no_dereference) orelse {
@@ -391,7 +391,7 @@ fn walkFd(
         if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
 
         // Sentinel-terminated copy of the entry name for the *at calls.
-        const name_z = allocator.dupeZ(u8, name) catch return;
+        const name_z = allocator.dupeSentinel(u8, name, 0) catch return;
         defer allocator.free(name_z);
 
         // Classify without following (we need to know if it's a symlink).
@@ -445,7 +445,7 @@ fn chownRecursiveEntry(allocator: std.mem.Allocator, path: []const u8, config: *
         return error.PermissionDenied;
     }
 
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     // Classify the operand without following (lstat semantics).
@@ -657,7 +657,7 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
 
     // When --reference is used, resolve owner/group from the reference file
     if (config.reference_file) |ref_file| {
-        const ref_z = try allocator.dupeZ(u8, ref_file);
+        const ref_z = try allocator.dupeSentinel(u8, ref_file, 0);
         defer allocator.free(ref_z);
         var ref_stat: Stat = undefined;
         const ref_result = stat(ref_z.ptr, &ref_stat);

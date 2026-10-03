@@ -37,7 +37,7 @@ pub const sockaddr_in = extern struct {
     family: if (is_darwin or is_bsd) u8 else u16,
     port: u16, // Network byte order (big-endian)
     addr: u32, // Network byte order (big-endian)
-    zero: [8]u8 = [_]u8{0} ** 8,
+    zero: [8]u8 = @splat(0),
 };
 
 // errno numbers differ between Linux and Darwin/BSD (e.g. EAGAIN is 11 on
@@ -165,7 +165,7 @@ pub fn connect(fd: socket_t, ip_parts: [4]u8, port: u16) SocketError!void {
 
     addr.port = std.mem.nativeToBig(u16, port);
     addr.addr = std.mem.nativeToBig(u32, (@as(u32, ip_parts[0]) << 24) | (@as(u32, ip_parts[1]) << 16) | (@as(u32, ip_parts[2]) << 8) | ip_parts[3]);
-    addr.zero = [_]u8{0} ** 8;
+    addr.zero = @as([8]u8, @splat(0));
 
     const result = sysConnect(fd, &addr, @sizeOf(sockaddr_in));
     if (result < 0) {

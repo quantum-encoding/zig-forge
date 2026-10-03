@@ -190,7 +190,7 @@ test "whale detection threshold" {
 
     // Test: Small transaction (should be ignored)
     const small_tx = Transaction{
-        .hash = [_]u8{0} ** 32,
+        .hash = @as([32]u8, @splat(0)),
         .total_value_sats = 50_000_000, // 0.5 BTC
         .outputs = &.{},
     };
@@ -199,7 +199,7 @@ test "whale detection threshold" {
 
     // Test: Large transaction (should trigger)
     const large_tx = Transaction{
-        .hash = [_]u8{0} ** 32,
+        .hash = @as([32]u8, @splat(0)),
         .total_value_sats = 200_000_000, // 2 BTC
         .outputs = &.{},
     };
@@ -220,7 +220,7 @@ test "exchange deposit detection" {
     };
 
     const tx = Transaction{
-        .hash = [_]u8{0} ** 32,
+        .hash = @as([32]u8, @splat(0)),
         .total_value_sats = 150_000_000,
         .outputs = &outputs,
     };

@@ -53,7 +53,7 @@ pub fn Register(comptime T: type, comptime addr: usize) type {
 
 /// Reserved bits placeholder - ensures correct struct size
 pub fn Reserved(comptime n: comptime_int) type {
-    return std.meta.Int(.unsigned, n);
+    return @Int(.unsigned, n);
 }
 
 /// Create a bit mask for a range of bits

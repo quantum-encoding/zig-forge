@@ -40,8 +40,9 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    const run_parity_tests = b.addRunArtifact(parity_tests);
-    run_parity_tests.setEnvironmentVariable("ZCHMOD_BIN", b.getInstallPath(.bin, "zchmod"));
+    const run_parity_tests = b.addSystemCommand(&.{"env"});
+    run_parity_tests.addPrefixedFileArg("ZCHMOD_BIN=", exe.getEmittedBin());
+    run_parity_tests.addArtifactArg(parity_tests);
     run_parity_tests.step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_parity_tests.step);
 }

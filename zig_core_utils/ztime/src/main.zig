@@ -190,13 +190,13 @@ fn executeAndTime(allocator: std.mem.Allocator, command: []const []const u8, qui
     defer argv_buf.deinit(allocator);
 
     for (command) |arg| {
-        const z = try allocator.dupeZ(u8, arg);
+        const z = try allocator.dupeSentinel(u8, arg, 0);
         try argv_buf.append(allocator, z.ptr);
     }
     try argv_buf.append(allocator, null);
 
     const argv: [*:null]const ?[*:0]const u8 = @ptrCast(argv_buf.items.ptr);
-    const cmd_z = try allocator.dupeZ(u8, command[0]);
+    const cmd_z = try allocator.dupeSentinel(u8, command[0], 0);
     defer allocator.free(cmd_z);
 
     // Get rusage before fork
@@ -687,7 +687,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (config.output_file) |path| {
         var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch {
+        const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch {
             writeStderr("ztime: path too long\n");
             std.process.exit(1);
         };

@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
     ) orelse "/opt/homebrew/bin/gfactor";
 
     const opts = b.addOptions();
-    opts.addOption([]const u8, "zfactor_path", b.getInstallPath(.bin, "zfactor"));
+    opts.addOptionPath("zfactor_path", exe.getEmittedBin());
     opts.addOption([]const u8, "gfactor_path", gfactor_path);
 
     const test_exe = b.addTest(.{

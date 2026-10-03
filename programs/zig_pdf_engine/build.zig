@@ -265,25 +265,27 @@ pub fn build(b: *std.Build) void {
 
     // Run commands for pdf-info
     const run_info = b.addRunArtifact(pdf_info);
-    if (b.args) |args| {
-        run_info.addArgs(args);
-    }
+    forwardArgs(b, run_info);
     const info_step = b.step("info", "Run pdf-info tool");
     info_step.dependOn(&run_info.step);
 
     // Run commands for pdf-text
     const run_text = b.addRunArtifact(pdf_text);
-    if (b.args) |args| {
-        run_text.addArgs(args);
-    }
+    forwardArgs(b, run_text);
     const text_step = b.step("text", "Run pdf-text tool");
     text_step.dependOn(&run_text.step);
 
     // Run commands for render-debug
     const run_render = b.addRunArtifact(render_debug);
-    if (b.args) |args| {
-        run_render.addArgs(args);
-    }
+    forwardArgs(b, run_render);
     const render_step = b.step("render", "Run render-debug tool");
     render_step.dependOn(&run_render.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

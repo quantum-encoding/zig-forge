@@ -19,9 +19,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run zpgrep");
     run_step.dependOn(&run_cmd.step);
@@ -36,7 +34,7 @@ pub fn build(b: *std.Build) void {
     // Absolute path to the installed binary, so the CLI shell-out tests can
     // exec the real zpgrep regardless of cwd.
     const build_options = b.addOptions();
-    build_options.addOption([]const u8, "zpgrep_path", b.getInstallPath(.bin, "zpgrep"));
+    build_options.addOptionPath("zpgrep_path", exe.getEmittedBin());
     test_mod.addOptions("build_options", build_options);
 
     const unit_tests = b.addTest(.{ .root_module = test_mod });
@@ -46,4 +44,12 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run zpgrep parity tests");
     test_step.dependOn(&run_tests.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

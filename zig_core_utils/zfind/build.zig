@@ -27,8 +27,9 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    const run_tests = b.addRunArtifact(tests);
-    run_tests.setEnvironmentVariable("ZFIND_BIN", b.getInstallPath(.bin, "zfind"));
+    const run_tests = b.addSystemCommand(&.{"env"});
+    run_tests.addPrefixedFileArg("ZFIND_BIN=", exe.getEmittedBin());
+    run_tests.addArtifactArg(tests);
     run_tests.step.dependOn(b.getInstallStep());
 
     const test_step = b.step("test", "Run unit + GNU-parity integration tests");

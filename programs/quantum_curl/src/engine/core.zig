@@ -561,7 +561,7 @@ pub fn Engine(comptime WriterType: type) type {
 
             // Build path: {dir}/{id}.{ext}
             var path_buf: [4096:0]u8 = undefined;
-            const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}.{s}", .{ dir, id, self.config.output_ext }) catch return;
+            const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}.{s}", .{ dir, id, self.config.output_ext }, 0) catch return;
 
             if (self.config.base64_field) |field_path| {
                 // Extract + decode base64 from JSON response

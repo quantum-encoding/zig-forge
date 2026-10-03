@@ -268,7 +268,7 @@ fn readFileAsDataUri(allocator: Allocator, path: []const u8) ![]u8 {
         "image/png"; // default
 
     // Read file using C API (Zig 0.16 compatible)
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     const fp = std.c.fopen(path_z.ptr, "rb") orelse return error.FileNotFound;

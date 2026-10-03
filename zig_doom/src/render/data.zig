@@ -40,8 +40,8 @@ pub const Flat = struct {
 
 pub const SpriteFrame = struct {
     rotate: bool = false,
-    lump: [8]usize = [_]usize{0} ** 8, // Lump number for each rotation (0-7); 0 = missing
-    flip: [8]bool = [_]bool{false} ** 8, // Flip horizontally?
+    lump: [8]usize = @splat(0), // Lump number for each rotation (0-7); 0 = missing
+    flip: [8]bool = @splat(false), // Flip horizontally?
 };
 
 pub const SpriteDef = struct {
@@ -440,7 +440,7 @@ pub const RenderData = struct {
     /// Get flat data (64x64 = 4096 bytes of palette indices)
     pub fn getFlatData(self: *const RenderData, flat_num: i32) []const u8 {
         if (flat_num < 0 or flat_num >= @as(i32, @intCast(self.num_flats))) {
-            return &[_]u8{0} ** 64; // Return minimal data
+            return &@as([64]u8, @splat(0)); // Return minimal data
         }
         const lump = self.flats[@intCast(flat_num)].lump;
         const data = self.wad.lumpData(lump);

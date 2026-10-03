@@ -79,7 +79,7 @@ fn emptyEntry() EpollEntry {
 
 fn emptyInstance() EpollInstance {
     return .{
-        .entries = [_]EpollEntry{emptyEntry()} ** MAX_EPOLL_ENTRIES,
+        .entries = @as([MAX_EPOLL_ENTRIES]EpollEntry, @splat(emptyEntry())),
         .waiting_pid = 0,
         .deadline_tick = 0,
         .in_use = false,
@@ -93,7 +93,7 @@ fn emptyInstance() EpollInstance {
 /// ordering violations and deadlock.
 var epoll_lock: spinlock.IrqSpinlock = .{};
 
-var instances: [MAX_EPOLL_INSTANCES]EpollInstance = [_]EpollInstance{emptyInstance()} ** MAX_EPOLL_INSTANCES;
+var instances: [MAX_EPOLL_INSTANCES]EpollInstance = @as([MAX_EPOLL_INSTANCES]EpollInstance, @splat(emptyInstance()));
 
 // --- VFS integration ---
 
@@ -182,7 +182,7 @@ fn checkFdReadiness(fds: *[fd_table.MAX_FDS]?*vfs.FileDescription, fd: u32, requ
 /// Wake all processes blocked on any epoll instance.
 /// Called from subsystems (pipe, socket, tcp) when events occur.
 pub fn wakeAllWaiters() void {
-    var pids_to_wake: [MAX_EPOLL_INSTANCES]u64 = [_]u64{0} ** MAX_EPOLL_INSTANCES;
+    var pids_to_wake: [MAX_EPOLL_INSTANCES]u64 = @splat(0);
     var wake_count: usize = 0;
 
     epoll_lock.acquire();

@@ -25,7 +25,7 @@ pub const MelSpectrogram = struct {
 // ── WAV Reader ──
 
 pub fn readWav(allocator: Allocator, path: []const u8) ![]f32 {
-    const c_path = try allocator.dupeZ(u8, path);
+    const c_path = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(c_path);
 
     const fp = std.c.fopen(c_path.ptr, "rb") orelse return error.FileNotFound;

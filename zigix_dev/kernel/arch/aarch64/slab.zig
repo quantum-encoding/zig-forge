@@ -299,7 +299,7 @@ pub fn createCache(name: []const u8, object_size: u32, slab_pages: u8) ?*Cache {
     for (0..MAX_CACHES) |i| {
         if (!cache_pool[i].active) {
             cache_pool[i] = .{
-                .name = [_]u8{0} ** 16,
+                .name = @as([16]u8, @splat(0)),
                 .name_len = 0,
                 .object_size = size,
                 .slab_pages = if (slab_pages == 0) 1 else slab_pages,

@@ -29,9 +29,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    const run_tests = b.addRunArtifact(parity_tests);
+    const run_tests = b.addSystemCommand(&.{"env"});
+    run_tests.addPrefixedFileArg("ZSED_BIN=", exe.getEmittedBin());
+    run_tests.addArtifactArg(parity_tests);
     // Point the tests at the freshly-built binary.
-    run_tests.setEnvironmentVariable("ZSED_BIN", b.getInstallPath(.bin, "zsed"));
     // The tests spawn the installed zsed binary, so install it first.
     run_tests.step.dependOn(b.getInstallStep());
 

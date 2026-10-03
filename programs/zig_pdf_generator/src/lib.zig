@@ -480,7 +480,7 @@ test "encrypted PDF emits /Encrypt (R6/AESV3) + /ID through build()" {
     try c.drawText("Confidential", 60, 700, doc.getFontId(.helvetica), 12, document.Color.black);
     try doc.addPage(&c);
     // Fixed seed → reproducible; real callers pass OS-random bytes.
-    try doc.enableEncryption("user-pw", "owner-pw", document.DEFAULT_PERMS, [_]u8{0x42} ** 32);
+    try doc.enableEncryption("user-pw", "owner-pw", document.DEFAULT_PERMS, @as([32]u8, @splat(0x42)));
     const pdf = try doc.build();
     try std.testing.expect(std.mem.indexOf(u8, pdf, "/Filter /Standard") != null);
     try std.testing.expect(std.mem.indexOf(u8, pdf, "/V 5") != null);

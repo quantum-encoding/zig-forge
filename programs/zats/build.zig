@@ -51,27 +51,29 @@ pub fn build(b: *std.Build) void {
     // Server
     const server = addExample(b, "zats-server", "src/main_server.zig", target, optimize, zats_module);
     const run_server = b.addRunArtifact(server);
-    if (b.args) |args| {
-        run_server.addArgs(args);
-    }
+    forwardArgs(b, run_server);
     const server_step = b.step("run-server", "Run NATS server");
     server_step.dependOn(&run_server.step);
 
     // Publisher CLI
     const pub_cli = addExample(b, "zats-pub", "src/main_pub.zig", target, optimize, zats_module);
     const run_pub = b.addRunArtifact(pub_cli);
-    if (b.args) |args| {
-        run_pub.addArgs(args);
-    }
+    forwardArgs(b, run_pub);
     const pub_step = b.step("run-pub", "Run NATS publisher");
     pub_step.dependOn(&run_pub.step);
 
     // Subscriber CLI
     const sub_cli = addExample(b, "zats-sub", "src/main_sub.zig", target, optimize, zats_module);
     const run_sub = b.addRunArtifact(sub_cli);
-    if (b.args) |args| {
-        run_sub.addArgs(args);
-    }
+    forwardArgs(b, run_sub);
     const sub_step = b.step("run-sub", "Run NATS subscriber");
     sub_step.dependOn(&run_sub.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

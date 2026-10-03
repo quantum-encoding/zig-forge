@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
         "/usr/bin/sync"; // Linux: system sync is GNU coreutils
 
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "zsync_path", b.getInstallPath(.bin, "zsync"));
+    test_opts.addOptionPath("zsync_path", exe.getEmittedBin());
     test_opts.addOption([]const u8, "gnu_sync_candidates", gnu_candidates);
 
     const parity_test = b.addTest(.{

@@ -125,8 +125,8 @@ const FbState = struct {
     },
 
     // Scale lookup tables (pre-computed for fast nearest-neighbor scaling)
-    col_lut: [MAX_NATIVE_DIM]u16 = [_]u16{0} ** MAX_NATIVE_DIM,
-    row_lut: [MAX_NATIVE_DIM]u16 = [_]u16{0} ** MAX_NATIVE_DIM,
+    col_lut: [MAX_NATIVE_DIM]u16 = @splat(0),
+    row_lut: [MAX_NATIVE_DIM]u16 = @splat(0),
 
     // Input device
     input_fd: c_int = -1,

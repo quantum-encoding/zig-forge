@@ -29,9 +29,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    const run_tests = b.addRunArtifact(tests);
+    const run_tests = b.addSystemCommand(&.{"env"});
+    run_tests.addPrefixedFileArg("ZTSORT_BIN=", exe.getEmittedBin());
+    run_tests.addArtifactArg(tests);
     // Point the harness at the freshly-installed ztsort binary.
-    run_tests.setEnvironmentVariable("ZTSORT_BIN", b.getInstallPath(.bin, "ztsort"));
     run_tests.step.dependOn(b.getInstallStep());
 
     const test_step = b.step("test", "Run GNU-parity tests against the built ztsort");

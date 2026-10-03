@@ -7,6 +7,7 @@
 //! disagree with Apple's documentation without the generator noticing.
 
 const std = @import("std");
+const compat = @import("zig_compat.zig");
 const sys = @import("sys.zig");
 const anchors = @import("layout_anchors.zig");
 
@@ -53,7 +54,7 @@ test "every generated gate names a real field (directly or through an anonymous 
 
 fn hasFieldDeep(comptime T: type, comptime name: []const u8) bool {
     if (@hasField(T, name)) return true;
-    inline for (std.meta.fields(T)) |f| {
+    inline for (compat.fields(T)) |f| {
         switch (@typeInfo(f.type)) {
             .@"struct", .@"union" => if (hasFieldDeep(f.type, name)) return true,
             else => {},

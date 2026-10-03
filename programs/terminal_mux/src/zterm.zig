@@ -198,7 +198,7 @@ pub fn runnerSocketPathFrom(
     home: ?[]const u8,
     baton_dir_present: bool,
 ) !?[:0]u8 {
-    if (override) |o| return try alloc.dupeZ(u8, o);
+    if (override) |o| return try alloc.dupeSentinel(u8, o, 0);
     if (baton_home) |b| return try std.fmt.allocPrintSentinel(alloc, "{s}/var/{s}.sock", .{ b, RUNNER_NAME }, 0);
     if (baton_dir_present) {
         if (home) |h| return try std.fmt.allocPrintSentinel(alloc, "{s}/.baton/var/{s}.sock", .{ h, RUNNER_NAME }, 0);
@@ -427,7 +427,7 @@ fn procComm(pid: c.pid_t, buf: []u8) ?[]const u8 {
     if (pid <= 0) return null;
     if (comptime is_linux) {
         var pb: [48]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&pb, "/proc/{d}/comm", .{pid}) catch return null;
+        const path = std.fmt.bufPrintSentinel(&pb, "/proc/{d}/comm", .{pid}, 0) catch return null;
         const fd = c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
         if (fd < 0) return null;
         defer _ = c.close(fd);
@@ -449,7 +449,7 @@ fn procCwd(pid: c.pid_t, buf: []u8) ?[]const u8 {
     if (comptime !is_linux) return null;
     if (pid <= 0) return null;
     var pb: [48]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&pb, "/proc/{d}/cwd", .{pid}) catch return null;
+    const path = std.fmt.bufPrintSentinel(&pb, "/proc/{d}/cwd", .{pid}, 0) catch return null;
     const n = c.readlink(path.ptr, buf.ptr, buf.len);
     if (n <= 0) return null;
     return buf[0..@intCast(n)];
@@ -2748,7 +2748,7 @@ test "pasteLanded needs NEW evidence, never evidence that was already there" {
 }
 
 test "tailOf keeps at most 48 codepoints and never splits one" {
-    const long = "x" ** 60 ++ "日本語";
+    const long = &@as([60]u8, @splat('x')) ++ "日本語";
     const t = tailOf(long);
     try testing.expect(std.unicode.utf8ValidateSlice(t));
     try testing.expectEqual(@as(usize, 48), try std.unicode.utf8CountCodepoints(t));
@@ -2762,7 +2762,7 @@ test "designations: valid names, pid: addressing, case-insensitive match" {
     try testing.expect(!validName(""));
     try testing.expect(!validName("has space"));
     try testing.expect(!validName("pid:12"));
-    try testing.expect(!validName("x" ** 65));
+    try testing.expect(!validName(&@as([65]u8, @splat('x'))));
     try testing.expect(answersTo("Scribe", 42, "scribe"));
     try testing.expect(answersTo("scribe", 42, "pid:42"));
     try testing.expect(!answersTo("scribe", 42, "pid:41"));
@@ -2838,6 +2838,6 @@ test "spawn env: anything outside the bounds is refused whole" {
         try std.testing.expect(why.len > 0);
     }
     // The key-length bound is inclusive at 64.
-    try std.testing.expect(validEnvKey("A" ** SPAWN_ENV_MAX_KEY));
-    try std.testing.expect(!validEnvKey("A" ** (SPAWN_ENV_MAX_KEY + 1)));
+    try std.testing.expect(validEnvKey(&@as([SPAWN_ENV_MAX_KEY]u8, @splat('A'))));
+    try std.testing.expect(!validEnvKey(&@as([(SPAWN_ENV_MAX_KEY + 1)]u8, @splat('A'))));
 }

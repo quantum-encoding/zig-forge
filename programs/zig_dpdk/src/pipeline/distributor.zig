@@ -23,8 +23,8 @@ pub const MAX_WORKERS: u8 = 16;
 pub const DistributorStats = struct {
     distributed: u64 = 0,
     drops: u64 = 0,
-    per_worker_pkts: [MAX_WORKERS]u64 = [_]u64{0} ** MAX_WORKERS,
-    per_worker_drops: [MAX_WORKERS]u64 = [_]u64{0} ** MAX_WORKERS,
+    per_worker_pkts: [MAX_WORKERS]u64 = @splat(0),
+    per_worker_drops: [MAX_WORKERS]u64 = @splat(0),
 };
 
 /// Packet distributor configuration.

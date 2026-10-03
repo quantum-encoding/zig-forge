@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
 
     // Enable AVX2/AVX-512 for SIMD optimization
     // User can override with -Dcpu=native for best performance
-    if (optimize == .ReleaseFast or optimize == .ReleaseSafe) {
+    if (optimize == std.builtin.OptimizeMode.ReleaseFast or optimize == std.builtin.OptimizeMode.ReleaseSafe) {
         exe.root_module.addCMacro("ENABLE_SIMD", "1");
     }
 
@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) void {
         .root_module = dash_module,
     });
 
-    if (optimize == .ReleaseFast or optimize == .ReleaseSafe) {
+    if (optimize == std.builtin.OptimizeMode.ReleaseFast or optimize == std.builtin.OptimizeMode.ReleaseSafe) {
         dash_exe.root_module.addCMacro("ENABLE_SIMD", "1");
     }
 
@@ -57,18 +57,14 @@ pub fn build(b: *std.Build) void {
     // Run commands
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run the Stratum mining engine");
     run_step.dependOn(&run_cmd.step);
 
     const dash_cmd = b.addRunArtifact(dash_exe);
     dash_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        dash_cmd.addArgs(args);
-    }
+    forwardArgs(b, dash_cmd);
 
     const dash_step = b.step("dashboard", "Run the mining + mempool dashboard");
     dash_step.dependOn(&dash_cmd.step);
@@ -113,9 +109,7 @@ pub fn build(b: *std.Build) void {
 
     const test_mempool_cmd = b.addRunArtifact(test_mempool_exe);
     test_mempool_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        test_mempool_cmd.addArgs(args);
-    }
+    forwardArgs(b, test_mempool_cmd);
 
     const test_mempool_step = b.step("test-mempool", "Test Bitcoin P2P mempool connection");
     test_mempool_step.dependOn(&test_mempool_cmd.step);
@@ -140,9 +134,7 @@ pub fn build(b: *std.Build) void {
 
     const test_exec_cmd = b.addRunArtifact(test_exec_exe);
     test_exec_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        test_exec_cmd.addArgs(args);
-    }
+    forwardArgs(b, test_exec_cmd);
 
     const test_exec_step = b.step("test-exec", "Test high-frequency execution engine");
     test_exec_step.dependOn(&test_exec_cmd.step);
@@ -207,7 +199,7 @@ pub fn build(b: *std.Build) void {
         .root_module = proxy_module,
     });
 
-    if (optimize == .ReleaseFast or optimize == .ReleaseSafe) {
+    if (optimize == std.builtin.OptimizeMode.ReleaseFast or optimize == std.builtin.OptimizeMode.ReleaseSafe) {
         proxy_exe.root_module.addCMacro("ENABLE_SIMD", "1");
     }
 
@@ -221,9 +213,7 @@ pub fn build(b: *std.Build) void {
 
     const proxy_cmd = b.addRunArtifact(proxy_exe);
     proxy_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        proxy_cmd.addArgs(args);
-    }
+    forwardArgs(b, proxy_cmd);
 
     const proxy_step = b.step("proxy", "Run the ASIC Stratum proxy server");
     proxy_step.dependOn(&proxy_cmd.step);
@@ -266,4 +256,12 @@ fn linkMbedtls3(mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
         mod.linkSystemLibrary("mbedx509", .{});
         mod.linkSystemLibrary("mbedcrypto", .{});
     }
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

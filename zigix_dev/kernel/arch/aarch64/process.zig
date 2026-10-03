@@ -39,7 +39,7 @@ pub const ProcessState = enum {
 
 /// Saved CPU context — matches the TrapFrame layout from exception.zig (800 bytes)
 pub const Context = extern struct {
-    x: [31]u64 = [_]u64{0} ** 31,  // X0-X30
+    x: [31]u64 = @splat(0),  // X0-X30
     sp: u64 = 0,                   // User stack pointer (SP_EL0)
     elr: u64 = 0,                  // Exception Link Register (return address)
     spsr: u64 = 0,                 // Saved Program Status Register
@@ -96,14 +96,14 @@ pub const Process = struct {
     cpu_id: i32 = -1,             // CPU currently running this process (-1 = not running)
     vma_lock: spinlock.IrqSpinlock = .{},  // Protects vmas + page_table for CLONE_VM threads
     fds: [fd_table.MAX_FDS]?*vfs.FileDescription = [_]?*vfs.FileDescription{null} ** fd_table.MAX_FDS,
-    fd_cloexec: [fd_table.MAX_FDS]bool = [_]bool{false} ** fd_table.MAX_FDS,
-    cwd: [256]u8 = [_]u8{'/'} ++ [_]u8{0} ** 255,
+    fd_cloexec: [fd_table.MAX_FDS]bool = @splat(false),
+    cwd: [256]u8 = [_]u8{'/'} ++ @as([255]u8, @splat(0)),
     cwd_len: u8 = 1,
     vmas: vma.VmaList = [_]vma.Vma{.{}} ** vma.MAX_VMAS,
     sig_pending: u64 = 0,
     sig_mask: u64 = 0,
     sig_actions: [MAX_SIGNALS]signal.SignalAction = [_]signal.SignalAction{.{}} ** MAX_SIGNALS,
-    exe_path: [256]u8 = [_]u8{0} ** 256,
+    exe_path: [256]u8 = @splat(0),
     exe_path_len: u8 = 0,
 
     // SVE state — lazily allocated on first SVE instruction use.
@@ -153,7 +153,7 @@ pub const MAX_PROCESSES = 512;
 /// overflows the kernel stack and corrupts adjacent BSS (pipe_inodes, etc).
 /// Always use zeroSlot() + individual field writes.
 var processes: [MAX_PROCESSES]Process = [_]Process{.{}} ** MAX_PROCESSES;
-pub var slot_in_use: [MAX_PROCESSES]bool = [_]bool{false} ** MAX_PROCESSES;
+pub var slot_in_use: [MAX_PROCESSES]bool = @splat(false);
 var next_pid: u64 = 1;
 
 /// SMP lock — protects process table, slot_in_use, and next_pid.

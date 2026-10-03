@@ -23,9 +23,9 @@ const SCREENSIZE = defs.SCREENSIZE;
 
 pub const Wipe = struct {
     active: bool = false,
-    y_offsets: [SCREENWIDTH]i32 = [_]i32{0} ** SCREENWIDTH,
-    start_screen: [SCREENSIZE]u8 = [_]u8{0} ** SCREENSIZE,
-    end_screen: [SCREENSIZE]u8 = [_]u8{0} ** SCREENSIZE,
+    y_offsets: [SCREENWIDTH]i32 = @splat(0),
+    start_screen: [SCREENSIZE]u8 = @splat(0),
+    end_screen: [SCREENSIZE]u8 = @splat(0),
 
     /// Capture the current screen as the wipe start, then
     /// the caller should render the new state and call captureEnd().

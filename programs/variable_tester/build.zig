@@ -81,9 +81,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run the variable tester");
     run_step.dependOn(&run_cmd.step);
@@ -106,9 +104,7 @@ pub fn build(b: *std.Build) void {
 
     const queen_cmd = b.addRunArtifact(queen_exe);
     queen_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        queen_cmd.addArgs(args);
-    }
+    forwardArgs(b, queen_cmd);
 
     const queen_step = b.step("queen", "Run the Queen coordinator");
     queen_step.dependOn(&queen_cmd.step);
@@ -133,9 +129,7 @@ pub fn build(b: *std.Build) void {
 
     const worker_cmd = b.addRunArtifact(worker_exe);
     worker_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        worker_cmd.addArgs(args);
-    }
+    forwardArgs(b, worker_cmd);
 
     const worker_step = b.step("worker", "Run a Worker drone");
     worker_step.dependOn(&worker_cmd.step);
@@ -179,9 +173,7 @@ pub fn build(b: *std.Build) void {
 
     const sat_cmd = b.addRunArtifact(sat_exe);
     sat_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        sat_cmd.addArgs(args);
-    }
+    forwardArgs(b, sat_cmd);
 
     const sat_step = b.step("saturation", "Run saturation benchmark");
     sat_step.dependOn(&sat_cmd.step);
@@ -202,9 +194,7 @@ pub fn build(b: *std.Build) void {
 
     const crypto_cmd = b.addRunArtifact(crypto_exe);
     crypto_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        crypto_cmd.addArgs(args);
-    }
+    forwardArgs(b, crypto_cmd);
 
     const crypto_step = b.step("crypto", "Run crypto brute-force benchmark");
     crypto_step.dependOn(&crypto_cmd.step);
@@ -225,9 +215,7 @@ pub fn build(b: *std.Build) void {
 
     const forge_cmd = b.addRunArtifact(forge_exe);
     forge_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        forge_cmd.addArgs(args);
-    }
+    forwardArgs(b, forge_cmd);
 
     const forge_step = b.step("forge", "Run The Forge variable tester");
     forge_step.dependOn(&forge_cmd.step);
@@ -248,9 +236,7 @@ pub fn build(b: *std.Build) void {
 
     const compress_bench_cmd = b.addRunArtifact(compress_bench_exe);
     compress_bench_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        compress_bench_cmd.addArgs(args);
-    }
+    forwardArgs(b, compress_bench_cmd);
 
     const compress_bench_step = b.step("compress-bench", "Run compression formula benchmark with real I/O");
     compress_bench_step.dependOn(&compress_bench_cmd.step);
@@ -289,4 +275,12 @@ pub fn build(b: *std.Build) void {
     const vt_tests = b.addTest(.{ .root_module = vt_module });
     const run_vt_tests = b.addRunArtifact(vt_tests);
     test_step.dependOn(&run_vt_tests.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

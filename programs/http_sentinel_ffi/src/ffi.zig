@@ -1053,7 +1053,7 @@ test "loopback: gzip response is decoded to exact plaintext through the FFI" {
     defer sock.stop(&srv);
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrintZ(&url_buf, "http://127.0.0.1:{d}/", .{srv.port});
+    const url = try std.fmt.bufPrintSentinel(&url_buf, "http://127.0.0.1:{d}/", .{srv.port}, 0);
 
     var response_body: [256]u8 = undefined;
     var response: HttpResponse = undefined;
@@ -1074,7 +1074,7 @@ test "loopback: an oversized body is truncated and flagged, not errored" {
     defer sock.stop(&srv);
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrintZ(&url_buf, "http://127.0.0.1:{d}/", .{srv.port});
+    const url = try std.fmt.bufPrintSentinel(&url_buf, "http://127.0.0.1:{d}/", .{srv.port}, 0);
 
     var response_body: [10]u8 = undefined; // server sends 100 bytes
     var response: HttpResponse = undefined;
@@ -1095,7 +1095,7 @@ test "loopback: caller headers reach the wire verbatim and a 404 is not an error
     defer sock.stop(&srv);
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrintZ(&url_buf, "http://127.0.0.1:{d}/", .{srv.port});
+    const url = try std.fmt.bufPrintSentinel(&url_buf, "http://127.0.0.1:{d}/", .{srv.port}, 0);
 
     const auth = "Bearer test-token";
     const headers = [_]HttpHeader{
@@ -1144,7 +1144,7 @@ test "loopback: a non-responsive server trips the request timeout" {
     defer _ = sock.unsetenv("HTTP_SENTINEL_TIMEOUT_MS");
 
     var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrintZ(&url_buf, "http://127.0.0.1:{d}/", .{srv.port});
+    const url = try std.fmt.bufPrintSentinel(&url_buf, "http://127.0.0.1:{d}/", .{srv.port}, 0);
 
     var response_body: [256]u8 = undefined;
     var response: HttpResponse = undefined;

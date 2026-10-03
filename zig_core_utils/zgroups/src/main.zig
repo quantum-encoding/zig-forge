@@ -101,7 +101,7 @@ fn printGroups(username: ?[]const u8) bool {
     var primary_gid: u32 = undefined;
 
     if (username) |user| {
-        const user_z = std.fmt.bufPrintZ(&name_buf, "{s}", .{user}) catch {
+        const user_z = std.fmt.bufPrintSentinel(&name_buf, "{s}", .{user}, 0) catch {
             writeStderr("zgroups: user name too long\n");
             return false;
         };

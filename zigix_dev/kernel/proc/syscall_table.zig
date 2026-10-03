@@ -792,7 +792,7 @@ fn sysStat(frame: *idt.InterruptFrame) void {
     var st: vfs.Stat = undefined;
     vfs.statFromInode(inode, &st);
 
-    var buf: [144]u8 = [_]u8{0} ** 144;
+    var buf: [144]u8 = @splat(0);
     packStat(&buf, &st);
 
     if (syscall.copyToUser(current.page_table, buf_addr, &buf)) {
@@ -825,7 +825,7 @@ fn sysFstat(frame: *idt.InterruptFrame) void {
     var st: vfs.Stat = undefined;
     vfs.statFromInode(desc.inode, &st);
 
-    var buf: [144]u8 = [_]u8{0} ** 144;
+    var buf: [144]u8 = @splat(0);
     packStat(&buf, &st);
 
     if (syscall.copyToUser(current.page_table, buf_addr, &buf)) {
@@ -1517,7 +1517,7 @@ fn sysUname(frame: *idt.InterruptFrame) void {
     };
 
     // Build utsname in kernel buffer
-    var utsname: [STRUCT_SIZE]u8 = [_]u8{0} ** STRUCT_SIZE;
+    var utsname: [STRUCT_SIZE]u8 = @splat(0);
     copyField(utsname[0 * FIELD_LEN ..][0..FIELD_LEN], "Zigix");
     copyField(utsname[1 * FIELD_LEN ..][0..FIELD_LEN], "zigix");
     copyField(utsname[2 * FIELD_LEN ..][0..FIELD_LEN], "0.10.0");
@@ -2648,7 +2648,7 @@ fn sysSchedGetaffinity(frame: *idt.InterruptFrame) void {
         // Zero remaining bytes if cpusetsize > 1
         if (cpusetsize > 1) {
             const zero_len: usize = if (cpusetsize - 1 > 128) 128 else @truncate(cpusetsize - 1);
-            var zeros: [128]u8 = [_]u8{0} ** 128;
+            var zeros: [128]u8 = @splat(0);
             if (!syscall.copyToUser(current.page_table, mask_addr + 1, zeros[0..zero_len])) {
                 frame.rax = @bitCast(@as(i64, -errno.EFAULT));
                 return;
@@ -2736,7 +2736,7 @@ fn sysNewfstatat(frame: *idt.InterruptFrame) void {
     var st: vfs.Stat = undefined;
     vfs.statFromInode(inode, &st);
 
-    var buf: [144]u8 = [_]u8{0} ** 144;
+    var buf: [144]u8 = @splat(0);
     packStat(&buf, &st);
 
     if (syscall.copyToUser(current.page_table, buf_addr, &buf)) {
@@ -3384,7 +3384,7 @@ fn sysGetrusage(frame: *idt.InterruptFrame) void {
         return;
     }
 
-    var buf: [144]u8 = [_]u8{0} ** 144;
+    var buf: [144]u8 = @splat(0);
     if (syscall.copyToUser(current.page_table, buf_addr, &buf)) {
         frame.rax = 0;
     } else {
@@ -3407,7 +3407,7 @@ fn sysStatfs(frame: *idt.InterruptFrame) void {
         return;
     }
 
-    var buf: [120]u8 = [_]u8{0} ** 120;
+    var buf: [120]u8 = @splat(0);
     // f_type = 0xEF53 (ext2)
     writeU64LE(buf[0..8], 0xEF53);
     // f_bsize = 4096
@@ -3879,7 +3879,7 @@ fn sysStatx(frame: *idt.InterruptFrame) void {
     }
 
     // struct statx is 256 bytes
-    var buf: [256]u8 = [_]u8{0} ** 256;
+    var buf: [256]u8 = @splat(0);
     // stx_mask (offset 0, u32) — STATX_BASIC_STATS = 0x7FF
     writeU32LE(buf[0..4], 0x7FF);
     // stx_blksize (offset 4, u32)
@@ -4429,7 +4429,7 @@ fn sysGetsockname(frame: *idt.InterruptFrame) void {
     }
 
     // Build sockaddr_in: family(2 LE) + port(2 BE) + ip(4 BE) + zero(8)
-    var sa: [16]u8 = [_]u8{0} ** 16;
+    var sa: [16]u8 = @splat(0);
     sa[0] = 2; // AF_INET
     sa[1] = 0;
     // Port in network byte order (big endian)
@@ -4492,7 +4492,7 @@ fn sysGetpeername(frame: *idt.InterruptFrame) void {
         return;
     }
 
-    var sa: [16]u8 = [_]u8{0} ** 16;
+    var sa: [16]u8 = @splat(0);
     sa[0] = 2; // AF_INET
     sa[1] = 0;
     sa[2] = @truncate(sock.remote_port >> 8);
@@ -4638,8 +4638,8 @@ fn sysSelect(frame: *idt.InterruptFrame) void {
 
     // fd_set is 128 bytes (1024 bits) on Linux
     const FD_SET_SIZE: usize = 128;
-    var read_set: [FD_SET_SIZE]u8 = [_]u8{0} ** FD_SET_SIZE;
-    var write_set: [FD_SET_SIZE]u8 = [_]u8{0} ** FD_SET_SIZE;
+    var read_set: [FD_SET_SIZE]u8 = @splat(0);
+    var write_set: [FD_SET_SIZE]u8 = @splat(0);
     var ready: usize = 0;
 
     // Read fd sets from user
@@ -4651,8 +4651,8 @@ fn sysSelect(frame: *idt.InterruptFrame) void {
     }
 
     // Check which fds are ready (for our simple kernel, valid fds are always ready)
-    var out_read: [FD_SET_SIZE]u8 = [_]u8{0} ** FD_SET_SIZE;
-    var out_write: [FD_SET_SIZE]u8 = [_]u8{0} ** FD_SET_SIZE;
+    var out_read: [FD_SET_SIZE]u8 = @splat(0);
+    var out_write: [FD_SET_SIZE]u8 = @splat(0);
 
     for (0..nfds) |fd| {
         const byte_idx = fd / 8;
@@ -4693,7 +4693,7 @@ fn resolveFromInode(start: *vfs.Inode, path: []const u8) vfs.ResolveResult {
     var result = vfs.ResolveResult{
         .inode = null,
         .parent = null,
-        .leaf_name = [_]u8{0} ** 256,
+        .leaf_name = @as([256]u8, @splat(0)),
         .leaf_len = 0,
     };
 
@@ -5025,7 +5025,7 @@ const InotifyEvent = struct {
     ifd: i32 = -1, // inotify fd that should receive this event
     wd: i32 = 0, // watch descriptor that matched
     mask: u32 = 0, // event type (IN_CREATE, IN_DELETE, etc.)
-    name: [256]u8 = [_]u8{0} ** 256,
+    name: [256]u8 = @splat(0),
     name_len: u32 = 0,
 };
 

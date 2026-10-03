@@ -92,7 +92,7 @@ pub fn start(nblocks: u32) bool {
         .sequence = state.sequence,
         .reserved_blocks = nblocks,
         .block_count = 0,
-        .block_numbers = [_]u32{0} ** types.MAX_TX_ENTRIES,
+        .block_numbers = @as([types.MAX_TX_ENTRIES]u32, @splat(0)),
         .active = true,
     };
 
@@ -135,7 +135,7 @@ pub fn stop() bool {
 
     // 2. Write data blocks to journal
     // Track which blocks had their magic escaped (need restore for real FS write)
-    var escaped: [types.MAX_TX_ENTRIES]bool = [_]bool{false} ** types.MAX_TX_ENTRIES;
+    var escaped: [types.MAX_TX_ENTRIES]bool = @splat(false);
 
     for (0..current_handle.block_count) |i| {
         const journal_pos = state.write_pos;

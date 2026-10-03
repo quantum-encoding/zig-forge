@@ -19,9 +19,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run ztree");
     run_step.dependOn(&run_cmd.step);
@@ -35,7 +33,7 @@ pub fn build(b: *std.Build) void {
 
     const test_opts = b.addOptions();
     // Absolute path to the freshly-installed ztree binary under test.
-    test_opts.addOption([]const u8, "ztree_exe", b.getInstallPath(.bin, "ztree"));
+    test_opts.addOptionPath("ztree_exe", exe.getEmittedBin());
     test_opts.addOption([]const u8, "gnu_tree", gnu_tree_path);
 
     const test_exe = b.addTest(.{
@@ -55,4 +53,12 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run GNU-parity tests");
     test_step.dependOn(&run_tests.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

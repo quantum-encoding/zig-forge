@@ -411,7 +411,7 @@ pub const CompiledKernel = struct {
         // compatible baseline if the capability could not be determined.
         var arch_buf: [64]u8 = undefined;
         const arch_opt: [:0]const u8 = if (cc_major > 0)
-            std.fmt.bufPrintZ(&arch_buf, "--gpu-architecture=compute_{d}{d}", .{ cc_major, cc_minor }) catch
+            std.fmt.bufPrintSentinel(&arch_buf, "--gpu-architecture=compute_{d}{d}", .{ cc_major, cc_minor }, 0) catch
                 return error.KernelCompilationFailed
         else
             "--gpu-architecture=compute_52";

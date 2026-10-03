@@ -38,7 +38,7 @@ var tss: TSS = .{};
 
 /// Dedicated stack for IST1 (double fault handler).
 /// 4 KiB, separate from any process kernel stack, so #DF always has a valid stack.
-var ist1_stack: [4096]u8 align(16) = [_]u8{0} ** 4096;
+var ist1_stack: [4096]u8 align(16) = @as([4096]u8, @splat(0));
 
 /// Initialize IST1 in the BSP's TSS. Called after TSS is loaded.
 pub fn initIst() void {

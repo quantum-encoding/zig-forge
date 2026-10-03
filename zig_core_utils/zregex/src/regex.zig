@@ -65,7 +65,7 @@ pub const Regex = struct {
     };
 
     pub const CharClass = struct {
-        bitmap: [256 / 8]u8 = [_]u8{0} ** (256 / 8),
+        bitmap: [256 / 8]u8 = @as([(256 / 8)]u8, @splat(0)),
         negated: bool = false,
 
         pub fn set(self: *CharClass, c: u8) void {

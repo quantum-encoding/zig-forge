@@ -98,7 +98,7 @@ pub const Inquisitor = struct {
         std.debug.print("🗡️  The Inquisitor - Loading LSM BPF from: {s}\n", .{obj_path});
 
         // Convert path to null-terminated C string
-        const path_z = try self.allocator.dupeZ(u8, obj_path);
+        const path_z = try self.allocator.dupeSentinel(u8, obj_path, 0);
         defer self.allocator.free(path_z);
 
         // Open eBPF object

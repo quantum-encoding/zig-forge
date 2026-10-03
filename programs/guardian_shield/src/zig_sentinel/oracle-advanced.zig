@@ -127,7 +127,7 @@ pub const OracleAdvanced = struct {
         std.debug.print("   Loading from: {s}\n", .{obj_path});
 
         // Convert path to null-terminated C string
-        const path_z = try self.allocator.dupeZ(u8, obj_path);
+        const path_z = try self.allocator.dupeSentinel(u8, obj_path, 0);
         defer self.allocator.free(path_z);
 
         // Open eBPF object
@@ -200,7 +200,7 @@ pub const OracleAdvanced = struct {
 
     /// Attach individual LSM hook
     fn attachHook(self: *OracleAdvanced, prog_name: []const u8, link_index: usize) !void {
-        const prog_name_z = try self.allocator.dupeZ(u8, prog_name);
+        const prog_name_z = try self.allocator.dupeSentinel(u8, prog_name, 0);
         defer self.allocator.free(prog_name_z);
 
         const prog = c.bpf_object__find_program_by_name(self.obj, prog_name_z) orelse {

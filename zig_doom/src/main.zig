@@ -468,7 +468,7 @@ fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, dump
     });
     var trace_file: ?*cio.FILE = null;
     if (trace_path) |tp| {
-        const tpz = alloc.dupeZ(u8, tp) catch null;
+        const tpz = alloc.dupeSentinel(u8, tp, 0) catch null;
         if (tpz) |z| {
             trace_file = cio.fopen(z.ptr, "w");
             alloc.free(z);
@@ -479,7 +479,7 @@ fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, dump
     };
 
     // Per-second movement trace (sync QA: a desynced player gets stuck)
-    var move_per_sec: [600]u32 = [_]u32{0} ** 600;
+    var move_per_sec: [600]u32 = @splat(0);
     var prev_x: i32 = 0;
     var prev_y: i32 = 0;
     var blk_px: i32 = 0;
@@ -539,7 +539,7 @@ fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, dump
                         schk +%= @as(u32, @bitCast(sec.floorheight.raw())) ^ (@as(u32, @bitCast(sec.ceilingheight.raw())) << 1);
                     }
                 }
-                const line = std.fmt.bufPrintZ(&tbuf, "S{d} C{d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d}\n", .{
+                const line = std.fmt.bufPrintSentinel(&tbuf, "S{d} C{d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d}\n", .{
                     schk,
                     chk,
                     game.level_time,
@@ -557,7 +557,7 @@ fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, dump
                     @intFromEnum(pl.ready_weapon),
                     psp_state,
                     pl.cmd.buttons,
-                }) catch unreachable;
+                }, 0) catch unreachable;
                 _ = cio.fwrite(line.ptr, 1, line.len, tf);
             }
         }

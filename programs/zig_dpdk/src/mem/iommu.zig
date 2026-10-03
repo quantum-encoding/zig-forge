@@ -362,7 +362,7 @@ pub const VfioDevice = struct {
         if (comptime builtin.os.tag != .linux) return error.NotSupported;
 
         // The PCI address string must be null-terminated for the ioctl
-        var addr_buf: [16]u8 = [_]u8{0} ** 16;
+        var addr_buf: [16]u8 = @splat(0);
         if (pci_addr.len > 15) return error.DeviceOpenFailed;
         @memcpy(addr_buf[0..pci_addr.len], pci_addr);
         addr_buf[pci_addr.len] = 0;

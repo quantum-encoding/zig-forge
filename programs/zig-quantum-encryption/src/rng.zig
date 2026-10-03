@@ -240,7 +240,7 @@ test "fillSecureRandomSafe handles large buffer" {
     try fillSecureRandomSafe(&buf);
 
     // Should have reasonable entropy (not all same value)
-    var histogram: [256]usize = [_]usize{0} ** 256;
+    var histogram: [256]usize = @splat(0);
     for (buf) |b| {
         histogram[b] += 1;
     }

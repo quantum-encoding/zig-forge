@@ -299,7 +299,7 @@ pub const ChronosDaemon = struct {
             var reply = msg.newMethodReturn() orelse return error.DBusReplyFailed;
             defer reply.unref();
 
-            const formatted_z = try self.allocator.dupeZ(u8, formatted);
+            const formatted_z = try self.allocator.dupeSentinel(u8, formatted, 0);
             defer self.allocator.free(formatted_z);
 
             try reply.appendString(formatted_z);
@@ -316,7 +316,7 @@ pub const ChronosDaemon = struct {
 
             if (state) |s| {
                 defer self.allocator.free(s);
-                const s_z = try self.allocator.dupeZ(u8, s);
+                const s_z = try self.allocator.dupeSentinel(u8, s, 0);
                 defer self.allocator.free(s_z);
                 try reply.appendString(s_z);
             } else {

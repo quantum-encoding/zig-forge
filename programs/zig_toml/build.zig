@@ -36,9 +36,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(demo);
 
     const run_demo = b.addRunArtifact(demo);
-    if (b.args) |args| {
-        run_demo.addArgs(args);
-    }
+    forwardArgs(b, run_demo);
 
     const demo_step = b.step("demo", "Run the TOML parser demo");
     demo_step.dependOn(&run_demo.step);
@@ -92,4 +90,12 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests, tier-2 failure modes, and tier-1 spec anchors");
     test_step.dependOn(&b.addRunArtifact(lib_unit_tests).step);
     test_step.dependOn(&b.addRunArtifact(anchor_tests).step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

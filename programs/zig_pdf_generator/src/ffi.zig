@@ -90,7 +90,7 @@ pub const ZigPdfError = enum(c_int) {
 /// thread gets its own buffer, so a generate/get-error pair on one thread is
 /// never clobbered by a concurrent call on another. Same-thread usage — the
 /// documented pattern — is byte-for-byte unchanged.
-threadlocal var last_error: [256]u8 = [_]u8{0} ** 256;
+threadlocal var last_error: [256]u8 = @splat(0);
 threadlocal var last_error_len: usize = 0;
 
 fn setLastError(msg: []const u8) void {

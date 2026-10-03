@@ -219,7 +219,7 @@ pub const ZipArchive = struct {
         // XML parser. Also cross-checks the declared uncompressed_size, which
         // makes the CD's own bookkeeping self-consistent.
         if (result.len != entry.uncompressed_size) return ZipError.ChecksumMismatch;
-        if (std.hash.crc.Crc32.hash(result) != entry.crc32) return ZipError.ChecksumMismatch;
+        if (std.hash.Crc32.hash(result) != entry.crc32) return ZipError.ChecksumMismatch;
 
         self.bytes_decompressed = std.math.add(usize, self.bytes_decompressed, result.len) catch
             return ZipError.DecompressionFailed;

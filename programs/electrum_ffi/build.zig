@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
     lib.root_module.link_libc = true;
 
     // Strip debug symbols for production (reduces binary size)
-    lib.root_module.strip = optimize != .Debug;
+    lib.root_module.strip = optimize != std.builtin.OptimizeMode.Debug;
 
     // Install to zig-out/lib/
     b.installArtifact(lib);

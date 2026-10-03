@@ -204,7 +204,7 @@ fn handleMetricsClient(fd: c_int, data: []const u8) void {
         .tokens_in = 0,
         .tokens_out = 0,
         .status_ok = true,
-        .model = [_]u8{0} ** 64,
+        .model = @as([64]u8, @splat(0)),
         .model_len = 0,
     };
 

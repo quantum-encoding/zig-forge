@@ -42,13 +42,13 @@ pub const MAX_VL_BYTES: usize = 256;
 /// Allocated per-process only when the process first uses SVE.
 pub const SveContext = struct {
     /// Z0-Z31 vector registers, each MAX_VL_BYTES
-    z_regs: [32][MAX_VL_BYTES]u8 = [_][MAX_VL_BYTES]u8{[_]u8{0} ** MAX_VL_BYTES} ** 32,
+    z_regs: [32][MAX_VL_BYTES]u8 = [_][MAX_VL_BYTES]u8{@as([MAX_VL_BYTES]u8, @splat(0))} ** 32,
 
     /// P0-P15 predicate registers, each MAX_VL_BYTES/8
-    p_regs: [16][MAX_VL_BYTES / 8]u8 = [_][MAX_VL_BYTES / 8]u8{[_]u8{0} ** (MAX_VL_BYTES / 8)} ** 16,
+    p_regs: [16][MAX_VL_BYTES / 8]u8 = [_][MAX_VL_BYTES / 8]u8{@as([(MAX_VL_BYTES / 8)]u8, @splat(0))} ** 16,
 
     /// FFR (First Fault Register), MAX_VL_BYTES/8
-    ffr: [MAX_VL_BYTES / 8]u8 = [_]u8{0} ** (MAX_VL_BYTES / 8),
+    ffr: [MAX_VL_BYTES / 8]u8 = @as([(MAX_VL_BYTES / 8)]u8, @splat(0)),
 
     /// Actual vector length this context was saved with
     vl_bytes: u16 = 0,

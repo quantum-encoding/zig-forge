@@ -691,7 +691,7 @@ fn parseArgs(allocator: Allocator, init: std.process.Init) !Config {
 // =============================================================================
 
 fn readFileAlloc(allocator: Allocator, path: []const u8, max_size: usize) ![]u8 {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     // NOFOLLOW: refuse to read through a symlink planted at the input path.
@@ -715,7 +715,7 @@ fn readFileAlloc(allocator: Allocator, path: []const u8, max_size: usize) ![]u8 
 }
 
 fn writeFileAlloc(allocator: Allocator, path: []const u8, data: []const u8) !void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     // NOFOLLOW: if the output path is a pre-planted symlink, fail rather
@@ -735,7 +735,7 @@ fn writeFileAlloc(allocator: Allocator, path: []const u8, data: []const u8) !voi
 extern "c" fn mkdir(path: [*:0]const u8, mode: std.c.mode_t) c_int;
 
 fn makeDirectory(allocator: Allocator, path: []const u8) !void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     const result = mkdir(path_z.ptr, 0o755);

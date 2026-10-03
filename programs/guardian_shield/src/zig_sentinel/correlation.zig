@@ -135,7 +135,7 @@ pub const ProcessState = struct {
     pub fn init(allocator: std.mem.Allocator, pid: u32) ProcessState {
         return .{
             .pid = pid,
-            .comm = [_]u8{0} ** 16,
+            .comm = @as([16]u8, @splat(0)),
             .stage = .idle,
             .open_sockets = std.AutoHashMap(i32, SocketInfo).init(allocator),
             .recent_reads = std.ArrayList(FileReadInfo).empty,
@@ -328,7 +328,7 @@ pub const CorrelationEngine = struct {
             .allocator = allocator,
             .process_states = std.AutoHashMap(u32, ProcessState).init(allocator),
             .total_alerts = 0,
-            .alerts_by_stage = [_]u64{0} ** 4,
+            .alerts_by_stage = @as([4]u64, @splat(0)),
             .processes_terminated = 0,
         };
     }

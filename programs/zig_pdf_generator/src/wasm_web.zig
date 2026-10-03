@@ -55,7 +55,7 @@ export fn zigpdf_free(ptr: usize, size: usize) void {
 
 // ---- error / version -------------------------------------------------------
 
-var last_error: [256]u8 = [_]u8{0} ** 256;
+var last_error: [256]u8 = @splat(0);
 
 fn setLastError(msg: []const u8) void {
     const copy_len = @min(msg.len, last_error.len - 1);

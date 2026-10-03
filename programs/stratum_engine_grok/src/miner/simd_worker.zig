@@ -48,7 +48,7 @@ pub const SimdMiner = struct {
     fn calculateTarget(nbits: u32) [32]u8 {
         // Simplified target calculation
         // In reality, nbits encodes the target
-        var target: [32]u8 = [_]u8{0xFF} ** 32; // Max target
+        var target: [32]u8 = @splat(0xFF); // Max target
         const exponent = (nbits >> 24) & 0xFF;
         const mantissa = nbits & 0xFFFFFF;
         if (exponent <= 3) {

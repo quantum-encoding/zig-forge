@@ -296,7 +296,7 @@ const FakeTrash = struct {
         const self: *FakeTrash = @ptrCast(@alignCast(user.?));
         for (paths[0..count]) |path| {
             var buf: [4096]u8 = undefined;
-            const target = std.fmt.bufPrintZ(&buf, "{s}/{d}", .{ self.bin, self.moved }) catch return 1;
+            const target = std.fmt.bufPrintSentinel(&buf, "{s}/{d}", .{ self.bin, self.moved }, 0) catch return 1;
             if (rename(path, target.ptr) != 0) {
                 err_out[0] = 0;
                 return 1;

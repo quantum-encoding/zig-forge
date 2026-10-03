@@ -2017,7 +2017,7 @@ pub const Session = struct {
         _ = self;
         const paths = arena.alloc([*:0]const u8, batch.len) catch return false;
         for (batch, paths) |target, *slot| {
-            const owned = arena.dupeZ(u8, target.path) catch return false;
+            const owned = arena.dupeSentinel(u8, target.path, 0) catch return false;
             slot.* = owned.ptr;
         }
         err_buf[0] = 0;

@@ -72,8 +72,8 @@ fn tcsetpgrp(pgid: u64) void {
 
 // Sigaction structs as global const — avoids stack-local arrays that trigger
 // SSE movaps on misaligned stack after fork (CoW pages cause #GP not #PF).
-const sig_dfl_act: [24]u8 = [_]u8{0} ** 24;
-const sig_ign_act: [24]u8 = [_]u8{1} ++ [_]u8{0} ** 23;
+const sig_dfl_act: [24]u8 = @splat(0);
+const sig_ign_act: [24]u8 = [_]u8{1} ++ @as([23]u8, @splat(0));
 
 /// Set signal handler to SIG_IGN (1)
 fn ignoreSig(sig: u64) void {
@@ -416,7 +416,7 @@ fn builtin_pwd() void {
 }
 
 fn builtin_uname() void {
-    var buf: [390]u8 = [_]u8{0} ** 390; // 6 * 65 = 390
+    var buf: [390]u8 = @splat(0); // 6 * 65 = 390
     const ret = sys.uname(&buf);
     if (ret == 0) {
         // sysname
@@ -854,7 +854,7 @@ fn waitForForeground(pgid: u64, lead_pid: u64, job_idx: usize) void {
     var lead_done = false;
 
     while (true) {
-        var wstatus_buf: [4]u8 = [_]u8{0} ** 4;
+        var wstatus_buf: [4]u8 = @splat(0);
         const ret = sys.wait4(@bitCast(@as(i64, -1)), @intFromPtr(&wstatus_buf), WUNTRACED);
         if (ret <= 0) break;
 
@@ -1438,8 +1438,8 @@ const O_APPEND: u64 = 0o2000;
 // ---- History ----
 
 const HISTORY_SIZE: usize = 16;
-var history_buf: [HISTORY_SIZE * 256]u8 = [_]u8{0} ** (HISTORY_SIZE * 256);
-var history_lens: [HISTORY_SIZE]u8 = [_]u8{0} ** HISTORY_SIZE;
+var history_buf: [HISTORY_SIZE * 256]u8 = @as([(HISTORY_SIZE * 256)]u8, @splat(0));
+var history_lens: [HISTORY_SIZE]u8 = @splat(0);
 var history_start: usize = 0;
 var history_count: usize = 0;
 var last_exit_status: u64 = 0;
@@ -1449,15 +1449,15 @@ var shell_pgid: u64 = 0;
 
 const SORT_MAX_LINES: usize = 64;
 const SORT_LINE_SIZE: usize = 256;
-var sort_buf: [SORT_MAX_LINES * SORT_LINE_SIZE]u8 = [_]u8{0} ** (SORT_MAX_LINES * SORT_LINE_SIZE);
-var sort_lens: [SORT_MAX_LINES]u16 = [_]u16{0} ** SORT_MAX_LINES;
+var sort_buf: [SORT_MAX_LINES * SORT_LINE_SIZE]u8 = @as([(SORT_MAX_LINES * SORT_LINE_SIZE)]u8, @splat(0));
+var sort_lens: [SORT_MAX_LINES]u16 = @splat(0);
 
 // ---- Environment variables ----
 
 const MAX_ENV: usize = 32;
 const ENV_SIZE: usize = 256; // max "KEY=VALUE\0" length
 var env_store: [MAX_ENV][ENV_SIZE]u8 = undefined;
-var env_lens: [MAX_ENV]u8 = [_]u8{0} ** MAX_ENV;
+var env_lens: [MAX_ENV]u8 = @splat(0);
 var env_count: usize = 0;
 
 // ---- Job table ----
@@ -1479,7 +1479,7 @@ var jobs: [MAX_JOBS]Job = [_]Job{.{
     .pid = 0,
     .pgid = 0,
     .state = .done,
-    .cmd = [_]u8{0} ** 64,
+    .cmd = @as([64]u8, @splat(0)),
     .cmd_len = 0,
     .in_use = false,
 }} ** MAX_JOBS;
@@ -1532,7 +1532,7 @@ fn jobRemove(idx: usize) void {
 fn reapBackgroundJobs() void {
     const WNOHANG: u64 = 1;
     while (true) {
-        var wstatus_buf: [4]u8 = [_]u8{0} ** 4;
+        var wstatus_buf: [4]u8 = @splat(0);
         const ret = sys.wait4(@bitCast(@as(i64, -1)), @intFromPtr(&wstatus_buf), WNOHANG);
         if (ret <= 0) break;
 
@@ -1896,13 +1896,13 @@ fn childExec(stage: *const Stage) noreturn {
     const cmd = argSlice(stage.argv[0]);
 
     // Build argv pointer array for execve (NULL-terminated)
-    var argv_ptrs: [MAX_ARGS + 1]u64 = [_]u64{0} ** (MAX_ARGS + 1);
+    var argv_ptrs: [MAX_ARGS + 1]u64 = @as([(MAX_ARGS + 1)]u64, @splat(0));
     for (0..stage.argc) |i| {
         argv_ptrs[i] = @intFromPtr(stage.argv[i]);
     }
 
     // Build envp pointer array from env_store
-    var envp_ptrs: [MAX_ENV + 1]u64 = [_]u64{0} ** (MAX_ENV + 1);
+    var envp_ptrs: [MAX_ENV + 1]u64 = @as([(MAX_ENV + 1)]u64, @splat(0));
     for (0..env_count) |i| {
         envp_ptrs[i] = @intFromPtr(&env_store[i]);
     }
@@ -1971,7 +1971,7 @@ fn executePipelineEx(stages: *[MAX_STAGES]Stage, num_stages: usize, background: 
     }
 
     // Build command string for job table
-    var cmd_str: [64]u8 = [_]u8{0} ** 64;
+    var cmd_str: [64]u8 = @splat(0);
     var cmd_len: usize = 0;
     for (0..num_stages) |si| {
         if (si > 0 and cmd_len + 3 < 64) {
@@ -2012,7 +2012,7 @@ fn executePipelineEx(stages: *[MAX_STAGES]Stage, num_stages: usize, background: 
     }
 
     // Fork N children — all in the same process group (first child's pid)
-    var child_pids: [MAX_STAGES]u64 = [_]u64{0} ** MAX_STAGES;
+    var child_pids: [MAX_STAGES]u64 = @splat(0);
     var child_pgid: u64 = 0; // Will be set to first child's pid
     var child_count: usize = 0;
 

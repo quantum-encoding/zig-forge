@@ -1073,7 +1073,7 @@ test "SHA-256 KAT: one million 'a' (multi-block streaming)" {
 }
 
 test "HMAC-SHA256 KAT: RFC 4231 Test Case 1" {
-    const key = [_]u8{0x0b} ** 20;
+    const key = @as([20]u8, @splat(0x0b));
     try testing.expectEqualStrings(
         "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
         &hmacHex(&key, "Hi There"),
@@ -1089,7 +1089,7 @@ test "HMAC-SHA256 KAT: RFC 4231 Test Case 2 (short key 'Jefe')" {
 
 test "HMAC-SHA256 KAT: RFC 4231 Test Case 4 (0xcd x50 message)" {
     const key = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19 };
-    const msg = [_]u8{0xcd} ** 50;
+    const msg = @as([50]u8, @splat(0xcd));
     try testing.expectEqualStrings(
         "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b",
         &hmacHex(&key, &msg),
@@ -1097,7 +1097,7 @@ test "HMAC-SHA256 KAT: RFC 4231 Test Case 4 (0xcd x50 message)" {
 }
 
 test "HMAC-SHA256 KAT: RFC 4231 Test Case 6 (key longer than block, 131 bytes)" {
-    const key = [_]u8{0xaa} ** 131;
+    const key = @as([131]u8, @splat(0xaa));
     try testing.expectEqualStrings(
         "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
         &hmacHex(&key, "Test Using Larger Than Block-Size Key - Hash Key First"),
@@ -1325,7 +1325,7 @@ test "verify_token: an absurdly long exp does not overflow i64" {
     try testing.expectEqual(ERR_OK, init(secret, secret.len));
 
     // 60-digit exp — pre-hardening this panicked on integer overflow.
-    const payload = "{\"sub\":\"a\",\"exp\":" ++ ("9" ** 60) ++ "}";
+    const payload = "{\"sub\":\"a\",\"exp\":" ++ (&@as([60]u8, @splat('9'))) ++ "}";
     const header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
 
     var signing_input: [512]u8 = undefined;

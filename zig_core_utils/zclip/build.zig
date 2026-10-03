@@ -45,11 +45,11 @@ pub fn build(b: *std.Build) void {
     // Run commands
     const run_zcopy = b.addRunArtifact(zcopy_exe);
     run_zcopy.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_zcopy.addArgs(args);
+    forwardArgs(b, run_zcopy);
 
     const run_zpaste = b.addRunArtifact(zpaste_exe);
     run_zpaste.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_zpaste.addArgs(args);
+    forwardArgs(b, run_zpaste);
 
     const copy_step = b.step("copy", "Run zcopy");
     copy_step.dependOn(&run_zcopy.step);
@@ -68,9 +68,10 @@ pub fn build(b: *std.Build) void {
     });
 
     // Externally-anchored parity tests. They shell out to the built zcopy/zpaste
-    // binaries, so expose the install bin dir and make the tests depend on install.
+    // binaries, so expose each binary's built path.
     const test_options = b.addOptions();
-    test_options.addOption([]const u8, "bin_dir", b.getInstallPath(.bin, ""));
+    test_options.addOptionPath("zcopy_bin", zcopy_exe.getEmittedBin());
+    test_options.addOptionPath("zpaste_bin", zpaste_exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -90,4 +91,12 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(clip_tests).step);
     test_step.dependOn(&run_parity.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

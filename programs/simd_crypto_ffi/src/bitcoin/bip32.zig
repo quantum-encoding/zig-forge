@@ -369,7 +369,7 @@ pub const ExtendedKey = struct {
             child.public_key = derivePublicKey(&child.private_key) catch return Bip32Error.InvalidKey;
         } else {
             // Public key derivation: point(il) + parent_public_key
-            child.private_key = .{0} ** 32;
+            child.private_key = @splat(0);
             child.public_key = addPublicKeys(&self.public_key, il) catch return Bip32Error.PointAtInfinity;
         }
 
@@ -409,7 +409,7 @@ pub const ExtendedKey = struct {
     /// Get public-key-only version of this key
     pub fn neuter(self: Self) Self {
         var public_only = self;
-        public_only.private_key = .{0} ** 32;
+        public_only.private_key = @splat(0);
         public_only.is_private = false;
         return public_only;
     }
@@ -834,14 +834,14 @@ test "BIP32 public key derivation fails for hardened" {
 
 test "Hash160" {
     // Test vector: SHA256(SHA256(0x02...pubkey)) then RIPEMD160
-    const test_data = [_]u8{0x02} ++ [_]u8{0x00} ** 32;
+    const test_data = [_]u8{0x02} ++ @as([32]u8, @splat(0x00));
     const result = hash160(&test_data);
     try std.testing.expect(result.len == 20);
 }
 
 test "Bech32 address generation" {
     // Create a test public key (this is a valid compressed pubkey format)
-    const test_pubkey = [_]u8{0x02} ++ [_]u8{0x01} ** 32;
+    const test_pubkey = [_]u8{0x02} ++ @as([32]u8, @splat(0x01));
 
     var output: [90]u8 = undefined;
     const len = generateP2wpkhAddress(&test_pubkey, true, &output);
@@ -853,7 +853,7 @@ test "Bech32 address generation" {
 }
 
 test "Bech32 testnet address" {
-    const test_pubkey = [_]u8{0x02} ++ [_]u8{0x02} ** 32;
+    const test_pubkey = [_]u8{0x02} ++ @as([32]u8, @splat(0x02));
 
     var output: [90]u8 = undefined;
     const len = generateP2wpkhAddress(&test_pubkey, false, &output);

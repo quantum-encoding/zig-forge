@@ -14,7 +14,7 @@ pub const Field = extern struct {
     _pad: u8,
     value: u64,        // all values stored as u64, formatted on output
 
-    pub const ZERO = Field{ .key = .{0} ** KEY_LEN, ._pad = 0, .value = 0 };
+    pub const ZERO = Field{ .key = @splat(0), ._pad = 0, .value = 0 };
 
     pub fn init(k: []const u8, v: u64) Field {
         var f = ZERO;
@@ -49,9 +49,9 @@ pub const LogEntry = extern struct {
         .level = .trace,
         .subsystem = .boot,
         .field_count = 0,
-        ._pad = .{0} ** 5,
-        .msg = .{0} ** MSG_LEN,
-        .fields = .{Field.ZERO} ** MAX_FIELDS,
+        ._pad = @splat(0),
+        .msg = @splat(0),
+        .fields = @splat(Field.ZERO),
     };
 
     pub fn msgSlice(self: *const LogEntry) []const u8 {
@@ -74,7 +74,7 @@ const RING_SIZE: usize = 4096;
 const RING_MASK: usize = RING_SIZE - 1;
 
 /// The ring buffer itself — entirely in .bss, zero-initialized.
-var ring: [RING_SIZE]LogEntry = .{LogEntry.ZERO} ** RING_SIZE;
+var ring: [RING_SIZE]LogEntry = @splat(LogEntry.ZERO);
 
 /// Write head — only the logger writes here (single-producer).
 var head: usize = 0;

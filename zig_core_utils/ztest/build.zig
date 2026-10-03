@@ -18,9 +18,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
     const run_step = b.step("run", "Run ztest");
     run_step.dependOn(&run_cmd.step);
 
@@ -36,10 +34,19 @@ pub fn build(b: *std.Build) void {
             .link_libc = true, // std.c.getenv / access / symlink / utimensat
         }),
     });
-    const run_tests = b.addRunArtifact(parity_tests);
-    run_tests.setEnvironmentVariable("ZTEST_BIN", b.getInstallPath(.bin, "ztest"));
+    const run_tests = b.addSystemCommand(&.{"env"});
+    run_tests.addPrefixedFileArg("ZTEST_BIN=", exe.getEmittedBin());
+    run_tests.addArtifactArg(parity_tests);
     run_tests.step.dependOn(b.getInstallStep());
 
     const test_step = b.step("test", "Run GNU parity tests");
     test_step.dependOn(&run_tests.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

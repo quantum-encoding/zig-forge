@@ -195,7 +195,7 @@ fn parseMode(s: []const u8, umask_value: u32) ModeError!u32 {
 
 fn createFifo(name: []const u8, mode: u32) bool {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{name}) catch {
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{name}, 0) catch {
         // Same shape/reason the syscall itself would produce (ENAMETOOLONG).
         writeStderr("zmkfifo: cannot create fifo '{s}': File name too long\n", .{name});
         return false;

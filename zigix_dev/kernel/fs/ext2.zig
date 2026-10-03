@@ -131,7 +131,7 @@ fn init_block_cache() [BLOCK_CACHE_SIZE]BlockCacheEntry {
         cache[i].valid = false;
         cache[i].dirty = false;
         cache[i].block_num = 0;
-        cache[i].data = [_]u8{0} ** MAX_BLOCK_SIZE;
+        cache[i].data = @as([MAX_BLOCK_SIZE]u8, @splat(0));
         cache[i].lru_prev = LRU_NONE;
         cache[i].lru_next = LRU_NONE;
     }
@@ -1250,7 +1250,7 @@ fn ext2Readdir(desc: *vfs.FileDescription, entry: *vfs.DirEntry) bool {
         }
 
         // Fill VFS DirEntry
-        entry.name = [_]u8{0} ** 256;
+        entry.name = @as([256]u8, @splat(0));
         const name_start = block_offset + EXT2_DIR_HEADER_SIZE;
         const name_len: usize = @min(de_name_len, 255);
         for (0..name_len) |i| {

@@ -40,7 +40,7 @@ var runtime_min_level: sub.Level = .trace;
 
 /// Per-subsystem runtime level overrides.
 /// Set to .trace by default (no override — defer to runtime_min_level).
-var runtime_sub_levels: [sub.Subsystem.COUNT]sub.Level = .{sub.Level.trace} ** sub.Subsystem.COUNT;
+var runtime_sub_levels: [sub.Subsystem.COUNT]sub.Level = @splat(sub.Level.trace);
 
 /// Maximum entries to drain per tick (prevent serial from monopolizing IRQ context).
 const MAX_DRAIN_PER_TICK: usize = 8;

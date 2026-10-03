@@ -328,7 +328,7 @@ pub fn findUtilMapping(name: []const u8) ?UtilMapping {
 
 fn fileExists(path: []const u8) bool {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return false;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return false;
 
     // Use C access() to check file existence
     return access(path_z.ptr, F_OK) == 0;
@@ -373,7 +373,7 @@ pub fn linkTargetIsZig(target: []const u8) bool {
 // (zig_installed AND backup_exists) heuristic (audit finding).
 pub fn resolveActiveIsZig(path: []const u8) bool {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return false;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return false;
     var link_buf: [4096]u8 = undefined;
     const n = readlink(path_z.ptr, &link_buf, link_buf.len);
     if (n <= 0) return false;
@@ -454,7 +454,7 @@ fn clampU32(n: i64) u32 {
 // slice on success, null on any error.
 fn readFileAll(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return null;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return null;
 
     const fd = open(path_z.ptr, O_RDONLY);
     if (fd < 0) return null;
@@ -568,7 +568,7 @@ fn cmdStatus(config: *const Config, allocator: std.mem.Allocator) void {
         "Perf",
     }) catch return;
     printColor(Color.dim, header);
-    printColor(Color.dim, "  " ++ "-" ** 72 ++ "\n");
+    printColor(Color.dim, "  " ++ &@as([72]u8, @splat('-')) ++ "\n");
 
     var installed_count: usize = 0;
     var available_count: usize = 0;

@@ -139,7 +139,7 @@ test "JSON export escapes command per RFC 8259 and parses back" {
 test "markdown export with all-failed benchmarks does not panic" {
     const gpa = std.testing.allocator;
 
-    const big = "echo " ++ ("x" ** 5000);
+    const big = "echo " ++ (&@as([5000]u8, @splat('x')));
     const out_name = "zbench_parity_export.md";
 
     var r = try runZbench(gpa, &.{ "-w", "0", "-r", "1", big, "--export-markdown", out_name });

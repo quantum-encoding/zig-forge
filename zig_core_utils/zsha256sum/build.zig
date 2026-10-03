@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const options = b.addOptions();
-    options.addOption([]const u8, "zsha_bin", b.getInstallPath(.bin, "zsha256sum"));
+    options.addOptionPath("zsha_bin", exe.getEmittedBin());
     options.addOption([]const u8, "gnu_bin", "/opt/homebrew/bin/gsha256sum");
     tests.root_module.addImport("build_options", options.createModule());
 

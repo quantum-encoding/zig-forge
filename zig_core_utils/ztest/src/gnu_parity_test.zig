@@ -133,9 +133,9 @@ var tmp_dir: []const u8 = "";
 
 fn fixPath(comptime name: []const u8) [:0]const u8 {
     var b: [1024]u8 = undefined;
-    const s = std.fmt.bufPrintZ(&b, "{s}/" ++ name, .{tmp_dir}) catch unreachable;
+    const s = std.fmt.bufPrintSentinel(&b, "{s}/" ++ name, .{tmp_dir}, 0) catch unreachable;
     // copy into a static-lifetime store per call
-    const store = std.heap.page_allocator.dupeZ(u8, s) catch unreachable;
+    const store = std.heap.page_allocator.dupeSentinel(u8, s, 0) catch unreachable;
     return store;
 }
 
@@ -146,12 +146,12 @@ fn makeFixtures() ![]const u8 {
     tmp_dir = base;
 
     var z: [1024]u8 = undefined;
-    const baseZ = std.fmt.bufPrintZ(&z, "{s}", .{base}) catch unreachable;
+    const baseZ = std.fmt.bufPrintSentinel(&z, "{s}", .{base}, 0) catch unreachable;
     _ = mkdir(baseZ.ptr, 0o755);
 
     // regular non-empty file
     {
-        const p = std.fmt.bufPrintZ(&z, "{s}/bigfile", .{base}) catch unreachable;
+        const p = std.fmt.bufPrintSentinel(&z, "{s}/bigfile", .{base}, 0) catch unreachable;
         const fd = open(p.ptr, O_WRONLY | O_CREAT | O_TRUNC, 0o644);
         if (fd >= 0) {
             _ = write(fd, "hi\n", 3);
@@ -160,33 +160,33 @@ fn makeFixtures() ![]const u8 {
     }
     // empty file
     {
-        const p = std.fmt.bufPrintZ(&z, "{s}/emptyfile", .{base}) catch unreachable;
+        const p = std.fmt.bufPrintSentinel(&z, "{s}/emptyfile", .{base}, 0) catch unreachable;
         const fd = open(p.ptr, O_WRONLY | O_CREAT | O_TRUNC, 0o644);
         if (fd >= 0) _ = close(fd);
     }
     // directory
     {
-        const p = std.fmt.bufPrintZ(&z, "{s}/sub", .{base}) catch unreachable;
+        const p = std.fmt.bufPrintSentinel(&z, "{s}/sub", .{base}, 0) catch unreachable;
         _ = mkdir(p.ptr, 0o755);
     }
     // symlink to an existing target, and a dangling one
     {
-        const target = std.fmt.bufPrintZ(&z, "bigfile", .{}) catch unreachable;
+        const target = std.fmt.bufPrintSentinel(&z, "bigfile", .{}, 0) catch unreachable;
         var z2: [1024]u8 = undefined;
-        const link = std.fmt.bufPrintZ(&z2, "{s}/link_ok", .{base}) catch unreachable;
+        const link = std.fmt.bufPrintSentinel(&z2, "{s}/link_ok", .{base}, 0) catch unreachable;
         _ = unlink(link.ptr);
         _ = std.c.symlink(target.ptr, link.ptr);
     }
     {
-        const target = std.fmt.bufPrintZ(&z, "nonexistent_target", .{}) catch unreachable;
+        const target = std.fmt.bufPrintSentinel(&z, "nonexistent_target", .{}, 0) catch unreachable;
         var z2: [1024]u8 = undefined;
-        const link = std.fmt.bufPrintZ(&z2, "{s}/link_dead", .{base}) catch unreachable;
+        const link = std.fmt.bufPrintSentinel(&z2, "{s}/link_dead", .{base}, 0) catch unreachable;
         _ = unlink(link.ptr);
         _ = std.c.symlink(target.ptr, link.ptr);
     }
     // fifo
     {
-        const p = std.fmt.bufPrintZ(&z, "{s}/fifo", .{base}) catch unreachable;
+        const p = std.fmt.bufPrintSentinel(&z, "{s}/fifo", .{base}, 0) catch unreachable;
         _ = unlink(p.ptr);
         _ = mkfifo(p.ptr, 0o644);
     }
@@ -194,11 +194,11 @@ fn makeFixtures() ![]const u8 {
     // newer. This is the sub-second `-nt`/`-ot` precision anchor — a
     // whole-second-only comparison would (wrongly) call them equal.
     {
-        const lo = std.fmt.bufPrintZ(&z, "{s}/m_lo", .{base}) catch unreachable;
+        const lo = std.fmt.bufPrintSentinel(&z, "{s}/m_lo", .{base}, 0) catch unreachable;
         var fd = open(lo.ptr, O_WRONLY | O_CREAT | O_TRUNC, 0o644);
         if (fd >= 0) _ = close(fd);
         var z2: [1024]u8 = undefined;
-        const hi = std.fmt.bufPrintZ(&z2, "{s}/m_hi", .{base}) catch unreachable;
+        const hi = std.fmt.bufPrintSentinel(&z2, "{s}/m_hi", .{base}, 0) catch unreachable;
         fd = open(hi.ptr, O_WRONLY | O_CREAT | O_TRUNC, 0o644);
         if (fd >= 0) _ = close(fd);
         const t_lo = [2]std.c.timespec{

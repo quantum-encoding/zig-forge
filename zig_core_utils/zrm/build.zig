@@ -18,9 +18,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run zrm");
     run_step.dependOn(&run_cmd.step);
@@ -44,7 +42,7 @@ pub fn build(b: *std.Build) void {
     // Use the ABSOLUTE installed path: the parity tests spawn `zrm` from scratch
     // working directories, so a build-root-relative path would not resolve.
     const parity_opts = b.addOptions();
-    parity_opts.addOption([]const u8, "zrm_exe", b.getInstallPath(.bin, "zrm"));
+    parity_opts.addOptionPath("zrm_exe", exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -59,4 +57,12 @@ pub fn build(b: *std.Build) void {
     const run_parity_tests = b.addRunArtifact(parity_tests);
     run_parity_tests.step.dependOn(b.getInstallStep()); // ensure zrm is installed first
     test_step.dependOn(&run_parity_tests.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

@@ -102,7 +102,7 @@ pub fn build(b: *std.Build) void {
 
     const zterm_run = b.addRunArtifact(zterm);
     zterm_run.step.dependOn(b.getInstallStep());
-    if (b.args) |a| zterm_run.addArgs(a);
+    forwardArgs(b, zterm_run);
     const zterm_step = b.step("zterm", "Run zterm (e.g. `zig build zterm -- cli list`)");
     zterm_step.dependOn(&zterm_run.step);
     // `zig build run` is the multiplexer — the same binary, run bare.
@@ -212,4 +212,12 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_capi_tests.step);
     test_step.dependOn(&run_zterm_tests.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

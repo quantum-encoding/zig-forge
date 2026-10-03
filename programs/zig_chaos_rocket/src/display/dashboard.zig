@@ -34,7 +34,7 @@ const HIDE_CURSOR = ESC ++ "[?25l";
 const SHOW_CURSOR = ESC ++ "[?25h";
 
 // Separator line constants (Zig 0.16 does not support fill patterns)
-const SEPARATOR_DASH_72 = "─" ** 72;
+const SEPARATOR_DASH_72 = repeatStr("─", 72);
 
 pub const Dashboard = struct {
     writer: *std.Io.Writer,
@@ -291,3 +291,13 @@ pub const Dashboard = struct {
         }) catch {};
     }
 };
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
+}

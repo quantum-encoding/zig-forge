@@ -30,8 +30,8 @@ pub const Node = struct {
         node.* = .{
             .is_leaf = is_leaf,
             .num_keys = 0,
-            .keys = [_]i64{0} ** MAX_KEYS,
-            .values = [_]u64{0} ** MAX_KEYS,
+            .keys = @as([MAX_KEYS]i64, @splat(0)),
+            .values = @as([MAX_KEYS]u64, @splat(0)),
             .children = [_]?*Node{null} ** ORDER,
             .parent = null,
         };

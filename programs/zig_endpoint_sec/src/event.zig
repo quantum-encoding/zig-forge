@@ -8,6 +8,7 @@
 //! does not name comes out as `.unknown`.
 
 const std = @import("std");
+const compat = @import("zig_compat.zig");
 const sys = @import("sys.zig");
 const versioned = @import("versioned.zig");
 const message = @import("message.zig");
@@ -159,7 +160,7 @@ const kind_table: [@intFromEnum(EventType.ES_EVENT_TYPE_LAST)]Kind = blk: {
     @setEvalBranchQuota(50_000);
     var table: [@intFromEnum(EventType.ES_EVENT_TYPE_LAST)]Kind = undefined;
     for (&table) |*k| k.* = .unknown;
-    for (std.meta.fields(EventType)) |f| {
+    for (compat.fields(EventType)) |f| {
         const member = memberName(f.name) orelse continue;
         if (f.value >= table.len) continue;
         table[f.value] = @field(Kind, member);
@@ -309,7 +310,7 @@ const testing_support = @import("testing_support.zig");
 
 test "every known event type resolves to a union member; reserved ones to unknown" {
     @setEvalBranchQuota(20_000);
-    inline for (std.meta.fields(EventType)) |f| {
+    inline for (compat.fields(EventType)) |f| {
         const t: EventType = @enumFromInt(f.value);
         const k = kindOf(t);
         if (comptime (std.mem.startsWith(u8, f.name, "ES_EVENT_TYPE_RESERVED_") or std.mem.eql(u8, f.name, "ES_EVENT_TYPE_LAST"))) {
@@ -323,8 +324,8 @@ test "every known event type resolves to a union member; reserved ones to unknow
 }
 
 test "Event mirrors es_events_t member for member" {
-    const union_members = std.meta.fields(sys.es_events_t);
-    try std.testing.expectEqual(union_members.len + 1, std.meta.fields(Event).len);
+    const union_members = compat.fields(sys.es_events_t);
+    try std.testing.expectEqual(union_members.len + 1, compat.fields(Event).len);
     inline for (union_members) |m| {
         try std.testing.expect(@hasField(Event, m.name));
         const Payload = switch (@typeInfo(m.type)) {

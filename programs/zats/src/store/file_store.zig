@@ -136,7 +136,7 @@ pub const FileStore = struct {
         defer self.allocator.free(path);
 
         // Null-terminate
-        const pathZ = try self.allocator.dupeZ(u8, path);
+        const pathZ = try self.allocator.dupeSentinel(u8, path, 0);
         defer self.allocator.free(pathZ);
 
         // Try to open existing file
@@ -532,7 +532,7 @@ pub const FileStore = struct {
 
             const path = self.walPath() catch return purged;
             defer self.allocator.free(path);
-            const pathZ = self.allocator.dupeZ(u8, path) catch return purged;
+            const pathZ = self.allocator.dupeSentinel(u8, path, 0) catch return purged;
             defer self.allocator.free(pathZ);
 
             const f = std.c.fopen(pathZ.ptr, "w+b");
@@ -590,7 +590,7 @@ fn deleteTree(path: []const u8, allocator: std.mem.Allocator) void {
     // Delete WAL file
     const wal_path = std.fmt.allocPrint(allocator, "{s}/stream.wal", .{path}) catch return;
     defer allocator.free(wal_path);
-    const walZ = allocator.dupeZ(u8, wal_path) catch return;
+    const walZ = allocator.dupeSentinel(u8, wal_path, 0) catch return;
     defer allocator.free(walZ);
     _ = std.c.unlink(walZ.ptr);
 

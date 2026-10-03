@@ -180,7 +180,7 @@ test "WAL replay: corrupted entry stops replay" {
     // [op=0x01][len=16 LE][crc=0xDEADBEEF LE][16 zero bytes]
     const bad_header = [_]u8{ 0x01, 0x10, 0x00, 0x00, 0x00, 0xEF, 0xBE, 0xAD, 0xDE };
     try corrupted.appendSlice(std.heap.c_allocator, &bad_header);
-    try corrupted.appendSlice(std.heap.c_allocator, &([_]u8{0x00} ** 16));
+    try corrupted.appendSlice(std.heap.c_allocator, &(@as([16]u8, @splat(0x00))));
 
     try Dir.cwd().writeFile(io, .{ .sub_path = wal_path, .data = corrupted.items });
 

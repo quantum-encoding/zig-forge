@@ -92,7 +92,7 @@ const Fixture = struct {
         defer lib.zdedupe_free(ctx);
         lib.zdedupe_set_mode(ctx, 0);
         lib.zdedupe_set_analyze_dirs(ctx, self.analyze_dirs);
-        const root = try self.gpa.dupeZ(u8, self.tree.path);
+        const root = try self.gpa.dupeSentinel(u8, self.tree.path, 0);
         defer self.gpa.free(root);
         if (lib.zdedupe_add_path(ctx, root.ptr) != 0) return error.AddPathFailed;
         if (lib.zdedupe_run_to_file(ctx, self.store_path.ptr) != 0) return error.ScanFailed;
@@ -200,7 +200,7 @@ test "a store that fails validation does not open" {
     var scratch = try Scratch.init(gpa, "session-bad-store");
     defer scratch.deinit();
 
-    try scratch.writeFile("not-a-store.zds", "ZDSTORE1" ++ "garbage" ** 40);
+    try scratch.writeFile("not-a-store.zds", "ZDSTORE1" ++ repeatStr("garbage", 40));
     const bad = try scratch.join("not-a-store.zds");
     defer gpa.free(bad);
     try testing.expectError(error.StoreIsInvalid, Session.open(gpa, bad, null));
@@ -540,10 +540,10 @@ test "a permanent delete goes by content, not by timestamp" {
     // check would wave it through; its content says otherwise.
     const edited = try fixture.path("b/dup.bin");
     defer gpa.free(edited);
-    const edited_z = try gpa.dupeZ(u8, edited);
+    const edited_z = try gpa.dupeSentinel(u8, edited, 0);
     defer gpa.free(edited_z);
     const before = try @import("pstat.zig").lstat(edited_z.ptr);
-    try fixture.tree.writeFile("b/dup.bin", &[_]u8{'X'} ** 3000);
+    try fixture.tree.writeFile("b/dup.bin", &@as([3000]u8, @splat('X')));
     try setMtime(edited_z, before.mtime_sec);
 
     var s = try fixture.open(null);
@@ -570,7 +570,7 @@ test "a copy modified since the scan is not trashed either" {
     // Same bytes, a newer mtime: content would pass, metadata must not.
     const touched = try fixture.path("b/dup.bin");
     defer gpa.free(touched);
-    const touched_z = try gpa.dupeZ(u8, touched);
+    const touched_z = try gpa.dupeSentinel(u8, touched, 0);
     defer gpa.free(touched_z);
     const before = try @import("pstat.zig").lstat(touched_z.ptr);
     try setMtime(touched_z, before.mtime_sec + 3600);
@@ -601,7 +601,7 @@ test "nothing in a group goes if no copy would survive" {
     // Something else took the copy that was to be kept.
     const keeper = try fixture.path("a/dup.bin");
     defer gpa.free(keeper);
-    const keeper_z = try gpa.dupeZ(u8, keeper);
+    const keeper_z = try gpa.dupeSentinel(u8, keeper, 0);
     defer gpa.free(keeper_z);
     try testing.expectEqual(@as(c_int, 0), sysc.unlink(keeper_z.ptr));
 
@@ -947,7 +947,7 @@ test "a name that is not UTF-8 pages, spells and deletes correctly" {
 
     // Two copies whose names are not valid UTF-8, and one plain copy of the
     // same content to keep.
-    const payload = [_]u8{'z'} ** 600;
+    const payload = @as([600]u8, @splat('z'));
     try fixture.tree.makeDir("raw");
     try fixture.tree.writeFile("raw/keep.bin", &payload);
     try fixture.tree.writeFile("raw/caf\xe9.bin", &payload);
@@ -1045,7 +1045,7 @@ test "export leaves out what was deleted, and escapes a hostile name" {
     const hostile = if (on_windows) "evil' ,'injected'=1, amp& {x};alert(1).bin" else "evil\" ,\"injected\":1, \\ <script>alert(1)<x>.bin";
     var fixture = try Fixture.init(gpa, "session-export-hostile", &.{});
     defer fixture.deinit();
-    const payload = [_]u8{'h'} ** 700;
+    const payload = @as([700]u8, @splat('h'));
     try fixture.tree.makeDir("h");
     try fixture.tree.writeFile("h/plain.bin", &payload);
     try fixture.tree.writeFile(try std.fmt.allocPrint(a, "h/{s}", .{hostile}), &payload);
@@ -1794,7 +1794,7 @@ fn setMtime(path: [:0]const u8, seconds: i64) !void {
 }
 
 fn readFile(arena: Allocator, path: []const u8) ![]u8 {
-    const path_z = try arena.dupeZ(u8, path);
+    const path_z = try arena.dupeSentinel(u8, path, 0);
     return removed_mod.readWholeFile(arena, path_z.ptr, 16 * 1024 * 1024);
 }
 
@@ -2067,7 +2067,7 @@ test "credential stores and shell history are never read" {
     lib.zdedupe_set_mode(ctx, 0);
     lib.zdedupe_set_include_hidden(ctx, true);
     lib.zdedupe_use_credential_excludes(ctx, true);
-    const root = try a.dupeZ(u8, fixture.tree.path);
+    const root = try a.dupeSentinel(u8, fixture.tree.path, 0);
     try testing.expectEqual(@as(c_int, 0), lib.zdedupe_add_path(ctx, root.ptr));
     try testing.expectEqual(@as(c_int, 0), lib.zdedupe_run_to_file(ctx, fixture.store_path.ptr));
 
@@ -2124,7 +2124,7 @@ test "the protected home is the user's real one, not $HOME" {
 
     // What the sandbox does: $HOME names somewhere that is not the home.
     const saved = sysc.getenv("HOME");
-    const saved_copy: ?[:0]u8 = if (saved) |h| try gpa.dupeZ(u8, std.mem.span(h)) else null;
+    const saved_copy: ?[:0]u8 = if (saved) |h| try gpa.dupeSentinel(u8, std.mem.span(h), 0) else null;
     defer if (saved_copy) |h| gpa.free(h);
     _ = setenv("HOME", "/private/tmp/zdedupe-container-home", 1);
     defer {
@@ -2219,4 +2219,14 @@ test "a file is located by its folder, never as a location of its own" {
         const key = field(f, "key").string;
         try testing.expect(!std.mem.endsWith(u8, key, ".bin"));
     }
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

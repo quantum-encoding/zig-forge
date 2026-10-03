@@ -110,7 +110,7 @@ pub const Poly = struct {
     coeffs: [N]i16,
 
     pub fn init() Poly {
-        return .{ .coeffs = [_]i16{0} ** N };
+        return .{ .coeffs = @as([N]i16, @splat(0)) };
     }
 
     /// Add two polynomials coefficient-wise

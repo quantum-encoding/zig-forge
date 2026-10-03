@@ -155,6 +155,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    secrets_mod.addImport("c", secretsLibc(b, target, optimize));
 
     const secrets_exe = b.addExecutable(.{
         .name = "secrets",
@@ -163,7 +164,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(secrets_exe);
 
     const run_secrets = b.addRunArtifact(secrets_exe);
-    if (b.args) |a| run_secrets.addArgs(a);
+    forwardArgs(b, run_secrets);
     const secrets_step = b.step("secrets", "Build and run secrets CLI");
     secrets_step.dependOn(&run_secrets.step);
 
@@ -181,6 +182,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSafe,
             .link_libc = true,
         });
+        s_mod.addImport("c", secretsLibc(b, b.resolveTargetQuery(ct.query), .ReleaseSafe));
         const s_exe = b.addExecutable(.{
             .name = "secrets-" ++ ct.name,
             .root_module = s_mod,
@@ -355,6 +357,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    secrets_test_mod.addImport("c", secretsLibc(b, target, optimize));
     const secrets_tests = b.addTest(.{
         .root_module = secrets_test_mod,
     });
@@ -365,7 +368,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/differential_std.zig"),
         .target = target,
         // These loops sign and verify thousands of times; Debug would take minutes.
-        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .optimize = if (optimize == std.builtin.OptimizeMode.Debug) std.builtin.OptimizeMode.ReleaseSafe else optimize,
         .link_libc = true,
     });
     const differential_tests = b.addTest(.{
@@ -452,4 +455,21 @@ pub fn build(b: *std.Build) void {
     const package_step = b.step("package", "Create distribution package");
     package_step.dependOn(cross_step);
     package_step.dependOn(gen_header_step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
+}
+
+/// tools/secrets.zig's libc surface (tools/secrets_c.h) translated for `target`.
+fn secretsLibc(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.addTranslateC(.{
+        .root_source_file = b.path("tools/secrets_c.h"),
+        .target = target,
+        .optimize = optimize,
+    }).createModule();
 }

@@ -122,7 +122,7 @@ pub const AlsaBackend = struct {
 
         // Create null-terminated device name
         var device_buf: [256]u8 = undefined;
-        const device_z = std.fmt.bufPrintZ(&device_buf, "{s}", .{self.config.device}) catch {
+        const device_z = std.fmt.bufPrintSentinel(&device_buf, "{s}", .{self.config.device}, 0) catch {
             return error.DeviceNameTooLong;
         };
 

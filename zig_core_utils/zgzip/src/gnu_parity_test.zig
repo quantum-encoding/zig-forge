@@ -197,7 +197,7 @@ fn le32(b: []const u8) u32 {
 test "zgzip output decodes under system gunzip (external decoder)" {
     if (!haveSystemGzip()) return error.SkipZigTest;
 
-    const payload = "hello world hello world\n" ** 40; // compressible, multi-block-ish
+    const payload = repeatStr("hello world hello world\n", 40); // compressible, multi-block-ish
 
     const dir = try makeTmpDir();
     defer {
@@ -436,7 +436,7 @@ test "failed compress leaves the source file intact" {
 test "system gzip -t validates zgzip output (CRC-verified)" {
     if (!haveSystemGzip()) return error.SkipZigTest;
 
-    const payload = "conformance payload \x00\x01\x02 with NULs and \xff bytes\n" ** 8;
+    const payload = repeatStr("conformance payload \x00\x01\x02 with NULs and \xff bytes\n", 8);
 
     const dir = try makeTmpDir();
     defer {
@@ -461,4 +461,14 @@ test "system gzip -t validates zgzip output (CRC-verified)" {
     defer std.testing.allocator.free(t.stdout);
     defer std.testing.allocator.free(t.stderr);
     try std.testing.expectEqual(@as(?u8, 0), exitCode(t.term));
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

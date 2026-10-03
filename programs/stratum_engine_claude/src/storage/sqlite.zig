@@ -96,7 +96,7 @@ pub const Database = struct {
         var db: ?*c.sqlite3 = null;
 
         // Null-terminate the path for C
-        const c_path = try allocator.dupeZ(u8, path);
+        const c_path = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(c_path);
 
         const result = c.sqlite3_open(c_path.ptr, &db);
@@ -516,7 +516,7 @@ pub const Database = struct {
     // ==================== Helper Methods ====================
 
     fn exec(self: *Self, sql: []const u8) !void {
-        const c_sql = try self.allocator.dupeZ(u8, sql);
+        const c_sql = try self.allocator.dupeSentinel(u8, sql, 0);
         defer self.allocator.free(c_sql);
 
         var err_msg: [*c]u8 = null;
@@ -532,7 +532,7 @@ pub const Database = struct {
     }
 
     fn prepare(self: *Self, sql: []const u8) !*c.sqlite3_stmt {
-        const c_sql = try self.allocator.dupeZ(u8, sql);
+        const c_sql = try self.allocator.dupeSentinel(u8, sql, 0);
         defer self.allocator.free(c_sql);
 
         var stmt: ?*c.sqlite3_stmt = null;
@@ -568,7 +568,7 @@ pub const Database = struct {
     }
 
     fn bindText(self: *Self, stmt: *c.sqlite3_stmt, index: c_int, text: []const u8) !void {
-        const c_text = try self.allocator.dupeZ(u8, text);
+        const c_text = try self.allocator.dupeSentinel(u8, text, 0);
         // Note: SQLITE_TRANSIENT means SQLite will copy the string
         if (c.sqlite3_bind_text(stmt, index, c_text.ptr, @intCast(text.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK) {
             self.allocator.free(c_text);

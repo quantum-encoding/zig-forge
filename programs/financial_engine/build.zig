@@ -195,7 +195,7 @@ pub fn build(b: *std.Build) void {
 
     // Real HFT System executable
     // NOTE: Force ReleaseFast due to Zig 0.16 dev DWARF bug with libwebsockets/libsystemd in Debug mode
-    const real_hft_optimize = if (optimize == .Debug) .ReleaseFast else optimize;
+    const real_hft_optimize = if (optimize == std.builtin.OptimizeMode.Debug) std.builtin.OptimizeMode.ReleaseFast else optimize;
     const real_hft_exe = b.addExecutable(.{
         .name = "real-hft-system",
         .root_module = b.createModule(.{
@@ -242,9 +242,7 @@ pub fn build(b: *std.Build) void {
     // Run commands
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
     
     const run_step = b.step("run", "Run the main application");
     run_step.dependOn(&run_cmd.step);
@@ -485,4 +483,12 @@ fn linkMbedtls3(mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
         mod.linkSystemLibrary("mbedcrypto", .{});
         mod.linkSystemLibrary("mbedx509", .{});
     }
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

@@ -650,7 +650,7 @@ fn dumpFile(path: ?[]const u8, cfg: *const Config) !void {
     const fd: c_int = if (path) |p| blk: {
         if (std.mem.eql(u8, p, "-")) break :blk libc.STDIN_FILENO;
         var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{p}) catch return error.PathTooLong;
+        const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{p}, 0) catch return error.PathTooLong;
         const opened = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
         if (opened < 0) return error.OpenFailed;
         break :blk opened;

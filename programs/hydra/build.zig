@@ -63,9 +63,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(hydra_exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    forwardArgs(b, run_cmd);
 
     const run_step = b.step("run", "Run the Hydra GPU variable tester");
     run_step.dependOn(&run_cmd.step);
@@ -97,9 +95,7 @@ pub fn build(b: *std.Build) void {
 
     const bench_cmd = b.addRunArtifact(bench_exe);
     bench_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        bench_cmd.addArgs(args);
-    }
+    forwardArgs(b, bench_cmd);
 
     const bench_step = b.step("bench", "Run GPU performance benchmark");
     bench_step.dependOn(&bench_cmd.step);
@@ -129,4 +125,12 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_work_unit_tests.step);
     test_step.dependOn(&run_simd_batch_tests.step);
     test_step.dependOn(&run_queen_tests.step);
+}
+
+/// Forwards `zig build <step> -- <args>` to a run step: `b.args` on Zig 0.16,
+/// passthru args on 0.17+.
+fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else run.addPassthruArgs();
 }

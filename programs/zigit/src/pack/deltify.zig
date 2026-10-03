@@ -480,7 +480,7 @@ test "encode/decode: insertion in middle splits into copy/insert/copy" {
 }
 
 test "encode/decode: empty base behaves like pure literal output" {
-    const target = "Hello, deltify world!" ** 16;
+    const target = repeatStr("Hello, deltify world!", 16);
     const delta = try encode(testing.allocator, "", target);
     defer testing.allocator.free(delta);
 
@@ -654,4 +654,14 @@ test "plan: many similar blobs share one base; deltify wins big" {
         delta_count += 1;
     };
     try testing.expect(delta_count >= (N - 1) * 4 / 5);
+}
+
+/// Comptime string repetition (`s` concatenated `n` times).
+fn repeatStr(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk &final;
+    };
 }

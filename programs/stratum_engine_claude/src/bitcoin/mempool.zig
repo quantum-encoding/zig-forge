@@ -93,7 +93,7 @@ fn buildVersionMessage(remote_addr: posix.sockaddr.in, allocator: std.mem.Alloca
     // addr_recv (remote peer)
     std.mem.writeInt(u64, &buf, 1, .little); // services
     try payload.appendSlice(allocator, &buf);
-    try payload.appendSlice(allocator, &[_]u8{0} ** 10 ++ [_]u8{ 0xFF, 0xFF }); // IPv4-mapped IPv6
+    try payload.appendSlice(allocator, &@as([10]u8, @splat(0)) ++ [_]u8{ 0xFF, 0xFF }); // IPv4-mapped IPv6
     std.mem.writeInt(u32, buf[0..4], remote_addr.addr, .big);
     try payload.appendSlice(allocator, buf[0..4]);
     std.mem.writeInt(u16, buf[0..2], remote_addr.port, .big);
@@ -102,7 +102,7 @@ fn buildVersionMessage(remote_addr: posix.sockaddr.in, allocator: std.mem.Alloca
     // addr_from (our address - zeros)
     std.mem.writeInt(u64, &buf, 0, .little); // services
     try payload.appendSlice(allocator, &buf);
-    try payload.appendSlice(allocator, &[_]u8{0} ** 10 ++ [_]u8{ 0xFF, 0xFF }); // IPv4-mapped IPv6
+    try payload.appendSlice(allocator, &@as([10]u8, @splat(0)) ++ [_]u8{ 0xFF, 0xFF }); // IPv4-mapped IPv6
     std.mem.writeInt(u32, buf[0..4], 0, .little);
     try payload.appendSlice(allocator, buf[0..4]);
     std.mem.writeInt(u16, buf[0..2], 0, .little);
@@ -505,7 +505,7 @@ pub fn formatHash(hash: [32]u8, buffer: []u8) ![]u8 {
 }
 
 test "hash reversal" {
-    const hash = [_]u8{0} ** 32;
+    const hash = @as([32]u8, @splat(0));
     const reversed = MempoolMonitor.reverseHashSIMD(hash);
     try std.testing.expectEqual(hash, reversed); // All zeros should stay the same
 }

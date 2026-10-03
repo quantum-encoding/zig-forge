@@ -117,7 +117,7 @@ pub fn getSystemStats() SystemStats {
         const line = cpu_buf[0..n];
         if (std.mem.startsWith(u8, line, "cpu ")) {
             var iter = std.mem.tokenizeScalar(u8, line["cpu ".len..], ' ');
-            var fields: [10]u64 = .{0} ** 10;
+            var fields: [10]u64 = @splat(0);
             var fi: usize = 0;
             while (iter.next()) |tok| {
                 if (fi >= 10) break;
