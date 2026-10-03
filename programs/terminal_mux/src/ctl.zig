@@ -24,6 +24,7 @@ const std = @import("std");
 const c = std.c;
 const posix = std.posix;
 const session = @import("session.zig");
+const pty = @import("pty.zig");
 const terminal = @import("terminal.zig");
 
 pub const Ctl = struct {
@@ -86,13 +87,12 @@ pub fn bind(alloc: std.mem.Allocator) !Ctl {
     const path = try socketPath(alloc);
     errdefer alloc.free(path);
     _ = c.unlink(path.ptr);
-    const fd = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
-    if (fd < 0) return error.SocketCreateFailed;
-    errdefer _ = c.close(fd);
     // Spawned shells must not inherit the listener (or any accepted conn —
     // see accept()): a child holding a conn open means the CLI never sees EOF
-    // and hangs after `split`/`new-window`.
-    _ = c.fcntl(fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
+    // and hangs after `split`/`new-window`. Created under the fork lock.
+    const fd = pty.cloexecUnderLock(c.socket, .{ c.AF.UNIX, c.SOCK.STREAM, @as(c_uint, 0) });
+    if (fd < 0) return error.SocketCreateFailed;
+    errdefer _ = c.close(fd);
     var addr = try fillAddr(path);
     if (c.bind(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) < 0) return error.BindFailed;
     // Owner-only: this socket types into the user's shell — default umask
@@ -134,10 +134,9 @@ pub fn accept(
     env: [*:null]const ?[*:0]const u8,
     alloc: std.mem.Allocator,
 ) bool {
-    const conn = c.accept(listen_fd, null, null);
+    const conn = pty.cloexecUnderLock(c.accept, .{ listen_fd, null, null });
     if (conn < 0) return false;
     defer _ = c.close(conn);
-    _ = c.fcntl(conn, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
 
     // Don't let a stalled client wedge the UI loop.
     const tv = c.timeval{ .sec = 0, .usec = 500_000 };

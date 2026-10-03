@@ -1,9 +1,10 @@
 //! PTY (Pseudo-Terminal) Management
 //!
 //! Handles creation and management of pseudo-terminals.
-//! Linux uses the Unix98 PTY interface (/dev/ptmx); Darwin (macOS) uses
-//! openpty(3) from libSystem. The rest of the lifecycle (fork/exec, raw mode,
-//! winsize ioctls) is shared across both platforms via libc.
+//! Both platforms allocate from /dev/ptmx with each end opened O_CLOEXEC
+//! (Linux via TIOCSPTLCK/TIOCGPTN, Darwin via grantpt/unlockpt/ptsname_r).
+//! The rest of the lifecycle (fork/exec, raw mode, winsize ioctls, reaping)
+//! is shared via libc.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -14,15 +15,213 @@ const is_darwin = builtin.os.tag.isDarwin();
 
 /// libc ioctl — used for the portable winsize / controlling-terminal requests.
 extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
-/// openpty(3) — Darwin (libSystem) and the BSDs. On Linux we use /dev/ptmx
-/// instead to avoid the -lutil link dependency.
-extern "c" fn openpty(
-    amaster: *c_int,
-    aslave: *c_int,
-    name: ?[*]u8,
-    termp: ?*const anyopaque,
-    winp: ?*const Winsize,
-) c_int;
+extern "c" fn grantpt(fd: c_int) c_int;
+extern "c" fn unlockpt(fd: c_int) c_int;
+extern "c" fn ptsname_r(fd: c_int, buf: [*]u8, len: usize) c_int;
+
+/// pthread-backed mutex (this toolchain's std has no std.Thread.Mutex).
+pub const Mutex = struct {
+    inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+
+    pub fn lock(self: *Mutex) void {
+        _ = std.c.pthread_mutex_lock(&self.inner);
+    }
+
+    pub fn unlock(self: *Mutex) void {
+        _ = std.c.pthread_mutex_unlock(&self.inner);
+    }
+};
+
+/// Serializes fork against fd creation that cannot be atomically CLOEXEC.
+/// Every terminal_mux site that creates an fd and then sets FD_CLOEXEC with a
+/// separate fcntl (Darwin has no SOCK_CLOEXEC / accept4) holds it across both
+/// calls, and every fork holds it across the fork, so a child never inherits
+/// such an fd in the gap. PTY ends are opened O_CLOEXEC and need no lock.
+pub var fd_lock: Mutex = .{};
+
+/// Create-then-CLOEXEC under `fd_lock`. `make` returns the new fd or < 0.
+pub fn cloexecUnderLock(make: anytype, args: anytype) c_int {
+    fd_lock.lock();
+    defer fd_lock.unlock();
+    const fd: c_int = @call(.auto, make, args);
+    if (fd >= 0) _ = c.fcntl(fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
+    return fd;
+}
+
+/// How long a closed pane's process group has to exit after the hangup
+/// before the reaper sends SIGKILL to the group.
+pub const REAP_GRACE_MS: isize = 2000;
+
+/// Process-wide reaper for children of closed PTYs.
+///
+/// Darwin: one thread blocked in kevent on EVFILT_PROC/NOTE_EXIT per adopted
+/// pid, plus a one-shot EVFILT_TIMER (same ident) for the SIGKILL escalation.
+/// Nothing polls and no caller blocks. Linux: a detached thread per pid
+/// waiting on its pidfd with the same grace.
+pub const reaper = struct {
+    var mutex: Mutex = .{};
+    var kq: c_int = -1;
+    var started = false;
+    /// Pids adopted and not yet reaped. Guards the escalation against a
+    /// timer that outlives its pid (a recycled pid must never be killed).
+    /// Value: the monotonic ms after which the group is SIGKILLed.
+    var pending: std.AutoHashMapUnmanaged(posix.pid_t, i64) = .empty;
+    const gpa = std.heap.c_allocator;
+
+    /// Number of adopted children not yet reaped (tests, diagnostics).
+    pub fn pendingCount() usize {
+        mutex.lock();
+        defer mutex.unlock();
+        return pending.count();
+    }
+
+    fn monotonicMs() i64 {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        return @intCast(@as(i128, ts.sec) * 1000 + @divTrunc(ts.nsec, 1_000_000));
+    }
+
+    pub fn adopt(pid: posix.pid_t) void {
+        if (is_darwin) adoptDarwin(pid) else adoptLinux(pid);
+    }
+
+    fn adoptDarwin(pid: posix.pid_t) void {
+        mutex.lock();
+        defer mutex.unlock();
+        if (!started) {
+            kq = c.kqueue();
+            if (kq >= 0) {
+                _ = c.fcntl(kq, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
+                if (std.Thread.spawn(.{}, runDarwin, .{})) |th| {
+                    th.detach();
+                    started = true;
+                } else |_| {
+                    _ = std.c.close(kq);
+                    kq = -1;
+                }
+            }
+        }
+        if (!started) {
+            // No reaper available: a non-blocking attempt is all that is
+            // safe here; the kernel keeps a zombie at worst.
+            _ = c.waitpid(pid, null, c.W.NOHANG);
+            return;
+        }
+        pending.put(gpa, pid, monotonicMs() + REAP_GRACE_MS) catch {};
+        const ident: usize = @intCast(pid);
+        const changes = [_]c.Kevent{
+            .{ .ident = ident, .filter = c.EVFILT.PROC, .flags = c.EV.ADD | c.EV.ONESHOT, .fflags = c.NOTE.EXIT, .data = 0, .udata = 0 },
+            .{ .ident = ident, .filter = c.EVFILT.TIMER, .flags = c.EV.ADD | c.EV.ONESHOT, .fflags = 0, .data = REAP_GRACE_MS, .udata = 0 },
+        };
+        var none: [0]c.Kevent = undefined;
+        const proc_ok = c.kevent(kq, changes[0..1].ptr, 1, &none, 0, null) == 0;
+        if (c.waitpid(pid, null, c.W.NOHANG) != 0) {
+            forgetLocked(pid, proc_ok);
+            return;
+        }
+        if (proc_ok) {
+            _ = c.kevent(kq, changes[1..2].ptr, 1, &none, 0, null);
+        } else {
+            // The kernel refuses an exit knote on a process already inside
+            // exit(); it becomes collectable within moments. Check back
+            // shortly instead of after the full grace.
+            armRetryLocked(ident);
+        }
+    }
+
+    /// Drop `pid` and its knotes. Caller holds `mutex`.
+    fn forgetLocked(pid: posix.pid_t, delete_proc: bool) void {
+        _ = pending.remove(pid);
+        const ident: usize = @intCast(pid);
+        var none: [0]c.Kevent = undefined;
+        const del_timer = [_]c.Kevent{.{ .ident = ident, .filter = c.EVFILT.TIMER, .flags = c.EV.DELETE, .fflags = 0, .data = 0, .udata = 0 }};
+        _ = c.kevent(kq, &del_timer, 1, &none, 0, null);
+        if (delete_proc) {
+            const del_proc = [_]c.Kevent{.{ .ident = ident, .filter = c.EVFILT.PROC, .flags = c.EV.DELETE, .fflags = 0, .data = 0, .udata = 0 }};
+            _ = c.kevent(kq, &del_proc, 1, &none, 0, null);
+        }
+    }
+
+    /// One-shot 20 ms timer on `ident`, for a child whose exit knote could
+    /// not attach (the kernel refuses one on a process inside exit()). Its
+    /// handler reaps, re-arming only while the process is still mid-exit,
+    /// and SIGKILLs the group only once the grace has passed.
+    fn armRetryLocked(ident: usize) void {
+        var none: [0]c.Kevent = undefined;
+        const rearm = [_]c.Kevent{.{ .ident = ident, .filter = c.EVFILT.TIMER, .flags = c.EV.ADD | c.EV.ONESHOT, .fflags = 0, .data = 20, .udata = 0 }};
+        _ = c.kevent(kq, &rearm, 1, &none, 0, null);
+    }
+
+    fn runDarwin() void {
+        var events: [16]c.Kevent = undefined;
+        var none: [0]c.Kevent = undefined;
+        while (true) {
+            const n = c.kevent(kq, &none, 0, &events, events.len, null);
+            if (n <= 0) continue; // EINTR
+            for (events[0..@intCast(n)]) |ev| {
+                const pid: posix.pid_t = @intCast(ev.ident);
+                mutex.lock();
+                defer mutex.unlock();
+                const deadline = pending.get(pid) orelse continue; // already collected
+                if (ev.filter == c.EVFILT.PROC) {
+                    // Exited: the zombie is collectable without waiting.
+                    _ = c.waitpid(pid, null, c.W.NOHANG);
+                    forgetLocked(pid, false);
+                } else {
+                    // Timer: once the grace is over, end the whole group. A
+                    // child with an exit knote is then collected on
+                    // NOTE_EXIT; one without (it was already mid-exit at
+                    // adopt) is re-checked until it is collectable.
+                    if (monotonicMs() >= deadline) {
+                        _ = c.kill(-pid, posix.SIG.KILL);
+                        _ = c.kill(pid, posix.SIG.KILL);
+                    }
+                    if (c.waitpid(pid, null, c.W.NOHANG) != 0) {
+                        forgetLocked(pid, true);
+                    } else {
+                        armRetryLocked(ev.ident);
+                    }
+                }
+            }
+        }
+    }
+
+    fn adoptLinux(pid: posix.pid_t) void {
+        mutex.lock();
+        pending.put(gpa, pid, 0) catch {};
+        mutex.unlock();
+        if (std.Thread.spawn(.{}, runLinux, .{pid})) |th| {
+            th.detach();
+        } else |_| {
+            _ = c.waitpid(pid, null, c.W.NOHANG);
+        }
+    }
+
+    fn runLinux(pid: posix.pid_t) void {
+        if (!is_darwin) {
+            const linux = std.os.linux;
+            const r = linux.pidfd_open(pid, 0);
+            if (linux.errno(r) == .SUCCESS) {
+                const pfd: c_int = @intCast(r);
+                var fds = [_]posix.pollfd{.{ .fd = pfd, .events = posix.POLL.IN, .revents = 0 }};
+                const ready = posix.poll(&fds, @intCast(REAP_GRACE_MS)) catch 0;
+                if (ready == 0) {
+                    _ = c.kill(-pid, posix.SIG.KILL);
+                    _ = c.kill(pid, posix.SIG.KILL);
+                }
+                _ = std.c.close(pfd);
+            } else {
+                _ = c.kill(-pid, posix.SIG.KILL);
+                _ = c.kill(pid, posix.SIG.KILL);
+            }
+            // The child has exited or been SIGKILLed: this returns promptly.
+            _ = c.waitpid(pid, null, 0);
+        }
+        mutex.lock();
+        _ = pending.remove(pid);
+        mutex.unlock();
+    }
+};
 
 /// Platform-dependent ioctl request numbers. The winsize + controlling-terminal
 /// requests have different encodings on Linux vs Darwin.
@@ -81,28 +280,39 @@ pub const Pty = struct {
         return if (is_darwin) createDarwin() else createLinux();
     }
 
-    /// Darwin: allocate the pair with openpty(3) from libSystem.
+    /// Darwin: allocate the pair from /dev/ptmx, both ends opened O_CLOEXEC.
+    ///
+    /// openpty(3) cannot take O_CLOEXEC, and setting it afterwards with fcntl
+    /// leaves a window in which a fork on another thread of the host (the
+    /// Swift app spawns processes from many threads) inherits the master; that
+    /// child then holds the terminal open and the pane's shell never hangs up.
+    /// Opening each end with the flag closes the window for every forker in
+    /// the process, not only those that take `fd_lock`.
     fn createDarwin() !Self {
-        var master_fd: c_int = -1;
-        var slave_fd: c_int = -1;
+        const master_fd = c.open("/dev/ptmx", .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true });
+        if (master_fd < 0) return error.OpenptyFailed;
+        errdefer _ = std.c.close(master_fd);
+        if (grantpt(master_fd) != 0) return error.OpenptyFailed;
+        if (unlockpt(master_fd) != 0) return error.OpenptyFailed;
+
+        var slave_path: [128]u8 = undefined;
+        if (ptsname_r(master_fd, &slave_path, slave_path.len) != 0) return error.OpenptyFailed;
+        const slave_fd = c.open(@ptrCast(&slave_path), .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true });
+        if (slave_fd < 0) return error.OpenptyFailed;
+        errdefer _ = std.c.close(slave_fd);
+
         var ws = Winsize{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 };
-        if (openpty(&master_fd, &slave_fd, null, null, &ws) != 0) {
-            return error.OpenptyFailed;
-        }
-        // Masters must not leak into spawned shells: a later pane's child
-        // inheriting an earlier pane's master keeps that PTY alive forever
-        // (and the same class of leak made ctl connections never EOF).
-        _ = c.fcntl(master_fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
+        try doIoctl(master_fd, tioc.SWINSZ, &ws);
         setMasterNonblock(master_fd);
 
-        // openpty hands back the slave fd directly; we don't track a path.
-        var slave_path: [32]u8 = undefined;
-        @memset(&slave_path, 0);
+        // The slave is held by fd; no path is tracked on Darwin.
+        var no_path: [32]u8 = undefined;
+        @memset(&no_path, 0);
 
         return Self{
             .master_fd = master_fd,
             .slave_fd = slave_fd,
-            .slave_path = slave_path,
+            .slave_path = no_path,
             .slave_path_len = 0,
             .child_pid = null,
             .rows = 24,
@@ -113,13 +323,15 @@ pub const Pty = struct {
     /// Linux: allocate the pair via the Unix98 /dev/ptmx interface.
     fn createLinux() !Self {
         // Open the PTY master device
+        // Both ends O_CLOEXEC, as on Darwin: no fork elsewhere in the host
+        // may inherit either end. The child gets the slave through dup2,
+        // which clears the flag on 0/1/2.
         const master_fd = try posix.openatZ(c.AT.FDCWD, "/dev/ptmx", .{
             .ACCMODE = .RDWR,
             .NOCTTY = true,
+            .CLOEXEC = true,
         }, 0);
         errdefer _ = std.c.close(master_fd);
-        // Same CLOEXEC rationale as the Darwin path: masters never reach children.
-        _ = c.fcntl(master_fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
         setMasterNonblock(master_fd);
 
         // Unlock the slave
@@ -147,6 +359,7 @@ pub const Pty = struct {
         const slave_fd = try posix.openatZ(c.AT.FDCWD, slave_path[0..path_len :0], .{
             .ACCMODE = .RDWR,
             .NOCTTY = true,
+            .CLOEXEC = true,
         }, 0);
         errdefer _ = std.c.close(slave_fd);
 
@@ -161,42 +374,33 @@ pub const Pty = struct {
         };
     }
 
-    /// Close the PTY, then end and reap the child.
+    /// Close the PTY and hand the child to the process-wide reaper. Never
+    /// waits: the caller is often the host's main thread or a view deinit.
     pub fn close(self: *Self) void {
-        // The descriptors go first. A child exiting with output still queued
+        // Watch for the exit BEFORE anything can end the child, so the exit
+        // knote attaches to a live process rather than racing its teardown.
+        const pid = self.child_pid;
+        if (pid) |p| reaper.adopt(p);
+        self.child_pid = null;
+
+        // The descriptors go next. A child exiting with output still queued
         // on its terminal waits in the kernel for that output to drain (ps
         // state `E`), and only a reader on the master or the master's close
-        // releases it, even after SIGKILL. Waiting before closing deadlocks
-        // the reap below with nothing that can break it. Closing the master
-        // also hangs up the terminal, which ends an ordinary shell before
-        // the TERM lands.
+        // releases it, even after SIGKILL. Closing the master also hangs up
+        // the terminal, which ends an ordinary shell.
         if (self.slave_fd >= 0) _ = std.c.close(self.slave_fd);
         self.slave_fd = -1;
-        _ = std.c.close(self.master_fd);
+        if (self.master_fd >= 0) _ = std.c.close(self.master_fd);
         self.master_fd = -1;
 
-        if (self.child_pid) |pid| {
-            // TERM, then reap. Without the waitpid every closed pane left a
-            // zombie for the life of the host process — the GUI embeddings
-            // (CosmicDuck/aiconductor) run for days and accumulate one per
-            // closed tab/split. If TERM hasn't landed yet, escalate to KILL
-            // and reap synchronously.
-            _ = posix.kill(pid, posix.SIG.TERM) catch {};
-            var i: u8 = 0;
-            var reaped = false;
-            while (i < 20) : (i += 1) { // ~100ms grace for a clean TERM exit
-                if (c.waitpid(pid, null, c.W.NOHANG) != 0) {
-                    reaped = true;
-                    break;
-                }
-                var no_fds = [_]posix.pollfd{};
-                _ = posix.poll(&no_fds, 5) catch {}; // 5ms portable sleep
-            }
-            if (!reaped) {
-                _ = posix.kill(pid, posix.SIG.KILL) catch {};
-                _ = c.waitpid(pid, null, 0);
-            }
-            self.child_pid = null;
+        if (pid) |p| {
+            // The child is a setsid leader, so its pid is also its process
+            // group: HUP reaches the shell and anything it started in its
+            // own group. The reaper escalates to SIGKILL on the group after
+            // `REAP_GRACE_MS` and collects the exit status, so no closed pane
+            // leaves a zombie in a host that runs for days.
+            _ = c.kill(-p, posix.SIG.HUP);
+            _ = c.kill(p, posix.SIG.HUP);
         }
     }
 
@@ -228,7 +432,11 @@ pub const Pty = struct {
         envp: [*:null]const ?[*:0]const u8,
         cwd: ?[*:0]const u8,
     ) !void {
+        // Held across fork so no terminal_mux fd that is still between
+        // creation and its FD_CLOEXEC fcntl can be inherited.
+        fd_lock.lock();
         const pid = c.fork();
+        fd_lock.unlock();
 
         if (pid < 0) {
             return error.ForkFailed;
@@ -547,8 +755,8 @@ test "pty create and close" {
     try std.testing.expect(pty_var.master_fd >= 0);
     try std.testing.expect(pty_var.slave_fd >= 0);
     if (!is_darwin) {
-        // Linux exposes the slave node as /dev/pts/N. openpty(3) on Darwin
-        // hands back the fd directly, so we don't track a path there.
+        // Linux exposes the slave node as /dev/pts/N; Darwin keeps only
+        // the fd, so no path is tracked there.
         try std.testing.expect(std.mem.startsWith(u8, pty_var.getSlavePath(), "/dev/pts/"));
     }
 }
@@ -668,6 +876,84 @@ test "close reaps a child whose output nobody read" {
         return error.CloseHung;
     }
     th.join();
+}
+
+test "both pty ends are close-on-exec from creation" {
+    var p = Pty.create() catch |err| {
+        if (isUnavailableError(err)) return error.SkipZigTest;
+        return err;
+    };
+    defer p.close();
+    try std.testing.expect(c.fcntl(p.master_fd, c.F.GETFD, @as(c_int, 0)) & c.FD_CLOEXEC != 0);
+    try std.testing.expect(c.fcntl(p.slave_fd, c.F.GETFD, @as(c_int, 0)) & c.FD_CLOEXEC != 0);
+}
+
+/// Whether `pid` still exists (a zombie counts). Test helper.
+fn pidExists(pid: posix.pid_t) bool {
+    return c.kill(pid, @enumFromInt(0)) == 0;
+}
+
+test "close returns at once and the reaper ends and reaps the whole group" {
+    // The shell ignores HUP and TERM and leaves a background job in its own
+    // process group: closing must not wait for it, the reaper must SIGKILL
+    // the GROUP after the grace (the job dies too, not only the leader), and
+    // the leader must be reaped (no zombie: kill(pid, 0) fails with ESRCH).
+    var p = Pty.create() catch |err| {
+        if (isUnavailableError(err)) return error.SkipZigTest;
+        return err;
+    };
+    const argv = [_:null]?[*:0]const u8{ "sh", "-c", "trap '' HUP TERM; sleep 100 & echo JOB=$!; wait" };
+    try p.spawn("/bin/sh", &argv, std.c.environ);
+    const leader = p.child_pid.?;
+
+    var buf: [256]u8 = undefined;
+    var got: usize = 0;
+    var job: posix.pid_t = 0;
+    const started_read = monotonicMsForTest();
+    while (job == 0 and monotonicMsForTest() - started_read < 5000) {
+        var pfd = [_]posix.pollfd{.{ .fd = p.master_fd, .events = posix.POLL.IN, .revents = 0 }};
+        if ((posix.poll(&pfd, 100) catch 0) == 0) continue;
+        const r = posix.read(p.master_fd, buf[got..]) catch break;
+        got += r;
+        if (std.mem.indexOf(u8, buf[0..got], "JOB=")) |i| {
+            var end = i + 4;
+            while (end < got and std.ascii.isDigit(buf[end])) end += 1;
+            if (end < got) job = std.fmt.parseInt(posix.pid_t, buf[i + 4 .. end], 10) catch 0;
+        }
+    }
+    try std.testing.expect(job > 0);
+
+    const t0 = monotonicMsForTest();
+    p.close();
+    try std.testing.expect(monotonicMsForTest() - t0 < 50);
+    try std.testing.expect(p.child_pid == null);
+
+    const deadline = monotonicMsForTest() + REAP_GRACE_MS + 3000;
+    var no_fds = [_]posix.pollfd{};
+    while ((pidExists(leader) or pidExists(job)) and monotonicMsForTest() < deadline) {
+        _ = posix.poll(&no_fds, 20) catch {};
+    }
+    try std.testing.expect(!pidExists(leader));
+    try std.testing.expect(!pidExists(job));
+}
+
+test "close of an ordinary shell reaps it on the hangup, before the grace" {
+    var p = Pty.create() catch |err| {
+        if (isUnavailableError(err)) return error.SkipZigTest;
+        return err;
+    };
+    const argv = [_:null]?[*:0]const u8{ "sh", "-c", "sleep 100" };
+    try p.spawn("/bin/sh", &argv, std.c.environ);
+    const pid = p.child_pid.?;
+    var no_fds = [_]posix.pollfd{};
+    _ = posix.poll(&no_fds, 100) catch {};
+    const t0 = monotonicMsForTest();
+    p.close();
+    while (pidExists(pid) and monotonicMsForTest() - t0 < 5000) {
+        _ = posix.poll(&no_fds, 10) catch {};
+    }
+    try std.testing.expect(!pidExists(pid));
+    try std.testing.expect(monotonicMsForTest() - t0 < REAP_GRACE_MS);
 }
 
 /// Local monotonic clock for the write-budget test. `std.time.Instant` and

@@ -148,20 +148,16 @@ fn cwrite(fd: c.fd_t, bytes: []const u8) void {
 }
 
 fn paccept(lfd: c.fd_t) !c.fd_t {
-    const f = c.accept(lfd, null, null);
+    const f = pty.cloexecUnderLock(c.accept, .{ lfd, null, null });
     if (f < 0) return error.AcceptFailed;
-    setCloexec(f);
     return f;
 }
-/// Keep server sockets out of spawned shells. `spawn` forks a shell while the
-/// client connection is open; without CLOEXEC the child inherits the socket,
-/// the server's close is no longer the last close, and the client — which
-/// frames the response by EOF — hangs until that shell exits. (accept4/
-/// SOCK_CLOEXEC would do this atomically, but macOS has neither; fcntl is the
-/// portable form, and the single-threaded accept loop leaves no fork race.)
-fn setCloexec(fd: c.fd_t) void {
-    _ = c.fcntl(fd, c.F.SETFD, @as(c_int, std.posix.FD_CLOEXEC));
-}
+// Server sockets stay out of spawned shells: `spawn` forks a shell while the
+// client connection is open; without CLOEXEC the child inherits the socket,
+// the server's close is no longer the last close, and the client — which
+// frames the response by EOF — hangs until that shell exits. macOS has no
+// accept4/SOCK_CLOEXEC, so every socket is created through
+// `pty.cloexecUnderLock`, which holds the lock `Pty.spawnIn` forks under.
 fn pclose(fd: c.fd_t) void {
     _ = c.close(fd);
 }
@@ -710,10 +706,9 @@ const Server = struct {
                 return error.StaleSocketUnremovable;
             },
         };
-        const lfd = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
+        const lfd = pty.cloexecUnderLock(c.socket, .{ c.AF.UNIX, c.SOCK.STREAM, @as(c_uint, 0) });
         if (lfd < 0) return error.SocketCreateFailed;
         errdefer pclose(lfd);
-        setCloexec(lfd); // shells spawned later must not inherit the listen socket
         if (c.bind(lfd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) < 0) {
             std.debug.print("zterm server: cannot bind {s} ({s})\n", .{ path, @tagName(posix.errno(-1)) });
             return error.BindFailed;
@@ -729,7 +724,7 @@ const Server = struct {
     /// the listener dies with its process, so this cannot be stale.
     fn socketIsLive(path: []const u8) bool {
         var addr = ctl.fillAddr(path) catch return false;
-        const fd = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
+        const fd = pty.cloexecUnderLock(c.socket, .{ c.AF.UNIX, c.SOCK.STREAM, @as(c_uint, 0) });
         if (fd < 0) return false;
         defer pclose(fd);
         return c.connect(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) == 0;
