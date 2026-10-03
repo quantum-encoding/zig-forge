@@ -17,6 +17,7 @@ const hasher = @import("hasher.zig");
 const fast_walker = @import("fast_walker.zig");
 const parallel = @import("parallel.zig");
 const dirs = @import("dirs.zig");
+const chunked = @import("chunked.zig");
 const builtin = @import("builtin");
 const sys = @import("sys.zig");
 
@@ -455,6 +456,12 @@ pub const DupeFinder = struct {
         // Only hash files with matching quick hashes (potential duplicates)
         var indices_to_hash: std.ArrayListUnmanaged(usize) = .empty;
         defer indices_to_hash.deinit(self.allocator);
+        // Big candidates whose probes agree are compared chunk by chunk, set
+        // by set (chunked.zig), so a pair that differs stops being read there.
+        var big_members: std.ArrayListUnmanaged(usize) = .empty;
+        defer big_members.deinit(self.allocator);
+        var big_bounds: std.ArrayListUnmanaged(usize) = .empty;
+        defer big_bounds.deinit(self.allocator);
 
         var iter = size_groups.valueIterator();
         while (iter.next()) |group| {
@@ -484,34 +491,64 @@ pub const DupeFinder = struct {
             while (qiter.next()) |indices| {
                 if (indices.items.len < 2) continue; // Skip unique quick hashes
 
+                // Pure clones are not read; the files that are read.
+                var readers: usize = 0;
+                for (indices.items) |idx| readers += @intFromBool(self.files.items[idx].clone_of == null);
+                // Two or more big files to tell apart: chunk by chunk. (One
+                // file and its clones needs its whole hash, not a comparison.)
+                const as_set = group.size >= chunked.min_size and readers >= 2;
                 for (indices.items) |idx| {
                     if (self.files.items[idx].clone_of != null) continue;
-                    try indices_to_hash.append(self.allocator, idx);
+                    try (if (as_set) &big_members else &indices_to_hash).append(self.allocator, idx);
                 }
+                if (as_set) try big_bounds.append(self.allocator, big_members.items.len);
             }
         }
 
-        self.summary.full_hash_jobs = indices_to_hash.items.len;
-        self.updateProgress(.full_hashing, 0, indices_to_hash.items.len, null);
+        const jobs = indices_to_hash.items.len + big_members.items.len;
+        self.summary.full_hash_jobs = jobs;
+        self.updateProgress(.full_hashing, 0, jobs, null);
         if (self.config.monitor) |m| {
             var bytes: u64 = 0;
             for (indices_to_hash.items) |idx| bytes +|= self.files.items[idx].readBytes();
+            for (big_members.items) |idx| bytes +|= self.files.items[idx].readBytes();
             m.bytes_total.store(bytes, .release);
         }
-        if (indices_to_hash.items.len == 0) return;
-        sortWalkOrder(indices_to_hash.items);
-
-        // Hash in parallel
+        if (jobs == 0) return;
         const thread_count = self.config.getThreadCount();
-        try parallel.parallelFullHash(
-            self.allocator,
-            self.files.items,
-            indices_to_hash.items,
-            self.config.hash_algorithm,
-            thread_count,
-            self.progress_callback,
-            self.config.monitor,
-        );
+
+        if (indices_to_hash.items.len > 0) {
+            sortWalkOrder(indices_to_hash.items);
+            try parallel.parallelFullHash(
+                self.allocator,
+                self.files.items,
+                indices_to_hash.items,
+                self.config.hash_algorithm,
+                thread_count,
+                self.progress_callback,
+                self.config.monitor,
+            );
+        }
+        try self.checkCancelled();
+
+        if (big_bounds.items.len > 0) {
+            const sets = try self.allocator.alloc([]const usize, big_bounds.items.len);
+            defer self.allocator.free(sets);
+            var begin: usize = 0;
+            for (big_bounds.items, sets) |end, *set| {
+                set.* = big_members.items[begin..end];
+                begin = end;
+            }
+            const stats = try chunked.compareSets(
+                self.allocator,
+                self.files.items,
+                sets,
+                self.config.hash_algorithm,
+                thread_count,
+                self.config.monitor,
+            );
+            self.summary.dropped_early = stats.dropped_early;
+        }
     }
 
     fn buildDuplicateGroups(self: *DupeFinder, size_groups: *std.AutoHashMap(u64, SizeGroup)) !void {

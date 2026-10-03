@@ -116,7 +116,7 @@ pub const FileHasher = struct {
 /// hash identically to an empty file and be reported as a "duplicate" —
 /// offering non-duplicates for deletion. The walk-time type check cannot
 /// replace this: the path can change type between walk and hash.
-fn openRegularFile(path: []const u8) !c_int {
+pub fn openRegularFile(path: []const u8) !c_int {
     var path_buf: [4096]u8 = undefined;
     if (path.len >= path_buf.len) return error.PathTooLong;
     @memcpy(path_buf[0..path.len], path);
@@ -232,21 +232,74 @@ fn preadAll(fd: c_int, buf: []u8, offset: u64) !usize {
 }
 
 /// One file's share of a phase's byte progress; see `hashForScanAt`.
-const Budget = struct {
+pub const Budget = struct {
     monitor: ?*types.Monitor,
     left: u64,
 
-    fn add(self: *Budget, n: u64) void {
+    pub fn add(self: *Budget, n: u64) void {
         const take = @min(n, self.left);
         if (take == 0) return;
         self.left -= take;
         if (self.monitor) |m| m.addBytes(take);
     }
 
-    fn finish(self: *Budget) void {
+    pub fn finish(self: *Budget) void {
         self.add(self.left);
     }
 };
+
+/// Feed bytes [start, end) of `fd` to `hasher`, reading only data extents
+/// (holes are fed as zeros, as in `feedSparse`). Returns false if the file
+/// ended before `end` (it shrank): what was fed is all there is.
+pub fn feedRange(comptime Hasher: type, hasher: *Hasher, fd: c_int, start: u64, end: u64, monitor: ?*types.Monitor, budget: *Budget) !bool {
+    var buf: [BUFFER_SIZE]u8 = undefined;
+    var pos = start;
+    while (pos < end) {
+        if (monitor) |m| if (m.cancelled()) return error.Cancelled;
+        // Where the next data starts and ends, clipped to the range.
+        var data_start = pos;
+        var data_end = end;
+        if (comptime holes_reported) {
+            const data = libc.lseek(fd, @intCast(pos), SEEK_DATA);
+            if (data < 0) {
+                switch (libc.errno(data)) {
+                    .INTR => continue,
+                    // No data from here on: the rest of the range is hole,
+                    // or past the end of a file that shrank.
+                    .NXIO => {
+                        const st = pstat.fstat(fd) catch return error.ReadFailed;
+                        const hole_end = @min(end, st.size);
+                        if (hole_end > pos) try feedZeros(Hasher, hasher, hole_end - pos, monitor);
+                        return st.size >= end;
+                    },
+                    // Extent queries unsupported: read plainly.
+                    else => {},
+                }
+            } else {
+                data_start = @min(@as(u64, @intCast(data)), end);
+                const hole = libc.lseek(fd, @intCast(data_start), SEEK_HOLE);
+                if (hole > 0) data_end = @min(@as(u64, @intCast(hole)), end);
+            }
+        }
+        if (data_start > pos) try feedZeros(Hasher, hasher, data_start - pos, monitor);
+        pos = data_start;
+        while (pos < data_end) {
+            if (monitor) |m| if (m.cancelled()) return error.Cancelled;
+            const want: usize = @intCast(@min(@as(u64, buf.len), data_end - pos));
+            const n = libc.pread(fd, &buf, want, @intCast(pos));
+            if (n == 0) return false;
+            if (n < 0) {
+                if (libc.errno(n) == .INTR) continue;
+                return error.ReadFailed;
+            }
+            const got: usize = @intCast(n);
+            hasher.update(buf[0..got]);
+            budget.add(got);
+            pos += got;
+        }
+    }
+    return true;
+}
 
 // lseek whence values for extent queries; Darwin and Linux number them oppositely.
 const SEEK_HOLE: c_int = if (builtin.os.tag.isDarwin()) 3 else 4;

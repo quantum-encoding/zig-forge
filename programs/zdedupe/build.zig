@@ -114,6 +114,7 @@ pub fn build(b: *std.Build) void {
         "src/testing_scratch.zig",
         "src/walker.zig",
         "src/dirstream.zig",
+        "src/chunked.zig",
         "src/fast_walker.zig",
         "src/parallel.zig",
         "src/dedupe.zig",

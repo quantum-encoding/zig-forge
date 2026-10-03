@@ -709,6 +709,9 @@ pub const DuplicateSummary = struct {
     dataless_bytes: u64 = 0,
     /// Candidates whose hashes came from a pure clone instead of a read.
     clone_hash_skips: u64 = 0,
+    /// Big candidates dropped part-way through a chunked comparison: no
+    /// other candidate of their size matched them that far (chunked.zig).
+    dropped_early: u64 = 0,
 
     pub fn spaceSavingsHuman(self: *const DuplicateSummary, buf: []u8) []const u8 {
         return formatBytes(self.space_savings, buf);
