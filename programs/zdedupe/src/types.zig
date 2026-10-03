@@ -636,7 +636,10 @@ test "Monitor never shows a torn path while workers race" {
     var out: [PathSlot.capacity]u8 = undefined;
     var reads: usize = 0;
     var i: usize = 0;
-    while (i < 200_000) : (i += 1) {
+    // At least 200k reads attempted, and keep going until one landed: on a
+    // fast or busy machine the workers may not be scheduled before the first
+    // 200k are done. The cap only stops a broken Monitor from spinning forever.
+    while ((i < 200_000 or reads == 0) and i < 200_000_000) : (i += 1) {
         const snap = ctx.monitor.longestRunning(&out);
         if (snap.written == 0) continue;
         reads += 1;

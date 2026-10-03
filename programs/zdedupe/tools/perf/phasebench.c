@@ -1,6 +1,6 @@
 // phasebench: run one zdedupe scan into a result store and print per-phase wall times.
 // usage: phasebench [-m mode] [-d] [-x] [-H] [-W] [-L secs] [-j threads] [-o store] PATH...
-//   -L SECS logs found/done rates, memory footprint and the longest-running path every SECS.
+//   -L SECS logs found/done rates, bytes read, memory footprint and the longest-running path every SECS.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,7 +23,7 @@ static size_t footprint(void){
 #endif
 }
 typedef struct zdedupe_ctx zdedupe_ctx;
-typedef struct { uint32_t phase, _pad; uint64_t files_found, done, total; } zdedupe_progress;
+typedef struct { uint32_t phase, _pad; uint64_t files_found, done, total, bytes_done, bytes_total; } zdedupe_progress;
 zdedupe_ctx* zdedupe_init(void); void zdedupe_free(zdedupe_ctx*);
 int zdedupe_add_path(zdedupe_ctx*, const char*); void zdedupe_set_mode(zdedupe_ctx*, int);
 void zdedupe_set_analyze_dirs(zdedupe_ctx*, bool); void zdedupe_use_default_excludes(zdedupe_ctx*, bool);
@@ -36,7 +36,7 @@ static volatile int running=1; static zdedupe_ctx* ctx; static double t0;
 static double ph_start[8]; static uint64_t ph_items[8]; static int seen[8];
 static void* poll(void*_){ int last=-1; double next_log=log_every; uint64_t last_found=0,last_done=0; double last_t=0; while(running){ zdedupe_progress p; zdedupe_get_progress(ctx,&p);
   if(log_every>0 && now()-t0>=next_log){ double t=now()-t0; char cur[512]; bool tail=false; size_t w=zdedupe_get_current_path(ctx,cur,sizeof cur-1,&tail); cur[w]=0;
-    fprintf(stderr,"[%7.0fs] %-10s found=%llu (+%.0f/s) done=%llu/%llu (+%.0f/s) footprint=%.0fMB cur=%s%s\n",t,names[p.phase<8?p.phase:0],(unsigned long long)p.files_found,(p.files_found-last_found)/(t-last_t),(unsigned long long)p.done,(unsigned long long)p.total,(p.done>=last_done?(p.done-last_done):0)/(t-last_t),footprint()/1e6,tail?"...":"",w?cur:"-");
+    fprintf(stderr,"[%7.0fs] %-10s found=%llu (+%.0f/s) done=%llu/%llu (+%.0f/s) bytes=%.2f/%.2fGB footprint=%.0fMB cur=%s%s\n",t,names[p.phase<8?p.phase:0],(unsigned long long)p.files_found,(p.files_found-last_found)/(t-last_t),(unsigned long long)p.done,(unsigned long long)p.total,(p.done>=last_done?(p.done-last_done):0)/(t-last_t),p.bytes_done/1e9,p.bytes_total/1e9,footprint()/1e6,tail?"...":"",w?cur:"-");
     last_found=p.files_found; last_done=p.done; last_t=t; next_log+=log_every; }
   int ph=p.phase<8?p.phase:0; if(ph!=last){ if(!seen[ph]){seen[ph]=1;ph_start[ph]=now()-t0;} fprintf(stderr,"[%8.2fs] -> %s (found=%llu total=%llu)\n",now()-t0,names[ph],(unsigned long long)p.files_found,(unsigned long long)p.total); last=ph; }
   if(walk_only&&ph>1)zdedupe_cancel(ctx); ph_items[ph]= ph==1? p.files_found : p.total; usleep(200);} return 0; }
