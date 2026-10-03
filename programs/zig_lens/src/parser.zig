@@ -66,7 +66,7 @@ pub fn parseFile(
         return error.NestingTooDeep;
     }
 
-    var ast = Ast.parse(allocator, source, .zig) catch {
+    var ast = Ast.parse(allocator, source, zig_parse) catch {
         allocator.free(source);
         return error.ParseFailed;
     };
@@ -451,3 +451,6 @@ test "parseFile: refuses depth-bomb file before std.zig.Ast.parse" {
     const result = parseFile(allocator, std.testing.io, abs_path);
     try std.testing.expectError(error.NestingTooDeep, result);
 }
+
+/// Zig-mode parse argument: `ParseOptions` on Zig 0.17+, `Mode` on 0.16.
+const zig_parse = if (@hasDecl(std.zig.Ast, "ParseOptions")) std.zig.Ast.ParseOptions{} else std.zig.Ast.Mode.zig;

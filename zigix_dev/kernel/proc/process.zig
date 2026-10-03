@@ -95,7 +95,7 @@ pub const Process = struct {
     vmas: vma.VmaList = vma.emptyVmaList(),
     sig_pending: u64 = 0, // Pending signal bitmap
     sig_mask: u64 = 0, // Blocked signal mask
-    sig_actions: [MAX_SIGNALS]SignalAction = [_]SignalAction{.{}} ** MAX_SIGNALS,
+    sig_actions: [MAX_SIGNALS]SignalAction = @splat(.{}),
     in_signal_handler: bool = false, // True during signal delivery (prevents recursive SIGSEGV)
     vfork_blocked: bool = false, // True when parent is blocked waiting for vfork child
     exe_path: [256]u8 = @splat(0),
@@ -137,18 +137,18 @@ fn rdtsc() u64 {
 
 pub const MAX_PROCESSES = 256;
 
-var processes: [MAX_PROCESSES]?Process = [_]?Process{null} ** MAX_PROCESSES;
+var processes: [MAX_PROCESSES]?Process = @splat(null);
 var slot_in_use: [MAX_PROCESSES]bool = @splat(false);
 var next_pid: types.ProcessId = 1;
 
 // --- Free list for O(1) slot allocation ---
-var free_next: [MAX_PROCESSES]?usize = [_]?usize{null} ** MAX_PROCESSES;
+var free_next: [MAX_PROCESSES]?usize = @splat(null);
 var free_head: ?usize = null;
 var free_list_initialized: bool = false;
 
 // --- PID hash table for O(1) lookup ---
 const PID_HASH_SIZE: usize = 256;
-var pid_to_idx: [PID_HASH_SIZE]?usize = [_]?usize{null} ** PID_HASH_SIZE;
+var pid_to_idx: [PID_HASH_SIZE]?usize = @splat(null);
 
 fn pidHash(pid: types.ProcessId) usize {
     return @truncate(pid % PID_HASH_SIZE);
@@ -299,7 +299,7 @@ pub fn createFromCode(code: []const u8) !*Process {
         },
         .heap_start = heap_start,
         .heap_current = heap_start,
-        .fds = [_]?*vfs.FileDescription{null} ** fd_table.MAX_FDS,
+        .fds = @as([fd_table.MAX_FDS]?*vfs.FileDescription, @splat(null)),
         .cwd = @as([256]u8, @splat(0)),
         .cwd_len = 1,
     };
@@ -416,7 +416,7 @@ pub fn createFromElf(elf_data: []const u8) !*Process {
         .heap_start = heap_start,
         .heap_current = heap_start,
         .mmap_hint = aslrMmapBase(),
-        .fds = [_]?*vfs.FileDescription{null} ** fd_table.MAX_FDS,
+        .fds = @as([fd_table.MAX_FDS]?*vfs.FileDescription, @splat(null)),
         .cwd = @as([256]u8, @splat(0)),
         .cwd_len = 1,
         .capabilities = capability.CAP_ALL, // Boot processes get all capabilities
@@ -521,7 +521,7 @@ pub fn initSlot(idx: usize) *Process {
         .context = .{},
         .heap_start = 0,
         .heap_current = 0,
-        .fds = [_]?*vfs.FileDescription{null} ** fd_table.MAX_FDS,
+        .fds = @as([fd_table.MAX_FDS]?*vfs.FileDescription, @splat(null)),
         .cwd = @as([256]u8, @splat(0)),
         .cwd_len = 0,
     };

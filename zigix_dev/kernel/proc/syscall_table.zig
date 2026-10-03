@@ -36,7 +36,7 @@ const epoll_mod = @import("epoll.zig");
 const Handler = *const fn (*idt.InterruptFrame) void;
 const MAX_SYSCALL: usize = 512; // Accommodates DPDK syscalls (510-511)
 
-var table: [MAX_SYSCALL]?Handler = [_]?Handler{null} ** MAX_SYSCALL;
+var table: [MAX_SYSCALL]?Handler = @splat(null);
 
 pub fn init() void {
     // I/O
@@ -436,7 +436,7 @@ fn checkPermission(inode: *vfs.Inode, wanted: u32, proc: *process.Process) bool 
 
 const MAX_FIFOS: usize = 16;
 const FifoEntry = struct { ino: u64, pipe_idx: usize, active: bool };
-var fifo_map: [MAX_FIFOS]FifoEntry = [_]FifoEntry{.{ .ino = 0, .pipe_idx = 0, .active = false }} ** MAX_FIFOS;
+var fifo_map: [MAX_FIFOS]FifoEntry = @splat(.{ .ino = 0, .pipe_idx = 0, .active = false });
 
 fn openFifo(proc: *process.Process, inode: *vfs.Inode, flags: u32) i64 {
     const access_mode = flags & vfs.O_ACCMODE;
@@ -5029,8 +5029,8 @@ const InotifyEvent = struct {
     name_len: u32 = 0,
 };
 
-var inotify_watches: [MAX_INOTIFY_WATCHES]InotifyWatch = [_]InotifyWatch{.{}} ** MAX_INOTIFY_WATCHES;
-var inotify_events: [MAX_INOTIFY_EVENTS]InotifyEvent = [_]InotifyEvent{.{}} ** MAX_INOTIFY_EVENTS;
+var inotify_watches: [MAX_INOTIFY_WATCHES]InotifyWatch = @splat(.{});
+var inotify_events: [MAX_INOTIFY_EVENTS]InotifyEvent = @splat(.{});
 var next_wd: i32 = 1;
 var next_inotify_fd: i32 = 100; // Use high fd numbers to avoid conflicts
 

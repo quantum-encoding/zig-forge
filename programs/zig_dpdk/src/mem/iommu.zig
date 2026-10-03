@@ -169,7 +169,7 @@ fn linuxReadlink(path: [*:0]const u8, buf: []u8) VfioError!usize {
 /// VFIO container — holds IOMMU domain for DMA mappings.
 pub const VfioContainer = struct {
     fd: i32 = -1,
-    dma_mappings: [max_dma_mappings]DmaMapping = [_]DmaMapping{.{}} ** max_dma_mappings,
+    dma_mappings: [max_dma_mappings]DmaMapping = @splat(.{}),
     mapping_count: u32 = 0,
 
     /// Open the VFIO container (/dev/vfio/vfio).

@@ -25,7 +25,7 @@ pub const TelemetryFrame = struct {
 };
 
 pub const TelemetryLog = struct {
-    frames: [2048]?TelemetryFrame = [_]?TelemetryFrame{null} ** 2048,
+    frames: [2048]?TelemetryFrame = @splat(null),
     count: usize = 0,
 
     pub fn record(self: *TelemetryLog, state: *const vehicle_mod.VehicleState, throttle: f64) void {

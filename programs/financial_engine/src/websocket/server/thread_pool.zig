@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("../../zig_compat.zig");
 
 const Thread = std.Thread;
 const Allocator = std.mem.Allocator;
@@ -14,7 +15,7 @@ pub fn ThreadPool(comptime F: anytype) type {
     // So F would be: handle(server: *Server, conn: *Conn, buf: []u8)
     // and FullArgs would be our 3 args....
     const FullArgs = std.meta.ArgsTuple(@TypeOf(F));
-    const full_fields = std.meta.fields(FullArgs);
+    const full_fields = compat.fields(FullArgs);
     const ARG_COUNT = full_fields.len - 1;
 
     // Args will be FullArgs[0..len-1], so in the above example, args would be

@@ -106,9 +106,9 @@ pub const Device = struct {
     num_rx_queues: u8 = 0,
     num_tx_queues: u8 = 0,
     rx_queues: [config.max_queues_per_port]RxQueue =
-        [_]RxQueue{.{}} ** config.max_queues_per_port,
+        @splat(.{}),
     tx_queues: [config.max_queues_per_port]TxQueue =
-        [_]TxQueue{.{}} ** config.max_queues_per_port,
+        @splat(.{}),
     stats: stats_mod.PortStats = .{},
     started: bool = false,
 

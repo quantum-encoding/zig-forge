@@ -18,6 +18,7 @@
 //!   ████████████████░░░░ 80% 9.9 MB/s
 
 const std = @import("std");
+const compat = @import("zig_compat.zig");
 const linux = std.os.linux;
 const warp_gate = @import("warp_gate");
 
@@ -408,7 +409,7 @@ fn jsonEvent(event_type: []const u8, data: anytype) void {
     jw.objectField("data") catch return;
     jw.beginObject() catch return;
 
-    inline for (std.meta.fields(@TypeOf(data))) |field| {
+    inline for (compat.fields(@TypeOf(data))) |field| {
         const value = @field(data, field.name);
         const FieldType = @TypeOf(value);
 

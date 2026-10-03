@@ -47,7 +47,7 @@ pub const SCRATCH_OFFSET = @offsetOf(CpuLocal, "scratch_rsp");
 
 pub const TIMESLICE_TICKS: u64 = 10; // 100ms at 100 Hz
 
-pub var cpu_locals: [MAX_CPUS]CpuLocal = [_]CpuLocal{.{}} ** MAX_CPUS;
+pub var cpu_locals: [MAX_CPUS]CpuLocal = @splat(.{});
 pub var online_cpus: u32 = 1; // BSP is always online
 
 /// MSR addresses

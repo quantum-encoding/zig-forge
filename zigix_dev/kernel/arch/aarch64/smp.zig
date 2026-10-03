@@ -28,12 +28,12 @@ const SecondaryBootContext = struct {
 };
 
 /// One boot context per secondary CPU (CPU 1-3).
-var boot_contexts: [MAX_CPUS]SecondaryBootContext = [_]SecondaryBootContext{.{
+var boot_contexts: [MAX_CPUS]SecondaryBootContext = @as([MAX_CPUS]SecondaryBootContext, @splat(.{
     .ttbr0 = 0,
     .stack_top = 0,
     .percpu_ptr = 0,
     .vbar = 0,
-}} ** MAX_CPUS;
+}));
 
 /// Per-CPU data structure. One instance per physical CPU.
 /// Accessed via TPIDR_EL1 for O(1) current-CPU lookup.
@@ -65,7 +65,7 @@ comptime {
         @compileError("PerCpu.scratch_x1 must be at offset 24");
 }
 
-pub var per_cpu_data: [MAX_CPUS]PerCpu = [_]PerCpu{.{}} ** MAX_CPUS;
+pub var per_cpu_data: [MAX_CPUS]PerCpu = @splat(.{});
 pub var online_cpus: u32 = 1;
 
 /// BSP stores kernel TTBR0 here; used to populate boot contexts.

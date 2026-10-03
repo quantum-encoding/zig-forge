@@ -24,7 +24,7 @@ const LogEntry = struct {
     message_len: usize = 0,
 };
 
-var entries: [MAX_ENTRIES]LogEntry = [_]LogEntry{.{}} ** MAX_ENTRIES;
+var entries: [MAX_ENTRIES]LogEntry = @splat(.{});
 var count: usize = 0;
 var head: usize = 0; // Next write position in ring buffer
 var scroll_offset: usize = 0;

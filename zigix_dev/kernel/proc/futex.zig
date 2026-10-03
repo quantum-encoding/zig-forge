@@ -23,12 +23,12 @@ const WaitEntry = struct {
     hash_next: u8, // next entry index in this hash bucket chain (0xFF = end)
 };
 
-var wait_queue: [MAX_WAITERS]WaitEntry = [_]WaitEntry{.{
+var wait_queue: [MAX_WAITERS]WaitEntry = @as([MAX_WAITERS]WaitEntry, @splat(.{
     .pid = 0,
     .phys_addr = 0,
     .in_use = false,
     .hash_next = 0xFF,
-}} ** MAX_WAITERS;
+}));
 
 /// Hash bucket heads — each points to the first WaitEntry index in the chain (0xFF = empty).
 var hash_buckets: [HASH_BUCKETS]u8 = @splat(0xFF);

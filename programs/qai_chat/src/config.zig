@@ -5,6 +5,7 @@
 //! Not a full TOML parser — just enough for our config surface.
 
 const std = @import("std");
+const compat = @import("zig_compat.zig");
 
 pub const Provider = enum {
     anthropic,
@@ -125,7 +126,7 @@ pub fn defaults(gpa: std.mem.Allocator) !Config {
     const provider: Provider = .anthropic;
 
     var providers: [7]ProviderSettings = undefined;
-    inline for (std.meta.fields(Provider), 0..) |field, i| {
+    inline for (compat.fields(Provider), 0..) |field, i| {
         const p: Provider = @enumFromInt(field.value);
         providers[i] = .{
             .base_url = try a.dupe(u8, p.defaultBaseUrl()),

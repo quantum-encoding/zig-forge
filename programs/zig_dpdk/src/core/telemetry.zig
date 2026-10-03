@@ -75,7 +75,7 @@ pub const PortTelemetry = struct {
 
 /// System-wide telemetry.
 pub const SystemTelemetry = struct {
-    ports: [config.max_ports]PortTelemetry = [_]PortTelemetry{.{}} ** config.max_ports,
+    ports: [config.max_ports]PortTelemetry = @splat(.{}),
     port_count: u8 = 0,
     latency: LatencyHistogram = .{},
     uptime_sec: u64 = 0,

@@ -7,6 +7,7 @@
 //!        zkill -l [SIGNAL]
 
 const std = @import("std");
+const compat = @import("zig_compat.zig");
 
 const VERSION = "1.0.0";
 
@@ -26,11 +27,11 @@ const MAX_SIGNAL: u8 = 64;
 // NOT a hardcoded Linux table. The binary calls the native kill(2), so the
 // name->number mapping must match the platform the binary runs on: on macOS
 // SIGUSR1=30/SIGCONT=19/SIGSTOP=17, on Linux SIGUSR1=10/SIGCONT=18/SIGSTOP=19.
-// @typeInfo(std.c.SIG).@"enum".fields yields exactly the real signals (the
+// compat.fields(std.c.SIG) yields exactly the real signals (the
 // SIG.DFL/IGN/BLOCK/... helpers are pub-const decls, not enum fields).
 const signals = blk: {
     @setEvalBranchQuota(10_000);
-    const fields = @typeInfo(std.c.SIG).@"enum".fields;
+    const fields = compat.fields(std.c.SIG);
     var arr: [fields.len]Signal = undefined;
     for (fields, 0..) |f, idx| {
         arr[idx] = .{

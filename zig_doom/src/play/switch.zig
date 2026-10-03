@@ -122,7 +122,7 @@ pub const Button = struct {
     timer: i32 = 0,
 };
 
-var buttons: [MAXBUTTONS]Button = [_]Button{.{}} ** MAXBUTTONS;
+var buttons: [MAXBUTTONS]Button = @splat(.{});
 
 /// Change a switch texture (swap to partner)
 pub fn changeSwitchTexture(line_idx: usize, use_again: bool, level: *Level) void {

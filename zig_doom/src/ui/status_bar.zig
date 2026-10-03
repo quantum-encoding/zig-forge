@@ -60,12 +60,12 @@ const ST_TOTAL_FACES = ST_NUMPAINFACES * ST_FACES_PER_PAIN + 5; // + godmode, de
 
 pub const StatusBar = struct {
     // Cached lump numbers for WAD patches
-    big_nums: [10]?usize = [_]?usize{null} ** 10, // STTNUM0-9
-    small_nums: [10]?usize = [_]?usize{null} ** 10, // STGNUM0-9
+    big_nums: [10]?usize = @splat(null), // STTNUM0-9
+    small_nums: [10]?usize = @splat(null), // STGNUM0-9
     bar_bg: ?usize = null, // STBAR
     arms_bg: ?usize = null, // STARMS
-    key_patches: [6]?usize = [_]?usize{null} ** 6, // STKEYS0-5
-    face_patches: [ST_TOTAL_FACES]?usize = [_]?usize{null} ** ST_TOTAL_FACES,
+    key_patches: [6]?usize = @splat(null), // STKEYS0-5
+    face_patches: [ST_TOTAL_FACES]?usize = @splat(null),
     face_bg: ?usize = null, // STFB0
     percent_patch: ?usize = null, // STTPRCNT
     minus_patch: ?usize = null, // STTMINUS

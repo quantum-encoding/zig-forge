@@ -538,7 +538,7 @@ export fn zig_lens_analyze_source(
                 return @intFromEnum(ZigLensResult.err_oom);
             };
 
-            var ast = Ast.parse(allocator, source_z, .zig) catch {
+            var ast = Ast.parse(allocator, source_z, zig_parse) catch {
                 setLastError("zig parse failed");
                 return @intFromEnum(ZigLensResult.err_analysis);
             };
@@ -735,3 +735,6 @@ test "isSingleFile detects file extensions" {
     try std.testing.expect(!isSingleFile("src/"));
     try std.testing.expect(!isSingleFile("project"));
 }
+
+/// Zig-mode parse argument: `ParseOptions` on Zig 0.17+, `Mode` on 0.16.
+const zig_parse = if (@hasDecl(std.zig.Ast, "ParseOptions")) std.zig.Ast.ParseOptions{} else std.zig.Ast.Mode.zig;

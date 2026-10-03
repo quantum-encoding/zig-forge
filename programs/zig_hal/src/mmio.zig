@@ -9,6 +9,7 @@
 //! gates in the peripheral circuitry.
 
 const std = @import("std");
+const compat = @import("zig_compat.zig");
 
 /// Register access wrapper that provides type-safe MMIO operations
 pub fn Mmio(comptime T: type, comptime addr: usize) type {
@@ -29,7 +30,7 @@ pub fn Mmio(comptime T: type, comptime addr: usize) type {
         /// Read-modify-write: update specific fields while preserving others
         pub inline fn modify(fields: anytype) void {
             var value = ptr.*;
-            inline for (@typeInfo(@TypeOf(fields)).@"struct".fields) |field| {
+            inline for (compat.fields(@TypeOf(fields))) |field| {
                 @field(value, field.name) = @field(fields, field.name);
             }
             ptr.* = value;
@@ -93,7 +94,7 @@ pub inline fn read(comptime T: type, addr: usize) T {
 pub inline fn modify(comptime T: type, addr: usize, fields: anytype) void {
     const ptr: *volatile T = @ptrFromInt(addr);
     var value = ptr.*;
-    inline for (@typeInfo(@TypeOf(fields)).@"struct".fields) |field| {
+    inline for (compat.fields(@TypeOf(fields))) |field| {
         @field(value, field.name) = @field(fields, field.name);
     }
     ptr.* = value;

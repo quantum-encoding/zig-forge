@@ -17,18 +17,7 @@
 const std = @import("std");
 const posix = std.posix;
 
-const c = @cImport({
-    @cInclude("netdb.h");
-    @cInclude("sys/socket.h");
-    @cInclude("netinet/in.h");
-    @cInclude("netinet/ip_icmp.h");
-    @cInclude("arpa/inet.h");
-    @cInclude("unistd.h");
-    @cInclude("errno.h");
-    @cInclude("string.h");
-    @cInclude("poll.h");
-    @cInclude("time.h");
-});
+const c = @import("main_c");
 
 const VERSION = "1.0.0";
 

@@ -1475,14 +1475,14 @@ const Job = struct {
     in_use: bool,
 };
 
-var jobs: [MAX_JOBS]Job = [_]Job{.{
+var jobs: [MAX_JOBS]Job = @as([MAX_JOBS]Job, @splat(.{
     .pid = 0,
     .pgid = 0,
     .state = .done,
     .cmd = @as([64]u8, @splat(0)),
     .cmd_len = 0,
     .in_use = false,
-}} ** MAX_JOBS;
+}));
 
 fn jobAdd(pid: u64, pgid: u64, cmd: []const u8, state: JobState) usize {
     for (0..MAX_JOBS) |i| {

@@ -36,7 +36,7 @@ pub const QueueStats = struct {
 
 pub const PortStats = struct {
     queue_stats: [config.max_queues_per_port]QueueStats =
-        [_]QueueStats{.{}} ** config.max_queues_per_port,
+        @splat(.{}),
 
     /// Aggregate statistics across all queues.
     pub fn totals(self: *const PortStats, num_queues: u8) QueueStats {
@@ -57,6 +57,6 @@ pub const PortStats = struct {
     }
 
     pub fn reset(self: *PortStats) void {
-        self.queue_stats = [_]QueueStats{.{}} ** config.max_queues_per_port;
+        self.queue_stats = @as([config.max_queues_per_port]QueueStats, @splat(.{}));
     }
 };

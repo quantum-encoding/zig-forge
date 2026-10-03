@@ -21,7 +21,7 @@ pub const Cell = struct {
 };
 
 pub const FrameBuffer = struct {
-    cells: [MAX_HEIGHT][MAX_WIDTH]Cell = [_][MAX_WIDTH]Cell{[_]Cell{.{}} ** MAX_WIDTH} ** MAX_HEIGHT,
+    cells: [MAX_HEIGHT][MAX_WIDTH]Cell = [_][MAX_WIDTH]Cell{@as([MAX_WIDTH]Cell, @splat(.{}))} ** MAX_HEIGHT,
     width: u16 = 80,
     height: u16 = 24,
 

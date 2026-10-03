@@ -33,7 +33,7 @@ pub const Pipe = struct {
 /// scheduler or epoll subsystem to avoid lock ordering violations.
 var pipe_lock: spinlock.IrqSpinlock = .{};
 
-var pipes: [MAX_PIPES]Pipe = [_]Pipe{.{
+var pipes: [MAX_PIPES]Pipe = @as([MAX_PIPES]Pipe, @splat(.{
     .buffer = @as([PIPE_BUF_SIZE]u8, @splat(0)),
     .read_pos = 0,
     .write_pos = 0,
@@ -43,7 +43,7 @@ var pipes: [MAX_PIPES]Pipe = [_]Pipe{.{
     .blocked_reader_pid = 0,
     .blocked_writer_pid = 0,
     .in_use = false,
-}} ** MAX_PIPES;
+}));
 
 var pipe_inodes: [MAX_PIPES]vfs.Inode = undefined;
 var inodes_initialized: bool = false;

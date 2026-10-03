@@ -91,7 +91,7 @@ pub const TcpConnection = struct {
     rto_deadline: u64, // Tick when RTO fires (0 = stopped)
 };
 
-var connections: [MAX_TCP_CONNECTIONS]TcpConnection = @as([MAX_TCP_CONNECTIONS]TcpConnection, @splat(emptyConn()));
+var connections: [MAX_TCP_CONNECTIONS]TcpConnection = @splat(emptyConn());
 var next_ephemeral_port: u16 = 49152;
 
 fn emptyConn() TcpConnection {
@@ -114,7 +114,7 @@ fn emptyConn() TcpConnection {
         .tx_head = 0,
         .tx_count = 0,
         .tx_sent = 0,
-        .tx_segs = [_]TxSegment{.{ .seq = 0, .len = 0, .retransmits = 0 }} ** MAX_TX_SEGS,
+        .tx_segs = @as([MAX_TX_SEGS]TxSegment, @splat(.{ .seq = 0, .len = 0, .retransmits = 0 })),
         .tx_seg_count = 0,
         // RTT
         .srtt = 0,

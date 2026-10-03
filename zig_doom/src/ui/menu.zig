@@ -50,15 +50,15 @@ pub const Menu = struct {
     selected_skill: defs.Skill = .medium,
 
     // Cached WAD patches
-    skull_patches: [2]?usize = [_]?usize{null} ** 2, // M_SKULL1, M_SKULL2
+    skull_patches: [2]?usize = @splat(null), // M_SKULL1, M_SKULL2
     main_title: ?usize = null, // M_DOOM
     new_game_patch: ?usize = null, // M_NGAME
     options_patch: ?usize = null, // M_OPTION
     load_game_patch: ?usize = null, // M_LOADG
     save_game_patch: ?usize = null, // M_SAVEG
     quit_game_patch: ?usize = null, // M_QUITG
-    episode_patches: [4]?usize = [_]?usize{null} ** 4, // M_EPI1-M_EPI4
-    skill_patches: [5]?usize = [_]?usize{null} ** 5, // M_JKILL-M_NMARE
+    episode_patches: [4]?usize = @splat(null), // M_EPI1-M_EPI4
+    skill_patches: [5]?usize = @splat(null), // M_JKILL-M_NMARE
     new_game_text: ?usize = null, // M_NEWG
 
     /// Initialize the menu by caching WAD patch lump numbers

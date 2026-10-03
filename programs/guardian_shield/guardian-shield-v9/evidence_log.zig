@@ -121,7 +121,7 @@ pub const Sink = struct {
     suppressed_total: u64 = 0,
 
     last_tick: u64 = 0,
-    table: [TABLE_SIZE]Entry = [_]Entry{.{}} ** TABLE_SIZE,
+    table: [TABLE_SIZE]Entry = @splat(.{}),
 
     /// Open both outputs. Never fails: an output that cannot be opened is
     /// retried from `tick`.

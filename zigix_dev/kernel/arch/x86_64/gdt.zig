@@ -28,14 +28,14 @@ const GdtPtr = packed struct {
 
 // 7 entries: null, kernel code, kernel data, user code, user data, TSS low, TSS high
 // TSS descriptor is 16 bytes (2 GDT slots) on x86_64.
-var gdt_entries: [7]GdtEntry = [_]GdtEntry{.{
+var gdt_entries: [7]GdtEntry = @as([7]GdtEntry, @splat(.{
     .limit_low = 0,
     .base_low = 0,
     .base_mid = 0,
     .access = 0,
     .flags_limit_high = 0,
     .base_high = 0,
-}} ** 7;
+}));
 var gdt_ptr: GdtPtr = undefined;
 
 fn makeEntry(base: u32, limit: u20, access: u8, flags: u4) GdtEntry {
@@ -154,13 +154,13 @@ pub fn loadTss(tss_ptr: *const tss_mod.TSS) void {
 
 // --- Per-CPU GDT/TSS for SMP ---
 
-pub var per_cpu_gdt: [smp.MAX_CPUS][7]GdtEntry = [_][7]GdtEntry{[_]GdtEntry{.{
+pub var per_cpu_gdt: [smp.MAX_CPUS][7]GdtEntry = [_][7]GdtEntry{@as([7]GdtEntry, @splat(.{
     .limit_low = 0, .base_low = 0, .base_mid = 0,
     .access = 0, .flags_limit_high = 0, .base_high = 0,
-}} ** 7} ** smp.MAX_CPUS;
+}))} ** smp.MAX_CPUS;
 
 pub var per_cpu_gdt_ptr: [smp.MAX_CPUS]GdtPtr = undefined;
-pub var per_cpu_tss: [smp.MAX_CPUS]tss_mod.TSS = [_]tss_mod.TSS{.{}} ** smp.MAX_CPUS;
+pub var per_cpu_tss: [smp.MAX_CPUS]tss_mod.TSS = @splat(.{});
 
 /// Initialize GDT for a secondary CPU. Fills code/data/TSS descriptors,
 /// loads the GDT, reloads segment registers, and loads the TSS.

@@ -189,7 +189,7 @@ pub const PatternStep = struct {
     max_step_distance: u32 = 0,
 
     /// Argument constraints (max 2 constraints per step to keep size small)
-    arg_constraints: [2]?ArgConstraint = [_]?ArgConstraint{null} ** 2,
+    arg_constraints: [2]?ArgConstraint = @splat(null),
 };
 
 /// Complete pattern definition (sized for cache efficiency: ~512 bytes max)

@@ -698,7 +698,7 @@ var ext2_lock: spinlock.IrqSpinlock = .{};
 
 // Per-inode locks — parallel array indexed by (ino - 1), same as vfs_inodes[].
 // Avoids changing the VFS Inode struct (shared across ramfs, tmpfs, ext2).
-var inode_locks: [MAX_EXT2_INODES]spinlock.IrqSpinlock = [_]spinlock.IrqSpinlock{.{}} ** MAX_EXT2_INODES;
+var inode_locks: [MAX_EXT2_INODES]spinlock.IrqSpinlock = @splat(.{});
 
 fn acquireInodeLock(ino: u32) void {
     if (ino > 0 and ino <= MAX_EXT2_INODES) {

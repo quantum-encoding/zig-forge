@@ -37,7 +37,7 @@ pub const PsciConduit = enum { hvc, smc };
 
 pub const HwConfig = struct {
     /// RAM regions discovered from /memory nodes
-    ram: [4]MemRegion = [_]MemRegion{.{}} ** 4,
+    ram: [4]MemRegion = @splat(.{}),
     ram_count: u8 = 0,
 
     /// UART base address (PL011 or NS16550)

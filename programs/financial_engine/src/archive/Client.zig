@@ -1,3 +1,4 @@
+const compat = @import("../zig_compat.zig");
 //! HTTP(S) Client implementation.
 //!
 //! Connections are opened in a thread-safe manner, but individual Requests are not.
@@ -804,8 +805,8 @@ pub const Request = struct {
     /// Externally-owned; must outlive the Request.
     privileged_headers: []const http.Header,
 
-    pub const default_accept_encoding: [@typeInfo(http.ContentEncoding).@"enum".fields.len]bool = b: {
-        var result: [@typeInfo(http.ContentEncoding).@"enum".fields.len]bool = @splat(false);
+    pub const default_accept_encoding: [compat.fields(http.ContentEncoding).len]bool = b: {
+        var result: [compat.fields(http.ContentEncoding).len]bool = @splat(false);
         result[@intFromEnum(http.ContentEncoding.gzip)] = true;
         result[@intFromEnum(http.ContentEncoding.deflate)] = true;
         result[@intFromEnum(http.ContentEncoding.identity)] = true;

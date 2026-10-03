@@ -104,10 +104,10 @@ pub const TcpConnection = struct {
     rto_deadline: u64,
 
     // --- Out-of-order reassembly ---
-    ooo_segs: [MAX_OOO_SEGS]OooSegment = [_]OooSegment{.{}} ** MAX_OOO_SEGS,
+    ooo_segs: [MAX_OOO_SEGS]OooSegment = @splat(.{}),
 };
 
-var connections: [MAX_TCP_CONNECTIONS]TcpConnection = @as([MAX_TCP_CONNECTIONS]TcpConnection, @splat(emptyConn()));
+var connections: [MAX_TCP_CONNECTIONS]TcpConnection = @splat(emptyConn());
 var next_ephemeral_port: u16 = 49152;
 
 /// SMP lock protecting all TCP connection state: connections[], next_ephemeral_port.
@@ -133,7 +133,7 @@ fn emptyConn() TcpConnection {
         .tx_head = 0,
         .tx_count = 0,
         .tx_sent = 0,
-        .tx_segs = [_]TxSegment{.{ .seq = 0, .len = 0, .retransmits = 0 }} ** MAX_TX_SEGS,
+        .tx_segs = @as([MAX_TX_SEGS]TxSegment, @splat(.{ .seq = 0, .len = 0, .retransmits = 0 })),
         .tx_seg_count = 0,
         .srtt = 0,
         .rttvar = 0,
@@ -146,7 +146,7 @@ fn emptyConn() TcpConnection {
         .dup_ack_count = 0,
         .in_recovery = false,
         .rto_deadline = 0,
-        .ooo_segs = [_]OooSegment{.{}} ** MAX_OOO_SEGS,
+        .ooo_segs = @as([MAX_OOO_SEGS]OooSegment, @splat(.{})),
     };
 }
 

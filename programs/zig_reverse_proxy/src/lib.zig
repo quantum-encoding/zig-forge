@@ -485,7 +485,7 @@ fn scanFraming(header_block: []const u8) Framing {
         if (std.ascii.eqlIgnoreCase(name, "Content-Length")) {
             framing.content_length = std.fmt.parseInt(usize, value, 10) catch null;
         } else if (std.ascii.eqlIgnoreCase(name, "Transfer-Encoding")) {
-            if (std.ascii.indexOfIgnoreCase(value, "chunked") != null) framing.chunked = true;
+            if (std.ascii.findIgnoreCase(value, "chunked") != null) framing.chunked = true;
         }
     }
     return framing;

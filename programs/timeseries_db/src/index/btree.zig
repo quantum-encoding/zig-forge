@@ -32,7 +32,7 @@ pub const Node = struct {
             .num_keys = 0,
             .keys = @as([MAX_KEYS]i64, @splat(0)),
             .values = @as([MAX_KEYS]u64, @splat(0)),
-            .children = [_]?*Node{null} ** ORDER,
+            .children = @as([ORDER]?*Node, @splat(null)),
             .parent = null,
         };
         return node;

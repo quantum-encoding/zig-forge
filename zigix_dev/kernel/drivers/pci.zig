@@ -34,7 +34,7 @@ const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
 
 const MAX_DEVICES: usize = 64;
-var devices: [MAX_DEVICES]PciDevice = [_]PciDevice{.{
+var devices: [MAX_DEVICES]PciDevice = @as([MAX_DEVICES]PciDevice, @splat(.{
     .bus = 0,
     .device = 0,
     .function = 0,
@@ -49,7 +49,7 @@ var devices: [MAX_DEVICES]PciDevice = [_]PciDevice{.{
     .irq_line = 0,
     .irq_pin = 0,
     .in_use = false,
-}} ** MAX_DEVICES;
+}));
 var device_count: u8 = 0;
 
 // ---- Config space access ----

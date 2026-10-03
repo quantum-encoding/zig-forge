@@ -738,10 +738,10 @@ fn rAtom(st: *MatchState, atom: *const Atom, pos: usize, cont: *const Cont) ?usi
 fn regexSearch(re: *const Regex, text: []const u8, from: usize) ?Match {
     var pos = from;
     while (true) : (pos += 1) {
-        var st = MatchState{ .re = re, .text = text, .caps = [_]Span{.{}} ** 10 };
+        var st = MatchState{ .re = re, .text = text, .caps = @as([10]Span, @splat(.{})) };
         const doneC = Cont{ .kind = .done };
         for (re.alts) |alt| {
-            st.caps = [_]Span{.{}} ** 10;
+            st.caps = @as([10]Span, @splat(.{}));
             const innerC = Cont{ .kind = .seq, .seq = alt.pieces, .idx = 0, .parent = &doneC };
             if (rApply(&st, &innerC, pos)) |end| {
                 return .{ .start = pos, .end = end, .caps = st.caps };

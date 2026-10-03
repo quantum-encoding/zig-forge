@@ -717,7 +717,7 @@ test "seccomp: blocked syscall traps at runtime (Linux/x86_64)" {
 
     // std.posix.waitpid/W are gone in 0.16 — wait4 + linux.W, same as main.zig.
     var status: u32 = undefined;
-    _ = std.os.linux.wait4(pid, &status, 0, null);
+    _ = std.os.linux.wait4(pid, @ptrCast(&status), 0, null);
 
     if (std.os.linux.W.IFEXITED(status) and std.os.linux.W.EXITSTATUS(status) == 2) {
         // seccomp install itself failed in this environment — don't assert on enforcement.

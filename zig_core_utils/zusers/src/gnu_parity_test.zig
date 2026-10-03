@@ -30,11 +30,7 @@
 
 const std = @import("std");
 const build_options = @import("build_options");
-const c = @cImport({
-    @cInclude("utmpx.h");
-    @cInclude("unistd.h"); // unlink, getpid
-    @cInclude("stdlib.h"); // getenv
-});
+const c = @import("gnu_parity_test_c");
 
 const ZUSERS: []const u8 = build_options.zusers_exe;
 const GUSERS: []const u8 = "/opt/homebrew/bin/gusers";

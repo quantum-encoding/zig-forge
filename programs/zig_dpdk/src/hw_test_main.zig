@@ -219,7 +219,7 @@ fn run(argc: c_int, argv: [*]const [*:0]const u8) !void {
     const ring_size: u32 = 256;
     var rx_descs: [256]ixgbe.RxDesc align(128) = undefined;
     @memset(std.mem.asBytes(&rx_descs), 0);
-    var shadow: [ixgbe.MAX_RING_SIZE]?*mbuf_mod.MBuf = [_]?*mbuf_mod.MBuf{null} ** ixgbe.MAX_RING_SIZE;
+    var shadow: [ixgbe.MAX_RING_SIZE]?*mbuf_mod.MBuf = @splat(null);
 
     const ring_phys = physical.ptrToPhys(&rx_descs);
     ixgbe.setupRxQueue(&ops, &rx_descs, ring_size, 0, ring_phys, &pool, &shadow);

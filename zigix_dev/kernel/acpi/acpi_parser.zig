@@ -41,7 +41,7 @@ pub const AcpiConfig = struct {
 
     // Table directory — for future lookups by signature
     table_count: u8 = 0,
-    table_sigs: [MAX_TABLES][4]u8 = [_][4]u8{@as([4]u8, @splat(0))} ** MAX_TABLES,
+    table_sigs: [MAX_TABLES][4]u8 = @as([MAX_TABLES][4]u8, @splat(@as([4]u8, @splat(0)))),
     table_addrs: [MAX_TABLES]u64 = @splat(0),
 };
 

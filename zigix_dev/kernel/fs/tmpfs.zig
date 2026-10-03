@@ -42,7 +42,7 @@ const HardLinkEntry = struct {
     name: [256]u8 = @splat(0),
     name_len: u8 = 0,
 };
-var hard_links: [MAX_HARD_LINKS]HardLinkEntry = [_]HardLinkEntry{.{}} ** MAX_HARD_LINKS;
+var hard_links: [MAX_HARD_LINKS]HardLinkEntry = @splat(.{});
 
 pub const TmpfsNode = struct {
     name: [256]u8,
@@ -62,7 +62,7 @@ pub const TmpfsNode = struct {
     child_count: u16,
     parent: ?*TmpfsNode,
     in_use: bool,
-    xattrs: [MAX_XATTRS]Xattr = [_]Xattr{.{}} ** MAX_XATTRS,
+    xattrs: [MAX_XATTRS]Xattr = @splat(.{}),
 
     pub fn dataPages(self: *TmpfsNode) ?[*]?types.PhysAddr {
         return self.data_pages_ptr;

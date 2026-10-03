@@ -24,7 +24,7 @@ pub const ChaosReport = struct {
     fuzz_crashes: u64 = 0,
     fuzz_errors_handled: u64 = 0,
     fuzz_safety_catches: u64 = 0,
-    scenario_results: [32]?fault_injector.InjectionResult = [_]?fault_injector.InjectionResult{null} ** 32,
+    scenario_results: [32]?fault_injector.InjectionResult = @splat(null),
     scenario_count: u8 = 0,
 
     pub fn addResult(self: *ChaosReport, result: fault_injector.InjectionResult) void {

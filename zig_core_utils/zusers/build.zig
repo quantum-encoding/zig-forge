@@ -3,6 +3,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const gnu_parity_test_c = b.addTranslateC(.{ .root_source_file = b.path("src/gnu_parity_test_c.h"), .target = target, .optimize = optimize }).createModule();
+    const main_c = b.addTranslateC(.{ .root_source_file = b.path("src/main_c.h"), .target = target, .optimize = optimize }).createModule();
 
     const exe = b.addExecutable(.{
         .name = "zusers",
@@ -14,6 +16,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    exe.root_module.addImport("gnu_parity_test_c", gnu_parity_test_c);
+    exe.root_module.addImport("main_c", main_c);
     b.installArtifact(exe);
 
     // Externally-anchored GNU parity tests. The freshly-built zusers binary
@@ -34,6 +38,8 @@ pub fn build(b: *std.Build) void {
     });
     tests.root_module.addOptions("build_options", test_opts);
 
+    tests.root_module.addImport("gnu_parity_test_c", gnu_parity_test_c);
+    tests.root_module.addImport("main_c", main_c);
     const run_tests = b.addRunArtifact(tests);
     run_tests.has_side_effects = true; // reads live utmpx / external gusers
 

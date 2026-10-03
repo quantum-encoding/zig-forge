@@ -44,7 +44,7 @@ fn analyzeFixture(arena: std.mem.Allocator, source: [:0]const u8) !models.FileRe
     var report = models.FileReport.init();
     report.language = .zig;
 
-    var ast = try std.zig.Ast.parse(arena, source, .zig);
+    var ast = try std.zig.Ast.parse(arena, source, zig_parse);
     // Populate report.functions so the enclosing-fn rules
     // (EQL-FOR-SECRETS, SHELL-CHILD shape (a)) can resolve scope
     // exactly as they do on a real file.
@@ -256,3 +256,6 @@ test "fixture/negative BLIND-CAST clean on std.math.cast" {
     var report = try analyzeFixture(c.arena.allocator(), @embedFile("security_fixtures/negative/blind_cast.fixture"));
     try expectAbsent(&report, "BLIND-CAST");
 }
+
+/// Zig-mode parse argument: `ParseOptions` on Zig 0.17+, `Mode` on 0.16.
+const zig_parse = if (@hasDecl(std.zig.Ast, "ParseOptions")) std.zig.Ast.ParseOptions{} else std.zig.Ast.Mode.zig;

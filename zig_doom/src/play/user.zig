@@ -136,7 +136,7 @@ pub const Player = struct {
     usedown: bool = false, // Use held (don't re-trigger every tic)
 
     // Weapon sprites
-    psprites: [NUMPSPRITES]PSpriteDef = [_]PSpriteDef{.{}} ** NUMPSPRITES,
+    psprites: [NUMPSPRITES]PSpriteDef = @splat(.{}),
 
     // Cheats
     cheats: u32 = 0,

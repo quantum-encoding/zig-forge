@@ -5,6 +5,7 @@
 // literally cannot be expressed in valid Zig).
 
 const std = @import("std");
+const compat = @import("../zig_compat.zig");
 const scenarios = @import("scenarios.zig");
 const sensor_bus = @import("../sensors/sensor_bus.zig");
 const imu_mod = @import("../sensors/imu.zig");
@@ -21,7 +22,7 @@ pub const InjectionResult = struct {
 };
 
 pub const FaultInjector = struct {
-    results: [32]?InjectionResult = [_]?InjectionResult{null} ** 32,
+    results: [32]?InjectionResult = @splat(null),
     result_count: u8 = 0,
     rng: std.Random.Xoshiro256,
 
@@ -145,7 +146,7 @@ pub const FaultInjector = struct {
         // A live variant would have a matching tag value; the retired flag has none,
         // so the checked mapping refuses it rather than dispatching dead code.
         var maps_to_live_variant = false;
-        inline for (@typeInfo(OrderMode).@"enum".fields) |field| {
+        inline for (compat.fields(OrderMode)) |field| {
             if (field.value == retired_flag) maps_to_live_variant = true;
         }
         const caught = !maps_to_live_variant;

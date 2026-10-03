@@ -38,7 +38,7 @@ pub fn parseFile(
     defer allocator.free(source);
 
     // Parse AST
-    var ast = Ast.parse(allocator, source, .zig) catch |err| {
+    var ast = Ast.parse(allocator, source, zig_parse) catch |err| {
         if (verbose) {
             std.debug.print("  Parse error in {s}: {s}\n", .{ file_path, @errorName(err) });
         }
@@ -280,3 +280,6 @@ fn getCallTargetName(ast: *const Ast, node_idx: Ast.Node.Index) ?[]const u8 {
         else => return null,
     }
 }
+
+/// Zig-mode parse argument: `ParseOptions` on Zig 0.17+, `Mode` on 0.16.
+const zig_parse = if (@hasDecl(std.zig.Ast, "ParseOptions")) std.zig.Ast.ParseOptions{} else std.zig.Ast.Mode.zig;

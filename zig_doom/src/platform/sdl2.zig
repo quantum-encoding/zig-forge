@@ -147,7 +147,7 @@ const Sdl2State = struct {
 
     // Sound
     audio_device: c.SDL_AudioDeviceID = 0,
-    mix_channels: [NUM_SFX_CHANNELS]MixChannel = [_]MixChannel{.{}} ** NUM_SFX_CHANNELS,
+    mix_channels: [NUM_SFX_CHANNELS]MixChannel = @splat(.{}),
     next_handle: u32 = 1,
     sound_init: bool = false,
 

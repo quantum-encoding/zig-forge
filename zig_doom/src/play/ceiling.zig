@@ -53,7 +53,7 @@ pub const CeilingMover = struct {
 };
 
 /// Active ceilings list — for stop/restart
-var active_ceilings: [MAXCEILINGS]?*CeilingMover = [_]?*CeilingMover{null} ** MAXCEILINGS;
+var active_ceilings: [MAXCEILINGS]?*CeilingMover = @splat(null);
 
 fn addActiveCeiling(ceiling: *CeilingMover) void {
     for (&active_ceilings) |*slot| {

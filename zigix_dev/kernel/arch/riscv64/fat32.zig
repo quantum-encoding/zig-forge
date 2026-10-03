@@ -113,12 +113,12 @@ const FatInode = struct {
     in_use: bool,
 };
 
-var fat_inodes: [MAX_INODES]FatInode = [_]FatInode{.{
+var fat_inodes: [MAX_INODES]FatInode = @as([MAX_INODES]FatInode, @splat(.{
     .first_cluster = 0,
     .size = 0,
     .is_dir = false,
     .in_use = false,
-}} ** MAX_INODES;
+}));
 
 var vfs_inodes: [MAX_INODES]vfs.Inode = undefined;
 var next_ino: usize = 1;

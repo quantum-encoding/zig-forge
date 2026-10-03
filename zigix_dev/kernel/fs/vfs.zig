@@ -208,12 +208,12 @@ pub const MountPoint = struct {
 };
 
 const MAX_MOUNTS: usize = 8;
-var mounts: [MAX_MOUNTS]MountPoint = [_]MountPoint{.{
+var mounts: [MAX_MOUNTS]MountPoint = @as([MAX_MOUNTS]MountPoint, @splat(.{
     .path = @as([256]u8, @splat(0)),
     .path_len = 0,
     .root_inode = undefined,
     .in_use = false,
-}} ** MAX_MOUNTS;
+}));
 
 pub fn mount(path: []const u8, root_inode: *Inode) bool {
     for (0..MAX_MOUNTS) |i| {

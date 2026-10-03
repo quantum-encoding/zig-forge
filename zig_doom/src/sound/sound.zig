@@ -29,7 +29,7 @@ pub const SoundChannel = struct {
 };
 
 pub const SoundEngine = struct {
-    channels: [NUM_CHANNELS]SoundChannel = [_]SoundChannel{.{}} ** NUM_CHANNELS,
+    channels: [NUM_CHANNELS]SoundChannel = @splat(.{}),
 
     // Listener position/angle (player)
     listener_x: Fixed = Fixed.ZERO,

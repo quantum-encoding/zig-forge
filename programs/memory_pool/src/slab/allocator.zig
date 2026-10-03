@@ -110,7 +110,7 @@ pub const SlabAllocator = struct {
     pub fn initWithCapacities(allocator: std.mem.Allocator, capacities: [NUM_CLASSES]usize) InitError!Self {
         var self = Self{
             .allocator = allocator,
-            .slabs = [_]?Slab{null} ** NUM_CLASSES,
+            .slabs = @as([NUM_CLASSES]?Slab, @splat(null)),
             .capacity_per_class = 0,
             .total_allocated = 0,
             .total_freed = 0,

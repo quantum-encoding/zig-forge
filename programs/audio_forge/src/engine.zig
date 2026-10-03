@@ -8,6 +8,7 @@
 //! - Audio Thread: Ring buffer read, DSP processing, backend output
 
 const std = @import("std");
+const compat = @import("zig_compat.zig");
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 
@@ -423,5 +424,5 @@ test "engine config defaults" {
 }
 
 test "state enum" {
-    try std.testing.expectEqual(@as(usize, 3), @typeInfo(State).@"enum".fields.len);
+    try std.testing.expectEqual(@as(usize, 3), compat.fields(State).len);
 }

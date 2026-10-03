@@ -204,7 +204,7 @@ const TraceEntry = struct {
     result: i64,
 };
 
-var trace_ring: [TRACE_SIZE]TraceEntry = [_]TraceEntry{.{ .pid = 0, .nr = 0, .arg0 = 0, .arg1 = 0, .result = 0 }} ** TRACE_SIZE;
+var trace_ring: [TRACE_SIZE]TraceEntry = @splat(.{ .pid = 0, .nr = 0, .arg0 = 0, .arg1 = 0, .result = 0 });
 var trace_idx: usize = 0;
 
 fn traceRecord(pid: u64, nr: u64, arg0: u64, arg1: u64, result: i64) void {
@@ -624,7 +624,7 @@ fn openDeviceFile(proc: *process.Process, inode: *vfs.Inode, flags: u32) i64 {
 // FIFO (named pipe) → pipe mapping table
 const MAX_FIFOS: usize = 16;
 const FifoEntry = struct { ino: u64, pipe_idx: usize, active: bool };
-var fifo_map: [MAX_FIFOS]FifoEntry = [_]FifoEntry{.{ .ino = 0, .pipe_idx = 0, .active = false }} ** MAX_FIFOS;
+var fifo_map: [MAX_FIFOS]FifoEntry = @splat(.{ .ino = 0, .pipe_idx = 0, .active = false });
 
 fn openFifo(proc: *process.Process, inode: *vfs.Inode, flags: u32) i64 {
     const access_mode = flags & vfs.O_ACCMODE;
@@ -3664,14 +3664,14 @@ const RecordLock = struct {
     lock_type: u16, // F_RDLCK or F_WRLCK
 };
 
-var record_locks: [MAX_RECORD_LOCKS]RecordLock = [_]RecordLock{.{
+var record_locks: [MAX_RECORD_LOCKS]RecordLock = @as([MAX_RECORD_LOCKS]RecordLock, @splat(.{
     .in_use = false,
     .ino = 0,
     .pid = 0,
     .start = 0,
     .len = 0,
     .lock_type = 0,
-}} ** MAX_RECORD_LOCKS;
+}));
 
 /// Read struct flock from userspace (aarch64 layout)
 /// struct flock { short l_type; short l_whence; long l_start; long l_len; int l_pid; }
@@ -5560,7 +5560,7 @@ fn sysPpoll(frame: *exception.TrapFrame) i64 {
     const POLLFD_SIZE: usize = 8; // struct pollfd: i32 fd + i16 events + i16 revents
 
     // Collect pipe inodes for the blocking phase
-    var pipe_inodes: [64]?*vfs.Inode = [_]?*vfs.Inode{null} ** 64;
+    var pipe_inodes: [64]?*vfs.Inode = @splat(null);
     var has_pipes = false;
 
     while (true) {

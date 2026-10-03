@@ -442,7 +442,7 @@ fn expectParsesAsZig(allocator: std.mem.Allocator, source: []const u8) !void {
     const zsrc = try allocator.dupeSentinel(u8, source, 0);
     defer allocator.free(zsrc);
 
-    var ast = try std.zig.Ast.parse(allocator, zsrc, .zig);
+    var ast = try std.zig.Ast.parse(allocator, zsrc, zig_parse);
     defer ast.deinit(allocator);
 
     if (ast.errors.len != 0) {
@@ -632,3 +632,6 @@ test "multiple peripherals are generated correctly" {
     try std.testing.expect(std.mem.indexOf(u8, output, "pub const GPIOB") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "pub const GPIOC") != null);
 }
+
+/// Zig-mode parse argument: `ParseOptions` on Zig 0.17+, `Mode` on 0.16.
+const zig_parse = if (@hasDecl(std.zig.Ast, "ParseOptions")) std.zig.Ast.ParseOptions{} else std.zig.Ast.Mode.zig;

@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const main_c = b.addTranslateC(.{ .root_source_file = b.path("src/main_c.h"), .target = target, .optimize = optimize }).createModule();
 
     const exe = b.addExecutable(.{
         .name = "zping",
@@ -15,6 +16,7 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.link_libc = true;
 
+    exe.root_module.addImport("main_c", main_c);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -37,6 +39,7 @@ pub fn build(b: *std.Build) void {
     // gnu_parity_test.zig imports main.zig, which @cImports libc.
     tests.root_module.link_libc = true;
 
+    tests.root_module.addImport("main_c", main_c);
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run zping tests");
     test_step.dependOn(&run_tests.step);

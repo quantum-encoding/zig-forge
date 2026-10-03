@@ -19,6 +19,7 @@
 //! No test here is a roundtrip of our own encoder against our own decoder.
 
 const std = @import("std");
+const compat = @import("zig_compat.zig");
 const testing = std.testing;
 
 const core = @import("engine/core.zig");
@@ -179,7 +180,7 @@ test "RFC 9110 §9.1: method names are case-sensitive uppercase tokens" {
     try testing.expect(manifest.Method.fromString("Get") == null);
     try testing.expect(manifest.Method.fromString("TRACE") == null);
     // toString round-trips the wire spelling for every variant.
-    inline for (@typeInfo(manifest.Method).@"enum".fields) |f| {
+    inline for (compat.fields(manifest.Method)) |f| {
         const m: manifest.Method = @enumFromInt(f.value);
         try testing.expectEqualStrings(f.name, m.toString());
     }

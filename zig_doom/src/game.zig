@@ -76,7 +76,7 @@ pub const Game = struct {
     map: u8 = 0,
 
     // Players
-    players: [MAXPLAYERS]Player = [_]Player{.{}} ** MAXPLAYERS,
+    players: [MAXPLAYERS]Player = @splat(.{}),
     player_in_game: [MAXPLAYERS]bool = blk: {
         var arr = @as([MAXPLAYERS]bool, @splat(false));
         arr[0] = true; // Player 1 is always in game

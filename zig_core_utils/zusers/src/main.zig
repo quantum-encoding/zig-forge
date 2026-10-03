@@ -11,9 +11,7 @@
 
 const std = @import("std");
 const libc = std.c;
-const c = @cImport({
-    @cInclude("utmpx.h");
-});
+const c = @import("main_c");
 
 const VERSION = "0.16.0";
 

@@ -11,6 +11,7 @@
 //!   trash restore <pattern> [--to <path>]
 
 const std = @import("std");
+const compat = @import("zig_compat.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 const Dir = Io.Dir;
@@ -858,7 +859,7 @@ const trashMacOS = if (builtin.os.tag == .macos) struct {
     }
 
     fn msg(comptime Ret: type, comptime Target: type, target: Target, sel: SEL, extra: anytype) Ret {
-        const fields = @typeInfo(@TypeOf(extra)).@"struct".fields;
+        const fields = compat.fields(@TypeOf(extra));
         const Fn = switch (fields.len) {
             0 => *const fn (Target, SEL) callconv(.c) Ret,
             1 => *const fn (Target, SEL, fields[0].type) callconv(.c) Ret,

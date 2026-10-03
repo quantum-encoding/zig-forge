@@ -89,14 +89,14 @@ const Stats = struct {
     bytes_recovered: u64 = 0,
 };
 
-var stats: [MAX_MODES]Stats = [_]Stats{.{}} ** MAX_MODES;
+var stats: [MAX_MODES]Stats = @splat(.{});
 
 // ============================================================
 // Registry — comptime-defined, runtime-executed
 // ============================================================
 
 const MAX_MODES = 16;
-var registry: [MAX_MODES]?FailureMode = [_]?FailureMode{null} ** MAX_MODES;
+var registry: [MAX_MODES]?FailureMode = @splat(null);
 var mode_count: u8 = 0;
 
 /// Register a failure mode. Called during kernel init by each subsystem.

@@ -215,7 +215,7 @@ pub fn main(init: std.process.Init) !void {
     } else {
         // Parent process: wait for child
         var status: u32 = 0;
-        _ = std.os.linux.wait4(@intCast(pid), &status, 0, null);
+        _ = std.os.linux.wait4(@intCast(pid), @ptrCast(&status), 0, null);
 
         std.debug.print("\n============================================================\n", .{});
 

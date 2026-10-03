@@ -1,9 +1,6 @@
 const std = @import("std");
 const libc = std.c;
-const c = @cImport({
-    @cInclude("time.h");
-    @cInclude("utmpx.h");
-});
+const c = @import("main_c");
 
 // utmpx ut_type values (POSIX; identical on Linux and macOS/BSD)
 const USER_PROCESS = 7;

@@ -55,7 +55,7 @@ pub const SystemSnapshot = struct {
     disk_used_kb: u64 = 0,
 
     // Network
-    net_ifaces: [MAX_NET_IFACES]NetInterface = [_]NetInterface{.{}} ** MAX_NET_IFACES,
+    net_ifaces: [MAX_NET_IFACES]NetInterface = @splat(.{}),
     net_iface_count: u8 = 0,
 
     // Timestamp
@@ -86,7 +86,7 @@ const CpuTimes = struct {
 const CpuTimesArray = [MAX_CORES + 1]CpuTimes;
 
 pub const SysInfoCollector = struct {
-    prev_cpu: CpuTimesArray = [_]CpuTimes{.{}} ** (MAX_CORES + 1),
+    prev_cpu: CpuTimesArray = @as([(MAX_CORES + 1)]CpuTimes, @splat(.{})),
     has_prev: bool = false,
     identity_loaded: bool = false,
     // Cached identity (only read once)
@@ -156,7 +156,7 @@ pub const SysInfoCollector = struct {
         var buf: [16384]u8 = undefined;
         const data = readProcFile("/proc/stat", &buf) orelse return;
 
-        var current: CpuTimesArray = [_]CpuTimes{.{}} ** (MAX_CORES + 1);
+        var current: CpuTimesArray = @as([(MAX_CORES + 1)]CpuTimes, @splat(.{}));
         var core_idx: u8 = 0;
 
         var lines = std.mem.splitScalar(u8, data, '\n');

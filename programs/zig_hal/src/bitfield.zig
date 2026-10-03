@@ -8,6 +8,7 @@
 //! address, you're physically changing the voltage state of transistor gates.
 
 const std = @import("std");
+const compat = @import("zig_compat.zig");
 
 /// Create a register type from a packed struct
 /// This adds read/write methods and ensures volatile access
@@ -35,7 +36,7 @@ pub fn Register(comptime T: type, comptime addr: usize) type {
 
         pub inline fn modify(fields: anytype) void {
             var value = ptr.*;
-            inline for (@typeInfo(@TypeOf(fields)).@"struct".fields) |field| {
+            inline for (compat.fields(@TypeOf(fields))) |field| {
                 @field(value, field.name) = @field(fields, field.name);
             }
             ptr.* = value;

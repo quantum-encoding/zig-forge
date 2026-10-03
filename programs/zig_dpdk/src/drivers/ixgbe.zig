@@ -347,7 +347,7 @@ pub const IxgbeRxQueueData = struct {
         std.debug.assert(ring_size > 0 and (ring_size & (ring_size - 1)) == 0); // power of two
         var data: IxgbeRxQueueData = undefined;
         data.descs = descs;
-        data.shadow = [_]?*MBuf{null} ** MAX_RING_SIZE;
+        data.shadow = @as([MAX_RING_SIZE]?*MBuf, @splat(null));
         data.sw_tail = 0;
         data.ring_size = ring_size;
         data.ring_mask = ring_size - 1;
@@ -381,7 +381,7 @@ pub const IxgbeTxQueueData = struct {
         std.debug.assert(ring_size > 0 and (ring_size & (ring_size - 1)) == 0);
         var data: IxgbeTxQueueData = undefined;
         data.descs = descs;
-        data.shadow = [_]?*MBuf{null} ** MAX_RING_SIZE;
+        data.shadow = @as([MAX_RING_SIZE]?*MBuf, @splat(null));
         data.sw_head = 0;
         data.sw_tail = 0;
         data.ring_size = ring_size;
@@ -1427,7 +1427,7 @@ test "ixgbe: setup rx queue writes registers" {
     var descs: [TEST_RING_SIZE]RxDesc align(16) = undefined;
     @memset(std.mem.asBytes(&descs), 0);
 
-    var shadow: [MAX_RING_SIZE]?*MBuf = [_]?*MBuf{null} ** MAX_RING_SIZE;
+    var shadow: [MAX_RING_SIZE]?*MBuf = @splat(null);
 
     var mock = MockRegs.init();
     const ops = mock.regOps();

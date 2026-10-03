@@ -6,6 +6,7 @@
 //! doLoadLevel and keeps leveltime in sync each tic.
 
 const std = @import("std");
+const compat = @import("../zig_compat.zig");
 const fixed = @import("../fixed.zig");
 const Fixed = fixed.Fixed;
 const setup = @import("setup.zig");
@@ -57,7 +58,7 @@ pub fn reset() void {
 pub fn playSound(origin: ?*anyopaque, sfx_index: i32) void {
     const snd = sound orelse return;
     if (sfx_index <= 0) return;
-    const count = @typeInfo(sound_defs.SfxId).@"enum".fields.len;
+    const count = compat.fields(sound_defs.SfxId).len;
     if (sfx_index >= count) return;
     snd.startSound(origin, @enumFromInt(@as(u16, @intCast(sfx_index))));
 }

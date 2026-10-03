@@ -4,6 +4,7 @@
 //! Output uses packed structs for registers and MMIO for access.
 
 const std = @import("std");
+const compat = @import("zig_compat.zig");
 const svd = @import("svd.zig");
 
 /// Simple writer wrapper for ArrayListUnmanaged
@@ -44,7 +45,7 @@ pub fn generate(allocator: std.mem.Allocator, device: svd.Device) ![]u8 {
         \\            pub inline fn write(value: T) void {{ ptr.* = value; }}
         \\            pub inline fn modify(fields: anytype) void {{
         \\                var value = ptr.*;
-        \\                inline for (@typeInfo(@TypeOf(fields)).@"struct".fields) |field| {{
+        \\                inline for (compat.fields(@TypeOf(fields))) |field| {{
         \\                    @field(value, field.name) = @field(fields, field.name);
         \\                }}
         \\                ptr.* = value;

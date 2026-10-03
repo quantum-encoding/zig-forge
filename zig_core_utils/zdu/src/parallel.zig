@@ -496,8 +496,8 @@ pub fn walkParallel(allocator: std.mem.Allocator, path: []const u8, options: Opt
 
     // Spawn worker threads
     const actual_threads = @min(num_threads, subdirs.items.len);
-    var workers: [MAX_WORKERS]?Thread = [_]?Thread{null} ** MAX_WORKERS;
-    var contexts: [MAX_WORKERS]?WorkerContext = [_]?WorkerContext{null} ** MAX_WORKERS;
+    var workers: [MAX_WORKERS]?Thread = @splat(null);
+    var contexts: [MAX_WORKERS]?WorkerContext = @splat(null);
 
     for (0..actual_threads) |i| {
         contexts[i] = try WorkerContext.init(allocator, shared);

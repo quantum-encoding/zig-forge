@@ -24,7 +24,7 @@ pub const RunQueue = struct {
 };
 
 /// One runqueue per CPU.
-var rqs: [smp.MAX_CPUS]RunQueue = [_]RunQueue{.{}} ** smp.MAX_CPUS;
+var rqs: [smp.MAX_CPUS]RunQueue = @splat(.{});
 
 /// Enqueue a process on a specific CPU's runqueue.
 /// Acquires the target CPU's rq_lock.

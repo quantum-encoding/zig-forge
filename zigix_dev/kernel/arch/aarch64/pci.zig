@@ -63,7 +63,7 @@ pub const PciDevice = struct {
 };
 
 const MAX_DEVICES: usize = 32;
-var devices: [MAX_DEVICES]PciDevice = [_]PciDevice{.{
+var devices: [MAX_DEVICES]PciDevice = @as([MAX_DEVICES]PciDevice, @splat(.{
     .bus = 0,
     .device = 0,
     .function = 0,
@@ -79,7 +79,7 @@ var devices: [MAX_DEVICES]PciDevice = [_]PciDevice{.{
     .bar2_size = 0,
     .irq_pin = 0,
     .in_use = false,
-}} ** MAX_DEVICES;
+}));
 
 var device_count: u8 = 0;
 
