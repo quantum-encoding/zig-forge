@@ -23,6 +23,7 @@ const fixed = @import("fixed.zig");
 const setup = @import("play/setup.zig");
 const mobj_mod = @import("play/mobj.zig");
 const maputl = @import("play/maputl.zig");
+const funnel = @import("agent_funnel.zig");
 
 const Level = setup.Level;
 const MapObject = mobj_mod.MapObject;
@@ -33,6 +34,13 @@ const MAX_STEP: f64 = 24;
 const DOOR_COST: f64 = 128;
 /// Extra cost of entering a damaging floor (nukage, lava).
 const HURT_COST: f64 = 512;
+/// Extra cost of stepping off a ledge too high to climb back: allowed, but
+/// only when nothing else gets there.
+const DROP_COST: f64 = 384;
+const PLAYER_RADIUS: f64 = 16;
+/// How far past a doorway an explore route ends, so arriving puts the
+/// player inside the new sector rather than on its threshold.
+const STEP_INSIDE: f64 = 40;
 
 const Portal = struct {
     a: u16,
@@ -72,6 +80,24 @@ pub const Waypoint = struct {
     switch_: bool = false,
 };
 
+/// Where a route goes.
+pub const Goal = union(enum) {
+    /// The nearest sector not yet visited.
+    explore,
+    /// The level exit.
+    exit,
+    /// A map point (an item, a monster's position).
+    point: [2]f64,
+};
+
+pub const Route = struct {
+    /// How many funnel spans the route crosses.
+    spans: usize,
+    end: funnel.Point,
+    /// The route ends at a switch to press.
+    switch_: bool,
+};
+
 pub const Plan = struct {
     explore: ?Waypoint,
     exit: ?Waypoint,
@@ -94,6 +120,11 @@ pub const Nav = struct {
     /// cut off, so two similar targets cannot swap places every plan and
     /// turn the player back and forth between them.
     goal: ?usize = null,
+    /// Per portal: the tic until which a route may not use it (set when
+    /// the player got stuck there).
+    blocked_until: []u32 = &.{},
+    /// The current tic, for `blocked_until`.
+    now: u32 = 0,
     done: []bool = &.{},
 
     pub fn init(alloc: std.mem.Allocator) Nav {
@@ -114,6 +145,7 @@ pub const Nav = struct {
         self.alloc.free(self.entry_y);
         self.alloc.free(self.via);
         self.alloc.free(self.done);
+        self.alloc.free(self.blocked_until);
         self.level_key = 0;
     }
 
@@ -146,9 +178,9 @@ pub const Nav = struct {
             if (f == b) continue;
             const v1 = level.vertices[line.v1];
             const v2 = level.vertices[line.v2];
-            const span = .{ .x1 = units(v1.x), .y1 = units(v1.y), .x2 = units(v2.x), .y2 = units(v2.y) };
-            try portals.append(self.alloc, .{ .a = f, .b = b, .line = @intCast(i), .mx = mid[0], .my = mid[1], .x1 = span.x1, .y1 = span.y1, .x2 = span.x2, .y2 = span.y2 });
-            try portals.append(self.alloc, .{ .a = b, .b = f, .line = @intCast(i), .mx = mid[0], .my = mid[1], .x1 = span.x1, .y1 = span.y1, .x2 = span.x2, .y2 = span.y2 });
+            const ends = .{ .x1 = units(v1.x), .y1 = units(v1.y), .x2 = units(v2.x), .y2 = units(v2.y) };
+            try portals.append(self.alloc, .{ .a = f, .b = b, .line = @intCast(i), .mx = mid[0], .my = mid[1], .x1 = ends.x1, .y1 = ends.y1, .x2 = ends.x2, .y2 = ends.y2 });
+            try portals.append(self.alloc, .{ .a = b, .b = f, .line = @intCast(i), .mx = mid[0], .my = mid[1], .x1 = ends.x1, .y1 = ends.y1, .x2 = ends.x2, .y2 = ends.y2 });
         }
         self.portals = try portals.toOwnedSlice(self.alloc);
         self.exits = try exits.toOwnedSlice(self.alloc);
@@ -159,6 +191,8 @@ pub const Nav = struct {
         self.entry_y = try self.alloc.alloc(f64, n);
         self.via = try self.alloc.alloc(i32, n);
         self.done = try self.alloc.alloc(bool, n);
+        self.blocked_until = try self.alloc.alloc(u32, self.portals.len);
+        @memset(self.blocked_until, 0);
         self.goal = null;
         self.level_key = key;
     }
@@ -169,7 +203,9 @@ pub const Nav = struct {
         if (sectorOf(level, pmo)) |s| self.visited[s] = true;
     }
 
-    pub fn plan(self: *Nav, level: *const Level, pmo: *const MapObject) ?Plan {
+    /// Dijkstra over the portal graph from where `pmo` stands. Returns the
+    /// start sector; distances and `via` chains are left in place.
+    fn search(self: *Nav, level: *const Level, pmo: *const MapObject) ?usize {
         self.ensure(level) catch return null;
         const start = sectorOf(level, pmo) orelse return null;
         self.visited[start] = true;
@@ -193,6 +229,7 @@ pub const Nav = struct {
             self.done[cur] = true;
             for (self.portals, 0..) |p, pi| {
                 if (p.a != cur or self.done[p.b]) continue;
+                if (self.blocked_until[pi] > self.now) continue;
                 const step = passCost(level, p) orelse continue;
                 const d = self.dist[cur] + std.math.hypot(p.mx - self.entry_x[cur], p.my - self.entry_y[cur]) + step;
                 if (d < self.dist[p.b]) {
@@ -203,27 +240,13 @@ pub const Nav = struct {
                 }
             }
         }
+        return start;
+    }
 
-        var seen: usize = 0;
-        var nearest: ?usize = null;
-        for (0..n) |s| {
-            if (self.visited[s]) {
-                seen += 1;
-                continue;
-            }
-            if (self.dist[s] == std.math.inf(f64)) continue;
-            if (nearest == null or self.dist[s] < self.dist[nearest.?]) nearest = s;
-        }
-        // Keep the current goal while it is still unvisited and reachable;
-        // switch only for one less than half as far.
-        if (self.goal) |g| {
-            const live = g < n and !self.visited[g] and self.dist[g] != std.math.inf(f64);
-            if (!live) self.goal = null;
-        }
-        if (nearest) |near| {
-            if (self.goal == null or self.dist[near] < 0.5 * self.dist[self.goal.?]) self.goal = near;
-        }
-        const explore_target = self.goal;
+    pub fn plan(self: *Nav, level: *const Level, pmo: *const MapObject) ?Plan {
+        const start = self.search(level, pmo) orelse return null;
+        const n = level.sectors.len;
+        const explore_target = self.exploreGoal(n);
 
         var exit_wp: ?Waypoint = null;
         for (self.exits) |e| {
@@ -235,6 +258,8 @@ pub const Nav = struct {
             exit_wp = wp;
         }
 
+        var seen: usize = 0;
+        for (self.visited) |v| seen += @intFromBool(v);
         return .{
             .explore = if (explore_target) |t|
                 self.waypoint(level, start, t, self.entry_x[t], self.entry_y[t], self.dist[t])
@@ -244,6 +269,145 @@ pub const Nav = struct {
             .seen = seen,
             .sectors = n,
         };
+    }
+
+    /// The sticky explore goal after a `search`: the nearest unvisited
+    /// reachable sector, kept until reached or cut off unless a new one is
+    /// under half as far.
+    fn exploreGoal(self: *Nav, n: usize) ?usize {
+        var nearest: ?usize = null;
+        for (0..n) |s| {
+            if (self.visited[s] or self.dist[s] == std.math.inf(f64)) continue;
+            if (nearest == null or self.dist[s] < self.dist[nearest.?]) nearest = s;
+        }
+        if (self.goal) |g| {
+            const live = g < n and !self.visited[g] and self.dist[g] != std.math.inf(f64);
+            if (!live) self.goal = null;
+        }
+        if (nearest) |near| {
+            if (self.goal == null or self.dist[near] < 0.5 * self.dist[self.goal.?]) self.goal = near;
+        }
+        return self.goal;
+    }
+
+    /// A whole route for the driver: the portal chain from where `pmo`
+    /// stands to the goal, as funnel spans narrowed by the player's radius,
+    /// plus the end point. `portals` receives the chain's portal indices.
+    pub fn route(
+        self: *Nav,
+        level: *const Level,
+        pmo: *const MapObject,
+        goal: Goal,
+        spans: []funnel.Span,
+        portals: []u32,
+    ) ?Route {
+        const start = self.search(level, pmo) orelse return null;
+        const n = level.sectors.len;
+        var target: usize = undefined;
+        var end: funnel.Point = undefined;
+        var switch_ = false;
+        var step_in = false;
+        switch (goal) {
+            .explore => {
+                target = self.exploreGoal(n) orelse return null;
+                end = .{ self.entry_x[target], self.entry_y[target] };
+                step_in = true;
+            },
+            .exit => {
+                var best: ?Exit = null;
+                var best_d = std.math.inf(f64);
+                for (self.exits) |e| {
+                    if (self.dist[e.sector] == std.math.inf(f64)) continue;
+                    const d = self.dist[e.sector] + std.math.hypot(e.mx - self.entry_x[e.sector], e.my - self.entry_y[e.sector]);
+                    if (d < best_d) {
+                        best_d = d;
+                        best = e;
+                    }
+                }
+                const e = best orelse return null;
+                target = e.sector;
+                end = .{ e.mx, e.my };
+                switch_ = e.switch_;
+            },
+            .point => |pt| {
+                target = sectorAt(level, pt[0], pt[1]) orelse return null;
+                if (self.dist[target] == std.math.inf(f64)) return null;
+                end = pt;
+            },
+        }
+
+        // The chain, target back to start, then reversed.
+        var count: usize = 0;
+        var s = target;
+        while (s != start and self.via[s] >= 0 and count < portals.len) {
+            const pi: u32 = @intCast(self.via[s]);
+            portals[count] = pi;
+            count += 1;
+            s = self.portals[pi].a;
+        }
+        if (s != start) return null;
+        std.mem.reverse(u32, portals[0..count]);
+        const n_spans = @min(count, spans.len);
+        for (portals[0..n_spans], 0..) |pi, i| spans[i] = self.span(level, pi);
+
+        if (step_in and count > 0) {
+            // Past the last doorway, into the target sector.
+            const last = self.span(level, portals[count - 1]);
+            const dx = last.right[0] - last.left[0];
+            const dy = last.right[1] - last.left[1];
+            const len = @max(std.math.hypot(dx, dy), 1e-6);
+            // Walking through, left→right points to the walker's right, so
+            // the way in is that turned 90° left.
+            end = .{ end[0] - dy / len * STEP_INSIDE, end[1] + dx / len * STEP_INSIDE };
+        }
+        return .{ .spans = n_spans, .end = end, .switch_ = switch_ };
+    }
+
+    /// A portal as a funnel span, oriented for walking from `a` to `b` and
+    /// narrowed by the player's radius at each end.
+    fn span(self: *Nav, level: *const Level, pi: u32) funnel.Span {
+        const p = self.portals[pi];
+        // The front side lies to the right of v1→v2; walking front→back,
+        // v1 is on the walker's left.
+        const from_front = level.lines[p.line].frontsector == p.a;
+        var left: funnel.Point = if (from_front) .{ p.x1, p.y1 } else .{ p.x2, p.y2 };
+        var right: funnel.Point = if (from_front) .{ p.x2, p.y2 } else .{ p.x1, p.y1 };
+        const dx = right[0] - left[0];
+        const dy = right[1] - left[1];
+        const len = std.math.hypot(dx, dy);
+        if (len <= 2 * PLAYER_RADIUS) {
+            const mid: funnel.Point = .{ p.mx, p.my };
+            return .{ .left = mid, .right = mid };
+        }
+        const ux = dx / len * PLAYER_RADIUS;
+        const uy = dy / len * PLAYER_RADIUS;
+        left = .{ left[0] + ux, left[1] + uy };
+        right = .{ right[0] - ux, right[1] - uy };
+        return .{ .left = left, .right = right };
+    }
+
+    /// Whether crossing portal `pi` means opening a closed door first.
+    pub fn portalIsClosedDoor(self: *Nav, level: *const Level, pi: u32) bool {
+        return isClosedDoor(level, self.portals[pi]);
+    }
+
+    pub fn portalMid(self: *Nav, pi: u32) funnel.Point {
+        return .{ self.portals[pi].mx, self.portals[pi].my };
+    }
+
+    /// Keep routes off portal `pi` until tic `until` (it could not be crossed).
+    pub fn block(self: *Nav, pi: u32, until: u32) void {
+        if (pi < self.blocked_until.len) self.blocked_until[pi] = until;
+    }
+
+    /// Lift every block; true when any was in force.
+    pub fn clearBlocks(self: *Nav) bool {
+        var any = false;
+        for (self.blocked_until) |*b| {
+            if (b.* > self.now) any = true;
+            b.* = 0;
+        }
+        return any;
     }
 
     /// The first hop toward `target`: walk the `via` chain back to the
@@ -273,6 +437,7 @@ fn passCost(level: *const Level, p: Portal) ?f64 {
     const step = units(to.floorheight) - units(from.floorheight);
     if (step > MAX_STEP) return null;
     var cost: f64 = 0;
+    if (step < -MAX_STEP) cost += DROP_COST;
     if (hurts(to.special)) cost += HURT_COST;
     const top = @min(units(from.ceilingheight), units(to.ceilingheight));
     const bottom = @max(units(from.floorheight), units(to.floorheight));
@@ -317,17 +482,24 @@ fn hurts(special: i16) bool {
     };
 }
 
-/// The sector `mo` stands in, located through the BSP tree (the port does
-/// not keep `subsector_id` current for moving things).
+/// The sector `mo` stands in.
 fn sectorOf(level: *const Level, mo: *const MapObject) ?usize {
+    return sectorAt(level, units(mo.x), units(mo.y));
+}
+
+/// The sector containing a map point, located through the BSP tree (the
+/// port does not keep `subsector_id` current for moving things).
+fn sectorAt(level: *const Level, x: f64, y: f64) ?usize {
+    const fx: i64 = @intFromFloat(x * 65536.0);
+    const fy: i64 = @intFromFloat(y * 65536.0);
     var ssi: usize = 0;
     if (level.num_nodes > 0) {
         var node_id: u16 = level.num_nodes - 1;
         while (node_id & defs.NF_SUBSECTOR == 0) {
             if (node_id >= level.nodes.len) return null;
             const node = &level.nodes[node_id];
-            const dx: i64 = mo.x.raw() -% node.x.raw();
-            const dy: i64 = mo.y.raw() -% node.y.raw();
+            const dx: i64 = fx - node.x.raw();
+            const dy: i64 = fy - node.y.raw();
             const left: i64 = @as(i64, node.dy.raw()) * dx;
             const right: i64 = dy * @as(i64, node.dx.raw());
             node_id = node.children[if (right < left) 0 else 1];

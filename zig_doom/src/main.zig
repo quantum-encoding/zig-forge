@@ -81,6 +81,8 @@ comptime {
     _ = @import("platform/interface.zig");
     _ = @import("agent_bridge.zig");
     _ = @import("agent_nav.zig");
+    _ = @import("agent_funnel.zig");
+    _ = @import("agent_drive.zig");
     _ = @import("platform/tui.zig");
     _ = @import("platform/null_sound.zig");
     _ = @import("platform/alsa_sound.zig");

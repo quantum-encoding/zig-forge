@@ -28,6 +28,13 @@
 //! A command lapses after `hold_tics` so a stalled agent stops the player
 //! rather than walking it into a wall forever.
 //!
+//!   go explore   |   go exit   |   go xy <x> <y>   |   go none
+//!
+//! hands locomotion to the game (agent_drive.zig): route-finding, path
+//! smoothing, speed control on corners and stairs, doors, the exit switch,
+//! and getting unstuck all happen here, every tic. While a goal is set it
+//! owns forward, turn and use; `go none` returns them to `cmd` lines.
+//!
 //!   aim <id> [fire]   |   aim xy <x> <y>   |   aim none
 //!
 //! turns toward a monster or item by the `id` a state line gave it, every
@@ -57,6 +64,7 @@ const sight = @import("play/sight.zig");
 const maputl = @import("play/maputl.zig");
 const setup = @import("play/setup.zig");
 const agent_nav = @import("agent_nav.zig");
+const agent_drive = @import("agent_drive.zig");
 const pspr = @import("play/pspr.zig");
 
 const MapObject = mobj_mod.MapObject;
@@ -97,6 +105,7 @@ pub const Bridge = struct {
     has_last: bool = false,
     tics: u32 = 0,
     nav: agent_nav.Nav,
+    drive: agent_drive.Drive = .{},
 
     /// Make stdin non-blocking: the game loop polls it every frame.
     pub fn init(alloc: std.mem.Allocator, period: u32) Bridge {
@@ -130,6 +139,21 @@ pub const Bridge = struct {
     fn parseLine(self: *Bridge, raw: []const u8) void {
         var it = std.mem.tokenizeScalar(u8, std.mem.trim(u8, raw, " \r\t"), ' ');
         const verb = it.next() orelse return;
+        if (std.mem.eql(u8, verb, "go")) {
+            const what = it.next() orelse return;
+            if (std.mem.eql(u8, what, "explore")) {
+                self.drive.setGoal(.explore);
+            } else if (std.mem.eql(u8, what, "exit")) {
+                self.drive.setGoal(.exit);
+            } else if (std.mem.eql(u8, what, "xy")) {
+                const x = std.fmt.parseFloat(f64, it.next() orelse return) catch return;
+                const y = std.fmt.parseFloat(f64, it.next() orelse return) catch return;
+                self.drive.setGoal(.{ .point = .{ x, y } });
+            } else if (std.mem.eql(u8, what, "none")) {
+                self.drive.setGoal(null);
+            }
+            return;
+        }
         if (std.mem.eql(u8, verb, "aim")) {
             const target = it.next() orelse return;
             self.aim_uid = null;
@@ -169,6 +193,14 @@ pub const Bridge = struct {
         var out = self.baseCmd();
         if (lapsed) return out;
         const pmo = game.players[game.consoleplayer].mobj orelse return out;
+        if (self.drive.goal != null and game.state == .level) {
+            if (game.level) |*lvl| {
+                var solids: [MAX_SOLIDS]Solid = undefined;
+                const n_solids = nearbySolids(pmo, &solids);
+                self.drive.steer(&self.nav, lvl, pmo, solids[0..n_solids], &out);
+                return out;
+            }
+        }
         var b: ?f64 = null;
         if (self.aim_uid) |uid| {
             if (findByUid(uid)) |target| {
@@ -249,6 +281,9 @@ pub const Bridge = struct {
             .demoscreen => "menu",
         };
         try w.print(",\"mode\":\"{s}\"", .{mode});
+        const going: []const u8 = if (self.drive.goal) |g| @tagName(g) else "none";
+        try w.print(",\"going\":\"{s}\"", .{going});
+        if (self.drive.heading()) |h| try w.print(",\"heading\":{{\"x\":{d:.0},\"y\":{d:.0}}}", .{ h[0], h[1] });
 
         const pmo = player.mobj orelse {
             try w.writeAll("}\n");
@@ -265,10 +300,10 @@ pub const Bridge = struct {
         const ammo_type = pspr.weaponinfo[@intFromEnum(weapon)].ammo;
         const ammo: i32 = if (ammo_type == .no_ammo) -1 else player.ammo[@intFromEnum(ammo_type)];
         try w.print(
-            ",\"player\":{{\"health\":{d},\"armor\":{d},\"weapon\":\"{s}\",\"ammo\":{d}," ++
+            ",\"player\":{{\"x\":{d:.0},\"y\":{d:.0},\"angle\":{d:.0},\"health\":{d},\"armor\":{d},\"weapon\":\"{s}\",\"ammo\":{d}," ++
                 "\"moved\":{d:.0},\"hurt\":{},\"kills\":{d},\"total_kills\":{d}",
             .{
-                player.health, player.armor_points,  @tagName(weapon), ammo,
+                px, py, @as(f64, @floatFromInt(pmo.angle)) / 4294967296.0 * 360.0, player.health, player.armor_points,  @tagName(weapon), ammo,
                 moved,         player.damage_count > 0, player.kill_count, game.total_kills,
             },
         );
@@ -327,14 +362,14 @@ pub const Bridge = struct {
         }
         try w.writeAll(",\"monsters\":[");
         for (monsters[0..n_monsters], 0..) |m, i| {
-            try w.print("{s}{{\"id\":\"m{x}\",\"kind\":\"{s}\",\"dist\":{d:.0},\"bearing\":{d:.1},\"health\":{d},\"targeting_me\":{}}}", .{
-                if (i == 0) "" else ",", uidOf(m.mo), kindName(m.mo.mobj_type), m.dist, m.bearing, m.mo.health, m.targeting_me,
+            try w.print("{s}{{\"id\":\"m{x}\",\"kind\":\"{s}\",\"x\":{d:.0},\"y\":{d:.0},\"dist\":{d:.0},\"bearing\":{d:.1},\"health\":{d},\"targeting_me\":{}}}", .{
+                if (i == 0) "" else ",", uidOf(m.mo), kindName(m.mo.mobj_type), toUnits(m.mo.x), toUnits(m.mo.y), m.dist, m.bearing, m.mo.health, m.targeting_me,
             });
         }
         try w.writeAll("],\"items\":[");
         for (items[0..n_items], 0..) |it, i| {
-            try w.print("{s}{{\"id\":\"i{x}\",\"kind\":\"{s}\",\"dist\":{d:.0},\"bearing\":{d:.1}}}", .{
-                if (i == 0) "" else ",", uidOf(it.mo), kindName(it.mo.mobj_type), it.dist, it.bearing,
+            try w.print("{s}{{\"id\":\"i{x}\",\"kind\":\"{s}\",\"x\":{d:.0},\"y\":{d:.0},\"dist\":{d:.0},\"bearing\":{d:.1}}}", .{
+                if (i == 0) "" else ",", uidOf(it.mo), kindName(it.mo.mobj_type), toUnits(it.mo.x), toUnits(it.mo.y), it.dist, it.bearing,
             });
         }
         var solids: [MAX_SOLIDS]Solid = undefined;
@@ -412,7 +447,7 @@ const Probe = struct { dist: f64, door: bool, thing: bool = false };
 
 /// A solid map object near the player, as a circle the player's own
 /// radius cannot enter.
-const Solid = struct { x: f64, y: f64, r: f64 };
+const Solid = agent_drive.Obstacle;
 const MAX_SOLIDS = 48;
 const SOLID_RANGE: f64 = 512;
 const PLAYER_RADIUS: f64 = 16;
