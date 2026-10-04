@@ -391,6 +391,11 @@ pub const Nav = struct {
         return isClosedDoor(level, self.portals[pi]);
     }
 
+    /// The sector a portal leads into.
+    pub fn portalTo(self: *Nav, pi: u32) u16 {
+        return self.portals[pi].b;
+    }
+
     pub fn portalMid(self: *Nav, pi: u32) funnel.Point {
         return .{ self.portals[pi].mx, self.portals[pi].my };
     }
@@ -489,7 +494,7 @@ fn sectorOf(level: *const Level, mo: *const MapObject) ?usize {
 
 /// The sector containing a map point, located through the BSP tree (the
 /// port does not keep `subsector_id` current for moving things).
-fn sectorAt(level: *const Level, x: f64, y: f64) ?usize {
+pub fn sectorAt(level: *const Level, x: f64, y: f64) ?usize {
     const fx: i64 = @intFromFloat(x * 65536.0);
     const fy: i64 = @intFromFloat(y * 65536.0);
     var ssi: usize = 0;

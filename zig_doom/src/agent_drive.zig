@@ -10,7 +10,14 @@
 //!   so a straight line between two route points can cut back through
 //!   other sectors. Each tic the driver heads for the FURTHEST upcoming
 //!   point it can really walk to in a straight line (no wall, no step or
-//!   drop over 24, enough headroom, no damaging floor), else the next one.
+//!   drop over 24, enough headroom, no damaging floor) whose sectors only
+//!   move FORWARD along the route, else the next one. Without the forward
+//!   rule a shortcut can climb back up the stair it just came down, and a
+//!   fresh plan at the top sends it down again — a loop.
+//! - Inside that, a local grid A* (agent_local) plans the real walkable
+//!   path to the furthest route point within reach, so a sector that wraps
+//!   round a stair is walked round, not climbed back over; the route
+//!   look-ahead above is the fallback when no local path exists.
 //! - Steering closes half the bearing error per tic, toward that point.
 //! - Speed drops while the corner is off to the side and before a sharp
 //!   turn, so momentum does not carry the player off a stair or a ledge.
@@ -30,6 +37,7 @@ const fixed = @import("fixed.zig");
 const defs = @import("defs.zig");
 const agent_nav = @import("agent_nav.zig");
 const funnel = @import("agent_funnel.zig");
+const agent_local = @import("agent_local.zig");
 
 const MapObject = mobj_mod.MapObject;
 
@@ -41,6 +49,15 @@ const MAX_CORNERS = 98;
 const REACH: f64 = 20;
 /// How many route points ahead the straight-walk check looks.
 const LOOKAHEAD: usize = 8;
+/// A local grid point this close counts as passed: it only marks the way,
+/// unlike a doorway that must be gone through.
+const LOCAL_REACH: f64 = 32;
+/// Tics a local path is followed before it is planned again.
+const LOCAL_TICS: u32 = 18;
+/// How many local points ahead the straight-walk check looks.
+const LOCAL_LOOKAHEAD: usize = 6;
+/// Route points tried as the local goal, furthest first.
+const LOCAL_TRIES: usize = 3;
 const MAX_STEP: f64 = 24;
 const PLAYER_HEIGHT: f64 = 56;
 const REPLAN_TICS: u32 = 7;
@@ -125,12 +142,20 @@ pub const Walls = struct {
     }
 };
 
+/// The first place `sector` appears in the route's sector order.
+fn routeIndex(order: []const u16, sector: ?usize) ?usize {
+    const s = sector orelse return null;
+    for (order, 0..) |o, i| if (o == s) return i;
+    return null;
+}
+
 /// Whether the player can walk straight from `a` to `b`, starting on a floor
 /// at height `floor`: no wall or blocking line, and at every two-sided line
 /// crossed no step up or drop over 24, at least player-height headroom, and
 /// no damaging floor beyond. Floors are followed line by line, so a stair
-/// climbed one step at a time passes.
-pub fn walkable(level: *const setup.Level, a: funnel.Point, b: funnel.Point, floor: f64) bool {
+/// climbed one step at a time passes. Every sector entered must come at or
+/// after the current one in the route's `order` (starting from index `at`).
+pub fn walkable(level: *const setup.Level, a: funnel.Point, b: funnel.Point, floor: f64, order: []const u16, at: usize) bool {
     const ex = b[0] - a[0];
     const ey = b[1] - a[1];
     var hits: [64]struct { t: f64, line: *const setup.Line, front_first: bool } = undefined;
@@ -160,10 +185,22 @@ pub fn walkable(level: *const setup.Level, a: funnel.Point, b: funnel.Point, flo
         }
     }.lt);
     var here = floor;
+    var idx = at;
     for (hits[0..n]) |h| {
         const fi = h.line.frontsector orelse return false;
         const bi = h.line.backsector orelse return false;
-        const to = &level.sectors[if (h.front_first) bi else fi];
+        const to_i = if (h.front_first) bi else fi;
+        // Forward along the route only: the entered sector must appear at
+        // or after the current position in its order.
+        var found: ?usize = null;
+        for (order[idx..], idx..) |o, k| {
+            if (o == to_i) {
+                found = k;
+                break;
+            }
+        }
+        idx = found orelse return false;
+        const to = &level.sectors[to_i];
         const other = &level.sectors[if (h.front_first) fi else bi];
         const next = units(to.floorheight);
         if (@abs(next - here) > MAX_STEP) return false;
@@ -199,6 +236,14 @@ pub const Drive = struct {
     next: usize = 1,
     portals: [MAX_SPANS]u32 = undefined,
     n_portals: usize = 0,
+    /// The route's sectors in order: where it starts, then each portal's far side.
+    order: [MAX_SPANS + 1]u16 = undefined,
+
+    local: agent_local.Path = .{},
+    local_i: usize = 1,
+    local_age: u32 = 0,
+    /// The local path ends at the route's end point.
+    local_final: bool = false,
     switch_end: bool = false,
 
     watch_x: f64 = 0,
@@ -253,18 +298,49 @@ pub const Drive = struct {
         }
 
         while (self.next < self.n_corners - 1 and dist(pos, self.corners[self.next]) < REACH) self.next += 1;
-        // Look ahead for the furthest point reachable in a straight walk.
         const floor = units(pmo.floorz);
-        var aim = self.next;
-        var j = @min(self.next + LOOKAHEAD, self.n_corners - 1);
-        while (j > self.next) : (j -= 1) {
-            if (walkable(level, pos, self.corners[j], floor)) {
-                aim = j;
-                break;
+
+        // The local walkable path, refreshed every so often or when used up.
+        if (self.local_age == 0 or self.local_i >= self.local.n) {
+            self.planLocal(level, pos, floor);
+            self.local_age = LOCAL_TICS;
+        } else self.local_age -= 1;
+
+        var target: funnel.Point = undefined;
+        var after: ?funnel.Point = null;
+        var final_leg = false;
+        if (self.local.n >= 2) {
+            while (self.local_i < self.local.n - 1 and dist(pos, self.local.pts[self.local_i]) < LOCAL_REACH) self.local_i += 1;
+            var aim = self.local_i;
+            var j = @min(self.local_i + LOCAL_LOOKAHEAD, self.local.n - 1);
+            while (j > self.local_i) : (j -= 1) {
+                if (agent_local.straightAll(level, pos, self.local.pts[j], floor)) {
+                    aim = j;
+                    break;
+                }
             }
+            self.local_i = aim;
+            target = self.local.pts[aim];
+            if (aim + 1 < self.local.n) after = self.local.pts[aim + 1];
+            final_leg = self.local_final and aim == self.local.n - 1;
+        } else {
+            // Fallback: the furthest route point a straight walk reaches
+            // while only moving forward along the route.
+            const order = self.order[0 .. self.n_portals + 1];
+            const here = routeIndex(order, agent_nav.sectorAt(level, pos[0], pos[1]));
+            var aim = self.next;
+            var j = @min(self.next + LOOKAHEAD, self.n_corners - 1);
+            while (j > self.next) : (j -= 1) {
+                if (here != null and walkable(level, pos, self.corners[j], floor, order, here.?)) {
+                    aim = j;
+                    break;
+                }
+            }
+            self.next = aim;
+            target = self.corners[aim];
+            if (aim + 1 < self.n_corners) after = self.corners[aim + 1];
+            final_leg = aim == self.n_corners - 1;
         }
-        self.next = aim;
-        const target = self.corners[self.next];
         const to_target = dist(pos, target);
         const b = bearingTo(pmo, detour(pos, target, obstacles, Walls{ .level = level }));
         cmd.angleturn = @intFromFloat(std.math.clamp(b * TURN_PER_DEG * 0.5, -1280, 1280));
@@ -280,13 +356,14 @@ pub const Drive = struct {
             fwd = 30;
         }
         // Ease off before a sharp turn at the coming corner.
-        if (self.next < self.n_corners - 1 and to_target < 96) {
-            const after = self.corners[self.next + 1];
-            const turn = angleBetween(target[0] - pos[0], target[1] - pos[1], after[0] - target[0], after[1] - target[1]);
-            if (turn > 45) fwd = @min(fwd, 25);
+        if (after) |nxt| {
+            if (to_target < 96) {
+                const turn = angleBetween(target[0] - pos[0], target[1] - pos[1], nxt[0] - target[0], nxt[1] - target[1]);
+                if (turn > 45) fwd = @min(fwd, 25);
+            }
         }
         // Arriving: do not overshoot the end point.
-        if (self.next == self.n_corners - 1 and to_target < 64) fwd = @min(fwd, 25);
+        if (final_leg and to_target < 64) fwd = @min(fwd, 25);
         cmd.forwardmove = @intCast(fwd);
 
         // Doors on the next stretch of route, and the exit switch at its end.
@@ -294,7 +371,7 @@ pub const Drive = struct {
         for (self.portals[0..@min(self.n_portals, 2)]) |pi| {
             if (nav.portalIsClosedDoor(level, pi) and dist(pos, nav.portalMid(pi)) < USE_REACH) want_use = true;
         }
-        if (self.switch_end and self.next == self.n_corners - 1 and to_target < USE_REACH) want_use = true;
+        if (self.switch_end and dist(pos, self.corners[self.n_corners - 1]) < USE_REACH) want_use = true;
         cmd.buttons &= ~@as(u8, user.BT_USE);
         if (want_use and self.since_use >= USE_EVERY) {
             cmd.buttons |= user.BT_USE;
@@ -309,6 +386,7 @@ pub const Drive = struct {
                 self.backoff = BACKOFF_TICS;
                 self.back_side = -self.back_side;
                 self.replan_in = 0;
+                self.local_age = 0;
             }
             self.watch_x = pos[0];
             self.watch_y = pos[1];
@@ -330,13 +408,39 @@ pub const Drive = struct {
         };
         self.n_portals = r.spans;
         self.switch_end = r.switch_;
+        self.order[0] = @intCast(agent_nav.sectorAt(level, pos[0], pos[1]) orelse 0);
+        for (self.portals[0..r.spans], 0..) |pi, i| self.order[i + 1] = nav.portalTo(pi);
         self.n_corners = funnel.crossings(pos, spans[0..r.spans], r.end, &self.corners);
+        self.local_age = 0;
         self.next = 1;
     }
 
-    /// Where the route currently heads, for the state line.
+    /// Plan the local path toward the furthest route point in reach that
+    /// has one, trying a few, furthest first.
+    fn planLocal(self: *Drive, level: *const setup.Level, pos: funnel.Point, floor: f64) void {
+        self.local.n = 0;
+        self.local_i = 1;
+        if (self.n_corners < 2) return;
+        var tries: usize = 0;
+        var j = self.n_corners - 1;
+        while (j >= self.next and tries < LOCAL_TRIES) : (j -= 1) {
+            const g = self.corners[j];
+            if (@abs(g[0] - pos[0]) < 960 and @abs(g[1] - pos[1]) < 960) {
+                tries += 1;
+                if (agent_local.plan(level, pos, floor, g, &self.local)) {
+                    self.local_final = j == self.n_corners - 1;
+                    return;
+                }
+            }
+            if (j == 0) break;
+        }
+        self.local.n = 0;
+    }
+
+    /// Where the driver currently heads, for the state line.
     pub fn heading(self: *const Drive) ?funnel.Point {
         if (self.goal == null or self.n_corners < 2) return null;
+        if (self.local.n >= 2) return self.local.pts[@min(self.local_i, self.local.n - 1)];
         return self.corners[@min(self.next, self.n_corners - 1)];
     }
 };
