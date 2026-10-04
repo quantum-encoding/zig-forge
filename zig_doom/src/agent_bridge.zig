@@ -6,7 +6,9 @@
 //! Out, every `period` tics: one JSON line (it always starts with `{"t":`)
 //! describing what the player can perceive — vitals, weapon and ammo, the
 //! monsters and pickups in line of sight with their distance and bearing,
-//! and whether the last command actually moved the player. Bearings are
+//! how far the player can walk at five bearings before something blocks it
+//! (and whether that something is a door), and whether the last command
+//! actually moved the player. Bearings are
 //! degrees relative to where the player faces, positive to the LEFT, the
 //! same sense as a positive turn.
 //!
@@ -36,6 +38,7 @@ const tick = @import("play/tick.zig");
 const mobj_mod = @import("play/mobj.zig");
 const sight = @import("play/sight.zig");
 const maputl = @import("play/maputl.zig");
+const setup = @import("play/setup.zig");
 const pspr = @import("play/pspr.zig");
 
 const MapObject = mobj_mod.MapObject;
@@ -45,6 +48,12 @@ const MONSTER_RANGE: f64 = 2048;
 const ITEM_RANGE: f64 = 1024;
 const MAX_MONSTERS = 6;
 const MAX_ITEMS = 5;
+/// Bearings the walk probes are cast at, degrees, positive = left.
+const PROBE_BEARINGS = [_]f64{ 60, 30, 0, -30, -60 };
+const PROBE_RANGE: f64 = 1024;
+/// The player is 56 units tall and steps up at most 24.
+const PLAYER_HEIGHT: f64 = 56;
+const MAX_STEP: f64 = 24;
 
 pub const Bridge = struct {
     /// Tics between state lines (35 tics = 1 s).
@@ -240,10 +249,61 @@ pub const Bridge = struct {
                 if (i == 0) "" else ",", i, kindName(it.mo.mobj_type), it.dist, it.bearing,
             });
         }
+        try w.writeAll("],\"walls\":[");
+        if (level_ptr) |lvl| {
+            for (PROBE_BEARINGS, 0..) |b, i| {
+                const hit = probe(lvl, pmo, b);
+                try w.print("{s}{{\"bearing\":{d:.0},\"clear\":{d:.0},\"door\":{}}}", .{
+                    if (i == 0) "" else ",", b, hit.dist, hit.door,
+                });
+            }
+        }
         try w.writeAll("]}\n");
         return w.buffered();
     }
 };
+
+const Probe = struct { dist: f64, door: bool };
+
+/// How far the player could walk from where it stands along `rel_deg`
+/// before a line stops it: one-sided walls, lines flagged blocking, and
+/// two-sided lines whose opening is too low or whose step is too high (a
+/// closed door is the last kind, and carries a special — reported as a door).
+fn probe(level: *const setup.Level, from: *const MapObject, rel_deg: f64) Probe {
+    const ox = toUnits(from.x);
+    const oy = toUnits(from.y);
+    const facing = @as(f64, @floatFromInt(from.angle)) / 4294967296.0 * 2.0 * std.math.pi;
+    const a = facing + rel_deg * std.math.pi / 180.0;
+    const dx = @cos(a);
+    const dy = @sin(a);
+    const floor = toUnits(from.floorz);
+    var best = Probe{ .dist = PROBE_RANGE, .door = false };
+    for (level.lines) |*line| {
+        const v1 = level.vertices[line.v1];
+        const v2 = level.vertices[line.v2];
+        const ax = toUnits(v1.x);
+        const ay = toUnits(v1.y);
+        const ex = toUnits(v2.x) - ax;
+        const ey = toUnits(v2.y) - ay;
+        // Solve origin + t·dir = v1 + u·edge.
+        const den = dx * ey - dy * ex;
+        if (@abs(den) < 1e-9) continue;
+        const t = ((ax - ox) * ey - (ay - oy) * ex) / den;
+        const u = ((ax - ox) * dy - (ay - oy) * dx) / den;
+        if (t <= 1 or t >= best.dist or u < 0 or u > 1) continue;
+        if (!blocks(level, line, floor)) continue;
+        best = .{ .dist = t, .door = line.special != 0 };
+    }
+    return best;
+}
+
+fn blocks(level: *const setup.Level, line: *const setup.Line, floor: f64) bool {
+    if (line.sidenum[1] < 0) return true;
+    if (line.flags & defs.ML_BLOCKING != 0) return true;
+    const open = maputl.lineOpening(line, level.sectors) orelse return true;
+    if (toUnits(open.range) < PLAYER_HEIGHT) return true;
+    return toUnits(open.bottom) - floor > MAX_STEP;
+}
 
 const Seen = struct {
     mo: *MapObject,
