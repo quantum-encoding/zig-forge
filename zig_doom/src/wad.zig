@@ -111,6 +111,30 @@ pub const Wad = struct {
         };
     }
 
+    /// Load a PWAD over this WAD: its lumps are appended after the
+    /// existing ones, and since lookups search from the end, a PWAD's lump
+    /// (a whole map, a texture) replaces the same-named one beneath it.
+    pub fn merge(self: *Wad, path: []const u8) WadError!void {
+        var add = try Wad.open(path, self.allocator);
+        defer add.close();
+        const base = self.data.len;
+        const data = self.allocator.alloc(u8, base + add.data.len) catch return WadError.OutOfMemory;
+        @memcpy(data[0..base], self.data);
+        @memcpy(data[base..], add.data);
+        const lumps = self.allocator.alloc(LumpInfo, self.lumps.len + add.lumps.len) catch {
+            self.allocator.free(data);
+            return WadError.OutOfMemory;
+        };
+        @memcpy(lumps[0..self.lumps.len], self.lumps);
+        for (add.lumps, 0..) |l, i| {
+            lumps[self.lumps.len + i] = .{ .name = l.name, .filepos = l.filepos + @as(u32, @intCast(base)), .size = l.size };
+        }
+        self.allocator.free(self.data);
+        self.allocator.free(self.lumps);
+        self.data = data;
+        self.lumps = lumps;
+    }
+
     pub fn close(self: *Wad) void {
         self.allocator.free(self.lumps);
         self.allocator.free(self.data);

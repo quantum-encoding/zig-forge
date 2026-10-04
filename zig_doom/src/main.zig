@@ -160,6 +160,8 @@ pub fn main(init: std.process.Init) !void {
     var opt_episode: ?u8 = null;
     var opt_warp: ?[]const u8 = null;
     var opt_agent: ?u32 = null;
+    var pwads: [8][]const u8 = undefined;
+    var n_pwads: usize = 0;
     var demo_name: ?[]const u8 = null;
     var dump_every: u32 = 0; // --dump-frames N: write frame_NNNNN.ppm every N tics during --playdemo
     var view_override: ?ViewOverride = null; // --view x,y,deg for --render-frame
@@ -175,8 +177,12 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--iwad")) {
             iwad_path = args.next();
         } else if (std.mem.eql(u8, arg, "--file")) {
-            // PWAD loading stub — skip the argument
-            _ = args.next();
+            if (args.next()) |f| {
+                if (n_pwads < pwads.len) {
+                    pwads[n_pwads] = f;
+                    n_pwads += 1;
+                }
+            }
         } else if (std.mem.eql(u8, arg, "--dump-lumps")) {
             command = .dump_lumps;
         } else if (std.mem.eql(u8, arg, "--dump-map")) {
@@ -274,6 +280,17 @@ pub fn main(init: std.process.Init) !void {
         return;
     };
     defer w.close();
+    for (pwads[0..n_pwads]) |pw| {
+        try writeStr("Loading PWAD: ");
+        try writeStr(pw);
+        try writeStr("\n");
+        w.merge(pw) catch |err| {
+            try writeStr("Error loading PWAD: ");
+            try writeStr(@errorName(err));
+            try writeStr("\n");
+            return;
+        };
+    }
 
     // Print WAD info
     var buf: [256]u8 = undefined;
