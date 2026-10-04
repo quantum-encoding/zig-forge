@@ -80,6 +80,7 @@ comptime {
     // Phase 6: Platform Backends
     _ = @import("platform/interface.zig");
     _ = @import("agent_bridge.zig");
+    _ = @import("agent_nav.zig");
     _ = @import("platform/tui.zig");
     _ = @import("platform/null_sound.zig");
     _ = @import("platform/alsa_sound.zig");
@@ -376,7 +377,8 @@ fn runCmd(w: *wad.Wad, platform_name: []const u8, alloc: std.mem.Allocator, opt_
     // Main game loop
     var gametic: u32 = 0;
     var event_buf: [64]event_mod.Event = undefined;
-    var bridge: ?agent_bridge.Bridge = if (opt_agent) |p| agent_bridge.Bridge.init(p) else null;
+    var bridge: ?agent_bridge.Bridge = if (opt_agent) |p| agent_bridge.Bridge.init(alloc, p) else null;
+    defer if (bridge) |*b| b.deinit();
 
     while (!platform.isQuitRequested(platform.impl)) {
         // 1. Pump input events

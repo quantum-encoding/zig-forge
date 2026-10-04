@@ -7,8 +7,11 @@
 //! describing what the player can perceive — vitals, weapon and ammo, the
 //! monsters and pickups in line of sight with their distance and bearing,
 //! how far the player can walk at five bearings before something blocks it
-//! (and whether that something is a door), and whether the last command
-//! actually moved the player. Bearings are
+//! (and whether that something is a door, or a solid thing such as a barrel
+//! or pillar that can be walked around), whether the last command
+//! actually moved the player, and `nav`: the next waypoint toward the
+//! nearest unexplored part of the level and toward the exit (see
+//! agent_nav.zig). Bearings are
 //! degrees relative to where the player faces, positive to the LEFT, the
 //! same sense as a positive turn.
 //!
@@ -20,6 +23,8 @@
 //! forward/side -50..50 (50 = run; side positive = strafe right), turn
 //! -1280..1280 angleturn units per tic (positive = left), buttons 1 = fire
 //! and 2 = use, weapon a WeaponType index (0 fist … 7 chainsaw) to switch to.
+//! Use and a weapon switch act once per command line: DOOM fires use on
+//! the press, so holding it across tics would make every later press a no-op.
 //! A command lapses after `hold_tics` so a stalled agent stops the player
 //! rather than walking it into a wall forever.
 
@@ -39,6 +44,7 @@ const mobj_mod = @import("play/mobj.zig");
 const sight = @import("play/sight.zig");
 const maputl = @import("play/maputl.zig");
 const setup = @import("play/setup.zig");
+const agent_nav = @import("agent_nav.zig");
 const pspr = @import("play/pspr.zig");
 
 const MapObject = mobj_mod.MapObject;
@@ -63,6 +69,8 @@ pub const Bridge = struct {
 
     cmd: user.TicCmd = .{},
     weapon_pending: ?u8 = null,
+    /// Use rides the first tic of a command only, as a fresh press.
+    press_use: bool = false,
     cmd_age: u32 = 0,
     use_pending: bool = false,
 
@@ -73,12 +81,17 @@ pub const Bridge = struct {
     last_y: f64 = 0,
     has_last: bool = false,
     tics: u32 = 0,
+    nav: agent_nav.Nav,
 
     /// Make stdin non-blocking: the game loop polls it every frame.
-    pub fn init(period: u32) Bridge {
+    pub fn init(alloc: std.mem.Allocator, period: u32) Bridge {
         const flags = c.fcntl(0, c.F_GETFL, @as(c_int, 0));
         if (flags >= 0) _ = c.fcntl(0, c.F_SETFL, flags | c.O_NONBLOCK);
-        return .{ .period = if (period == 0) 7 else period };
+        return .{ .period = if (period == 0) 7 else period, .nav = agent_nav.Nav.init(alloc) };
+    }
+
+    pub fn deinit(self: *Bridge) void {
+        self.nav.deinit();
     }
 
     /// Read whatever commands have arrived; the last complete one wins.
@@ -112,8 +125,9 @@ pub const Bridge = struct {
             .forwardmove = @intCast(fwd),
             .sidemove = @intCast(side),
             .angleturn = @intCast(turn),
-            .buttons = @intCast(buttons),
+            .buttons = @as(u8, @intCast(buttons)) & ~@as(u8, user.BT_USE),
         };
+        self.press_use = buttons & user.BT_USE != 0;
         self.weapon_pending = if (weapon) |w| @intCast(w) else null;
         self.use_pending = buttons & user.BT_USE != 0;
         self.cmd_age = 0;
@@ -125,6 +139,10 @@ pub const Bridge = struct {
         if (self.cmd_age >= self.hold_tics) return .{};
         self.cmd_age += 1;
         var out = self.cmd;
+        if (self.press_use) {
+            out.buttons |= user.BT_USE;
+            self.press_use = false;
+        }
         if (self.weapon_pending) |w| {
             out.buttons |= user.BT_CHANGE | (w << user.BT_WEAPONSHIFT);
             self.weapon_pending = null;
@@ -142,6 +160,11 @@ pub const Bridge = struct {
     /// Called once per game tic; writes a state line every `period` tics.
     pub fn afterTic(self: *Bridge, game: *game_mod.Game) void {
         self.tics += 1;
+        if (game.state == .level) {
+            if (game.level) |*lvl| {
+                if (game.players[game.consoleplayer].mobj) |pmo| self.nav.markVisited(lvl, pmo);
+            }
+        }
         if (self.tics % self.period != 0) return;
         var buf: [8192]u8 = undefined;
         const text = self.formatState(game, &buf) catch return;
@@ -249,27 +272,111 @@ pub const Bridge = struct {
                 if (i == 0) "" else ",", i, kindName(it.mo.mobj_type), it.dist, it.bearing,
             });
         }
+        var solids: [MAX_SOLIDS]Solid = undefined;
+        const n_solids = nearbySolids(pmo, &solids);
         try w.writeAll("],\"walls\":[");
         if (level_ptr) |lvl| {
             for (PROBE_BEARINGS, 0..) |b, i| {
-                const hit = probe(lvl, pmo, b);
-                try w.print("{s}{{\"bearing\":{d:.0},\"clear\":{d:.0},\"door\":{}}}", .{
-                    if (i == 0) "" else ",", b, hit.dist, hit.door,
+                const hit = probe(lvl, pmo, b, solids[0..n_solids]);
+                try w.print("{s}{{\"bearing\":{d:.0},\"clear\":{d:.0},\"door\":{},\"thing\":{}}}", .{
+                    if (i == 0) "" else ",", b, hit.dist, hit.door, hit.thing,
                 });
             }
         }
-        try w.writeAll("]}\n");
+        try w.writeAll("]");
+        if (level_ptr) |lvl| {
+            if (self.nav.plan(lvl, pmo)) |plan| {
+                try w.print(",\"nav\":{{\"seen\":{d},\"sectors\":{d}", .{ plan.seen, plan.sectors });
+                inline for (.{ "explore", "exit" }) |name| {
+                    if (@field(plan, name)) |route| {
+                        const wp = clearAim(lvl, pmo, route, solids[0..n_solids]);
+                        try w.print(",\"" ++ name ++ "\":{{\"bearing\":{d:.1},\"hop\":{d:.0},\"dist\":{d:.0},\"door\":{},\"switch\":{}}}", .{
+                            bearingTo(pmo, wp.x, wp.y),
+                            std.math.hypot(wp.x - px, wp.y - py),
+                            wp.dist,
+                            wp.door,
+                            wp.switch_,
+                        });
+                    }
+                }
+                try w.writeAll("}");
+            }
+        }
+        try w.writeAll("}\n");
         return w.buffered();
     }
 };
 
-const Probe = struct { dist: f64, door: bool };
+/// The point along the waypoint's portal span to head for: the one nearest
+/// the midpoint that a straight walk reaches without hitting a wall or a
+/// solid thing — so a barrel in the middle of a doorway is walked round,
+/// not pushed against. The midpoint when no sample is clear.
+fn clearAim(level: *const setup.Level, pmo: *const MapObject, wp: agent_nav.Waypoint, solids: []const Solid) agent_nav.Waypoint {
+    const fractions = [_]f64{ 0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8 };
+    const px = toUnits(pmo.x);
+    const py = toUnits(pmo.y);
+    for (fractions) |f| {
+        const x = wp.x1 + (wp.x2 - wp.x1) * f;
+        const y = wp.y1 + (wp.y2 - wp.y1) * f;
+        const want = std.math.hypot(x - px, y - py);
+        if (want < 1) return wp;
+        const hit = probe(level, pmo, bearingTo(pmo, x, y), solids);
+        // The portal line itself is the far end; reaching it is enough.
+        if (hit.dist >= want - 2) {
+            var out = wp;
+            out.x = x;
+            out.y = y;
+            return out;
+        }
+    }
+    return wp;
+}
+
+/// Degrees from where `from` faces to the point (x, y), positive = left.
+fn bearingTo(from: *const MapObject, x: f64, y: f64) f64 {
+    const facing = @as(f64, @floatFromInt(from.angle)) / 4294967296.0 * 360.0;
+    var d = std.math.atan2(y - toUnits(from.y), x - toUnits(from.x)) * 180.0 / std.math.pi - facing;
+    while (d > 180) d -= 360;
+    while (d < -180) d += 360;
+    return d;
+}
+
+const Probe = struct { dist: f64, door: bool, thing: bool = false };
+
+/// A solid map object near the player, as a circle the player's own
+/// radius cannot enter.
+const Solid = struct { x: f64, y: f64, r: f64 };
+const MAX_SOLIDS = 48;
+const SOLID_RANGE: f64 = 512;
+const PLAYER_RADIUS: f64 = 16;
+
+fn nearbySolids(pmo: *const MapObject, out: *[MAX_SOLIDS]Solid) usize {
+    const px = toUnits(pmo.x);
+    const py = toUnits(pmo.y);
+    var n: usize = 0;
+    const cap = tick.getThinkerCap();
+    var current = cap.next;
+    while (current != null and current != cap and n < out.len) {
+        const th = current.?;
+        current = th.next;
+        const func = th.function orelse continue;
+        if (func != @as(tick.ThinkFn, @ptrCast(&mobj_mod.mobjThinker))) continue;
+        const mo: *MapObject = @fieldParentPtr("thinker", th);
+        if (mo == pmo or mo.flags & info.MF_SOLID == 0) continue;
+        const x = toUnits(mo.x);
+        const y = toUnits(mo.y);
+        if (std.math.hypot(x - px, y - py) > SOLID_RANGE) continue;
+        out[n] = .{ .x = x, .y = y, .r = toUnits(mo.radius) + PLAYER_RADIUS };
+        n += 1;
+    }
+    return n;
+}
 
 /// How far the player could walk from where it stands along `rel_deg`
 /// before a line stops it: one-sided walls, lines flagged blocking, and
 /// two-sided lines whose opening is too low or whose step is too high (a
 /// closed door is the last kind, and carries a special — reported as a door).
-fn probe(level: *const setup.Level, from: *const MapObject, rel_deg: f64) Probe {
+fn probe(level: *const setup.Level, from: *const MapObject, rel_deg: f64, solids: []const Solid) Probe {
     const ox = toUnits(from.x);
     const oy = toUnits(from.y);
     const facing = @as(f64, @floatFromInt(from.angle)) / 4294967296.0 * 2.0 * std.math.pi;
@@ -293,6 +400,18 @@ fn probe(level: *const setup.Level, from: *const MapObject, rel_deg: f64) Probe 
         if (t <= 1 or t >= best.dist or u < 0 or u > 1) continue;
         if (!blocks(level, line, floor)) continue;
         best = .{ .dist = t, .door = line.special != 0 };
+    }
+    // Solid things: the first entry of the ray into each circle.
+    for (solids) |sd| {
+        const fx = sd.x - ox;
+        const fy = sd.y - oy;
+        const along = fx * dx + fy * dy;
+        if (along <= 0) continue;
+        const off2 = fx * fx + fy * fy - along * along;
+        const r2 = sd.r * sd.r;
+        if (off2 > r2) continue;
+        const t = @max(along - @sqrt(r2 - off2), 0);
+        if (t < best.dist) best = .{ .dist = t, .door = false, .thing = true };
     }
     return best;
 }
@@ -409,7 +528,7 @@ fn writeAll(bytes: []const u8) void {
 }
 
 test "commands parse, clamp, and lapse" {
-    var b = Bridge{ .hold_tics = 2 };
+    var b = Bridge{ .hold_tics = 2, .nav = agent_nav.Nav.init(std.testing.allocator) };
     b.parseLine("cmd 50 -10 900 1 2");
     var t = b.ticCmd();
     try std.testing.expectEqual(@as(i8, 50), t.forwardmove);
@@ -419,6 +538,12 @@ test "commands parse, clamp, and lapse" {
     try std.testing.expect(t.buttons & user.BT_CHANGE != 0);
     t = b.ticCmd();
     try std.testing.expect(t.buttons & user.BT_CHANGE == 0); // one tic only
+
+    b.parseLine("cmd 0 0 0 2");
+    try std.testing.expect(b.ticCmd().buttons & user.BT_USE != 0);
+    try std.testing.expect(b.ticCmd().buttons & user.BT_USE == 0); // a press, not a hold
+    b.parseLine("cmd 0 0 0 2");
+    try std.testing.expect(b.ticCmd().buttons & user.BT_USE != 0); // each line presses again
     t = b.ticCmd();
     try std.testing.expectEqual(@as(i8, 0), t.forwardmove); // lapsed
 
