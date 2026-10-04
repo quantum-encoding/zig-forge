@@ -386,6 +386,14 @@ pub const Nav = struct {
         return .{ .left = left, .right = right };
     }
 
+    /// Whether the door at portal `pi` is at rest: no mover on either side.
+    /// A DOOM door that is moving reverses when used again, so a press while
+    /// one is opening would shut it.
+    pub fn portalDoorIdle(self: *Nav, level: *const Level, pi: u32) bool {
+        const p = self.portals[pi];
+        return level.sectors[p.a].ceilingdata == null and level.sectors[p.b].ceilingdata == null;
+    }
+
     /// Whether crossing portal `pi` means opening a closed door first.
     pub fn portalIsClosedDoor(self: *Nav, level: *const Level, pi: u32) bool {
         return isClosedDoor(level, self.portals[pi]);

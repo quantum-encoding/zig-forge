@@ -33,6 +33,11 @@ const MAX_STEP: f64 = 24;
 const CLEARANCE: f64 = 24;
 const PLAYER_HEIGHT: f64 = 56;
 const MAX_LINES = 1024;
+/// Reaching a cell this close to the goal counts as reaching it: route
+/// points sit ON doorway lines, and a cell on a closed door is never usable,
+/// so the last stretch (and the use press) is the driver's. It covers
+/// CLEARANCE plus a cell's half-diagonal, with margin.
+const GOAL_NEAR: f64 = 72;
 pub const MAX_POINTS = 256;
 
 /// A planned local path, start to goal.
@@ -232,11 +237,15 @@ pub fn plan(level: *const setup.Level, start: Point, floor: f64, goal: Point, ou
     var heap = Heap{};
     heap.push(.{ .f = dist(start, goal), .c = @intCast(s_cell) });
     var expansions: usize = 0;
+    var reached: ?usize = null;
     while (heap.pop()) |top| {
         const c: usize = top.c;
         if (st.closed[c]) continue;
         st.closed[c] = true;
-        if (c == g_cell) break;
+        if (c == g_cell or dist(pointOf(c, s_cell, g_cell, start, goal, ox, oy), goal) < GOAL_NEAR) {
+            reached = c;
+            break;
+        }
         expansions += 1;
         if (expansions > CELLS) break;
         const cx: i32 = @intCast(c % GRID);
@@ -274,12 +283,17 @@ pub fn plan(level: *const setup.Level, start: Point, floor: f64, goal: Point, ou
             }
         }
     }
-    if (!st.closed[g_cell]) return false;
+    const last = reached orelse return false;
 
-    // Walk back from the goal, then reverse.
+    // Walk back from the goal (the exact goal first, when the search
+    // stopped short of it), then reverse.
     var rev: [MAX_POINTS]Point = undefined;
     var m: usize = 0;
-    var c: i32 = @intCast(g_cell);
+    if (last != g_cell) {
+        rev[0] = goal;
+        m = 1;
+    }
+    var c: i32 = @intCast(last);
     while (c >= 0 and m < MAX_POINTS) {
         rev[m] = pointOf(@intCast(c), s_cell, g_cell, start, goal, ox, oy);
         m += 1;

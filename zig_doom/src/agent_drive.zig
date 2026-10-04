@@ -24,7 +24,8 @@
 //! - A solid thing (barrel, pillar, lamp) on the straight line to the next
 //!   corner is passed on its far side via a detour point: the sector graph
 //!   cannot see things, so without this the player pushes into them.
-//! - Doors on the route and the exit switch at its end get a use press.
+//! - Doors on the route and the exit switch at its end get a use press —
+//!   a door only while shut and at rest, since using a moving door reverses it.
 //! - No progress for a second blocks the portal it was heading through for
 //!   a few seconds, backs off, and re-plans around it.
 
@@ -369,7 +370,7 @@ pub const Drive = struct {
         // Doors on the next stretch of route, and the exit switch at its end.
         var want_use = false;
         for (self.portals[0..@min(self.n_portals, 2)]) |pi| {
-            if (nav.portalIsClosedDoor(level, pi) and dist(pos, nav.portalMid(pi)) < USE_REACH) want_use = true;
+            if (nav.portalIsClosedDoor(level, pi) and nav.portalDoorIdle(level, pi) and dist(pos, nav.portalMid(pi)) < USE_REACH) want_use = true;
         }
         if (self.switch_end and dist(pos, self.corners[self.n_corners - 1]) < USE_REACH) want_use = true;
         cmd.buttons &= ~@as(u8, user.BT_USE);
