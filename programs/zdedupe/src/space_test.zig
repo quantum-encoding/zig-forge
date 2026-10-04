@@ -257,6 +257,56 @@ test "children come back largest first, capped, with the remainder summed" {
     try testing.expect(s.spaceChildren("{\"node\":999999}") == null);
 }
 
+test "children page: offset passes over ranked items, group answers one cluster" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    try fx.scan();
+    const s = try fx.open(true);
+    defer s.close();
+
+    // Folder view: pages of two walk the same ranking one answer gives.
+    const whole = field(field(try parse(arena, s.spaceChildren("{\"limit\":500}")), "groups").array.items[0], "items").array.items;
+    const page = field(try parse(arena, s.spaceChildren("{\"limit\":2,\"offset\":2}")), "groups").array.items[0];
+    const page_items = field(page, "items").array.items;
+    try testing.expectEqual(@as(usize, 2), page_items.len);
+    try testing.expectEqualStrings(str(whole[2], "name"), str(page_items[0], "name"));
+    try testing.expectEqualStrings(str(whole[3], "name"), str(page_items[1], "name"));
+    // The rest is what follows the page.
+    try testing.expectEqual(@as(i64, 2), int(field(page, "rest"), "count"));
+    try testing.expectEqual(int(whole[4], "bytes") + int(whole[5], "bytes"), int(field(page, "rest"), "bytes"));
+    // Past the end: nothing listed, nothing left.
+    const past = field(try parse(arena, s.spaceChildren("{\"offset\":99}")), "groups").array.items[0];
+    try testing.expectEqual(@as(usize, 0), field(past, "items").array.items.len);
+    try testing.expectEqual(@as(i64, 0), int(field(past, "rest"), "count"));
+
+    // Size view, one band: every file is under 1 MB, so the band holds all nine.
+    const band_all = try parse(arena, s.spaceChildren("{\"by\":\"size\",\"group\":\"under_1m\",\"per_group\":200}"));
+    const ranked = field(field(band_all, "groups").array.items[0], "items").array.items;
+    try testing.expectEqual(@as(usize, 9), ranked.len);
+    const band_page = try parse(arena, s.spaceChildren("{\"by\":\"size\",\"group\":\"under_1m\",\"per_group\":3,\"offset\":3}"));
+    const groups = field(band_page, "groups").array.items;
+    try testing.expectEqual(@as(usize, 1), groups.len);
+    const band_items = field(groups[0], "items").array.items;
+    try testing.expectEqual(@as(usize, 3), band_items.len);
+    for (band_items, 0..) |item, i| try testing.expectEqual(int(ranked[3 + i], "id"), int(item, "id"));
+    try testing.expectEqual(@as(i64, 3), int(field(groups[0], "rest"), "count"));
+
+    // Type view, one type; an unknown key answers no groups.
+    const docs = try parse(arena, s.spaceChildren("{\"by\":\"type\",\"group\":\"documents\",\"offset\":1}"));
+    const doc_groups = field(docs, "groups").array.items;
+    try testing.expectEqual(@as(usize, 1), doc_groups.len);
+    try testing.expectEqualStrings("documents", str(doc_groups[0], "key"));
+    try testing.expectEqual(@as(i64, 2), int(doc_groups[0], "files"));
+    try testing.expectEqual(@as(usize, 1), field(doc_groups[0], "items").array.items.len);
+    try testing.expectEqualStrings("notes.txt", str(field(doc_groups[0], "items").array.items[0], "name"));
+    const none = try parse(arena, s.spaceChildren("{\"by\":\"type\",\"group\":\"nope\"}"));
+    try testing.expectEqual(@as(usize, 0), field(none, "groups").array.items.len);
+}
+
 test "largest files and folders; wrappers left out" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

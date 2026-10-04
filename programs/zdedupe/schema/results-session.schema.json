@@ -856,7 +856,9 @@
         "limit": { "type": "integer", "minimum": 0, "maximum": 500, "default": 150, "description": "Clamped to 500." },
         "per_group": { "type": "integer", "minimum": 0, "maximum": 200, "default": 40, "description": "Clamped to 200." },
         "depth": { "type": "integer", "minimum": 0, "maximum": 255, "default": 1, "description": "Folder view only: levels of subfolders nested inside each folder item, for a map that draws folders inside folders. 1 = none; clamped to 1..3." },
-        "nested_limit": { "type": "integer", "minimum": 0, "maximum": 60, "default": 16, "description": "Items listed inside each nested folder; clamped to 60. One answer carries at most 3000 nested items in all; past that, folder items come back without children." }
+        "nested_limit": { "type": "integer", "minimum": 0, "maximum": 60, "default": 16, "description": "Items listed inside each nested folder; clamped to 60. One answer carries at most 3000 nested items in all; past that, folder items come back without children." },
+        "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Ranked items to pass over before listing: the folder view's merged list, or each group's files in the type and size views. Pages through what a rest holds; rest then counts what follows the page." },
+        "group": { "type": ["string", "null"], "default": null, "description": "Type and size views: answer only the group with this key (a SpaceType or a size band). Null answers every group; an unknown key answers none." }
       }
     },
 

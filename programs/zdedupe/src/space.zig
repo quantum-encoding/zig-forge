@@ -1485,6 +1485,13 @@ pub const ChildrenQuery = struct {
     depth: u8 = 1,
     /// Items listed inside each nested folder; clamped to `max_nested`.
     nested_limit: usize = 16,
+    /// Ranked items to skip before listing: the folder view's merged list,
+    /// or each group's files in the type and size views. Pages through what
+    /// a "N more" left out; `rest` is then what follows the page.
+    offset: usize = 0,
+    /// Type and size views: answer only the group with this key (a type or a
+    /// size band); null answers every group.
+    group: ?[]const u8 = null,
 };
 
 pub const LargestKind = enum { files, folders };
@@ -1593,6 +1600,11 @@ pub const size_bands = [_]struct { key: []const u8, min: u64 }{
     .{ .key = "1m_10m", .min = 1 << 20 },
     .{ .key = "under_1m", .min = 0 },
 };
+
+/// A group's key in the type and size views.
+fn bandKey(by: By, band: usize) []const u8 {
+    return if (by == .type) @tagName(@as(Category, @enumFromInt(band))) else size_bands[band].key;
+}
 
 fn bandOf(bytes: u64) usize {
     for (size_bands, 0..) |band, i| {
@@ -1909,8 +1921,9 @@ pub const View = struct {
                 @min(query.limit, max_children),
                 std.math.clamp(query.depth, 1, max_depth),
                 @min(query.nested_limit, max_nested),
+                query.offset,
             ),
-            .type, .size => try self.bandGroups(json, &s, query.by, @min(query.per_group, max_per_group)),
+            .type, .size => try self.bandGroups(json, &s, query.by, @min(query.per_group, max_per_group), query.offset, query.group),
         }
         try json.endArray();
         try json.endObject();
@@ -1919,7 +1932,7 @@ pub const View = struct {
     const Item = struct { bytes: u64, kind: enum { dir, file }, id: u64 };
 
     /// The folder view's one group: what is directly inside, largest first.
-    fn folderGroup(self: *const View, json: *std.json.Stringify, s: *const Scope, limit: usize, depth: u8, nested_limit: usize) !void {
+    fn folderGroup(self: *const View, json: *std.json.Stringify, s: *const Scope, limit: usize, depth: u8, nested_limit: usize, offset: usize) !void {
         var budget: usize = nested_budget;
         try json.beginObject();
         try json.objectField("key");
@@ -1930,13 +1943,13 @@ pub const View = struct {
         try json.write(s.agg.files);
         try json.objectField("items");
         try json.beginArray();
-        const done = try self.writeMerged(json, s, limit, .{ .depth = depth, .limit = nested_limit, .budget = &budget });
+        const done = try self.writeMergedFrom(json, s, offset, limit, .{ .depth = depth, .limit = nested_limit, .budget = &budget });
         try json.endArray();
-        try writeRest(json, done.total - done.shown, s.agg.bytes -| done.shown_bytes);
+        try writeRest(json, done.total - done.skipped - done.shown, s.agg.bytes -| done.skipped_bytes -| done.shown_bytes);
         try json.endObject();
     }
 
-    const Merged = struct { shown: u64, shown_bytes: u64, total: u64 };
+    const Merged = struct { shown: u64, shown_bytes: u64, total: u64, skipped: u64 = 0, skipped_bytes: u64 = 0 };
 
     /// Subfolders and files directly inside the scope, merged largest first,
     /// `limit` of them, as array elements. Files are already stored largest
@@ -1944,6 +1957,11 @@ pub const View = struct {
     /// own children while `nest` has depth and budget left; each nested list
     /// spends its limit from the budget.
     fn writeMerged(self: *const View, json: *std.json.Stringify, s: *const Scope, limit: usize, nest: Nest) anyerror!Merged {
+        return self.writeMergedFrom(json, s, 0, limit, nest);
+    }
+
+    /// `writeMerged` after passing over the first `offset` items unwritten.
+    fn writeMergedFrom(self: *const View, json: *std.json.Stringify, s: *const Scope, offset: usize, limit: usize, nest: Nest) anyerror!Merged {
         var subdirs: std.ArrayListUnmanaged(Item) = .empty;
         var c: u32 = if (s.dir) |d| d + 1 else 0;
         while (c < s.dir_end) {
@@ -1972,6 +1990,8 @@ pub const View = struct {
 
         var shown: u64 = 0;
         var shown_bytes: u64 = 0;
+        var skipped: u64 = 0;
+        var skipped_bytes: u64 = 0;
         var next_dir: usize = 0;
         var next_file = files.next();
         var next_file_rec: ?FileRecord = if (next_file) |f| try self.r.file(f) else null;
@@ -1979,33 +1999,50 @@ pub const View = struct {
             const dir_item: ?Item = if (next_dir < subdirs.items.len) subdirs.items[next_dir] else null;
             if (dir_item == null and next_file_rec == null) break;
             const take_dir = if (dir_item) |di| (next_file_rec == null or di.bytes >= next_file_rec.?.bytes) else false;
+            const listing = skipped >= offset;
             if (take_dir) {
                 const item = dir_item.?;
-                const id: u32 = @intCast(item.id);
-                const rec = try self.r.dir(id);
-                try self.writeDirNested(json, id, &rec, self.dirAgg(id, &rec), nest);
-                shown_bytes +|= item.bytes;
+                if (listing) {
+                    const id: u32 = @intCast(item.id);
+                    const rec = try self.r.dir(id);
+                    try self.writeDirNested(json, id, &rec, self.dirAgg(id, &rec), nest);
+                    shown_bytes +|= item.bytes;
+                } else skipped_bytes +|= item.bytes;
                 next_dir += 1;
             } else {
                 const rec = next_file_rec.?;
-                try self.writeFile(json, next_file.?, &rec);
-                shown_bytes +|= rec.bytes;
+                if (listing) {
+                    try self.writeFile(json, next_file.?, &rec);
+                    shown_bytes +|= rec.bytes;
+                } else skipped_bytes +|= rec.bytes;
                 next_file = files.next();
                 next_file_rec = if (next_file) |f| try self.r.file(f) else null;
             }
-            shown += 1;
+            if (listing) shown += 1 else skipped += 1;
         }
-        return .{ .shown = shown, .shown_bytes = shown_bytes, .total = subdirs.items.len + alive_files };
+        return .{
+            .shown = shown,
+            .shown_bytes = shown_bytes,
+            .total = subdirs.items.len + alive_files,
+            .skipped = skipped,
+            .skipped_bytes = skipped_bytes,
+        };
     }
 
-    /// Every file in the subtree, grouped by type or size band.
-    fn bandGroups(self: *const View, json: *std.json.Stringify, s: *const Scope, by: By, per_group: usize) !void {
+    /// Every file in the subtree, grouped by type or size band: each group's
+    /// files ranked largest first, `offset` of them passed over and
+    /// `per_group` listed. `only` answers one group by key.
+    fn bandGroups(self: *const View, json: *std.json.Stringify, s: *const Scope, by: By, per_group: usize, offset_in: usize, only: ?[]const u8) !void {
         const band_count = if (by == .type) category_count else size_bands.len;
+        // Never more to pass over than there are files in the scope; keeps a
+        // wild offset from asking for a wild heap.
+        const offset = @min(offset_in, std.math.cast(usize, s.file_end - s.file_start) orelse std.math.maxInt(usize));
         var heaps: [category_count]TopK = undefined;
         var bytes: [category_count]u64 = @splat(0);
         var counts: [category_count]u64 = @splat(0);
-        for (heaps[0..band_count]) |*heap| {
-            heap.* = .{ .items = try self.arena.alloc(TopK.Entry, per_group) };
+        for (heaps[0..band_count], 0..) |*heap, band| {
+            const wanted = if (only) |key| std.mem.eql(u8, key, bandKey(by, band)) else true;
+            heap.* = .{ .items = if (wanted) try self.arena.alloc(TopK.Entry, offset + per_group) else &.{} };
         }
         var files = self.removed.aliveFiles(s.file_start, s.file_end);
         while (files.next()) |f| {
@@ -2028,24 +2065,25 @@ pub const View = struct {
         }
         for (order[0..band_count]) |band| {
             if (counts[band] == 0) continue;
+            if (only) |key| if (!std.mem.eql(u8, key, bandKey(by, band))) continue;
             try json.beginObject();
             try json.objectField("key");
-            try json.write(if (by == .type) @tagName(@as(Category, @enumFromInt(band))) else size_bands[band].key);
+            try json.write(bandKey(by, band));
             try json.objectField("bytes");
             try json.write(bytes[band]);
             try json.objectField("files");
             try json.write(counts[band]);
             try json.objectField("items");
             try json.beginArray();
-            var shown_bytes: u64 = 0;
+            var ranked_bytes: u64 = 0;
             const ranked = heaps[band].sorted();
-            for (ranked) |entry| {
+            for (ranked, 0..) |entry, i| {
                 const rec = try self.r.file(entry.id);
-                try self.writeFile(json, entry.id, &rec);
-                shown_bytes +|= rec.bytes;
+                if (i >= offset) try self.writeFile(json, entry.id, &rec);
+                ranked_bytes +|= rec.bytes;
             }
             try json.endArray();
-            try writeRest(json, counts[band] - ranked.len, bytes[band] -| shown_bytes);
+            try writeRest(json, counts[band] - ranked.len, bytes[band] -| ranked_bytes);
             try json.endObject();
         }
     }
