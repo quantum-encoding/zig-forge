@@ -28,14 +28,17 @@
 //! A command lapses after `hold_tics` so a stalled agent stops the player
 //! rather than walking it into a wall forever.
 //!
-//!   aim <id> [fire]   |   aim none
+//!   aim <id> [fire]   |   aim xy <x> <y>   |   aim none
 //!
 //! turns toward a monster or item by the `id` a state line gave it, every
 //! tic, from its live position — the aim loop closes here at 35 Hz instead
 //! of across the agent's round trip, which overshoots. With `fire`, the
 //! attack button is pressed only on tics when the target is lined up. Ids are
-//! stable for as long as the thing exists. While aiming, a command's turn is
-//! ignored.
+//! stable for as long as the thing exists. `aim xy` steers to a map point
+//! (a route waypoint's `x`/`y`). While aiming, a command's turn is ignored;
+//! and unless firing, its forward speed is cut while the target is well off
+//! to the side — stop to turn past 60°, slow past 30° — so the player turns
+//! onto a point instead of orbiting it.
 
 const std = @import("std");
 const c = @cImport({
@@ -81,6 +84,7 @@ pub const Bridge = struct {
     /// Use rides the first tic of a command only, as a fresh press.
     press_use: bool = false,
     aim_uid: ?u32 = null,
+    aim_point: ?[2]f64 = null,
     aim_fire: bool = false,
     cmd_age: u32 = 0,
     use_pending: bool = false,
@@ -128,6 +132,15 @@ pub const Bridge = struct {
         const verb = it.next() orelse return;
         if (std.mem.eql(u8, verb, "aim")) {
             const target = it.next() orelse return;
+            self.aim_uid = null;
+            self.aim_point = null;
+            self.aim_fire = false;
+            if (std.mem.eql(u8, target, "xy")) {
+                const x = std.fmt.parseFloat(f64, it.next() orelse return) catch return;
+                const y = std.fmt.parseFloat(f64, it.next() orelse return) catch return;
+                self.aim_point = .{ x, y };
+                return;
+            }
             self.aim_uid = parseUid(target);
             self.aim_fire = if (it.next()) |f| std.mem.eql(u8, f, "fire") else false;
             return;
@@ -155,19 +168,31 @@ pub const Bridge = struct {
         const lapsed = self.cmd_age >= self.hold_tics;
         var out = self.baseCmd();
         if (lapsed) return out;
+        const pmo = game.players[game.consoleplayer].mobj orelse return out;
+        var b: ?f64 = null;
         if (self.aim_uid) |uid| {
-            const pmo = game.players[game.consoleplayer].mobj;
-            if (pmo != null and findByUid(uid) != null) {
-                const target = findByUid(uid).?;
-                const b = bearing(pmo.?, target);
-                // Close half the error each tic: quick, and no overshoot.
-                out.angleturn = @intFromFloat(std.math.clamp(b * TURN_PER_DEG * 0.5, -1280, 1280));
+            if (findByUid(uid)) |target| {
+                b = bearing(pmo, target);
                 out.buttons &= ~@as(u8, user.BT_ATTACK);
-                if (self.aim_fire and lined_up(b, distance(pmo.?, target))) out.buttons |= user.BT_ATTACK;
+                if (self.aim_fire and lined_up(b.?, distance(pmo, target))) out.buttons |= user.BT_ATTACK;
             } else {
                 // Gone (killed, picked up): stop aiming.
                 self.aim_uid = null;
                 out.angleturn = 0;
+            }
+        } else if (self.aim_point) |pt| {
+            b = bearingTo(pmo, pt[0], pt[1]);
+        }
+        if (b) |deg| {
+            // Close half the error each tic: quick, and no overshoot.
+            out.angleturn = @intFromFloat(std.math.clamp(deg * TURN_PER_DEG * 0.5, -1280, 1280));
+            if (!self.aim_fire) {
+                const off = @abs(deg);
+                if (off > 60) {
+                    out.forwardmove = 0;
+                } else if (off > 30) {
+                    out.forwardmove = @divTrunc(out.forwardmove, 3);
+                }
             }
         }
         return out;
@@ -330,7 +355,9 @@ pub const Bridge = struct {
                 inline for (.{ "explore", "exit" }) |name| {
                     if (@field(plan, name)) |route| {
                         const wp = clearAim(lvl, pmo, route, solids[0..n_solids]);
-                        try w.print(",\"" ++ name ++ "\":{{\"bearing\":{d:.1},\"hop\":{d:.0},\"dist\":{d:.0},\"door\":{},\"switch\":{}}}", .{
+                        try w.print(",\"" ++ name ++ "\":{{\"x\":{d:.0},\"y\":{d:.0},\"bearing\":{d:.1},\"hop\":{d:.0},\"dist\":{d:.0},\"door\":{},\"switch\":{}}}", .{
+                            wp.x,
+                            wp.y,
                             bearingTo(pmo, wp.x, wp.y),
                             std.math.hypot(wp.x - px, wp.y - py),
                             wp.dist,
@@ -614,8 +641,12 @@ test "commands parse, clamp, and lapse" {
     b.parseLine("aim m1a2b fire");
     try std.testing.expectEqual(@as(?u32, 0x1a2b), b.aim_uid);
     try std.testing.expect(b.aim_fire);
+    b.parseLine("aim xy 1056 -3616");
+    try std.testing.expectEqual(@as(?u32, null), b.aim_uid);
+    try std.testing.expectEqual(@as(f64, -3616), b.aim_point.?[1]);
     b.parseLine("aim none");
     try std.testing.expectEqual(@as(?u32, null), b.aim_uid);
+    try std.testing.expectEqual(@as(?[2]f64, null), b.aim_point);
     b.parseLine("cmd 50 -10 900 1 2");
     var t = b.baseCmd();
     try std.testing.expectEqual(@as(i8, 50), t.forwardmove);
