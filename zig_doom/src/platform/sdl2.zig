@@ -14,17 +14,20 @@ const SCREENWIDTH = defs.SCREENWIDTH;
 const SCREENHEIGHT = defs.SCREENHEIGHT;
 const SCREENSIZE = defs.SCREENSIZE;
 
-/// SDL2 is only available when the build links it (zig build -Dsdl2=true).
-/// We detect availability via the "sdl2_enabled" option injected by build.zig.
-/// Since @cImport is evaluated eagerly, we cannot conditionally import SDL2
-/// headers at comptime. Instead, when SDL2 is not linked, all functions
-/// return failure/stubs so the file always compiles.
-///
-/// When SDL2 IS available, rebuild with: zig build -Dsdl2=true
-/// and the @cImport below will succeed.
-const c = struct {
-    // Stub constants and types so the file compiles without SDL2 headers.
-    // When SDL2 is linked, replace this entire struct with the real @cImport.
+/// SDL2 is only available when the build links it (zig build -Dsdl2=true),
+/// which also sets `build_options.sdl2`. Built that way, `c` is the real
+/// SDL2 API; otherwise it is `stub`, whose functions fail, so the file
+/// compiles everywhere and `--platform sdl2` reports that video is
+/// unavailable.
+const c = if (@import("build_options").sdl2) @cImport({
+    @cDefine("SDL_MAIN_HANDLED", "1");
+    // SDL_cpuinfo.h would pull in arm_neon.h, which translate-c cannot read.
+    @cDefine("SDL_DISABLE_ARM_NEON_H", "1");
+    @cInclude("SDL.h");
+}) else stub;
+
+const stub = struct {
+    // Stand-ins for the SDL2 API, used when SDL2 is not linked.
     const SDL_Window = anyopaque;
     const SDL_Renderer = anyopaque;
     const SDL_Texture = anyopaque;

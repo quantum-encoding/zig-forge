@@ -208,19 +208,20 @@ fn addLine(
     }
 }
 
-/// tan(angle) for a signed view-relative binary angle, using this codebase's
-/// finetangent convention: finetangent[i] = tan((2048.5 - i)*pi/4096), so
-/// i = 2048 - (signed_angle >> 19).
+/// tan(angle) for a signed view-relative binary angle. finetangent is the
+/// vanilla table (ascending: finetangent[i] = tan((i - 2048 + 0.5)*pi/4096)),
+/// so i = 2048 + (signed_angle >> 19).
 fn fineTan(angle: Angle) Fixed {
     const s: i32 = @bitCast(angle);
-    var i: i32 = 2048 - (s >> tables.ANGLETOFINESHIFT);
+    var i: i32 = 2048 + (s >> tables.ANGLETOFINESHIFT);
     if (i < 0) i = 0;
     if (i > 4095) i = 4095;
     return tables.finetangent[@intCast(i)];
 }
 
 /// Project a signed view-relative angle to a screen column.
-/// theta=0 -> centre, -ANG45 -> x=0 (left edge), +ANG45 -> x=SCREENWIDTH (right).
+/// theta=0 -> centre, +ANG45 -> x=0 (left edge), -ANG45 -> x=SCREENWIDTH
+/// (right edge): positive angles are left of view-centre, as in addLine.
 fn angleToX(theta: Angle) i32 {
     const half = SCREENWIDTH / 2;
     const x = half - Fixed.mul(fineTan(theta), Fixed.fromInt(half)).toInt();
@@ -293,9 +294,12 @@ fn clipSolidSegRange(rstate: *RenderState, first: i32, last: i32) void {
 test "angleToX" {
     // Straight ahead maps to screen centre.
     try std.testing.expectEqual(@as(i32, SCREENWIDTH / 2), angleToX(0));
-    // ±ANG45 map to the screen edges (90° FOV) — visually verified convention.
-    try std.testing.expectEqual(@as(i32, SCREENWIDTH), angleToX(fixed.ANG45));
-    try std.testing.expectEqual(@as(i32, 0), angleToX(0 -% fixed.ANG45));
+    // ±ANG45 map to the screen edges (90° FOV). Positive angles are left of
+    // centre (addLine's convention), so +ANG45 is the LEFT edge, x = 0.
+    try std.testing.expectEqual(@as(i32, 0), angleToX(fixed.ANG45));
+    try std.testing.expectEqual(@as(i32, SCREENWIDTH), angleToX(0 -% fixed.ANG45));
+    // A wall spanning left-to-right in angle projects left-to-right on screen.
+    try std.testing.expect(angleToX(fixed.ANG45 / 2) < angleToX(0 -% fixed.ANG45 / 2));
 }
 
 test "pointOnSide axis-aligned" {

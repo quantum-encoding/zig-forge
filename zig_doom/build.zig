@@ -14,6 +14,11 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    // sdl2.zig reads this to choose the real SDL headers over its stubs.
+    const options = b.addOptions();
+    options.addOption(bool, "sdl2", use_sdl2);
+    doom_module.addOptions("build_options", options);
+
     // Link SDL2 if requested
     if (use_sdl2) {
         doom_module.linkSystemLibrary("SDL2", .{});

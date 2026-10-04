@@ -23,6 +23,7 @@ const fixed = @import("fixed.zig");
 const tick = @import("play/tick.zig");
 const mobj_mod = @import("play/mobj.zig");
 const info = @import("info.zig");
+const agent_bridge = @import("agent_bridge.zig");
 
 // Pull in test declarations from all modules
 comptime {
@@ -78,6 +79,7 @@ comptime {
     _ = @import("ui/menu.zig");
     // Phase 6: Platform Backends
     _ = @import("platform/interface.zig");
+    _ = @import("agent_bridge.zig");
     _ = @import("platform/tui.zig");
     _ = @import("platform/null_sound.zig");
     _ = @import("platform/alsa_sound.zig");
@@ -120,6 +122,9 @@ const usage =
     \\  --render-frame <map>      Render one frame and save as PPM
     \\  --play                    Run game loop (title screen, outputs frame.ppm)
     \\  --run                     Run interactive game with platform backend
+    \\  --agent                   With --run: an external agent plays over stdin/stdout
+    \\                            (state JSON lines out, `cmd F S T B [W]` lines in)
+    \\  --agent-period <tics>     Tics between agent state lines (default 7 = 5/s)
     \\  --output <path>           Output path for --render-frame/--play (default: frame.ppm)
     \\  --devparm                 Developer mode (show tics/frame)
     \\  --help                    Show this help
@@ -150,6 +155,7 @@ pub fn main(init: std.process.Init) !void {
     var opt_skill: ?defs.Skill = null;
     var opt_episode: ?u8 = null;
     var opt_warp: ?[]const u8 = null;
+    var opt_agent: ?u32 = null;
     var demo_name: ?[]const u8 = null;
     var dump_every: u32 = 0; // --dump-frames N: write frame_NNNNN.ppm every N tics during --playdemo
     var view_override: ?ViewOverride = null; // --view x,y,deg for --render-frame
@@ -195,6 +201,10 @@ pub fn main(init: std.process.Init) !void {
                     opt_episode = s[0] - '0';
                 }
             }
+        } else if (std.mem.eql(u8, arg, "--agent")) {
+            if (opt_agent == null) opt_agent = 7;
+        } else if (std.mem.eql(u8, arg, "--agent-period")) {
+            if (args.next()) |p| opt_agent = std.fmt.parseInt(u32, p, 10) catch 7;
         } else if (std.mem.eql(u8, arg, "--warp")) {
             opt_warp = args.next();
         } else if (std.mem.eql(u8, arg, "--fast") or
@@ -289,7 +299,7 @@ pub fn main(init: std.process.Init) !void {
         .dump_map => try dumpMap(&w, map_name orelse "E1M1", alloc, &buf),
         .render_frame => try renderFrameCmd(&w, map_name orelse "E1M1", output_path, view_override, alloc),
         .play => try playCmd(&w, output_path, alloc),
-        .run => try runCmd(&w, platform_name, alloc, opt_skill, opt_episode, opt_warp),
+        .run => try runCmd(&w, platform_name, alloc, opt_skill, opt_episode, opt_warp, opt_agent),
         .playdemo => try playDemoCmd(&w, demo_name orelse "DEMO1", output_path, dump_every, trace_path, debug_rng_tic_arg, alloc),
         .timedemo => try playDemoCmd(&w, demo_name orelse "DEMO1", output_path, dump_every, trace_path, debug_rng_tic_arg, alloc),
         .none => try writeStr("DOOM initialized. Use --dump-lumps, --dump-map, --render-frame, --play, or --run.\n"),
@@ -297,7 +307,12 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn runCmd(w: *wad.Wad, platform_name: []const u8, alloc: std.mem.Allocator, opt_skill: ?defs.Skill, opt_episode: ?u8, opt_warp: ?[]const u8) !void {
+fn runCmd(w: *wad.Wad, platform_name: []const u8, alloc: std.mem.Allocator, opt_skill: ?defs.Skill, opt_episode: ?u8, opt_warp: ?[]const u8, opt_agent: ?u32) !void {
+    // The TUI draws on stdout, which agent mode reserves for state lines.
+    if (opt_agent != null and std.mem.eql(u8, platform_name, "tui")) {
+        try writeStr("Error: --agent needs a windowed platform (--platform sdl2)\n");
+        return;
+    }
     try writeStr("Starting interactive game with platform: ");
     try writeStr(platform_name);
     try writeStr("\n");
@@ -361,6 +376,7 @@ fn runCmd(w: *wad.Wad, platform_name: []const u8, alloc: std.mem.Allocator, opt_
     // Main game loop
     var gametic: u32 = 0;
     var event_buf: [64]event_mod.Event = undefined;
+    var bridge: ?agent_bridge.Bridge = if (opt_agent) |p| agent_bridge.Bridge.init(p) else null;
 
     while (!platform.isQuitRequested(platform.impl)) {
         // 1. Pump input events
@@ -371,8 +387,18 @@ fn runCmd(w: *wad.Wad, platform_name: []const u8, alloc: std.mem.Allocator, opt_
             _ = game.responder(ev);
         }
 
-        // 2. Build tic command from input
-        if (game.state == .level and !game.paused and !game.demo_playback) {
+        if (bridge) |*b| {
+            b.poll();
+            // Outside a level, USE is what moves the game on.
+            if (b.takeUse()) switch (game.state) {
+                .intermission => game.intermission.accelerateStage(),
+                .finale => game.finale.accelerate(),
+                else => {},
+            };
+        }
+
+        // 2. Build tic command from input (the agent's, per tic, below)
+        if (bridge == null and game.state == .level and !game.paused and !game.demo_playback) {
             var cmd = user.TicCmd{};
             net.buildTicCmd(&cmd, events);
             game.players[game.consoleplayer].cmd = cmd;
@@ -382,7 +408,13 @@ fn runCmd(w: *wad.Wad, platform_name: []const u8, alloc: std.mem.Allocator, opt_
         const current_tic = platform.getTics(platform.impl);
         var tics_ran: u32 = 0;
         while (gametic < current_tic) : (gametic += 1) {
+            if (bridge) |*b| {
+                if (game.state == .level and !game.paused) {
+                    game.players[game.consoleplayer].cmd = b.ticCmd();
+                }
+            }
             game.ticker();
+            if (bridge) |*b| b.afterTic(&game);
             tics_ran += 1;
             if (tics_ran >= 4) break; // Don't run more than 4 tics per frame
         }
