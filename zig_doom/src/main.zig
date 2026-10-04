@@ -412,7 +412,7 @@ fn runCmd(w: *wad.Wad, platform_name: []const u8, alloc: std.mem.Allocator, opt_
         while (gametic < current_tic) : (gametic += 1) {
             if (bridge) |*b| {
                 if (game.state == .level and !game.paused) {
-                    game.players[game.consoleplayer].cmd = b.ticCmd();
+                    game.players[game.consoleplayer].cmd = b.ticCmd(&game);
                 }
             }
             game.ticker();

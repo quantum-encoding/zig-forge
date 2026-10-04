@@ -27,6 +27,15 @@
 //! the press, so holding it across tics would make every later press a no-op.
 //! A command lapses after `hold_tics` so a stalled agent stops the player
 //! rather than walking it into a wall forever.
+//!
+//!   aim <id> [fire]   |   aim none
+//!
+//! turns toward a monster or item by the `id` a state line gave it, every
+//! tic, from its live position — the aim loop closes here at 35 Hz instead
+//! of across the agent's round trip, which overshoots. With `fire`, the
+//! attack button is pressed only on tics when the target is lined up. Ids are
+//! stable for as long as the thing exists. While aiming, a command's turn is
+//! ignored.
 
 const std = @import("std");
 const c = @cImport({
@@ -71,6 +80,8 @@ pub const Bridge = struct {
     weapon_pending: ?u8 = null,
     /// Use rides the first tic of a command only, as a fresh press.
     press_use: bool = false,
+    aim_uid: ?u32 = null,
+    aim_fire: bool = false,
     cmd_age: u32 = 0,
     use_pending: bool = false,
 
@@ -115,6 +126,12 @@ pub const Bridge = struct {
     fn parseLine(self: *Bridge, raw: []const u8) void {
         var it = std.mem.tokenizeScalar(u8, std.mem.trim(u8, raw, " \r\t"), ' ');
         const verb = it.next() orelse return;
+        if (std.mem.eql(u8, verb, "aim")) {
+            const target = it.next() orelse return;
+            self.aim_uid = parseUid(target);
+            self.aim_fire = if (it.next()) |f| std.mem.eql(u8, f, "fire") else false;
+            return;
+        }
         if (!std.mem.eql(u8, verb, "cmd")) return;
         const fwd = parseClamped(it.next(), -50, 50) orelse return;
         const side = parseClamped(it.next(), -50, 50) orelse return;
@@ -133,9 +150,32 @@ pub const Bridge = struct {
         self.cmd_age = 0;
     }
 
-    /// The command for this tic. A weapon change rides one tic only, and a
-    /// lapsed command is no command.
-    pub fn ticCmd(self: *Bridge) user.TicCmd {
+    /// The command for this tic, steered onto the aim target when there is one.
+    pub fn ticCmd(self: *Bridge, game: *game_mod.Game) user.TicCmd {
+        const lapsed = self.cmd_age >= self.hold_tics;
+        var out = self.baseCmd();
+        if (lapsed) return out;
+        if (self.aim_uid) |uid| {
+            const pmo = game.players[game.consoleplayer].mobj;
+            if (pmo != null and findByUid(uid) != null) {
+                const target = findByUid(uid).?;
+                const b = bearing(pmo.?, target);
+                // Close half the error each tic: quick, and no overshoot.
+                out.angleturn = @intFromFloat(std.math.clamp(b * TURN_PER_DEG * 0.5, -1280, 1280));
+                out.buttons &= ~@as(u8, user.BT_ATTACK);
+                if (self.aim_fire and lined_up(b, distance(pmo.?, target))) out.buttons |= user.BT_ATTACK;
+            } else {
+                // Gone (killed, picked up): stop aiming.
+                self.aim_uid = null;
+                out.angleturn = 0;
+            }
+        }
+        return out;
+    }
+
+    /// The last command line as this tic's command: use and a weapon change
+    /// ride one tic only, and a lapsed command is no command.
+    fn baseCmd(self: *Bridge) user.TicCmd {
         if (self.cmd_age >= self.hold_tics) return .{};
         self.cmd_age += 1;
         var out = self.cmd;
@@ -262,14 +302,14 @@ pub const Bridge = struct {
         }
         try w.writeAll(",\"monsters\":[");
         for (monsters[0..n_monsters], 0..) |m, i| {
-            try w.print("{s}{{\"id\":\"m{d}\",\"kind\":\"{s}\",\"dist\":{d:.0},\"bearing\":{d:.1},\"health\":{d},\"targeting_me\":{}}}", .{
-                if (i == 0) "" else ",", i, kindName(m.mo.mobj_type), m.dist, m.bearing, m.mo.health, m.targeting_me,
+            try w.print("{s}{{\"id\":\"m{x}\",\"kind\":\"{s}\",\"dist\":{d:.0},\"bearing\":{d:.1},\"health\":{d},\"targeting_me\":{}}}", .{
+                if (i == 0) "" else ",", uidOf(m.mo), kindName(m.mo.mobj_type), m.dist, m.bearing, m.mo.health, m.targeting_me,
             });
         }
         try w.writeAll("],\"items\":[");
         for (items[0..n_items], 0..) |it, i| {
-            try w.print("{s}{{\"id\":\"i{d}\",\"kind\":\"{s}\",\"dist\":{d:.0},\"bearing\":{d:.1}}}", .{
-                if (i == 0) "" else ",", i, kindName(it.mo.mobj_type), it.dist, it.bearing,
+            try w.print("{s}{{\"id\":\"i{x}\",\"kind\":\"{s}\",\"dist\":{d:.0},\"bearing\":{d:.1}}}", .{
+                if (i == 0) "" else ",", uidOf(it.mo), kindName(it.mo.mobj_type), it.dist, it.bearing,
             });
         }
         var solids: [MAX_SOLIDS]Solid = undefined;
@@ -445,6 +485,48 @@ fn insertNearest(list: anytype, n: *usize, seen: Seen) void {
     list[i] = seen;
 }
 
+/// `angleturn` units per degree: 65536 of them make a full turn.
+const TURN_PER_DEG: f64 = 65536.0 / 360.0;
+
+/// A stable handle for a map object: its address, which does not change
+/// while it exists. Printed as hex after an `m`/`i` prefix.
+fn uidOf(mo: *const MapObject) u32 {
+    return @truncate(@intFromPtr(mo) >> 4);
+}
+
+fn parseUid(tok: []const u8) ?u32 {
+    if (tok.len < 2 or (tok[0] != 'm' and tok[0] != 'i')) return null;
+    return std.fmt.parseInt(u32, tok[1..], 16) catch null;
+}
+
+/// The live map object with this uid: monsters only while alive.
+fn findByUid(uid: u32) ?*MapObject {
+    const cap = tick.getThinkerCap();
+    var current = cap.next;
+    while (current != null and current != cap) {
+        const th = current.?;
+        current = th.next;
+        const func = th.function orelse continue;
+        if (func != @as(tick.ThinkFn, @ptrCast(&mobj_mod.mobjThinker))) continue;
+        const mo: *MapObject = @fieldParentPtr("thinker", th);
+        if (uidOf(mo) != uid) continue;
+        if (mo.flags & info.MF_COUNTKILL != 0 and mo.health <= 0) return null;
+        return mo;
+    }
+    return null;
+}
+
+fn distance(a: *const MapObject, b: *const MapObject) f64 {
+    return std.math.hypot(toUnits(b.x) - toUnits(a.x), toUnits(b.y) - toUnits(a.y));
+}
+
+/// Close enough to straight ahead to hit: a monster is ~40 units wide, so
+/// the tolerance widens as it gets nearer.
+fn lined_up(bearing_deg: f64, dist: f64) bool {
+    const half_width = std.math.atan(20.0 / @max(dist, 1.0)) * 180.0 / std.math.pi;
+    return @abs(bearing_deg) <= @max(half_width, 3.0);
+}
+
 fn toUnits(v: fixed.Fixed) f64 {
     return @as(f64, @floatFromInt(v.raw())) / 65536.0;
 }
@@ -529,32 +611,37 @@ fn writeAll(bytes: []const u8) void {
 
 test "commands parse, clamp, and lapse" {
     var b = Bridge{ .hold_tics = 2, .nav = agent_nav.Nav.init(std.testing.allocator) };
+    b.parseLine("aim m1a2b fire");
+    try std.testing.expectEqual(@as(?u32, 0x1a2b), b.aim_uid);
+    try std.testing.expect(b.aim_fire);
+    b.parseLine("aim none");
+    try std.testing.expectEqual(@as(?u32, null), b.aim_uid);
     b.parseLine("cmd 50 -10 900 1 2");
-    var t = b.ticCmd();
+    var t = b.baseCmd();
     try std.testing.expectEqual(@as(i8, 50), t.forwardmove);
     try std.testing.expectEqual(@as(i8, -10), t.sidemove);
     try std.testing.expectEqual(@as(i16, 900), t.angleturn);
     try std.testing.expect(t.buttons & user.BT_ATTACK != 0);
     try std.testing.expect(t.buttons & user.BT_CHANGE != 0);
-    t = b.ticCmd();
+    t = b.baseCmd();
     try std.testing.expect(t.buttons & user.BT_CHANGE == 0); // one tic only
 
     b.parseLine("cmd 0 0 0 2");
-    try std.testing.expect(b.ticCmd().buttons & user.BT_USE != 0);
-    try std.testing.expect(b.ticCmd().buttons & user.BT_USE == 0); // a press, not a hold
+    try std.testing.expect(b.baseCmd().buttons & user.BT_USE != 0);
+    try std.testing.expect(b.baseCmd().buttons & user.BT_USE == 0); // a press, not a hold
     b.parseLine("cmd 0 0 0 2");
-    try std.testing.expect(b.ticCmd().buttons & user.BT_USE != 0); // each line presses again
-    t = b.ticCmd();
+    try std.testing.expect(b.baseCmd().buttons & user.BT_USE != 0); // each line presses again
+    t = b.baseCmd();
     try std.testing.expectEqual(@as(i8, 0), t.forwardmove); // lapsed
 
     b.parseLine("cmd 999 0 -99999 0");
-    t = b.ticCmd();
+    t = b.baseCmd();
     try std.testing.expectEqual(@as(i8, 50), t.forwardmove);
     try std.testing.expectEqual(@as(i16, -1280), t.angleturn);
 
     b.parseLine("garbage");
     b.parseLine("cmd 1 2");
-    try std.testing.expectEqual(@as(i8, 50), b.ticCmd().forwardmove); // ignored
+    try std.testing.expectEqual(@as(i8, 50), b.baseCmd().forwardmove); // ignored
 }
 
 test "nearest-first insertion keeps the closest" {
