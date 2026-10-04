@@ -90,6 +90,10 @@ pub const Nav = struct {
     entry_y: []f64 = &.{},
     /// The portal a sector was reached through; -1 for none.
     via: []i32 = &.{},
+    /// The unvisited sector exploring is heading for. Held until reached or
+    /// cut off, so two similar targets cannot swap places every plan and
+    /// turn the player back and forth between them.
+    goal: ?usize = null,
     done: []bool = &.{},
 
     pub fn init(alloc: std.mem.Allocator) Nav {
@@ -155,6 +159,7 @@ pub const Nav = struct {
         self.entry_y = try self.alloc.alloc(f64, n);
         self.via = try self.alloc.alloc(i32, n);
         self.done = try self.alloc.alloc(bool, n);
+        self.goal = null;
         self.level_key = key;
     }
 
@@ -200,15 +205,25 @@ pub const Nav = struct {
         }
 
         var seen: usize = 0;
-        var explore_target: ?usize = null;
+        var nearest: ?usize = null;
         for (0..n) |s| {
             if (self.visited[s]) {
                 seen += 1;
                 continue;
             }
             if (self.dist[s] == std.math.inf(f64)) continue;
-            if (explore_target == null or self.dist[s] < self.dist[explore_target.?]) explore_target = s;
+            if (nearest == null or self.dist[s] < self.dist[nearest.?]) nearest = s;
         }
+        // Keep the current goal while it is still unvisited and reachable;
+        // switch only for one less than half as far.
+        if (self.goal) |g| {
+            const live = g < n and !self.visited[g] and self.dist[g] != std.math.inf(f64);
+            if (!live) self.goal = null;
+        }
+        if (nearest) |near| {
+            if (self.goal == null or self.dist[near] < 0.5 * self.dist[self.goal.?]) self.goal = near;
+        }
+        const explore_target = self.goal;
 
         var exit_wp: ?Waypoint = null;
         for (self.exits) |e| {
