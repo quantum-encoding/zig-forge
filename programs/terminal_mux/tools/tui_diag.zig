@@ -1,7 +1,7 @@
 //! TUI renderer-diagnosis harness. Feeds a captured/synth byte stream through
 //! the C ABI exactly as the Swift Metal view does, then dumps what the renderer
 //! consumes: the grid as text, every cell that carries ATTR_UNDERLINE (defect
-//! 1 — spurious underlines), and the tmux_find_urls ranges (the suspected
+//! 1 — spurious underlines), and the zterm_find_urls ranges (the suspected
 //! source). Confirms whether the emulator grid is correct (operator says yes)
 //! and localizes the underline overreach.
 //!
@@ -41,16 +41,16 @@ pub fn main(init: std.process.Init) !void {
     }
     const bytes = list.items;
 
-    const h = capi.tmux_create(40, 120, "/bin/cat", null) orelse return;
-    defer capi.tmux_destroy(h);
-    capi.tmux_feed(h, bytes.ptr, bytes.len);
+    const h = capi.zterm_create(40, 120, "/bin/cat", null) orelse return;
+    defer capi.zterm_destroy(h);
+    capi.zterm_feed(h, bytes.ptr, bytes.len);
 
     var rows: u16 = 0;
     var cols: u16 = 0;
-    capi.tmux_grid_size(h, &rows, &cols);
+    capi.zterm_grid_size(h, &rows, &cols);
     const total = @as(usize, rows) * cols;
     const cells = try alloc.alloc(capi.CCell, total);
-    const n = capi.tmux_read_cells(h, cells.ptr, total);
+    const n = capi.zterm_read_cells(h, cells.ptr, total);
 
     const out = Printer{};
 
@@ -95,9 +95,9 @@ pub fn main(init: std.process.Init) !void {
     }
     out.print("  total underlined cells: {d}\n", .{underline_count});
 
-    out.print("\n=== tmux_find_urls RANGES ===\n", .{});
+    out.print("\n=== zterm_find_urls RANGES ===\n", .{});
     var ranges: [64]capi.CUrlRange = undefined;
-    const url_n = capi.tmux_find_urls(h, &ranges, ranges.len);
+    const url_n = capi.zterm_find_urls(h, &ranges, ranges.len);
     out.print("  {d} range(s)\n", .{url_n});
     var i: usize = 0;
     while (i < url_n) : (i += 1) {

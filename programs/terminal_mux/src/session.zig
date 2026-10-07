@@ -259,7 +259,7 @@ pub const Pane = struct {
     /// query, and this writes them back to the application. Call after
     /// `processOutput` wherever zterm IS the terminal — the visible mux and
     /// `zterm server`. NOT called inside `processOutput`: an embedding host
-    /// (the Swift app) drains the same queue through `tmux_take_responses`
+    /// (the Swift app) drains the same queue through `zterm_take_responses`
     /// and writes the replies itself, and would otherwise answer twice.
     pub fn flushResponses(self: *Self) void {
         const t = &self.terminal;

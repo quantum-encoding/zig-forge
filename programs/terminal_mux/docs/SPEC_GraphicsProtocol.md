@@ -21,7 +21,7 @@ A terminal graphics protocol has three jobs, and they're separable:
    cells are cleared, and are deleted on request or when the image is freed.
 
 The cell grid is unchanged. Images are an **overlay indexed by grid position**,
-not a new kind of cell — `tmux_cell` stays 16 bytes and the C ABI struct layout
+not a new kind of cell — `zterm_cell` stays 16 bytes and the C ABI struct layout
 is untouched (the repo rule about not breaking `CCell`/consumers holds).
 
 ## Which protocols
@@ -175,18 +175,18 @@ New calls, all additive (no existing symbol/struct changes):
 
 ```c
 // How many placements are visible in the active pane right now.
-size_t   tmux_placement_count(tmux_session *h);
+size_t   zterm_placement_count(zterm_session *h);
 // Geometry + image handle for placement idx (cell coords within the pane).
-int      tmux_placement_at(tmux_session *h, size_t idx, tmux_placement *out);
+int      zterm_placement_at(zterm_session *h, size_t idx, zterm_placement *out);
 // The image bytes for a handle (format tag: 0=RGBA,1=RGB,2=PNG,3=iterm-blob).
-size_t   tmux_image_data(tmux_session *h, uint32_t image_id,
-                         uint8_t *out, size_t max, tmux_image_info *info);
+size_t   zterm_image_data(zterm_session *h, uint32_t image_id,
+                         uint8_t *out, size_t max, zterm_image_info *info);
 // Monotonic counter; bumps when placements/images change, so the host only
 // re-uploads textures when something actually moved (cheap idle path).
-uint64_t tmux_graphics_generation(tmux_session *h);
+uint64_t zterm_graphics_generation(zterm_session *h);
 ```
 
-`tmux_placement` = `{ image_id, cell_x, cell_y, cell_w, cell_h, src_x, src_y,
+`zterm_placement` = `{ image_id, cell_x, cell_y, cell_w, cell_h, src_x, src_y,
 src_w, src_h, z }` — a new extern struct, additive.
 
 **Freed-image signalling (the VRAM-leak guard — required for the DOOM demo).**
@@ -197,14 +197,14 @@ textures/sec. So the ABI must let the host reclaim GPU memory:
 
 ```c
 // Image ids freed since the last call (a=d, eviction, or overwrite), so the
-// host can drop the matching MTLTextures. Read-and-clear, like tmux_take_bell.
-size_t tmux_take_freed_images(tmux_session *h, uint32_t *out_ids, size_t max);
+// host can drop the matching MTLTextures. Read-and-clear, like zterm_take_bell.
+size_t zterm_take_freed_images(zterm_session *h, uint32_t *out_ids, size_t max);
 ```
 
 The host's per-image `MTLTexture` cache is keyed by `image_id`; every id from
-`tmux_take_freed_images` releases its entry. This closes the transmit-per-frame
-loop: place → upload → delete → free, steady-state VRAM. (`tmux_graphics_
-generation` tells the host *something* changed; `tmux_take_freed_images` tells it
+`zterm_take_freed_images` releases its entry. This closes the transmit-per-frame
+loop: place → upload → delete → free, steady-state VRAM. (`zterm_graphics_
+generation` tells the host *something* changed; `zterm_take_freed_images` tells it
 *what to release* — both are needed.)
 
 ### Host renderer (Metal — `MetalTerminalView.swift`)
@@ -213,7 +213,7 @@ The draw path today is one instanced glyph-quad pass
 (`drawPrimitives … instanceCount: count`, `MetalTerminalView.swift:529`). Add:
 
 1. After the frame's cells are composed, read placements via the new ABI. On a
-   `tmux_graphics_generation` change, upload each referenced image as an
+   `zterm_graphics_generation` change, upload each referenced image as an
    `MTLTexture` (cache by image_id; decode PNG with `CGImageSource`).
 2. A **second draw pass** before `endEncoding`: for each placement, one textured
    quad at its cell rect (pixel rect = cell rect × cellPx), sampled from the
@@ -247,7 +247,7 @@ acceptance demo: `zig_doom --graphics kitty` piped into an aiconductor pane.
 
 | Phase | Deliverable | Gate |
 |---|---|---|
-| 1 | APC parser (Kitty subset whitelist above) + streaming payload buffer + image store (RGBA/RGB only) + line-anchored placements surviving scroll/erase/resize/alt-screen; C ABI incl. `tmux_take_freed_images`; Metal 2nd pass | (a) the 4 lifecycle failure-mode tests pass; (b) **parser regression-diff gate**: existing fixtures replay grid-identical; (c) a transmitted RGBA image displays at a cell, scrolls with text, deletes by id, and its texture is released — recorded-stream test through `tui_diag` |
+| 1 | APC parser (Kitty subset whitelist above) + streaming payload buffer + image store (RGBA/RGB only) + line-anchored placements surviving scroll/erase/resize/alt-screen; C ABI incl. `zterm_take_freed_images`; Metal 2nd pass | (a) the 4 lifecycle failure-mode tests pass; (b) **parser regression-diff gate**: existing fixtures replay grid-identical; (c) a transmitted RGBA image displays at a cell, scrolls with text, deletes by id, and its texture is released — recorded-stream test through `tui_diag` |
 | 2 | iTerm2 OSC 1337 (host-side decode) + PNG via `CGImageSource` | `imgcat`-style blob renders |
 | 3 | zig_doom `--graphics kitty` backend → full-res DOOM demo | frame streams into an aiconductor pane at steady-state VRAM (transmit+delete per frame frees textures) |
 | 4 (opt) | Sixel DCS decode; standalone half-block downsample | only if a consumer needs Sixel |

@@ -4,11 +4,11 @@
 //! Drives the exported libterminal_mux entry points (src/capi.zig) exactly as a
 //! host (e.g. the Swift front-end) would, and measures:
 //!   1. Emulator ingest — MiB/s fed straight through the VT parser into the grid
-//!      (`tmux_feed`), the pure core hot path, over four fixed inputs: mixed SGR
+//!      (`zterm_feed`), the pure core hot path, over four fixed inputs: mixed SGR
 //!      text, plain text (the SIMD path), CJK + emoji (double-width cells), and
 //!      full-screen cursor-addressed repaints (what a TUI such as htop does).
 //!   2. PTY ingest — a shell emits an exact byte count; MiB/s through the PTY +
-//!      parser (`tmux_pump`), timed to the LAST byte received.
+//!      parser (`zterm_pump`), timed to the LAST byte received.
 //!   3. Lifecycle — create+destroy and attach+detach, microseconds per op.
 //!
 //! Every metric is sampled `--repeat` times after one unrecorded warm-up and
@@ -132,14 +132,14 @@ const Config = struct {
 /// One timed pass of `mib` MiB of `input` through the parser. Null when a
 /// session could not be created (reported, never recorded as zero).
 fn feedOnce(input: []const u8, mib: usize, shell: [*:0]const u8) ?f64 {
-    const h = capi.tmux_create(ROWS, COLS, shell, null) orelse return null;
-    defer capi.tmux_destroy(h);
+    const h = capi.zterm_create(ROWS, COLS, shell, null) orelse return null;
+    defer capi.zterm_destroy(h);
     const target = mib * 1024 * 1024;
     const iters = @max(1, target / @max(1, input.len));
     const t0 = nowNs();
     var fed: usize = 0;
     for (0..iters) |_| {
-        capi.tmux_feed(h, input.ptr, input.len);
+        capi.zterm_feed(h, input.ptr, input.len);
         fed += input.len;
     }
     return mibPerSec(fed, nowNs() - t0);
@@ -149,19 +149,19 @@ fn feedOnce(input: []const u8, mib: usize, shell: [*:0]const u8) ?f64 {
 /// PTY and parser. Timed from the command to the LAST byte of output: waiting
 /// to be sure the stream has ended is not part of the measurement.
 fn ptyOnce(mib: usize, shell: [*:0]const u8) ?f64 {
-    const h = capi.tmux_create(ROWS, COLS, shell, null) orelse return null;
-    defer capi.tmux_destroy(h);
+    const h = capi.zterm_create(ROWS, COLS, shell, null) orelse return null;
+    defer capi.zterm_destroy(h);
 
     // Drain the shell's start-up output until it has been quiet for 300 ms.
     var quiet_since = nowNs();
     while (nowNs() - quiet_since < 300 * std.time.ns_per_ms) {
-        if (capi.tmux_pump(h, 50) > 0) quiet_since = nowNs();
+        if (capi.zterm_pump(h, 50) > 0) quiet_since = nowNs();
     }
 
     const bytes = mib * 1024 * 1024;
     var cmd_buf: [160]u8 = undefined;
     const cmd = std.fmt.bufPrint(&cmd_buf, "yes ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij 2>/dev/null | head -c {d}\n", .{bytes}) catch return null;
-    _ = capi.tmux_send(h, cmd.ptr, cmd.len);
+    _ = capi.zterm_send(h, cmd.ptr, cmd.len);
 
     const t0 = nowNs();
     var got: usize = 0;
@@ -170,7 +170,7 @@ fn ptyOnce(mib: usize, shell: [*:0]const u8) ?f64 {
     // 500 ms. The shell's echo of the command and its next prompt are counted
     // too: a few hundred bytes against megabytes. A 60 s ceiling bounds a wedge.
     while (nowNs() - t0 < 60 * std.time.ns_per_s) {
-        const r = capi.tmux_pump(h, 100);
+        const r = capi.zterm_pump(h, 100);
         if (r < 0) break;
         if (r > 0) {
             got += @intCast(r);
@@ -187,9 +187,9 @@ fn createOnce(shell: [*:0]const u8) ?f64 {
     const t0 = nowNs();
     var made: usize = 0;
     for (0..rounds) |_| {
-        const h = capi.tmux_create(24, 80, shell, null) orelse continue;
+        const h = capi.zterm_create(24, 80, shell, null) orelse continue;
         made += 1;
-        capi.tmux_destroy(h);
+        capi.zterm_destroy(h);
     }
     if (made == 0) return null;
     return @as(f64, @floatFromInt(nowNs() - t0)) / 1000.0 / @as(f64, @floatFromInt(made));
@@ -198,13 +198,13 @@ fn createOnce(shell: [*:0]const u8) ?f64 {
 /// Microseconds per attach+detach against one live session.
 fn attachOnce(shell: [*:0]const u8) ?f64 {
     var id: u64 = 0;
-    const keep = capi.tmux_create(24, 80, shell, &id) orelse return null;
-    defer capi.tmux_destroy(keep);
+    const keep = capi.zterm_create(24, 80, shell, &id) orelse return null;
+    defer capi.zterm_destroy(keep);
     const rounds: usize = 2000;
     const t0 = nowNs();
     for (0..rounds) |_| {
-        const h = capi.tmux_attach(id) orelse return null;
-        capi.tmux_detach(h);
+        const h = capi.zterm_attach(id) orelse return null;
+        capi.zterm_detach(h);
     }
     return @as(f64, @floatFromInt(nowNs() - t0)) / 1000.0 / @as(f64, @floatFromInt(rounds));
 }
@@ -284,7 +284,7 @@ pub fn main(init: std.process.Init) !void {
     var checksums: [inputs.len]u64 = undefined;
 
     std.debug.print("zterm-bench v{s} (schema {d}): repeat={d} feed={d}MiB pty={d}MiB shell={s}\n", .{
-        std.mem.sliceTo(capi.tmux_version(), 0), SCHEMA, cfg.repeat, cfg.feed_mib, cfg.pty_mib, cfg.shell,
+        std.mem.sliceTo(capi.zterm_version(), 0), SCHEMA, cfg.repeat, cfg.feed_mib, cfg.pty_mib, cfg.shell,
     });
 
     for (inputs, 0..) |in, k| {
@@ -325,7 +325,7 @@ pub fn main(init: std.process.Init) !void {
     try s.objectField("schema");
     try s.write(SCHEMA);
     try s.objectField("zterm_version");
-    try s.write(std.mem.sliceTo(capi.tmux_version(), 0));
+    try s.write(std.mem.sliceTo(capi.zterm_version(), 0));
     try s.objectField("config");
     try s.beginObject();
     try s.objectField("repeat");

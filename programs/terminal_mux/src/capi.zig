@@ -12,9 +12,9 @@
 //! natural model when each session is bound to one UI surface.
 //!
 //! "Attach / detach" here is in-process session lifecycle: a session created via
-//! `tmux_create` is registered under a u64 id and keeps running (its shell stays
-//! alive, its grid stays intact) until `tmux_destroy`. `tmux_detach` releases the
-//! caller's logical hold without tearing anything down; `tmux_attach` re-acquires
+//! `zterm_create` is registered under a u64 id and keeps running (its shell stays
+//! alive, its grid stays intact) until `zterm_destroy`. `zterm_detach` releases the
+//! caller's logical hold without tearing anything down; `zterm_attach` re-acquires
 //! the handle by id. This lets a host surface detach and a later surface reattach
 //! to the same live session — the embedded analogue of `tmux attach`.
 
@@ -54,13 +54,13 @@ const READ_CHUNK = 65536;
 // Handle + global registry
 // =============================================================================
 
-/// Opaque session handle exposed to C as `tmux_session*`.
-pub const TmuxSession = struct {
+/// Opaque session handle exposed to C as `zterm_session*`.
+pub const ZtermSession = struct {
     id: u64,
     sess: *session.Session,
     attached: bool,
-    /// Latched when `tmux_drain` sees a pane's child go away (EOF or POLLHUP
-    /// plus a dead process). Read-and-clear via `tmux_take_exit` — without it
+    /// Latched when `zterm_drain` sees a pane's child go away (EOF or POLLHUP
+    /// plus a dead process). Read-and-clear via `zterm_take_exit` — without it
     /// a dead shell leaves its last grid on screen and reads exactly like an
     /// idle one, which in a cockpit of agent panes is indistinguishable from
     /// "still thinking".
@@ -69,7 +69,7 @@ pub const TmuxSession = struct {
     exit_signal: c_int = 0,
 };
 
-var registry: std.AutoHashMapUnmanaged(u64, *TmuxSession) = .empty;
+var registry: std.AutoHashMapUnmanaged(u64, *ZtermSession) = .empty;
 var registry_mutex: Mutex = .{};
 var next_id: u64 = 1;
 
@@ -91,7 +91,7 @@ fn defaultShell() []const u8 {
     return if (builtin.os.tag.isDarwin()) "/bin/zsh" else "/bin/bash";
 }
 
-fn activePane(h: *TmuxSession) *session.Pane {
+fn activePane(h: *ZtermSession) *session.Pane {
     return h.sess.getActiveWindow().getActivePane();
 }
 
@@ -141,7 +141,7 @@ pub const ColorKind = enum(u8) {
     rgb = 2,
 };
 
-/// A single terminal cell, flattened for C consumers. Matches `tmux_cell` in
+/// A single terminal cell, flattened for C consumers. Matches `zterm_cell` in
 /// include/terminal_mux.h. `attrs` is the bit-for-bit `CellAttrs` byte:
 ///   bit0 bold, bit1 dim, bit2 italic, bit3 underline,
 ///   bit4 blink, bit5 inverse, bit6 invisible, bit7 strikethrough.
@@ -188,11 +188,87 @@ fn fillColor(col: terminal.CellColor, kind: *u8, idx: *u8, r: *u8, g: *u8, b: *u
 }
 
 // =============================================================================
+// Deprecated names
+// =============================================================================
+
+/// The ABI's names before it became `zterm_*`. Each is exported a second time
+/// under its old `tmux_*` symbol so a host built against the old header keeps
+/// linking for one release; new code calls the `zterm_*` names. Remove after
+/// the next release (CosmicDuckOS and older aiconductor branches still link
+/// the old names).
+const deprecated_tmux_names = [_][]const u8{
+    "version",
+    "create",
+    "attach",
+    "detach",
+    "destroy",
+    "id",
+    "is_attached",
+    "list",
+    "pty_fd",
+    "pump",
+    "drain",
+    "take_exit",
+    "feed",
+    "send",
+    "resize",
+    "is_alive",
+    "grid_size",
+    "read_cells",
+    "modes",
+    "sync_suppressed",
+    "cursor_style",
+    "take_bell",
+    "take_clipboard",
+    "take_responses",
+    "title",
+    "mouse",
+    "cursor",
+    "scroll",
+    "pane_scroll",
+    "pane_lines",
+    "pane_read_line",
+    "pane_scroll_to",
+    "scroll_offset",
+    "split",
+    "new_window",
+    "select_window",
+    "window_count",
+    "focus_next_pane",
+    "window_size",
+    "pane_count",
+    "pane_rect",
+    "pane_is_active",
+    "focus_pane",
+    "pane_pty_fd",
+    "pane_cursor",
+    "pane_read_cells",
+    "close_pane",
+    "resize_split",
+    "set_theme_text",
+    "reset_theme",
+    "get_theme",
+    "find_urls",
+    "bracketed_paste",
+    "paste",
+    "placement_count",
+    "placement_at",
+    "image_data",
+    "graphics_generation",
+    "take_freed_images",};
+
+comptime {
+    for (deprecated_tmux_names) |n| {
+        @export(&@field(@This(), "zterm_" ++ n), .{ .name = "tmux_" ++ n });
+    }
+}
+
+// =============================================================================
 // Lifecycle
 // =============================================================================
 
 /// Library version string ("MAJOR.MINOR.PATCH"), NUL-terminated, static.
-pub export fn tmux_version() [*:0]const u8 {
+pub export fn zterm_version() [*:0]const u8 {
     return VERSION;
 }
 
@@ -201,15 +277,15 @@ pub export fn tmux_version() [*:0]const u8 {
 /// pane. The session is registered under a new id (written to `out_id` if
 /// non-NULL). Returns the handle, or NULL on failure. rows/cols of 0 default
 /// to 24/80.
-pub export fn tmux_create(rows: u16, cols: u16, shell: ?[*:0]const u8, out_id: ?*u64) ?*TmuxSession {
+pub export fn zterm_create(rows: u16, cols: u16, shell: ?[*:0]const u8, out_id: ?*u64) ?*ZtermSession {
     return createIn(rows, cols, if (shell) |s| std.mem.sliceTo(s, 0) else null, null, false, &.{}, out_id);
 }
 
 /// Create a session whose first pane runs `argv[0..argc]` as its own process:
 /// no shell is started and nothing is typed. `argv[0]` must be an absolute
-/// path (it is exec'd without a PATH search). Otherwise as `tmux_create`.
+/// path (it is exec'd without a PATH search). Otherwise as `zterm_create`.
 /// Returns NULL when argc is 0, an entry is NULL, or the spawn fails.
-pub export fn tmux_create_argv(rows: u16, cols: u16, argv: ?[*]const ?[*:0]const u8, argc: usize, out_id: ?*u64) ?*TmuxSession {
+pub export fn zterm_create_argv(rows: u16, cols: u16, argv: ?[*]const ?[*:0]const u8, argc: usize, out_id: ?*u64) ?*ZtermSession {
     const v = argv orelse return null;
     if (argc == 0 or argc > 4096) return null;
     const list = alloc.alloc([:0]const u8, argc) catch return null;
@@ -279,7 +355,7 @@ const SpawnEnv = struct {
     }
 };
 
-/// `tmux_create`, with the shell started in `cwd` (null = inherit this
+/// `zterm_create`, with the shell started in `cwd` (null = inherit this
 /// process's). Zig-only — the headless `zterm server` needs a per-pane start
 /// directory; the C ABI is unchanged. The caller validates `cwd`: a directory
 /// the child cannot enter makes the shell exit 126 immediately (see
@@ -294,18 +370,18 @@ const SpawnEnv = struct {
 /// `extra_env` ("KEY=value", validated by the caller) is added to that pane's
 /// environment only, replacing inherited entries of the same keys; it is
 /// applied only with `export_pane_id` (the server path).
-pub fn createIn(rows: u16, cols: u16, shell: ?[]const u8, cwd: ?[]const u8, export_pane_id: bool, extra_env: []const [:0]const u8, out_id: ?*u64) ?*TmuxSession {
+pub fn createIn(rows: u16, cols: u16, shell: ?[]const u8, cwd: ?[]const u8, export_pane_id: bool, extra_env: []const [:0]const u8, out_id: ?*u64) ?*ZtermSession {
     return createWith(rows, cols, shell, &.{}, cwd, export_pane_id, extra_env, out_id);
 }
 
 /// `createIn` with a program instead of a login shell: `argv` runs as the
 /// pane's own process (`Pane.spawnArgvIn`; `argv[0]` absolute). An empty
 /// `argv` starts the login shell, exactly as `createIn`.
-pub fn createInArgv(rows: u16, cols: u16, argv: []const [:0]const u8, cwd: ?[]const u8, export_pane_id: bool, extra_env: []const [:0]const u8, out_id: ?*u64) ?*TmuxSession {
+pub fn createInArgv(rows: u16, cols: u16, argv: []const [:0]const u8, cwd: ?[]const u8, export_pane_id: bool, extra_env: []const [:0]const u8, out_id: ?*u64) ?*ZtermSession {
     return createWith(rows, cols, null, argv, cwd, export_pane_id, extra_env, out_id);
 }
 
-fn createWith(rows: u16, cols: u16, shell: ?[]const u8, argv: []const [:0]const u8, cwd: ?[]const u8, export_pane_id: bool, extra_env: []const [:0]const u8, out_id: ?*u64) ?*TmuxSession {
+fn createWith(rows: u16, cols: u16, shell: ?[]const u8, argv: []const [:0]const u8, cwd: ?[]const u8, export_pane_id: bool, extra_env: []const [:0]const u8, out_id: ?*u64) ?*ZtermSession {
     const r: u16 = if (rows == 0) 24 else rows;
     const co: u16 = if (cols == 0) 80 else cols;
     const rect = session.Rect{ .x = 0, .y = 0, .width = co, .height = r };
@@ -346,7 +422,7 @@ fn createWith(rows: u16, cols: u16, shell: ?[]const u8, argv: []const [:0]const 
         };
     }
 
-    const handle = alloc.create(TmuxSession) catch {
+    const handle = alloc.create(ZtermSession) catch {
         sess.deinit();
         return null;
     };
@@ -366,7 +442,7 @@ fn createWith(rows: u16, cols: u16, shell: ?[]const u8, argv: []const [:0]const 
 
 /// Re-acquire a live session by id. Returns the existing handle (marking it
 /// attached) or NULL if no session with that id is registered.
-pub export fn tmux_attach(id: u64) ?*TmuxSession {
+pub export fn zterm_attach(id: u64) ?*ZtermSession {
     registry_mutex.lock();
     defer registry_mutex.unlock();
     const handle = registry.get(id) orelse return null;
@@ -375,8 +451,8 @@ pub export fn tmux_attach(id: u64) ?*TmuxSession {
 }
 
 /// Release the caller's logical hold on a session without tearing it down: the
-/// shell keeps running and the grid is preserved for a later `tmux_attach`.
-pub export fn tmux_detach(handle: ?*TmuxSession) void {
+/// shell keeps running and the grid is preserved for a later `zterm_attach`.
+pub export fn zterm_detach(handle: ?*ZtermSession) void {
     const h = handle orelse return;
     registry_mutex.lock();
     defer registry_mutex.unlock();
@@ -385,7 +461,7 @@ pub export fn tmux_detach(handle: ?*TmuxSession) void {
 
 /// Destroy a session: terminates the shell, frees the terminal, and removes the
 /// session from the registry. The handle is invalid after this call.
-pub export fn tmux_destroy(handle: ?*TmuxSession) void {
+pub export fn zterm_destroy(handle: ?*ZtermSession) void {
     const h = handle orelse return;
     registry_mutex.lock();
     _ = registry.remove(h.id);
@@ -395,13 +471,13 @@ pub export fn tmux_destroy(handle: ?*TmuxSession) void {
 }
 
 /// The session's registry id (0 if handle is NULL).
-pub export fn tmux_id(handle: ?*TmuxSession) u64 {
+pub export fn zterm_id(handle: ?*ZtermSession) u64 {
     const h = handle orelse return 0;
     return h.id;
 }
 
 /// Whether the session is currently attached (1) or detached (0).
-pub export fn tmux_is_attached(handle: ?*TmuxSession) bool {
+pub export fn zterm_is_attached(handle: ?*ZtermSession) bool {
     const h = handle orelse return false;
     return h.attached;
 }
@@ -409,7 +485,7 @@ pub export fn tmux_is_attached(handle: ?*TmuxSession) bool {
 /// Enumerate live session ids. Writes up to `max` ids into `out_ids` (may be
 /// NULL to just count) and returns the total number of live sessions (which may
 /// exceed `max`).
-pub export fn tmux_list(out_ids: ?[*]u64, max: usize) usize {
+pub export fn zterm_list(out_ids: ?[*]u64, max: usize) usize {
     registry_mutex.lock();
     defer registry_mutex.unlock();
     var i: usize = 0;
@@ -428,9 +504,9 @@ pub export fn tmux_list(out_ids: ?[*]u64, max: usize) usize {
 // =============================================================================
 
 /// The PTY master fd of the active pane (-1 if none). The host can register it
-/// with a readability source (DispatchSource / kqueue) and call `tmux_drain`
-/// when it fires, instead of polling via `tmux_pump`.
-pub export fn tmux_pty_fd(handle: ?*TmuxSession) c_int {
+/// with a readability source (DispatchSource / kqueue) and call `zterm_drain`
+/// when it fires, instead of polling via `zterm_pump`.
+pub export fn zterm_pty_fd(handle: ?*ZtermSession) c_int {
     const h = handle orelse return -1;
     const fd = activePane(h).getFd() orelse return -1;
     return @intCast(fd);
@@ -439,7 +515,7 @@ pub export fn tmux_pty_fd(handle: ?*TmuxSession) c_int {
 /// Wait up to `timeout_ms` for PTY output on the active pane, then read one
 /// chunk and run it through the VT emulator. Returns bytes processed, 0 on
 /// timeout/no-data, or -1 on error (no PTY / read failure / EOF).
-pub export fn tmux_pump(handle: ?*TmuxSession, timeout_ms: c_int) c_long {
+pub export fn zterm_pump(handle: ?*ZtermSession, timeout_ms: c_int) c_long {
     const h = handle orelse return -1;
     const pane = activePane(h);
     const fd = pane.getFd() orelse return -1;
@@ -465,7 +541,7 @@ pub export fn tmux_pump(handle: ?*TmuxSession, timeout_ms: c_int) c_long {
 /// processed (0 if nothing was ready). Draining only the focused pane would
 /// stall background split panes on a full PTY buffer — the multiplexer's one
 /// job is that it doesn't.
-pub export fn tmux_drain(handle: ?*TmuxSession) c_long {
+pub export fn zterm_drain(handle: ?*ZtermSession) c_long {
     const h = handle orelse return -1;
     const w = h.sess.getActiveWindow();
 
@@ -500,7 +576,7 @@ pub export fn tmux_drain(handle: ?*TmuxSession) c_long {
 
 /// Latch a pane's child exit onto the session, once. `isAlive` does the reap,
 /// so the status is available immediately afterwards.
-fn noteIfExited(h: *TmuxSession, pane: *session.Pane) void {
+fn noteIfExited(h: *ZtermSession, pane: *session.Pane) void {
     if (pane.exit_reported) return; // this pane's exit is already the host's
     if (pane.isAlive()) return; // EOF without an exit — nothing to report
     const st = pane.exitStatus() orelse session.Pane.PtyExitStatus{};
@@ -513,8 +589,8 @@ fn noteIfExited(h: *TmuxSession, pane: *session.Pane) void {
 /// Whether a pane's shell has exited since the last call (read-and-clear).
 /// Writes the exit code and terminating signal (0 = not signalled) when
 /// non-null. The host should stop its PTY sources and mark the pane dead —
-/// `tmux_drain` will not report it twice.
-pub export fn tmux_take_exit(handle: ?*TmuxSession, out_code: ?*c_int, out_signal: ?*c_int) bool {
+/// `zterm_drain` will not report it twice.
+pub export fn zterm_take_exit(handle: ?*ZtermSession, out_code: ?*c_int, out_signal: ?*c_int) bool {
     const h = handle orelse return false;
     if (!h.child_exited) return false;
     if (out_code) |p| p.* = h.exit_code;
@@ -526,7 +602,7 @@ pub export fn tmux_take_exit(handle: ?*TmuxSession, out_code: ?*c_int, out_signa
 /// Feed raw bytes straight into the VT emulator, bypassing the PTY. This drives
 /// the emulator core directly — used for deterministic throughput benchmarking
 /// and for replaying captured output. No effect if handle/data is NULL.
-pub export fn tmux_feed(handle: ?*TmuxSession, data: ?[*]const u8, len: usize) void {
+pub export fn zterm_feed(handle: ?*ZtermSession, data: ?[*]const u8, len: usize) void {
     const h = handle orelse return;
     const d = data orelse return;
     activePane(h).processOutput(d[0..len]);
@@ -537,7 +613,7 @@ pub export fn tmux_feed(handle: ?*TmuxSession, data: ?[*]const u8, len: usize) v
 /// Returns bytes ACTUALLY written, or -1 on error. A short return means the
 /// child stopped reading and the write hit its stall budget (see `Pty.write`);
 /// the caller owns the remainder. Keystroke-sized sends never go short.
-pub export fn tmux_send(handle: ?*TmuxSession, data: ?[*]const u8, len: usize) c_long {
+pub export fn zterm_send(handle: ?*ZtermSession, data: ?[*]const u8, len: usize) c_long {
     const h = handle orelse return -1;
     const d = data orelse return -1;
     const pane = activePane(h);
@@ -548,7 +624,7 @@ pub export fn tmux_send(handle: ?*TmuxSession, data: ?[*]const u8, len: usize) c
 
 /// Resize the active pane and its PTY to `rows`x`cols` (and notify the shell via
 /// SIGWINCH). Returns 0 on success, -1 on error.
-pub export fn tmux_resize(handle: ?*TmuxSession, rows: u16, cols: u16) c_int {
+pub export fn zterm_resize(handle: ?*ZtermSession, rows: u16, cols: u16) c_int {
     const h = handle orelse return -1;
     const r: u16 = if (rows == 0) 1 else rows;
     const co: u16 = if (cols == 0) 1 else cols;
@@ -557,7 +633,7 @@ pub export fn tmux_resize(handle: ?*TmuxSession, rows: u16, cols: u16) c_int {
 }
 
 /// Whether the active pane's shell process is still alive.
-pub export fn tmux_is_alive(handle: ?*TmuxSession) bool {
+pub export fn zterm_is_alive(handle: ?*ZtermSession) bool {
     const h = handle orelse return false;
     return activePane(h).isAlive();
 }
@@ -567,7 +643,7 @@ pub export fn tmux_is_alive(handle: ?*TmuxSession) bool {
 // =============================================================================
 
 /// Report the active pane's grid dimensions.
-pub export fn tmux_grid_size(handle: ?*TmuxSession, out_rows: ?*u16, out_cols: ?*u16) void {
+pub export fn zterm_grid_size(handle: ?*ZtermSession, out_rows: ?*u16, out_cols: ?*u16) void {
     const h = handle orelse return;
     const grid = &activePane(h).terminal.grid;
     if (out_rows) |p| p.* = grid.rows;
@@ -614,7 +690,7 @@ fn readTerminalCells(term: *const terminal.Terminal, buf: [*]CCell, max_cells: u
 
 /// Copy the active pane's grid into `out` in row-major order (row*cols+col).
 /// Copies at most `max_cells`; returns the number of cells written.
-pub export fn tmux_read_cells(handle: ?*TmuxSession, out: ?[*]CCell, max_cells: usize) usize {
+pub export fn zterm_read_cells(handle: ?*ZtermSession, out: ?[*]CCell, max_cells: usize) usize {
     const h = handle orelse return 0;
     const buf = out orelse return 0;
     return readTerminalCells(&activePane(h).terminal, buf, max_cells);
@@ -623,7 +699,7 @@ pub export fn tmux_read_cells(handle: ?*TmuxSession, out: ?[*]CCell, max_cells: 
 /// DEC private modes the host renderer needs, as a bitmask:
 /// 1 app-cursor (DECCKM → SS3 arrows) · 2 bracketed paste · 4 alt screen ·
 /// 8 mouse tracking on · 16 SGR mouse encoding · 32 focus events wanted.
-pub export fn tmux_modes(handle: ?*TmuxSession) u32 {
+pub export fn zterm_modes(handle: ?*ZtermSession) u32 {
     const h = handle orelse return 0;
     const m = &activePane(h).terminal.modes;
     var out: u32 = 0;
@@ -642,7 +718,7 @@ pub export fn tmux_modes(handle: ?*TmuxSession) u32 {
 /// drain and repaints the finished frame. Self-healing: a block left open
 /// longer than 250ms (app crashed mid-repaint) stops suppressing and clears,
 /// so the view can never freeze on a torn writer.
-pub export fn tmux_sync_suppressed(handle: ?*TmuxSession) bool {
+pub export fn zterm_sync_suppressed(handle: ?*ZtermSession) bool {
     const h = handle orelse return false;
     const w = h.sess.getActiveWindow();
     const now = terminal.monotonicMs();
@@ -660,7 +736,7 @@ pub export fn tmux_sync_suppressed(handle: ?*TmuxSession) bool {
 }
 
 /// DECSCUSR cursor style: shape 0 block / 1 underline / 2 bar, plus blink.
-pub export fn tmux_cursor_style(handle: ?*TmuxSession, out_shape: ?*u8, out_blink: ?*bool) void {
+pub export fn zterm_cursor_style(handle: ?*ZtermSession, out_shape: ?*u8, out_blink: ?*bool) void {
     const h = handle orelse return;
     const t = &activePane(h).terminal;
     if (out_shape) |p| p.* = t.cursor_shape;
@@ -668,7 +744,7 @@ pub export fn tmux_cursor_style(handle: ?*TmuxSession, out_shape: ?*u8, out_blin
 }
 
 /// Bell strokes since the last call (read-and-clear).
-pub export fn tmux_take_bell(handle: ?*TmuxSession) u32 {
+pub export fn zterm_take_bell(handle: ?*ZtermSession) u32 {
     const h = handle orelse return 0;
     const t = &activePane(h).terminal;
     const n = t.bell_pending;
@@ -678,7 +754,7 @@ pub export fn tmux_take_bell(handle: ?*TmuxSession) u32 {
 
 /// The pending OSC 52 clipboard payload ("Pc;Pd", Pd = base64), read-and-clear.
 /// Returns the copied length (0 = none pending).
-pub export fn tmux_take_clipboard(handle: ?*TmuxSession, out: ?[*]u8, max: usize) usize {
+pub export fn zterm_take_clipboard(handle: ?*ZtermSession, out: ?[*]u8, max: usize) usize {
     const h = handle orelse return 0;
     const buf = out orelse return 0;
     const t = &activePane(h).terminal;
@@ -691,11 +767,11 @@ pub export fn tmux_take_clipboard(handle: ?*TmuxSession, out: ?[*]u8, max: usize
 
 /// Device-report replies the emulator owes the app (DA1/DA2, DSR/CPR, OSC
 /// 10/11 colour queries), read-and-clear. The host MUST write these back into
-/// the pane with `tmux_send` — vim, fzf and an inner tmux BLOCK on them, so
+/// the pane with `zterm_send` — vim, fzf and an inner tmux BLOCK on them, so
 /// dropping them costs a read timeout or a degraded-capability fallback.
 /// Returns bytes copied (0 = nothing pending). The queue is bounded
-/// (`terminal.RESP_CAPACITY`); drain it on every wake alongside `tmux_drain`.
-pub export fn tmux_take_responses(handle: ?*TmuxSession, out: ?[*]u8, max: usize) usize {
+/// (`terminal.RESP_CAPACITY`); drain it on every wake alongside `zterm_drain`.
+pub export fn zterm_take_responses(handle: ?*ZtermSession, out: ?[*]u8, max: usize) usize {
     const h = handle orelse return 0;
     const buf = out orelse return 0;
     const t = &activePane(h).terminal;
@@ -715,7 +791,7 @@ pub export fn tmux_take_responses(handle: ?*TmuxSession, out: ?[*]u8, max: usize
 }
 
 /// The window title (OSC 0/2), UTF-8, not NUL-terminated. Returns the length.
-pub export fn tmux_title(handle: ?*TmuxSession, out: ?[*]u8, max: usize) usize {
+pub export fn zterm_title(handle: ?*ZtermSession, out: ?[*]u8, max: usize) usize {
     const h = handle orelse return 0;
     const buf = out orelse return 0;
     const t = &activePane(h).terminal;
@@ -729,7 +805,7 @@ pub export fn tmux_title(handle: ?*TmuxSession, out: ?[*]u8, max: usize) usize {
 /// mods bitmask: 4 shift, 8 alt, 16 ctrl (xterm encoding). Returns 1 when the
 /// event was reported (host must NOT also act on it), 0 when tracking is off /
 /// below the event's level — the host handles it locally (selection etc.).
-pub export fn tmux_mouse(handle: ?*TmuxSession, kind: c_int, button: c_int, row: u16, col: u16, mods: c_int) c_int {
+pub export fn zterm_mouse(handle: ?*ZtermSession, kind: c_int, button: c_int, row: u16, col: u16, mods: c_int) c_int {
     const h = handle orelse return 0;
     const pane = activePane(h);
     const t = &pane.terminal;
@@ -758,7 +834,7 @@ pub export fn tmux_mouse(handle: ?*TmuxSession, kind: c_int, button: c_int, row:
 }
 
 /// Report the cursor position and visibility of the active pane.
-pub export fn tmux_cursor(handle: ?*TmuxSession, out_row: ?*u16, out_col: ?*u16, out_visible: ?*bool) void {
+pub export fn zterm_cursor(handle: ?*ZtermSession, out_row: ?*u16, out_col: ?*u16, out_visible: ?*bool) void {
     const h = handle orelse return;
     const term = &activePane(h).terminal;
     if (out_row) |p| p.* = term.cursor.row;
@@ -776,17 +852,17 @@ pub export fn tmux_cursor(handle: ?*TmuxSession, out_row: ?*u16, out_col: ?*u16,
 ///  - Alt screen without mouse reporting (less, man): sends arrow keys — the
 ///    xterm "alternate scroll" convention.
 ///  - Primary screen otherwise: moves the viewport through the scrollback
-///    ring; tmux_read_cells then composes history + live grid.
+///    ring; zterm_read_cells then composes history + live grid.
 /// Returns the viewport's scrollback offset after the call (0 = live bottom).
-pub export fn tmux_scroll(handle: ?*TmuxSession, delta: c_int, row: u16, col: u16) c_long {
+pub export fn zterm_scroll(handle: ?*ZtermSession, delta: c_int, row: u16, col: u16) c_long {
     const h = handle orelse return 0;
-    if (delta == 0) return tmux_scroll_offset(handle);
+    if (delta == 0) return zterm_scroll_offset(handle);
     return scrollPane(activePane(h), delta, row, col);
 }
 
 /// Wheel-scroll a SPECIFIC pane (multi-pane hosts route the wheel to the pane
 /// under the cursor, not the focused one). `row`/`col` are PANE-LOCAL.
-pub export fn tmux_pane_scroll(handle: ?*TmuxSession, idx: usize, delta: c_int, row: u16, col: u16) c_long {
+pub export fn zterm_pane_scroll(handle: ?*ZtermSession, idx: usize, delta: c_int, row: u16, col: u16) c_long {
     const h = handle orelse return 0;
     const p = paneAt(h, idx) orelse return 0;
     if (delta == 0) {
@@ -843,7 +919,7 @@ fn scrollPane(pane: *session.Pane, delta: c_int, row: u16, col: u16) c_long {
 /// line of the live grid, `oldest` the oldest line still retained (history is
 /// a ring, and on the alternate screen only the live grid exists). Returns 0,
 /// or -1 for a bad handle or pane.
-pub export fn tmux_pane_lines(handle: ?*TmuxSession, idx: usize, out_view_top: ?*i64, out_live_top: ?*i64, out_oldest: ?*i64) c_int {
+pub export fn zterm_pane_lines(handle: ?*ZtermSession, idx: usize, out_view_top: ?*i64, out_live_top: ?*i64, out_oldest: ?*i64) c_int {
     const h = handle orelse return -1;
     const p = paneAt(h, idx) orelse return -1;
     const term = &p.terminal;
@@ -859,7 +935,7 @@ pub export fn tmux_pane_lines(handle: ?*TmuxSession, idx: usize, out_view_top: ?
 /// Copy one line, addressed by absolute number, into `out` (at most `max`
 /// cells). Returns the number of cells written, or -1 when that line is no
 /// longer retained or not yet written.
-pub export fn tmux_pane_read_line(handle: ?*TmuxSession, idx: usize, line: i64, out: ?[*]CCell, max: usize) c_long {
+pub export fn zterm_pane_read_line(handle: ?*ZtermSession, idx: usize, line: i64, out: ?[*]CCell, max: usize) c_long {
     const h = handle orelse return -1;
     const p = paneAt(h, idx) orelse return -1;
     const buf = out orelse return -1;
@@ -886,7 +962,7 @@ pub export fn tmux_pane_read_line(handle: ?*TmuxSession, idx: usize, line: i64, 
 
 /// Move a pane's view so `line` (absolute) is the top visible line, clamped to
 /// retained history and the live bottom. Returns the resulting offset.
-pub export fn tmux_pane_scroll_to(handle: ?*TmuxSession, idx: usize, line: i64) c_long {
+pub export fn zterm_pane_scroll_to(handle: ?*ZtermSession, idx: usize, line: i64) c_long {
     const h = handle orelse return 0;
     const p = paneAt(h, idx) orelse return 0;
     const term = &p.terminal;
@@ -898,7 +974,7 @@ pub export fn tmux_pane_scroll_to(handle: ?*TmuxSession, idx: usize, line: i64) 
     return @intCast(clamped);
 }
 
-pub export fn tmux_scroll_offset(handle: ?*TmuxSession) c_long {
+pub export fn zterm_scroll_offset(handle: ?*ZtermSession) c_long {
     const h = handle orelse return 0;
     const term = &activePane(h).terminal;
     if (term.modes.alt_screen) return 0;
@@ -911,7 +987,7 @@ pub export fn tmux_scroll_offset(handle: ?*TmuxSession) c_long {
 
 /// Split the active pane and spawn a shell in the new one. `horizontal` != 0
 /// splits left/right, else top/bottom. Returns 0 on success, -1 on error.
-pub export fn tmux_split(handle: ?*TmuxSession, horizontal: c_int) c_int {
+pub export fn zterm_split(handle: ?*ZtermSession, horizontal: c_int) c_int {
     const h = handle orelse return -1;
     const dir: session.SplitDirection = if (horizontal != 0) .horizontal else .vertical;
     const new_pane = h.sess.getActiveWindow().split(dir, DEFAULT_SCROLLBACK) catch return -1;
@@ -921,7 +997,7 @@ pub export fn tmux_split(handle: ?*TmuxSession, horizontal: c_int) c_int {
 
 /// Create a new window, make it active, and spawn a shell in it. Returns 0 on
 /// success, -1 on error.
-pub export fn tmux_new_window(handle: ?*TmuxSession) c_int {
+pub export fn zterm_new_window(handle: ?*ZtermSession) c_int {
     const h = handle orelse return -1;
     _ = h.sess.createWindow() catch return -1;
     h.sess.nextWindow();
@@ -930,19 +1006,19 @@ pub export fn tmux_new_window(handle: ?*TmuxSession) c_int {
 }
 
 /// Switch the active window by index. Returns 0 on success, -1 if out of range.
-pub export fn tmux_select_window(handle: ?*TmuxSession, index: u8) c_int {
+pub export fn zterm_select_window(handle: ?*ZtermSession, index: u8) c_int {
     const h = handle orelse return -1;
     return if (h.sess.selectWindow(index)) 0 else -1;
 }
 
 /// Number of windows in the session (0 if handle is NULL).
-pub export fn tmux_window_count(handle: ?*TmuxSession) u8 {
+pub export fn zterm_window_count(handle: ?*ZtermSession) u8 {
     const h = handle orelse return 0;
     return @intCast(h.sess.windows.items.len);
 }
 
 /// Cycle focus to the next pane in the active window. Returns 0, or -1 if NULL.
-pub export fn tmux_focus_next_pane(handle: ?*TmuxSession) c_int {
+pub export fn zterm_focus_next_pane(handle: ?*ZtermSession) c_int {
     const h = handle orelse return -1;
     h.sess.getActiveWindow().focusNext();
     return 0;
@@ -955,27 +1031,27 @@ pub export fn tmux_focus_next_pane(handle: ?*TmuxSession) c_int {
 // split/close.
 // =============================================================================
 
-fn paneAt(h: *TmuxSession, idx: usize) ?*session.Pane {
+fn paneAt(h: *ZtermSession, idx: usize) ?*session.Pane {
     const w = h.sess.getActiveWindow();
     if (idx >= w.panes.items.len) return null;
     return w.panes.items[idx];
 }
 
 /// The active window's full extent (the rect panes tile), in cells.
-pub export fn tmux_window_size(handle: ?*TmuxSession, out_rows: ?*u16, out_cols: ?*u16) void {
+pub export fn zterm_window_size(handle: ?*ZtermSession, out_rows: ?*u16, out_cols: ?*u16) void {
     const h = handle orelse return;
     if (out_rows) |p| p.* = h.sess.rect.height;
     if (out_cols) |p| p.* = h.sess.rect.width;
 }
 
 /// Number of panes in the active window (0 if handle is NULL).
-pub export fn tmux_pane_count(handle: ?*TmuxSession) usize {
+pub export fn zterm_pane_count(handle: ?*ZtermSession) usize {
     const h = handle orelse return 0;
     return h.sess.getActiveWindow().panes.items.len;
 }
 
 /// Pane `idx`'s rect within the window (cells). Returns 0, -1 if out of range.
-pub export fn tmux_pane_rect(handle: ?*TmuxSession, idx: usize, out_x: ?*u16, out_y: ?*u16, out_w: ?*u16, out_h: ?*u16) c_int {
+pub export fn zterm_pane_rect(handle: ?*ZtermSession, idx: usize, out_x: ?*u16, out_y: ?*u16, out_w: ?*u16, out_h: ?*u16) c_int {
     const h = handle orelse return -1;
     const p = paneAt(h, idx) orelse return -1;
     if (out_x) |o| o.* = p.rect.x;
@@ -986,14 +1062,14 @@ pub export fn tmux_pane_rect(handle: ?*TmuxSession, idx: usize, out_x: ?*u16, ou
 }
 
 /// Whether pane `idx` is the focused pane of the active window.
-pub export fn tmux_pane_is_active(handle: ?*TmuxSession, idx: usize) bool {
+pub export fn zterm_pane_is_active(handle: ?*ZtermSession, idx: usize) bool {
     const h = handle orelse return false;
     return idx < h.sess.getActiveWindow().panes.items.len and
         idx == h.sess.getActiveWindow().active_pane_idx;
 }
 
 /// Focus pane `idx` of the active window. Returns 0, -1 if out of range.
-pub export fn tmux_focus_pane(handle: ?*TmuxSession, idx: usize) c_int {
+pub export fn zterm_focus_pane(handle: ?*ZtermSession, idx: usize) c_int {
     const h = handle orelse return -1;
     const w = h.sess.getActiveWindow();
     if (idx >= w.panes.items.len) return -1;
@@ -1004,7 +1080,7 @@ pub export fn tmux_focus_pane(handle: ?*TmuxSession, idx: usize) c_int {
 }
 
 /// Pane `idx`'s PTY master fd (-1 if none) — one readability source per pane.
-pub export fn tmux_pane_pty_fd(handle: ?*TmuxSession, idx: usize) c_int {
+pub export fn zterm_pane_pty_fd(handle: ?*ZtermSession, idx: usize) c_int {
     const h = handle orelse return -1;
     const p = paneAt(h, idx) orelse return -1;
     const fd = p.getFd() orelse return -1;
@@ -1012,7 +1088,7 @@ pub export fn tmux_pane_pty_fd(handle: ?*TmuxSession, idx: usize) c_int {
 }
 
 /// Pane `idx`'s cursor in PANE-LOCAL cells (host adds the pane rect offset).
-pub export fn tmux_pane_cursor(handle: ?*TmuxSession, idx: usize, out_row: ?*u16, out_col: ?*u16, out_visible: ?*bool) void {
+pub export fn zterm_pane_cursor(handle: ?*ZtermSession, idx: usize, out_row: ?*u16, out_col: ?*u16, out_visible: ?*bool) void {
     const h = handle orelse return;
     const p = paneAt(h, idx) orelse return;
     const term = &p.terminal;
@@ -1024,7 +1100,7 @@ pub export fn tmux_pane_cursor(handle: ?*TmuxSession, idx: usize, out_row: ?*u16
 
 /// Copy pane `idx`'s visible grid (scrollback-composed) into `out`, row-major
 /// at the PANE's width. Returns cells written (0 on bad idx/NULL).
-pub export fn tmux_pane_read_cells(handle: ?*TmuxSession, idx: usize, out: ?[*]CCell, max_cells: usize) usize {
+pub export fn zterm_pane_read_cells(handle: ?*ZtermSession, idx: usize, out: ?[*]CCell, max_cells: usize) usize {
     const h = handle orelse return 0;
     const buf = out orelse return 0;
     const p = paneAt(h, idx) orelse return 0;
@@ -1033,7 +1109,7 @@ pub export fn tmux_pane_read_cells(handle: ?*TmuxSession, idx: usize, out: ?[*]C
 
 /// Close pane `idx`: kills its shell and re-tiles the survivors. Refused (-1)
 /// for the last pane of the window — destroy the session instead.
-pub export fn tmux_close_pane(handle: ?*TmuxSession, idx: usize) c_int {
+pub export fn zterm_close_pane(handle: ?*ZtermSession, idx: usize) c_int {
     const h = handle orelse return -1;
     const w = h.sess.getActiveWindow();
     const p = paneAt(h, idx) orelse return -1;
@@ -1046,7 +1122,7 @@ pub export fn tmux_close_pane(handle: ?*TmuxSession, idx: usize) c_int {
 /// neighbor by that many cells (positive grows pane `idx`). The neighbor must
 /// span the same cross-axis extent (clean tiling). Returns 0 when anything
 /// moved, -1 otherwise. Deltas clamp so both panes keep >= 2 cells.
-pub export fn tmux_resize_split(handle: ?*TmuxSession, idx: usize, dx: c_int, dy: c_int) c_int {
+pub export fn zterm_resize_split(handle: ?*ZtermSession, idx: usize, dx: c_int, dy: c_int) c_int {
     const h = handle orelse return -1;
     const w = h.sess.getActiveWindow();
     const p = paneAt(h, idx) orelse return -1;
@@ -1098,7 +1174,7 @@ pub export fn tmux_resize_split(handle: ?*TmuxSession, idx: usize, dx: c_int, dy
 // =============================================================================
 // Theme — the shared color scheme. Consumers (CosmicDuck's Metal view, a future
 // standalone GUI) read the file themselves and push the bytes via
-// tmux_set_theme_text, then read back the resolved palette via tmux_get_theme.
+// zterm_set_theme_text, then read back the resolved palette via zterm_get_theme.
 // Parsing lives once in Zig (config.Theme.parse); this just exposes it over C.
 // =============================================================================
 
@@ -1124,18 +1200,18 @@ fn toCRgb(c: config.Color) CRgb {
 }
 
 /// Parse theme config text (the `key = value` format) and make it the active theme.
-pub export fn tmux_set_theme_text(text: ?[*]const u8, len: usize) void {
+pub export fn zterm_set_theme_text(text: ?[*]const u8, len: usize) void {
     const t = text orelse return;
     config.active_theme = config.Theme.parse(t[0..len]);
 }
 
 /// Reset to the built-in default theme.
-pub export fn tmux_reset_theme() void {
+pub export fn zterm_reset_theme() void {
     config.active_theme = .{};
 }
 
 /// Copy the active theme (resolved ANSI-16 palette + named colors) into `out`.
-pub export fn tmux_get_theme(out: ?*CTheme) void {
+pub export fn zterm_get_theme(out: ?*CTheme) void {
     const o = out orelse return;
     const th = &config.active_theme;
     var i: usize = 0;
@@ -1160,7 +1236,7 @@ pub export fn tmux_get_theme(out: ?*CTheme) void {
 
 pub const CUrlRange = url.UrlRange; // extern struct {start_row, start_col, end_row, end_col: u16}
 
-pub export fn tmux_find_urls(handle: ?*TmuxSession, out: ?[*]CUrlRange, max: usize) usize {
+pub export fn zterm_find_urls(handle: ?*ZtermSession, out: ?[*]CUrlRange, max: usize) usize {
     const h = handle orelse return 0;
     const buf = out orelse return 0;
     const grid = &activePane(h).terminal.grid;
@@ -1176,7 +1252,7 @@ pub export fn tmux_find_urls(handle: ?*TmuxSession, out: ?[*]CUrlRange, max: usi
 // =============================================================================
 
 /// True if the active pane's app turned on bracketed paste (DEC 2004).
-pub export fn tmux_bracketed_paste(handle: ?*TmuxSession) bool {
+pub export fn zterm_bracketed_paste(handle: ?*ZtermSession) bool {
     const h = handle orelse return false;
     return activePane(h).terminal.modes.bracketed_paste;
 }
@@ -1187,7 +1263,7 @@ pub export fn tmux_bracketed_paste(handle: ?*TmuxSession) bool {
 /// bracket markers are not counted), or -1 on error. A SHORT return means the
 /// child stopped reading and `Pty.write` hit its stall budget — the host must
 /// treat the remainder as unsent and retry it, not assume the paste landed.
-pub export fn tmux_paste(handle: ?*TmuxSession, data: ?[*]const u8, len: usize) c_long {
+pub export fn zterm_paste(handle: ?*ZtermSession, data: ?[*]const u8, len: usize) c_long {
     const h = handle orelse return -1;
     const d = data orelse return -1;
     const pane = activePane(h);
@@ -1267,7 +1343,7 @@ fn nthVisiblePlacement(term: *const terminal.Terminal, idx: usize, out: *CPlacem
 }
 
 /// Number of image placements currently VISIBLE in the active pane.
-pub export fn tmux_placement_count(handle: ?*TmuxSession) usize {
+pub export fn zterm_placement_count(handle: ?*ZtermSession) usize {
     const h = handle orelse return 0;
     const term = &activePane(h).terminal;
     const rows = term.grid.rows;
@@ -1283,7 +1359,7 @@ pub export fn tmux_placement_count(handle: ?*TmuxSession) usize {
 
 /// Fill `out` with the geometry of the idx-th visible placement. Returns 0 on
 /// success, -1 if idx is out of range or on NULL.
-pub export fn tmux_placement_at(handle: ?*TmuxSession, idx: usize, out: ?*CPlacement) c_int {
+pub export fn zterm_placement_at(handle: ?*ZtermSession, idx: usize, out: ?*CPlacement) c_int {
     const h = handle orelse return -1;
     const o = out orelse return -1;
     const term = &activePane(h).terminal;
@@ -1293,7 +1369,7 @@ pub export fn tmux_placement_at(handle: ?*TmuxSession, idx: usize, out: ?*CPlace
 /// Copy image `image_id`'s stored bytes into `out` (at most `max`) and fill
 /// `info`. Returns the FULL byte length (which may exceed `max`), or 0 if no
 /// such image. Call with out=NULL to query the length + info, then allocate.
-pub export fn tmux_image_data(handle: ?*TmuxSession, image_id: u32, out: ?[*]u8, max: usize, info: ?*CImageInfo) usize {
+pub export fn zterm_image_data(handle: ?*ZtermSession, image_id: u32, out: ?[*]u8, max: usize, info: ?*CImageInfo) usize {
     const h = handle orelse return 0;
     const term = &activePane(h).terminal;
     const img = term.graphics.findImage(image_id) orelse return 0;
@@ -1308,7 +1384,7 @@ pub export fn tmux_image_data(handle: ?*TmuxSession, image_id: u32, out: ?[*]u8,
 /// Monotonic graphics generation for the active pane. Bumps whenever
 /// placements/images change (transmit, place, delete, eviction, alt-swap), so
 /// the host only re-reads/re-uploads when something actually moved.
-pub export fn tmux_graphics_generation(handle: ?*TmuxSession) u64 {
+pub export fn zterm_graphics_generation(handle: ?*ZtermSession) u64 {
     const h = handle orelse return 0;
     return activePane(h).terminal.graphics_gen;
 }
@@ -1317,7 +1393,7 @@ pub export fn tmux_graphics_generation(handle: ?*TmuxSession) u64 {
 /// read-and-clear — the host releases the matching MTLTextures. Writes up to
 /// `max` ids into `out_ids` (may be NULL to just drain/count) and returns the
 /// number freed.
-pub export fn tmux_take_freed_images(handle: ?*TmuxSession, out_ids: ?[*]u32, max: usize) usize {
+pub export fn zterm_take_freed_images(handle: ?*ZtermSession, out_ids: ?[*]u32, max: usize) usize {
     const h = handle orelse return 0;
     const term = &activePane(h).terminal;
     const items = term.graphics_freed.items;
@@ -1355,10 +1431,10 @@ test "CCell layout is stable for the C header" {
 }
 
 test "graphics ABI struct layouts are stable for the C header" {
-    // tmux_placement: u32 + 4×u16 + 4×u32 + i32 = 32 bytes, align 4.
+    // zterm_placement: u32 + 4×u16 + 4×u32 + i32 = 32 bytes, align 4.
     try std.testing.expectEqual(@as(usize, 4), @alignOf(CPlacement));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(CPlacement));
-    // tmux_image_info: u32 + u32 + u8 → 12 bytes (align 4), matches C padding.
+    // zterm_image_info: u32 + u32 + u8 → 12 bytes (align 4), matches C padding.
     try std.testing.expectEqual(@as(usize, 4), @alignOf(CImageInfo));
     try std.testing.expectEqual(@as(usize, 12), @sizeOf(CImageInfo));
 }
@@ -1367,70 +1443,70 @@ test "pane-aware surface: split, rects tile with a border gap, focus, close" {
     try pty.skipIfUnavailable();
     var id: u64 = 0;
     // /bin/cat as the "shell": no rc files, no prompt noise, sits on the pty.
-    const h = tmux_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
-    defer tmux_destroy(h);
+    const h = zterm_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
+    defer zterm_destroy(h);
 
-    try std.testing.expectEqual(@as(usize, 1), tmux_pane_count(h));
+    try std.testing.expectEqual(@as(usize, 1), zterm_pane_count(h));
     var rows: u16 = 0;
     var cols: u16 = 0;
-    tmux_window_size(h, &rows, &cols);
+    zterm_window_size(h, &rows, &cols);
     try std.testing.expectEqual(@as(u16, 24), rows);
     try std.testing.expectEqual(@as(u16, 80), cols);
 
-    try std.testing.expectEqual(@as(c_int, 0), tmux_split(h, 1));
-    try std.testing.expectEqual(@as(usize, 2), tmux_pane_count(h));
+    try std.testing.expectEqual(@as(c_int, 0), zterm_split(h, 1));
+    try std.testing.expectEqual(@as(usize, 2), zterm_pane_count(h));
 
     var ax: u16 = 0;
     var aw: u16 = 0;
     var bx: u16 = 0;
     var bw: u16 = 0;
-    try std.testing.expectEqual(@as(c_int, 0), tmux_pane_rect(h, 0, &ax, null, &aw, null));
-    try std.testing.expectEqual(@as(c_int, 0), tmux_pane_rect(h, 1, &bx, null, &bw, null));
+    try std.testing.expectEqual(@as(c_int, 0), zterm_pane_rect(h, 0, &ax, null, &aw, null));
+    try std.testing.expectEqual(@as(c_int, 0), zterm_pane_rect(h, 1, &bx, null, &bw, null));
     try std.testing.expectEqual(@as(u16, 0), ax);
     try std.testing.expectEqual(ax + aw + 1, bx); // 1-cell border gap between panes
     try std.testing.expectEqual(@as(u16, 80), bx + bw);
 
-    try std.testing.expectEqual(@as(c_int, 0), tmux_focus_pane(h, 1));
-    try std.testing.expect(tmux_pane_is_active(h, 1));
-    try std.testing.expect(!tmux_pane_is_active(h, 0));
-    try std.testing.expect(tmux_pane_pty_fd(h, 1) >= 0);
+    try std.testing.expectEqual(@as(c_int, 0), zterm_focus_pane(h, 1));
+    try std.testing.expect(zterm_pane_is_active(h, 1));
+    try std.testing.expect(!zterm_pane_is_active(h, 0));
+    try std.testing.expect(zterm_pane_pty_fd(h, 1) >= 0);
 
-    try std.testing.expectEqual(@as(c_int, 0), tmux_close_pane(h, 1));
-    try std.testing.expectEqual(@as(usize, 1), tmux_pane_count(h));
-    try std.testing.expectEqual(@as(c_int, -1), tmux_close_pane(h, 0)); // last pane refused
+    try std.testing.expectEqual(@as(c_int, 0), zterm_close_pane(h, 1));
+    try std.testing.expectEqual(@as(usize, 1), zterm_pane_count(h));
+    try std.testing.expectEqual(@as(c_int, -1), zterm_close_pane(h, 0)); // last pane refused
 }
 
-test "tmux_take_responses drains the emulator's device replies, never splitting one" {
+test "zterm_take_responses drains the emulator's device replies, never splitting one" {
     try pty.skipIfUnavailable();
     var id: u64 = 0;
-    const h = tmux_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
-    defer tmux_destroy(h);
+    const h = zterm_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
+    defer zterm_destroy(h);
 
     var out: [64]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), tmux_take_responses(h, &out, out.len));
+    try std.testing.expectEqual(@as(usize, 0), zterm_take_responses(h, &out, out.len));
 
-    tmux_feed(h, "\x1b[3;7H\x1b[6n", 10);
-    const n = tmux_take_responses(h, &out, out.len);
+    zterm_feed(h, "\x1b[3;7H\x1b[6n", 10);
+    const n = zterm_take_responses(h, &out, out.len);
     try std.testing.expectEqualStrings("\x1b[3;7R", out[0..n]);
-    try std.testing.expectEqual(@as(usize, 0), tmux_take_responses(h, &out, out.len));
+    try std.testing.expectEqual(@as(usize, 0), zterm_take_responses(h, &out, out.len));
 
     // A `max` too small to hold the whole reply must keep the tail queued
     // rather than hand the app a fragment it would type as keystrokes.
-    tmux_feed(h, "\x1b[c", 3); // 9-byte DA1 reply
+    zterm_feed(h, "\x1b[c", 3); // 9-byte DA1 reply
     var small: [4]u8 = undefined;
-    const a = tmux_take_responses(h, &small, small.len);
+    const a = zterm_take_responses(h, &small, small.len);
     try std.testing.expectEqual(@as(usize, 4), a);
     try std.testing.expectEqualStrings("\x1b[?6", small[0..a]);
-    const b = tmux_take_responses(h, &out, out.len);
+    const b = zterm_take_responses(h, &out, out.len);
     try std.testing.expectEqualStrings("2;22c", out[0..b]);
 }
 
-test "tmux_take_exit reports a child that exited, once, with its code" {
+test "zterm_take_exit reports a child that exited, once, with its code" {
     try pty.skipIfUnavailable();
     var id: u64 = 0;
     // `false` exits immediately with status 1 — a deterministic dead child.
-    const h = tmux_create(24, 80, "/usr/bin/false", &id) orelse return error.CreateFailed;
-    defer tmux_destroy(h);
+    const h = zterm_create(24, 80, "/usr/bin/false", &id) orelse return error.CreateFailed;
+    defer zterm_destroy(h);
 
     // Drain until the exit is observed. The child races us to exit, so poll a
     // bounded number of times rather than assuming the first drain sees it.
@@ -1439,8 +1515,8 @@ test "tmux_take_exit reports a child that exited, once, with its code" {
     var seen = false;
     var i: usize = 0;
     while (i < 200) : (i += 1) {
-        _ = tmux_drain(h);
-        if (tmux_take_exit(h, &code, &sig)) {
+        _ = zterm_drain(h);
+        if (zterm_take_exit(h, &code, &sig)) {
             seen = true;
             break;
         }
@@ -1452,40 +1528,40 @@ test "tmux_take_exit reports a child that exited, once, with its code" {
     try std.testing.expectEqual(@as(c_int, 0), sig); // exited, not signalled
 
     // Read-and-clear: the host must not redraw the "exited" bar every frame.
-    try std.testing.expect(!tmux_take_exit(h, &code, &sig));
-    _ = tmux_drain(h);
-    try std.testing.expect(!tmux_take_exit(h, &code, &sig));
+    try std.testing.expect(!zterm_take_exit(h, &code, &sig));
+    _ = zterm_drain(h);
+    try std.testing.expect(!zterm_take_exit(h, &code, &sig));
 }
 
-test "tmux_take_exit stays false while the shell is alive" {
+test "zterm_take_exit stays false while the shell is alive" {
     try pty.skipIfUnavailable();
     var id: u64 = 0;
-    const h = tmux_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
-    defer tmux_destroy(h);
+    const h = zterm_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
+    defer zterm_destroy(h);
     var i: usize = 0;
     while (i < 20) : (i += 1) {
-        _ = tmux_drain(h);
-        try std.testing.expect(!tmux_take_exit(h, null, null));
+        _ = zterm_drain(h);
+        try std.testing.expect(!zterm_take_exit(h, null, null));
         var no_fds = [_]posix.pollfd{};
         _ = posix.poll(&no_fds, 5) catch {};
     }
-    try std.testing.expect(tmux_is_alive(h));
+    try std.testing.expect(zterm_is_alive(h));
 }
 
-test "tmux_create_argv runs the program itself, with its arguments, and reports its exit" {
+test "zterm_create_argv runs the program itself, with its arguments, and reports its exit" {
     try pty.skipIfUnavailable();
     var id: u64 = 0;
     // `sh -c 'exit 7' ignored` — the status proves argv[2] reached the program.
     const argv = [_]?[*:0]const u8{ "/bin/sh", "-c", "exit $0", "7" };
-    const h = tmux_create_argv(24, 80, &argv, argv.len, &id) orelse return error.CreateFailed;
-    defer tmux_destroy(h);
+    const h = zterm_create_argv(24, 80, &argv, argv.len, &id) orelse return error.CreateFailed;
+    defer zterm_destroy(h);
     var code: c_int = -1;
     var sig: c_int = -1;
     var seen = false;
     var i: usize = 0;
     while (i < 200) : (i += 1) {
-        _ = tmux_drain(h);
-        if (tmux_take_exit(h, &code, &sig)) {
+        _ = zterm_drain(h);
+        if (zterm_take_exit(h, &code, &sig)) {
             seen = true;
             break;
         }
@@ -1496,32 +1572,32 @@ test "tmux_create_argv runs the program itself, with its arguments, and reports 
     try std.testing.expectEqual(@as(c_int, 7), code);
 }
 
-test "tmux_create_argv refuses an empty or relative argv" {
+test "zterm_create_argv refuses an empty or relative argv" {
     var id: u64 = 0;
     const rel = [_]?[*:0]const u8{"sh"};
-    try std.testing.expect(tmux_create_argv(24, 80, &rel, rel.len, &id) == null);
-    try std.testing.expect(tmux_create_argv(24, 80, &rel, 0, &id) == null);
-    try std.testing.expect(tmux_create_argv(24, 80, null, 1, &id) == null);
+    try std.testing.expect(zterm_create_argv(24, 80, &rel, rel.len, &id) == null);
+    try std.testing.expect(zterm_create_argv(24, 80, &rel, 0, &id) == null);
+    try std.testing.expect(zterm_create_argv(24, 80, null, 1, &id) == null);
     const holed = [_]?[*:0]const u8{ "/bin/sh", null };
-    try std.testing.expect(tmux_create_argv(24, 80, &holed, holed.len, &id) == null);
+    try std.testing.expect(zterm_create_argv(24, 80, &holed, holed.len, &id) == null);
 }
 
 test "version string is well formed" {
-    const v = std.mem.sliceTo(tmux_version(), 0);
+    const v = std.mem.sliceTo(zterm_version(), 0);
     try std.testing.expect(v.len >= 5);
 }
 
 test "theme C-ABI roundtrip + layout" {
     const txt = "preset = matrix\nbackground = #010203\n";
-    tmux_set_theme_text(txt.ptr, txt.len);
+    zterm_set_theme_text(txt.ptr, txt.len);
     var ct: CTheme = undefined;
-    tmux_get_theme(&ct);
+    zterm_get_theme(&ct);
     try std.testing.expectEqual(@as(u8, 0x01), ct.bg.r); // override applied
     try std.testing.expectEqual(@as(u8, 0x00), ct.fg.r); // matrix green
     try std.testing.expectEqual(@as(u8, 0xFF), ct.fg.g);
     try std.testing.expectEqual(@as(u8, 1), ct.bold_is_bright);
-    tmux_reset_theme();
-    tmux_get_theme(&ct);
+    zterm_reset_theme();
+    zterm_get_theme(&ct);
     try std.testing.expectEqual(@as(u8, 0xD9), ct.fg.r); // default fg restored
     // CRgb is tightly packed so [16]CRgb maps cleanly to the Swift side
     try std.testing.expectEqual(@as(usize, 3), @sizeOf(CRgb));

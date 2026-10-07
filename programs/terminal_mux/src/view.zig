@@ -177,7 +177,7 @@ fn shapeName(shape: u8) []const u8 {
 }
 
 /// The absolute line number of grid row 0, and of the oldest history line
-/// still held — the numbering `tmux_pane_lines` uses, so a selection held
+/// still held — the numbering `zterm_pane_lines` uses, so a selection held
 /// against content survives output streaming past it.
 pub fn lineRange(term: *const Terminal) struct { live_top: i64, oldest: i64 } {
     const live_top: i64 = @intCast(term.graphics.epoch);

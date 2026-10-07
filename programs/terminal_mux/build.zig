@@ -7,7 +7,7 @@
 //!   (e.g. a Swift/SwiftUI front-end) — see include/terminal_mux.h
 //!
 //! Usage:
-//!   zig build              - Build the C ABI static library + tmux executable
+//!   zig build              - Build the C ABI static library + the zterm executable
 //!   zig build test         - Run all unit tests (Zig lib + C ABI)
 //!   zig build run          - Run the standalone terminal multiplexer
 //!   zig build bench        - Run the C ABI throughput/latency benchmark
@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
 
     // ==========================================================================
     // C ABI Static Library (libterminal_mux) — the embedding surface.
-    // Root is src/capi.zig so the installed archive exports the tmux_* symbols.
+    // Root is src/capi.zig so the installed archive exports the zterm_* symbols.
     // ==========================================================================
     const lib = b.addLibrary(.{
         .name = "terminal_mux",

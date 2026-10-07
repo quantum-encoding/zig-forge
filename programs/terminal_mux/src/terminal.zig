@@ -159,7 +159,7 @@ pub const Modes = struct {
     focus_events: bool = false,
     /// Synchronized output (DEC 2026): the app is mid-repaint and the host
     /// must not present the grid until the closing `?2026l` (or a timeout —
-    /// see tmux_sync_suppressed). Claude Code wraps EVERY frame in a 2026
+    /// see zterm_sync_suppressed). Claude Code wraps EVERY frame in a 2026
     /// pair; painting between them shows half-erased rows and duplicated
     /// composer blocks (goal 556D61CB defects #4/#5).
     synchronized: bool = false,
@@ -308,7 +308,7 @@ pub const Grid = struct {
     /// overflowed the last column), i.e. there was NO explicit CR/LF between them.
     /// Indexed by physRow (mirrors `cells`) so it rides the ring rotation on
     /// scroll exactly like the cells do. INTERNAL only — never exported over the
-    /// C ABI (tmux_cell stays 16 bytes; this is Grid-level metadata, not per-cell).
+    /// C ABI (zterm_cell stays 16 bytes; this is Grid-level metadata, not per-cell).
     /// Renderers/URL detection use it to distinguish a real soft-wrap from a
     /// hard-terminated line that merely happens to fill the full width.
     wrapped: []bool,
@@ -712,7 +712,7 @@ pub const Terminal = struct {
     /// Device-report replies the emulator owes the app: DA1/DA2 (`CSI c`),
     /// DSR-CPR (`CSI 6 n`), OSC 10/11 colour queries. The emulator must not
     /// write to the PTY — the host owns input — so replies queue here and the
-    /// host drains them via `tmux_take_responses` and sends them back.
+    /// host drains them via `zterm_take_responses` and sends them back.
     /// Bounded on purpose: an app that spams queries while the host is not
     /// draining drops replies instead of growing the terminal without limit.
     resp_pending: [RESP_CAPACITY]u8 = undefined,
@@ -725,7 +725,7 @@ pub const Terminal = struct {
     graphics: gfx.GraphicsState = .empty,
     alt_graphics: ?gfx.GraphicsState = null,
     /// Image ids freed since the host last drained (a=d, eviction, alt-exit,
-    /// overwrite). Read-and-clear via tmux_take_freed_images — the VRAM guard.
+    /// overwrite). Read-and-clear via zterm_take_freed_images — the VRAM guard.
     graphics_freed: std.ArrayListUnmanaged(u32) = .empty,
     /// Monotonic counter; bumps when placements/images change so the host only
     /// re-uploads textures when something actually moved.

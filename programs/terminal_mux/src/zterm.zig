@@ -522,7 +522,7 @@ fn procCwd(pid: c.pid_t, buf: []u8) ?[]const u8 {
 
 const Pane = struct {
     id: u64,
-    handle: *capi.TmuxSession,
+    handle: *capi.ZtermSession,
     fd: c.fd_t,
     /// The designation, when one was given (spawn `name`, or `title`). Owned.
     name: ?[]u8 = null,
@@ -744,7 +744,7 @@ const Server = struct {
         for (self.viewers.items) |*v| v.deinit(self.alloc);
         self.viewers.deinit(self.alloc);
         for (self.panes.items) |p| {
-            capi.tmux_destroy(p.handle);
+            capi.zterm_destroy(p.handle);
             if (p.name) |n| self.alloc.free(n);
         }
         self.panes.deinit(self.alloc);
@@ -904,9 +904,9 @@ const Server = struct {
             why.* = if (o.argv.len > 0) "could not start the program in a new PTY" else "could not start a shell in a new PTY";
             return null;
         };
-        const fd = capi.tmux_pty_fd(h);
+        const fd = capi.zterm_pty_fd(h);
         self.panes.append(self.alloc, .{ .id = id, .handle = h, .fd = fd, .name = name_copy }) catch {
-            capi.tmux_destroy(h);
+            capi.zterm_destroy(h);
             if (name_copy) |n| self.alloc.free(n);
             why.* = "out of memory";
             return null;
@@ -936,7 +936,7 @@ const Server = struct {
                 v.exit_sent = true;
                 v.closing = true;
             }
-            capi.tmux_destroy(p.handle);
+            capi.zterm_destroy(p.handle);
             if (p.name) |n| self.alloc.free(n);
             _ = self.panes.orderedRemove(idx);
             return true;
@@ -1061,7 +1061,7 @@ const Server = struct {
                     continue;
                 }
                 if (self.findPane(a.pane_id)) |p| {
-                    _ = capi.tmux_send(p.handle, &io_buf, r);
+                    _ = capi.zterm_send(p.handle, &io_buf, r);
                     p.noteInput();
                 } else {
                     pclose(a.conn);
@@ -1170,7 +1170,7 @@ const Server = struct {
                 cwrite(conn, "err no such pane\n");
                 return .close;
             };
-            if (text.len > 0) _ = capi.tmux_send(p.handle, text.ptr, text.len);
+            if (text.len > 0) _ = capi.zterm_send(p.handle, text.ptr, text.len);
             cwrite(conn, "ok\n");
         } else if (std.mem.eql(u8, cmd, "enter")) {
             const id = std.fmt.parseInt(u64, it.next() orelse "", 10) catch return .close;
@@ -1178,7 +1178,7 @@ const Server = struct {
                 cwrite(conn, "err no such pane\n");
                 return .close;
             };
-            _ = capi.tmux_send(p.handle, "\r", 1);
+            _ = capi.zterm_send(p.handle, "\r", 1);
             cwrite(conn, "ok\n");
         } else if (std.mem.eql(u8, cmd, "capture")) {
             const id = std.fmt.parseInt(u64, it.next() orelse "", 10) catch return .close;
@@ -1210,7 +1210,7 @@ const Server = struct {
             }
             try writeSnapshot(conn, p.handle, self.alloc);
             // Keystrokes that raced in behind the attach line belong to the pane.
-            if (trailing.len > 0) _ = capi.tmux_send(p.handle, trailing.ptr, trailing.len);
+            if (trailing.len > 0) _ = capi.zterm_send(p.handle, trailing.ptr, trailing.len);
             // Relay writes are bounded (relayWrite); the conn must be non-blocking
             // so a stalled reader surfaces as EAGAIN instead of wedging the loop.
             const fl = c.fcntl(conn, c.F.GETFL, @as(c_int, 0));
@@ -1324,7 +1324,7 @@ const Server = struct {
                 cwrite(conn, "{\"ok\":false,\"error\":\"no such pane\"}\n");
                 return .close;
             };
-            _ = capi.tmux_send(p.handle, "\r", 1);
+            _ = capi.zterm_send(p.handle, "\r", 1);
             cwrite(conn, "{\"ok\":true}\n");
         } else if (std.mem.eql(u8, cmd, "capture")) {
             const p = self.findPane(pane_id) orelse {
@@ -1539,7 +1539,7 @@ const Server = struct {
     /// Resize a pane and resync everyone viewing it: the grid has new
     /// dimensions, so only a full frame describes it.
     fn resizePane(self: *Server, p: *Pane, rows: u16, cols: u16) void {
-        _ = capi.tmux_resize(p.handle, rows, cols);
+        _ = capi.zterm_resize(p.handle, rows, cols);
         p.noteInput(); // a window being dragged wants its frames now
         for (self.viewers.items) |*v| {
             if (v.conn < 0 or v.pane_id != p.id) continue;
@@ -1785,14 +1785,14 @@ const Server = struct {
         if (jsonBool(m, "focus")) |focused| {
             if (p.spane().terminal.modes.focus_events) {
                 const seq: []const u8 = if (focused) "\x1b[I" else "\x1b[O";
-                _ = capi.tmux_send(p.handle, seq.ptr, seq.len);
+                _ = capi.zterm_send(p.handle, seq.ptr, seq.len);
             }
             return;
         }
         const kind = jsonStr(m, "input") orelse return;
         if (std.mem.eql(u8, kind, "text")) {
             const data = jsonStr(m, "data") orelse return;
-            if (data.len > 0) _ = capi.tmux_send(p.handle, data.ptr, data.len);
+            if (data.len > 0) _ = capi.zterm_send(p.handle, data.ptr, data.len);
         } else if (std.mem.eql(u8, kind, "bytes")) {
             const b64 = jsonStr(m, "b64") orelse return;
             const dec = std.base64.standard.Decoder;
@@ -1800,13 +1800,13 @@ const Server = struct {
             const buf = self.alloc.alloc(u8, n) catch return;
             defer self.alloc.free(buf);
             dec.decode(buf, b64) catch return;
-            if (n > 0) _ = capi.tmux_send(p.handle, buf.ptr, n);
+            if (n > 0) _ = capi.zterm_send(p.handle, buf.ptr, n);
         } else if (std.mem.eql(u8, kind, "paste")) {
             const data = jsonStr(m, "data") orelse return;
             var clean: std.ArrayList(u8) = .empty;
             defer clean.deinit(self.alloc);
             const text = view.stripPasteEnd(data, &clean, self.alloc) catch return;
-            if (text.len > 0) _ = capi.tmux_paste(p.handle, text.ptr, text.len);
+            if (text.len > 0) _ = capi.zterm_paste(p.handle, text.ptr, text.len);
         } else if (std.mem.eql(u8, kind, "mouse")) {
             const what = jsonStr(m, "kind") orelse return;
             const k: c_int = if (std.mem.eql(u8, what, "press")) 0 else if (std.mem.eql(u8, what, "release")) 1 else if (std.mem.eql(u8, what, "motion")) 2 else return;
@@ -1814,7 +1814,7 @@ const Server = struct {
             const y = std.math.cast(u16, jsonInt(m, "y") orelse return) orelse return;
             const button = std.math.cast(c_int, jsonInt(m, "button") orelse 0) orelse return;
             const mods = std.math.cast(c_int, jsonInt(m, "mods") orelse 0) orelse return;
-            _ = capi.tmux_mouse(p.handle, k, button, y, x, mods);
+            _ = capi.zterm_mouse(p.handle, k, button, y, x, mods);
         }
     }
 
@@ -1853,13 +1853,13 @@ const Server = struct {
         for (self.panes.items, 0..) |*p, i| {
             var rows: u16 = 0;
             var cols: u16 = 0;
-            capi.tmux_grid_size(p.handle, &rows, &cols);
+            capi.zterm_grid_size(p.handle, &rows, &cols);
             const sp = p.spane();
             const alive = p.alive();
             const st = if (!alive) sp.exitStatus() else null;
             const child = p.childPid();
             const cwd = procCwd(child, &scratch[i].cwd) orelse sp.cwd[0..sp.cwd_len];
-            const tlen = capi.tmux_title(p.handle, &scratch[i].title, scratch[i].title.len);
+            const tlen = capi.zterm_title(p.handle, &scratch[i].title, scratch[i].title.len);
             const fg = if (alive and !p.hup) procComm(p.foregroundPgid(), &scratch[i].fg) orelse "" else "";
             try infos.append(self.alloc, .{
                 .pane = p.id,
@@ -2031,9 +2031,9 @@ const Server = struct {
                 }
                 if (s.payload.len > 0) {
                     const n = if (s.paste)
-                        capi.tmux_paste(p.handle, s.payload.ptr, s.payload.len)
+                        capi.zterm_paste(p.handle, s.payload.ptr, s.payload.len)
                     else
-                        capi.tmux_send(p.handle, s.payload.ptr, s.payload.len);
+                        capi.zterm_send(p.handle, s.payload.ptr, s.payload.len);
                     if (n < 0) return self.finishSubmit(s, false, "the PTY refused the write");
                     s.written = @intCast(n);
                     if (s.written < s.payload.len) {
@@ -2062,7 +2062,7 @@ const Server = struct {
                     } else |_| {}
                 }
                 if (now < s.deadline) return;
-                const n = capi.tmux_send(p.handle, "\r", 1);
+                const n = capi.zterm_send(p.handle, "\r", 1);
                 if (n != 1) return self.finishSubmit(s, false, "the paste was written but the submitting CR was not");
                 const detail = if (s.landed or s.payload.len == 0)
                     "zterm hosts no transcript, so consumption is not observable here; submitted after the paste showed on screen"
@@ -2132,15 +2132,15 @@ fn relayWrite(fd: c.fd_t, data: []const u8) !void {
 /// Redraw a pane's current screen onto a freshly-attached client: clear, home,
 /// then the grid rows joined with CRLF (the client tty is raw — bare LF would
 /// staircase). Colors return as the app repaints; this restores the text.
-fn writeSnapshot(conn: i32, h: *capi.TmuxSession, alloc: std.mem.Allocator) !void {
+fn writeSnapshot(conn: i32, h: *capi.ZtermSession, alloc: std.mem.Allocator) !void {
     var rows: u16 = 0;
     var cols: u16 = 0;
-    capi.tmux_grid_size(h, &rows, &cols);
+    capi.zterm_grid_size(h, &rows, &cols);
     const total = @as(usize, rows) * @as(usize, cols);
     if (total == 0) return;
     const cells = try alloc.alloc(capi.CCell, total);
     defer alloc.free(cells);
-    const got = capi.tmux_read_cells(h, cells.ptr, total);
+    const got = capi.zterm_read_cells(h, cells.ptr, total);
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(alloc);
@@ -2164,7 +2164,7 @@ fn writeSnapshot(conn: i32, h: *capi.TmuxSession, alloc: std.mem.Allocator) !voi
     var crow: u16 = 0;
     var ccol: u16 = 0;
     var cvis = false;
-    capi.tmux_cursor(h, &crow, &ccol, &cvis);
+    capi.zterm_cursor(h, &crow, &ccol, &cvis);
     var cb: [24]u8 = undefined;
     try out.appendSlice(alloc, std.fmt.bufPrint(&cb, "\x1b[{d};{d}H", .{ crow + 1, ccol + 1 }) catch "");
     _ = pwrite(conn, out.items) catch {};

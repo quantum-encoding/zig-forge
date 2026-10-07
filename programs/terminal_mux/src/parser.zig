@@ -1067,7 +1067,7 @@ fn handleDecPrivateMode(term: *Terminal, seq: CsiSequence, enable: bool) void {
             2026 => {
                 // Synchronized output: claude Code wraps every TUI repaint in
                 // `?2026h … ?2026l`. The grid keeps updating normally; only
-                // the HOST's presentation is gated (tmux_sync_suppressed), so
+                // the HOST's presentation is gated (zterm_sync_suppressed), so
                 // a replayed stream's final grid is identical with or without
                 // this mode — but a live renderer no longer paints the
                 // half-applied repaint states between the pair.

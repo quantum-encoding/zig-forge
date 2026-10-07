@@ -40,7 +40,7 @@ const Harness = struct {
         return .{ .row = c.row, .col = c.col };
     }
     /// The reply queue the emulator owes the app, read-and-clear (what the
-    /// host drains via tmux_take_responses).
+    /// host drains via zterm_take_responses).
     fn takeResp(self: *Harness) []const u8 {
         const t = &self.term().terminal;
         const out = t.resp_pending[0..t.resp_len];

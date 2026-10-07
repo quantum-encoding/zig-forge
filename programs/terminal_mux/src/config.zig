@@ -321,13 +321,15 @@ pub const RuntimeConfig = struct {
         return self.scrollback_override orelse self.static.scrollback_lines;
     }
 
-    /// Load overrides from environment variables
+    /// Load overrides from environment variables: ZTERM_SHELL and
+    /// ZTERM_SCROLLBACK. Their old names (TMUX_SHELL, TMUX_SCROLLBACK) are still
+    /// read when the new ones are unset, for one release.
     pub fn loadFromEnv(self: *RuntimeConfig) void {
-        if (std.posix.getenv("TMUX_SHELL")) |shell| {
+        if (std.posix.getenv("ZTERM_SHELL") orelse std.posix.getenv("TMUX_SHELL")) |shell| {
             self.shell_override = self.allocator.dupe(u8, shell) catch null;
         }
 
-        if (std.posix.getenv("TMUX_SCROLLBACK")) |val| {
+        if (std.posix.getenv("ZTERM_SCROLLBACK") orelse std.posix.getenv("TMUX_SCROLLBACK")) |val| {
             self.scrollback_override = std.fmt.parseInt(u32, val, 10) catch null;
         }
     }
@@ -524,7 +526,7 @@ fn presetByName(name: []const u8) ?Theme {
 
 /// Runtime-active theme — the single source of truth for every renderer at run
 /// time. Set once near startup (the TUI parses the config file; C-ABI consumers
-/// push config text via tmux_set_theme_text). Read-mostly, so left unguarded.
+/// push config text via zterm_set_theme_text). Read-mostly, so left unguarded.
 pub var active_theme: Theme = .{};
 
 // =============================================================================

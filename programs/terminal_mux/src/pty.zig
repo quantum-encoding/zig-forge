@@ -530,7 +530,7 @@ pub const Pty = struct {
     /// the whole payload; only a child that has stopped reading (Ctrl-Z'd,
     /// wedged, dead-but-unreaped) hits the bound.
     ///
-    /// This is a hard requirement, not a tuning knob: `tmux_paste` runs on the
+    /// This is a hard requirement, not a tuning knob: `zterm_paste` runs on the
     /// host's MAIN thread, so an unbounded wait here freezes the UI.
     pub const WRITE_STALL_BUDGET_MS: i32 = 250;
     /// One EAGAIN wait. The budget is charged this much per wait regardless of
@@ -546,7 +546,7 @@ pub const Pty = struct {
     /// `data.len`: a child that is not reading stalls the write, and after
     /// `WRITE_STALL_BUDGET_MS` of no progress we return what got through
     /// rather than block the caller forever. Callers that care must check the
-    /// count — `tmux_paste` reports it to the host.
+    /// count — `zterm_paste` reports it to the host.
     pub fn write(self: *Self, data: []const u8) !usize {
         var off: usize = 0;
         var budget_ms = WRITE_STALL_BUDGET_MS;

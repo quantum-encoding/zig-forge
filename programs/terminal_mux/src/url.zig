@@ -9,7 +9,7 @@
 const std = @import("std");
 const terminal = @import("terminal.zig");
 
-/// extern so it doubles as the C-ABI type (capi re-exports it as tmux_url_range).
+/// extern so it doubles as the C-ABI type (capi re-exports it as zterm_url_range).
 /// A single-row URL has start_row == end_row.
 pub const UrlRange = extern struct {
     start_row: u16,

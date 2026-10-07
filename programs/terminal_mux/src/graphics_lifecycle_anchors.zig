@@ -3,7 +3,7 @@
 //! stream anchor.
 //!
 //! Every case drives bytes through the REAL parser (Pane.processOutput /
-//! tmux_feed), so the APC capture + Kitty control parse are under test too — not
+//! zterm_feed), so the APC capture + Kitty control parse are under test too — not
 //! just the graphics bookkeeping.
 //!
 //!   1. Scroll off the top of scrollback  → placement evicted, image freed.
@@ -63,7 +63,7 @@ const H = struct {
         return &self.sess.getActiveWindow().getActivePane().terminal;
     }
     /// Count placements whose clipped rect is currently on-screen (mirrors
-    /// tmux_placement_count).
+    /// zterm_placement_count).
     fn visibleCount(self: *H) usize {
         const t = self.term();
         const top = t.graphicsViewportTopAbs();
@@ -221,33 +221,33 @@ test "lifecycle 4: alt-screen placements never leak into the primary; freed on e
 test "graphics ABI: transmit, place, image_data, scroll-move, delete + freed" {
     try pty.skipIfUnavailable();
     var id: u64 = 0;
-    const hh = capi.tmux_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
-    defer capi.tmux_destroy(hh);
+    const hh = capi.zterm_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
+    defer capi.zterm_destroy(hh);
 
-    const gen0 = capi.tmux_graphics_generation(hh);
+    const gen0 = capi.zterm_graphics_generation(hh);
 
     // Transmit + place a 2x2 image at row 3 (CUP row 4).
-    capi.tmux_feed(hh, "\x1b[4;1H", 6);
+    capi.zterm_feed(hh, "\x1b[4;1H", 6);
     const stream = try transmitPlace(1, 2, 2, 2, 2, &PIXELS);
     defer talloc.free(stream);
-    capi.tmux_feed(hh, stream.ptr, stream.len);
+    capi.zterm_feed(hh, stream.ptr, stream.len);
 
-    try std.testing.expectEqual(@as(usize, 1), capi.tmux_placement_count(hh));
-    try std.testing.expect(capi.tmux_graphics_generation(hh) > gen0);
+    try std.testing.expectEqual(@as(usize, 1), capi.zterm_placement_count(hh));
+    try std.testing.expect(capi.zterm_graphics_generation(hh) > gen0);
 
     var pl: capi.CPlacement = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), capi.tmux_placement_at(hh, 0, &pl));
+    try std.testing.expectEqual(@as(c_int, 0), capi.zterm_placement_at(hh, 0, &pl));
     try std.testing.expectEqual(@as(u32, 1), pl.image_id);
     try std.testing.expectEqual(@as(u16, 0), pl.cell_x);
     try std.testing.expectEqual(@as(u16, 3), pl.cell_y);
     try std.testing.expectEqual(@as(u16, 2), pl.cell_w);
     try std.testing.expectEqual(@as(u16, 2), pl.cell_h);
-    try std.testing.expectEqual(@as(c_int, -1), capi.tmux_placement_at(hh, 1, &pl)); // only one
+    try std.testing.expectEqual(@as(c_int, -1), capi.zterm_placement_at(hh, 1, &pl)); // only one
 
     // Image bytes + info come straight back (host decodes; core does not).
     var info: capi.CImageInfo = undefined;
     var buf: [64]u8 = undefined;
-    const n = capi.tmux_image_data(hh, 1, &buf, buf.len, &info);
+    const n = capi.zterm_image_data(hh, 1, &buf, buf.len, &info);
     try std.testing.expectEqual(@as(usize, 16), n);
     try std.testing.expectEqual(@as(u32, 2), info.width);
     try std.testing.expectEqual(@as(u32, 2), info.height);
@@ -255,24 +255,24 @@ test "graphics ABI: transmit, place, image_data, scroll-move, delete + freed" {
     try std.testing.expectEqualSlices(u8, &PIXELS, buf[0..16]);
 
     // Scroll up 2 — the placement MOVES with the content (anchor line fixed).
-    capi.tmux_feed(hh, "\x1b[2S", 4);
-    try std.testing.expectEqual(@as(usize, 1), capi.tmux_placement_count(hh));
-    try std.testing.expectEqual(@as(c_int, 0), capi.tmux_placement_at(hh, 0, &pl));
+    capi.zterm_feed(hh, "\x1b[2S", 4);
+    try std.testing.expectEqual(@as(usize, 1), capi.zterm_placement_count(hh));
+    try std.testing.expectEqual(@as(c_int, 0), capi.zterm_placement_at(hh, 0, &pl));
     try std.testing.expectEqual(@as(u16, 1), pl.cell_y); // 3 → 1
 
     // Drain freed, then delete by id → count 0, freed reports the id.
-    _ = capi.tmux_take_freed_images(hh, null, 0);
+    _ = capi.zterm_take_freed_images(hh, null, 0);
     const del = try deleteById(1);
     defer talloc.free(del);
-    capi.tmux_feed(hh, del.ptr, del.len);
-    try std.testing.expectEqual(@as(usize, 0), capi.tmux_placement_count(hh));
+    capi.zterm_feed(hh, del.ptr, del.len);
+    try std.testing.expectEqual(@as(usize, 0), capi.zterm_placement_count(hh));
 
     var freed: [8]u32 = undefined;
-    const nfreed = capi.tmux_take_freed_images(hh, &freed, freed.len);
+    const nfreed = capi.zterm_take_freed_images(hh, &freed, freed.len);
     try std.testing.expectEqual(@as(usize, 1), nfreed);
     try std.testing.expectEqual(@as(u32, 1), freed[0]);
     // Image is gone from the store.
-    try std.testing.expectEqual(@as(usize, 0), capi.tmux_image_data(hh, 1, null, 0, null));
+    try std.testing.expectEqual(@as(usize, 0), capi.zterm_image_data(hh, 1, null, 0, null));
 }
 
 // ============================================================================
@@ -285,14 +285,14 @@ test "recorded-stream anchor: committed .bin replays to the expected ABI state" 
 
     try pty.skipIfUnavailable();
     var id: u64 = 0;
-    const hh = capi.tmux_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
-    defer capi.tmux_destroy(hh);
+    const hh = capi.zterm_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
+    defer capi.zterm_destroy(hh);
 
-    capi.tmux_feed(hh, fixture.ptr, fixture.len);
+    capi.zterm_feed(hh, fixture.ptr, fixture.len);
 
-    try std.testing.expectEqual(@as(usize, 1), capi.tmux_placement_count(hh));
+    try std.testing.expectEqual(@as(usize, 1), capi.zterm_placement_count(hh));
     var pl: capi.CPlacement = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), capi.tmux_placement_at(hh, 0, &pl));
+    try std.testing.expectEqual(@as(c_int, 0), capi.zterm_placement_at(hh, 0, &pl));
     try std.testing.expectEqual(@as(u32, 1), pl.image_id);
     try std.testing.expectEqual(@as(u16, 2), pl.cell_y); // placed at row 5, scrolled up 3
     try std.testing.expectEqual(@as(u16, 2), pl.cell_w);
@@ -300,7 +300,7 @@ test "recorded-stream anchor: committed .bin replays to the expected ABI state" 
 
     var info: capi.CImageInfo = undefined;
     var buf: [64]u8 = undefined;
-    const n = capi.tmux_image_data(hh, 1, &buf, buf.len, &info);
+    const n = capi.zterm_image_data(hh, 1, &buf, buf.len, &info);
     try std.testing.expectEqual(@as(usize, 16), n);
     try std.testing.expectEqual(@as(u32, 2), info.width);
     try std.testing.expectEqualSlices(u8, &PIXELS, buf[0..16]);
@@ -308,9 +308,9 @@ test "recorded-stream anchor: committed .bin replays to the expected ABI state" 
     // Delete frees it.
     const del = try deleteById(1);
     defer talloc.free(del);
-    capi.tmux_feed(hh, del.ptr, del.len);
-    try std.testing.expectEqual(@as(usize, 0), capi.tmux_placement_count(hh));
+    capi.zterm_feed(hh, del.ptr, del.len);
+    try std.testing.expectEqual(@as(usize, 0), capi.zterm_placement_count(hh));
     var freed: [8]u32 = undefined;
-    try std.testing.expectEqual(@as(usize, 1), capi.tmux_take_freed_images(hh, &freed, freed.len));
+    try std.testing.expectEqual(@as(usize, 1), capi.zterm_take_freed_images(hh, &freed, freed.len));
     try std.testing.expectEqual(@as(u32, 1), freed[0]);
 }
