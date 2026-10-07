@@ -77,6 +77,28 @@ try:
     check("spawn with cwd+name", sp.get("ok"), sp); pane = sp["pane"]
     check("spawn refuses a bad cwd", not J(ctl_sock, {"cmd": "spawn", "cwd": "/nonexistent/x"})["ok"])
     check("spawn refuses a duplicate name", not J(ctl_sock, {"cmd": "spawn", "name": "SCRIBE"})["ok"])
+    # ── spawn with argv: the program IS the pane's process. Nothing is typed
+    # into a shell, the arguments arrive verbatim, and its exit status is kept.
+    ax = J(ctl_sock, {"cmd": "spawn", "cwd": wd, "name": "argv-exit",
+                      "argv": ["/bin/sh", "-c", "printf 'argv-ok:%s|%s\\n' \"$0\" \"$PWD\"; sleep 1; exit 7", "it's $HOME"]})
+    check("spawn argv answers exec:true", ax.get("ok") and ax.get("exec") is True, ax)
+    arrived = lambda cap: any(f"argv-ok:it's $HOME|{d}" in cap for d in (wd, os.path.realpath(wd)))
+    check("argv arrives verbatim, in the requested cwd",
+          wait_for(lambda: arrived(capture(ax["pane"])), 10), capture(ax["pane"])[-300:])
+    row = lambda p: [r for r in J(ctl_sock, {"cmd": "list"}) if r["pane"] == p][0]
+    check("argv program's exit status is reported", wait_for(lambda: not row(ax["pane"])["alive"], 10)
+          and row(ax["pane"])["exit_code"] == 7, row(ax["pane"]))
+    asl = J(ctl_sock, {"cmd": "spawn", "argv": ["/bin/sleep", "30"]})
+    pid = row(asl["pane"])["pid"]
+    comm = subprocess.run(["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    check("the pane's process is the argv program, not a shell", os.path.basename(comm) == "sleep", comm)
+    check("an argv pane names its terminal", row(asl["pane"])["tty"].startswith("/dev/"), row(asl["pane"]))
+    J(ctl_sock, {"cmd": "kill", "pane": asl["pane"]})
+    check("argv[0] must be absolute", not J(ctl_sock, {"cmd": "spawn", "argv": ["sleep", "1"]})["ok"])
+    check("argv and run are exclusive", not J(ctl_sock, {"cmd": "spawn", "argv": ["/bin/sh"], "run": "true"})["ok"])
+    check("an empty argv is refused", not J(ctl_sock, {"cmd": "spawn", "argv": []})["ok"])
+    check("a spawn without argv never claims exec", "exec" not in J(ctl_sock, {"cmd": "spawn", "name": "plain-shell"}))
+    J(ctl_sock, {"cmd": "kill", "pane": ax["pane"]})
     ready = lambda: J(ctl_sock, {"cmd": "send", "pane": pane, "text": "touch " + wd + "/ready", "enter": True})["ok"] and os.path.exists(wd + "/ready")
     check("JSON send+enter executes in the pane (shell booted)", wait_for(ready, 30))
     r = subprocess.run([Z, "cli", "send", str(pane), "--", "pwd", ">", wd + "/pwd.txt"], env=env, capture_output=True, text=True)

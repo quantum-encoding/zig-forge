@@ -36,7 +36,9 @@
 //!   * `{"cmd":...}` — the JSON control protocol, shared with ctl.zig (the
 //!            visible mux). Binary-safe text, options, JSON answers:
 //!              list
-//!              spawn   {cwd?, name?, run?, rows?, cols?}      → {ok, pane}
+//!              spawn   {cwd?, name?, run?, argv?, env?, rows?, cols?} → {ok, pane, exec?}
+//!                      argv: the pane runs that program itself (argv[0] absolute;
+//!                      no shell, nothing typed) and the reply carries exec:true
 //!              send    {pane, text, paste?, enter?}           → {ok, bytes, entered}
 //!              enter   {pane}
 //!              capture {pane, lines?, escapes?}              → plain text
@@ -388,6 +390,64 @@ pub fn parseSpawnEnv(alloc: std.mem.Allocator, env: std.json.Value, why: *[]cons
 
 pub fn freeSpawnEnv(alloc: std.mem.Allocator, entries: []const [:0]u8) void {
     for (entries) |e| alloc.free(e);
+}
+
+/// Bounds on a spawn's `argv`: a program and its arguments, not a payload.
+pub const SPAWN_ARGV_MAX: usize = 256;
+pub const SPAWN_ARGV_MAX_BYTES: usize = 256 * 1024;
+
+/// A spawn request's `argv` array as owned NUL-terminated strings, or null
+/// with `why` set. `argv[0]` must be an absolute path (it is exec'd without a
+/// PATH search); every entry is a string with no NUL. Applied whole or refused
+/// whole, like `env`.
+pub fn parseSpawnArgv(alloc: std.mem.Allocator, argv: std.json.Value, why: *[]const u8) ?[][:0]u8 {
+    const items = switch (argv) {
+        .array => |a| a.items,
+        else => {
+            why.* = "argv must be an array of strings";
+            return null;
+        },
+    };
+    if (items.len == 0 or items.len > SPAWN_ARGV_MAX) {
+        why.* = "argv must hold 1-256 strings";
+        return null;
+    }
+    var total: usize = 0;
+    for (items, 0..) |it, i| {
+        const s = switch (it) {
+            .string => |x| x,
+            else => {
+                why.* = "argv must be an array of strings";
+                return null;
+            },
+        };
+        if (std.mem.indexOfScalar(u8, s, 0) != null) {
+            why.* = "argv entries must not contain NUL";
+            return null;
+        }
+        if (i == 0 and !std.fs.path.isAbsolute(s)) {
+            why.* = "argv[0] must be an absolute path";
+            return null;
+        }
+        total += s.len + 1;
+    }
+    if (total > SPAWN_ARGV_MAX_BYTES) {
+        why.* = "argv is larger than 256 KiB";
+        return null;
+    }
+    const out = alloc.alloc([:0]u8, items.len) catch {
+        why.* = "out of memory";
+        return null;
+    };
+    for (items, 0..) |it, made| {
+        out[made] = alloc.dupeZ(u8, it.string) catch {
+            freeSpawnEnv(alloc, out[0..made]);
+            alloc.free(out);
+            why.* = "out of memory";
+            return null;
+        };
+    }
+    return out;
 }
 
 /// baton's `Session::answers_to`: a designation (any case), or `pid:<n>` for
@@ -792,6 +852,8 @@ const Server = struct {
         /// Extra "KEY=value" entries for this pane's environment only
         /// (`parseSpawnEnv`).
         env: []const [:0]const u8 = &.{},
+        /// The pane's own program (`parseSpawnArgv`). Empty = a login shell.
+        argv: []const [:0]const u8 = &.{},
     };
 
     /// Spawn a pane. Returns the pane id, or a sentence saying why not.
@@ -816,14 +878,18 @@ const Server = struct {
             why.* = "run command longer than 1024 bytes (send it after spawn instead)";
             return null;
         };
+        if (o.run != null and o.argv.len > 0) {
+            why.* = "argv and run are exclusive: argv starts the program itself, run types into a shell";
+            return null;
+        }
         const name_copy: ?[]u8 = if (o.name) |n| (self.alloc.dupe(u8, n) catch {
             why.* = "out of memory";
             return null;
         }) else null;
         var id: u64 = 0;
-        const h = capi.createIn(o.rows, o.cols, null, o.cwd, true, o.env, &id) orelse {
+        const h = capi.createInArgv(o.rows, o.cols, o.argv, o.cwd, true, o.env, &id) orelse {
             if (name_copy) |n| self.alloc.free(n);
-            why.* = "could not start a shell in a new PTY";
+            why.* = if (o.argv.len > 0) "could not start the program in a new PTY" else "could not start a shell in a new PTY";
             return null;
         };
         const fd = capi.tmux_pty_fd(h);
@@ -1183,6 +1249,17 @@ const Server = struct {
                 freeSpawnEnv(self.alloc, env);
                 if (env.len > 0) self.alloc.free(env);
             }
+            var argv: [][:0]u8 = &.{};
+            if (v.object.get("argv")) |a| if (a != .null) {
+                argv = parseSpawnArgv(self.alloc, a, &why) orelse {
+                    self.reply(conn, .{ .ok = false, .@"error" = why });
+                    return .close;
+                };
+            };
+            defer {
+                freeSpawnEnv(self.alloc, argv);
+                if (argv.len > 0) self.alloc.free(argv);
+            }
             const o = SpawnOpts{
                 .rows = clampDim(jsonInt(v, "rows"), 40),
                 .cols = clampDim(jsonInt(v, "cols"), 120),
@@ -1190,9 +1267,14 @@ const Server = struct {
                 .name = jsonStr(v, "name"),
                 .run = jsonStr(v, "run"),
                 .env = env,
+                .argv = argv,
             };
             if (self.spawn(o, &why)) |id| {
-                self.reply(conn, .{ .ok = true, .pane = id });
+                // `exec` tells a client the program was started as the pane's
+                // own process; a server without argv support never says it.
+                if (argv.len > 0) {
+                    self.reply(conn, .{ .ok = true, .pane = id, .exec = true });
+                } else self.reply(conn, .{ .ok = true, .pane = id });
             } else self.reply(conn, .{ .ok = false, .@"error" = why });
         } else if (std.mem.eql(u8, cmd, "send")) {
             const p = self.findPane(pane_id) orelse {
@@ -2781,6 +2863,58 @@ test "agent detection uses baton's list, or $BATON_AGENT_EXES instead of it" {
     try testing.expect(!isAgentComm("", null));
     try testing.expect(isAgentComm("qwen", "qwen, claude"));
     try testing.expect(!isAgentComm("codex", "qwen, claude"));
+}
+
+test "spawn argv: strings become owned NUL-terminated entries, verbatim" {
+    const alloc = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc,
+        \\["/bin/zsh","-l","-c","exec claude -- \"$(cat '/tmp/b')\"",""]
+    , .{});
+    defer parsed.deinit();
+    var why: []const u8 = "";
+    const argv = parseSpawnArgv(alloc, parsed.value, &why).?;
+    defer {
+        freeSpawnEnv(alloc, argv);
+        alloc.free(argv);
+    }
+    try std.testing.expectEqual(@as(usize, 5), argv.len);
+    try std.testing.expectEqualStrings("/bin/zsh", argv[0]);
+    try std.testing.expectEqualStrings("exec claude -- \"$(cat '/tmp/b')\"", argv[3]);
+    try std.testing.expectEqualStrings("", argv[4]);
+}
+
+test "spawn argv: anything outside the bounds is refused whole" {
+    const alloc = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    var many: std.json.Array = .init(arena.allocator());
+    try many.append(.{ .string = "/bin/true" });
+    for (0..SPAWN_ARGV_MAX) |_| try many.append(.{ .string = "x" });
+    const many_json = try std.json.Stringify.valueAlloc(alloc, std.json.Value{ .array = many }, .{});
+    defer alloc.free(many_json);
+    const big = try arena.allocator().alloc(u8, SPAWN_ARGV_MAX_BYTES);
+    @memset(big, 'a');
+    const big_json = try std.json.Stringify.valueAlloc(alloc, .{ "/bin/true", big }, .{});
+    defer alloc.free(big_json);
+    const bad = [_][]const u8{
+        "[]",                    "\"/bin/sh\"",
+        "{\"0\":\"/bin/sh\"}",     "[\"sh\",\"-c\",\"x\"]",
+        "[\"./sh\"]",              "[\"/bin/sh\",1]",
+        "[\"/bin/sh\",null]",      "[\"/bin/sh\",\"a\\u0000b\"]",
+        many_json,               big_json,
+    };
+    for (bad) |src| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, src, .{});
+        defer parsed.deinit();
+        var why: []const u8 = "";
+        if (parseSpawnArgv(alloc, parsed.value, &why)) |argv| {
+            freeSpawnEnv(alloc, argv);
+            alloc.free(argv);
+            std.debug.print("accepted: {s}\n", .{src[0..@min(src.len, 80)]});
+            return error.TestUnexpectedResult;
+        }
+        try std.testing.expect(why.len > 0);
+    }
 }
 
 test "spawn env: well-formed keys and values become KEY=value entries" {

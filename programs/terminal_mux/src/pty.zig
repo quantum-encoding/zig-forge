@@ -305,15 +305,19 @@ pub const Pty = struct {
         try doIoctl(master_fd, tioc.SWINSZ, &ws);
         setMasterNonblock(master_fd);
 
-        // The slave is held by fd; no path is tracked on Darwin.
-        var no_path: [32]u8 = undefined;
-        @memset(&no_path, 0);
+        // The slave's device path (`/dev/ttysNNN`), so `list` can name the
+        // pane's terminal — a client reads its line discipline through it.
+        var path_copy: [32]u8 = undefined;
+        @memset(&path_copy, 0);
+        const plen = std.mem.indexOfScalar(u8, &slave_path, 0) orelse 0;
+        const kept = if (plen < path_copy.len) plen else 0;
+        @memcpy(path_copy[0..kept], slave_path[0..kept]);
 
         return Self{
             .master_fd = master_fd,
             .slave_fd = slave_fd,
-            .slave_path = no_path,
-            .slave_path_len = 0,
+            .slave_path = path_copy,
+            .slave_path_len = kept,
             .child_pid = null,
             .rows = 24,
             .cols = 80,

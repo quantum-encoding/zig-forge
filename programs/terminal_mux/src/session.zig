@@ -204,6 +204,37 @@ pub const Pane = struct {
         }
     }
 
+    /// Run `argv` as this pane's own process, starting in `cwd` (null =
+    /// inherit). `argv[0]` is the absolute path executed (execve does no PATH
+    /// search) and is also what the program sees as its name. No shell is
+    /// started and nothing is typed: the program IS the pane.
+    pub fn spawnArgvIn(self: *Self, alloc: std.mem.Allocator, argv: []const [:0]const u8, env: [*:null]const ?[*:0]const u8, cwd: ?[]const u8) !void {
+        if (argv.len == 0 or !std.fs.path.isAbsolute(argv[0])) return error.ArgvNeedsAbsolutePath;
+        var cwd_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+        const cwd_z: ?[*:0]const u8 = if (cwd) |d| blk: {
+            if (d.len == 0 or d.len > std.fs.max_path_bytes) return error.CwdTooLong;
+            @memcpy(cwd_buf[0..d.len], d);
+            cwd_buf[d.len] = 0;
+            break :blk @ptrCast(&cwd_buf);
+        } else null;
+
+        // The vector execve reads: every entry, then the terminating null.
+        const vec = try alloc.allocSentinel(?[*:0]const u8, argv.len, null);
+        defer alloc.free(vec);
+        for (argv, 0..) |a, i| vec[i] = a.ptr;
+
+        var pty = try Pty.create();
+        errdefer pty.close();
+        try pty.setSize(self.rect.height, self.rect.width);
+        try pty.spawnIn(argv[0].ptr, vec.ptr, env, cwd_z);
+
+        self.pty = pty;
+        if (cwd) |d| {
+            @memcpy(self.cwd[0..d.len], d);
+            self.cwd_len = d.len;
+        }
+    }
+
     /// Process input data from the PTY.
     ///
     /// Fast path: while the parser is in ground state, sweep the input in

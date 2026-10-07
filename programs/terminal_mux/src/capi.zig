@@ -278,6 +278,17 @@ const SpawnEnv = struct {
 /// environment only, replacing inherited entries of the same keys; it is
 /// applied only with `export_pane_id` (the server path).
 pub fn createIn(rows: u16, cols: u16, shell: ?[]const u8, cwd: ?[]const u8, export_pane_id: bool, extra_env: []const [:0]const u8, out_id: ?*u64) ?*TmuxSession {
+    return createWith(rows, cols, shell, &.{}, cwd, export_pane_id, extra_env, out_id);
+}
+
+/// `createIn` with a program instead of a login shell: `argv` runs as the
+/// pane's own process (`Pane.spawnArgvIn`; `argv[0]` absolute). An empty
+/// `argv` starts the login shell, exactly as `createIn`.
+pub fn createInArgv(rows: u16, cols: u16, argv: []const [:0]const u8, cwd: ?[]const u8, export_pane_id: bool, extra_env: []const [:0]const u8, out_id: ?*u64) ?*TmuxSession {
+    return createWith(rows, cols, null, argv, cwd, export_pane_id, extra_env, out_id);
+}
+
+fn createWith(rows: u16, cols: u16, shell: ?[]const u8, argv: []const [:0]const u8, cwd: ?[]const u8, export_pane_id: bool, extra_env: []const [:0]const u8, out_id: ?*u64) ?*TmuxSession {
     const r: u16 = if (rows == 0) 24 else rows;
     const co: u16 = if (cols == 0) 80 else cols;
     const rect = session.Rect{ .x = 0, .y = 0, .width = co, .height = r };
@@ -299,12 +310,20 @@ pub fn createIn(rows: u16, cols: u16, shell: ?[]const u8, cwd: ?[]const u8, expo
             return null;
         };
         defer se.deinit();
-        pane.spawnIn(shell_path, se.env.ptr, cwd) catch {
+        const spawned = if (argv.len > 0)
+            pane.spawnArgvIn(alloc, argv, se.env.ptr, cwd)
+        else
+            pane.spawnIn(shell_path, se.env.ptr, cwd);
+        spawned catch {
             sess.deinit();
             return null;
         };
     } else {
-        pane.spawnIn(shell_path, childEnviron(), cwd) catch {
+        const spawned = if (argv.len > 0)
+            pane.spawnArgvIn(alloc, argv, childEnviron(), cwd)
+        else
+            pane.spawnIn(shell_path, childEnviron(), cwd);
+        spawned catch {
             sess.deinit();
             return null;
         };
