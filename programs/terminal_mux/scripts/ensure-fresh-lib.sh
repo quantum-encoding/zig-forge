@@ -56,7 +56,17 @@ else
     fi
 fi
 
+# A hand-run `zig build` writes a fresh archive that is newer than every
+# source yet was never repacked, so ld-prime drops its members as "not 8-byte
+# aligned". The stamp records the last repack; an archive newer than it is
+# repacked here, with no rebuild.
+stamp="$archive.repacked"
 if [[ $stale -eq 0 ]]; then
+    if [[ "$(uname -s)" == "Darwin" && -x "$repack" ]] && [[ ! -f "$stamp" || "$archive" -nt "$stamp" ]]; then
+        echo "repacking libterminal_mux.a (written since its last repack)"
+        "$repack" "$archive"
+        touch "$stamp"
+    fi
     echo "libterminal_mux.a is current"
     exit 0
 fi
@@ -68,6 +78,7 @@ echo "rebuilding libterminal_mux.a ($reason)"
 # 8-byte or the link fails with "not 8-byte aligned". Repack on Darwin.
 if [[ "$(uname -s)" == "Darwin" && -x "$repack" ]]; then
     "$repack" "$archive"
+    touch "$stamp"
 fi
 
 echo "libterminal_mux.a rebuilt"
