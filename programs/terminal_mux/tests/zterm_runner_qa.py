@@ -171,6 +171,15 @@ try:
     # ── stop, and a pane that exits
     check("stop ends the session", J(runner_sock, {"verb": "stop", "to": "scribe"})["ok"] and "scribe" not in [s["designation"] for s in J(runner_sock, {"verb": "list"})["sessions"]])
     check("send to a stopped session fails by name", "no session called 'scribe'" in J(runner_sock, {"verb": "send", "to": "scribe", "text": "x"})["error"])
+    # ── a client with no $ZTERM_SOCKET finds the service at the runner door
+    # ($BATON_HOME/var/zterm.sock) before the /tmp default, and says where it looked
+    no_sock = {k: v for k, v in env.items() if k != "ZTERM_SOCKET"}
+    r = subprocess.run([Z, "cli", "list"], env=no_sock, capture_output=True, text=True, timeout=10)
+    check("`zterm cli` with no $ZTERM_SOCKET reaches the runner door", r.returncode == 0 and r.stdout.lstrip().startswith("["), r.stderr[-200:])
+    empty_bh = f"{base}/empty-bh"; os.makedirs(f"{empty_bh}/var", exist_ok=True)
+    r = subprocess.run([Z, "cli", "list"], env=dict(no_sock, BATON_HOME=empty_bh), capture_output=True, text=True, timeout=10)
+    check("with nothing listening, the error names every place it looked",
+          r.returncode != 0 and f"{empty_bh}/var/zterm.sock" in r.stderr and "/tmp/zterm-" in r.stderr, r.stderr[-300:])
     # ── long socket path is refused loudly
     longp = base + "/" + "x" * 120 + ".sock"
     r = subprocess.run([Z, "cli", "list"], env=dict(env, ZTERM_SOCKET=longp), capture_output=True, text=True)

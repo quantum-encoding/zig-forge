@@ -2209,21 +2209,64 @@ fn runServer(alloc: std.mem.Allocator, opts: ServerOptions) !void {
 }
 
 // ══ CLIENT ════════════════════════════════════════════════════════════════════════════════════════════
-fn connectServer(alloc: std.mem.Allocator) !c.fd_t {
-    const path = try ctl.socketPath(alloc);
-    defer alloc.free(path);
-    var addr = ctl.fillAddr(path) catch {
-        std.debug.print("zterm: socket path is {d} bytes, longer than sun_path allows: {s}\n", .{ path.len, path });
-        return error.SocketPathTooLong;
-    };
-    const fd = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
-    if (fd < 0) return error.SocketCreateFailed;
-    if (c.connect(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) < 0) {
-        pclose(fd);
-        std.debug.print("zterm: cannot reach server at {s} (is `zterm server` running?)\n", .{path});
-        return error.ConnectFailed;
+/// Where a client (`zterm cli`, `zterm attach`) looks for a server, in order.
+/// `$ZTERM_SOCKET`, when set, is the only place. Otherwise the baton runner
+/// door first — `$ZTERM_RUNNER_SOCKET`, else `$BATON_HOME/var/zterm.sock`,
+/// else `~/.baton/var/zterm.sock` when ~/.baton exists — which is where the
+/// zterm service listens, then the control socket's default path. A caller
+/// moves past a candidate nothing is listening on.
+pub fn clientSocketCandidates(
+    alloc: std.mem.Allocator,
+    zterm_socket: ?[]const u8,
+    runner_override: ?[]const u8,
+    baton_home: ?[]const u8,
+    home: ?[]const u8,
+    baton_dir_present: bool,
+    uid: u32,
+) ![][:0]u8 {
+    var out: std.ArrayList([:0]u8) = .empty;
+    errdefer {
+        for (out.items) |p| alloc.free(p);
+        out.deinit(alloc);
     }
-    return fd;
+    if (zterm_socket) |z| {
+        try out.append(alloc, try alloc.dupeZ(u8, z));
+        return out.toOwnedSlice(alloc);
+    }
+    if (try runnerSocketPathFrom(alloc, runner_override, baton_home, home, baton_dir_present)) |door| {
+        try out.append(alloc, door);
+    }
+    try out.append(alloc, try std.fmt.allocPrintSentinel(alloc, "/tmp/zterm-{d}.sock", .{uid}, 0));
+    return out.toOwnedSlice(alloc);
+}
+
+fn connectServer(alloc: std.mem.Allocator) !c.fd_t {
+    const home = envSlice("HOME");
+    const present = if (home) |h| blk: {
+        var pb: [std.fs.max_path_bytes]u8 = undefined;
+        const d = std.fmt.bufPrint(&pb, "{s}/.baton", .{h}) catch break :blk false;
+        break :blk isDirectory(d);
+    } else false;
+    const candidates = try clientSocketCandidates(alloc, envSlice("ZTERM_SOCKET"), envSlice("ZTERM_RUNNER_SOCKET"),
+        envSlice("BATON_HOME"), home, present, c.getuid());
+    defer {
+        for (candidates) |p| alloc.free(p);
+        alloc.free(candidates);
+    }
+    for (candidates) |path| {
+        var addr = ctl.fillAddr(path) catch {
+            std.debug.print("zterm: socket path is {d} bytes, longer than sun_path allows: {s}\n", .{ path.len, path });
+            return error.SocketPathTooLong;
+        };
+        const fd = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
+        if (fd < 0) return error.SocketCreateFailed;
+        if (c.connect(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) == 0) return fd;
+        pclose(fd);
+    }
+    std.debug.print("zterm: no server answers at", .{});
+    for (candidates, 0..) |path, i| std.debug.print("{s} {s}", .{ if (i == 0) "" else " or", path });
+    std.debug.print(" (is the zterm service, or `zterm server`, running?)\n", .{});
+    return error.ConnectFailed;
 }
 
 fn runClient(alloc: std.mem.Allocator, args: []const []const u8) !void {
@@ -2796,6 +2839,49 @@ test "runner socket path follows baton's home_base tiers" {
     }
     try testing.expect((try runnerSocketPathFrom(a, null, null, "/h", false)) == null);
     try testing.expect((try runnerSocketPathFrom(a, null, null, null, true)) == null);
+}
+
+test "a client looks for the service's runner door before the default control socket" {
+    const a = testing.allocator;
+    const free = struct {
+        fn all(al: std.mem.Allocator, list: [][:0]u8) void {
+            for (list) |p| al.free(p);
+            al.free(list);
+        }
+    }.all;
+    // $ZTERM_SOCKET is the only place when it is set.
+    {
+        const l = try clientSocketCandidates(a, "/x/c.sock", null, "/bh", "/h", true, 501);
+        defer free(a, l);
+        try testing.expectEqual(@as(usize, 1), l.len);
+        try testing.expectEqualStrings("/x/c.sock", l[0]);
+    }
+    // $BATON_HOME's runner door, then /tmp.
+    {
+        const l = try clientSocketCandidates(a, null, null, "/bh", "/h", false, 501);
+        defer free(a, l);
+        try testing.expectEqual(@as(usize, 2), l.len);
+        try testing.expectEqualStrings("/bh/var/zterm.sock", l[0]);
+        try testing.expectEqualStrings("/tmp/zterm-501.sock", l[1]);
+    }
+    // ~/.baton's door when that directory exists; an explicit runner path wins.
+    {
+        const l = try clientSocketCandidates(a, null, null, null, "/h", true, 501);
+        defer free(a, l);
+        try testing.expectEqualStrings("/h/.baton/var/zterm.sock", l[0]);
+    }
+    {
+        const l = try clientSocketCandidates(a, null, "/r/door.sock", null, "/h", true, 501);
+        defer free(a, l);
+        try testing.expectEqualStrings("/r/door.sock", l[0]);
+    }
+    // No fleet home: the default control socket alone.
+    {
+        const l = try clientSocketCandidates(a, null, null, null, "/h", false, 501);
+        defer free(a, l);
+        try testing.expectEqual(@as(usize, 1), l.len);
+        try testing.expectEqualStrings("/tmp/zterm-501.sock", l[0]);
+    }
 }
 
 test "scrubForPaste drops every sequence a terminal would interpret" {

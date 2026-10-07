@@ -205,6 +205,23 @@ pub export fn tmux_create(rows: u16, cols: u16, shell: ?[*:0]const u8, out_id: ?
     return createIn(rows, cols, if (shell) |s| std.mem.sliceTo(s, 0) else null, null, false, &.{}, out_id);
 }
 
+/// Create a session whose first pane runs `argv[0..argc]` as its own process:
+/// no shell is started and nothing is typed. `argv[0]` must be an absolute
+/// path (it is exec'd without a PATH search). Otherwise as `tmux_create`.
+/// Returns NULL when argc is 0, an entry is NULL, or the spawn fails.
+pub export fn tmux_create_argv(rows: u16, cols: u16, argv: ?[*]const ?[*:0]const u8, argc: usize, out_id: ?*u64) ?*TmuxSession {
+    const v = argv orelse return null;
+    if (argc == 0 or argc > 4096) return null;
+    const list = alloc.alloc([:0]const u8, argc) catch return null;
+    defer alloc.free(list);
+    for (0..argc) |i| {
+        const entry = v[i] orelse return null;
+        list[i] = std.mem.sliceTo(entry, 0);
+    }
+    if (!std.fs.path.isAbsolute(list[0])) return null;
+    return createInArgv(rows, cols, list, null, false, &.{}, out_id);
+}
+
 /// Pane-identity variables a child must not inherit from whatever started
 /// this process: a stale one names somebody else's pane.
 const PANE_ENV_KEYS = [_][]const u8{ "ZTERM_PANE=", "WEZTERM_PANE=" };
@@ -1453,6 +1470,40 @@ test "tmux_take_exit stays false while the shell is alive" {
         _ = posix.poll(&no_fds, 5) catch {};
     }
     try std.testing.expect(tmux_is_alive(h));
+}
+
+test "tmux_create_argv runs the program itself, with its arguments, and reports its exit" {
+    try pty.skipIfUnavailable();
+    var id: u64 = 0;
+    // `sh -c 'exit 7' ignored` — the status proves argv[2] reached the program.
+    const argv = [_]?[*:0]const u8{ "/bin/sh", "-c", "exit $0", "7" };
+    const h = tmux_create_argv(24, 80, &argv, argv.len, &id) orelse return error.CreateFailed;
+    defer tmux_destroy(h);
+    var code: c_int = -1;
+    var sig: c_int = -1;
+    var seen = false;
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        _ = tmux_drain(h);
+        if (tmux_take_exit(h, &code, &sig)) {
+            seen = true;
+            break;
+        }
+        var no_fds = [_]posix.pollfd{};
+        _ = posix.poll(&no_fds, 5) catch {};
+    }
+    try std.testing.expect(seen);
+    try std.testing.expectEqual(@as(c_int, 7), code);
+}
+
+test "tmux_create_argv refuses an empty or relative argv" {
+    var id: u64 = 0;
+    const rel = [_]?[*:0]const u8{"sh"};
+    try std.testing.expect(tmux_create_argv(24, 80, &rel, rel.len, &id) == null);
+    try std.testing.expect(tmux_create_argv(24, 80, &rel, 0, &id) == null);
+    try std.testing.expect(tmux_create_argv(24, 80, null, 1, &id) == null);
+    const holed = [_]?[*:0]const u8{ "/bin/sh", null };
+    try std.testing.expect(tmux_create_argv(24, 80, &holed, holed.len, &id) == null);
 }
 
 test "version string is well formed" {

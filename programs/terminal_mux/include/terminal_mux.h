@@ -70,6 +70,9 @@ const char *tmux_version(void);
 
 /* ---- lifecycle ---- */
 tmux_session *tmux_create(uint16_t rows, uint16_t cols, const char *shell, uint64_t *out_id);
+/* The first pane runs argv[0..argc] as its own process: no shell, nothing
+ * typed. argv[0] must be an absolute path. NULL on any failure. */
+tmux_session *tmux_create_argv(uint16_t rows, uint16_t cols, const char *const *argv, size_t argc, uint64_t *out_id);
 tmux_session *tmux_attach(uint64_t id);
 void          tmux_detach(tmux_session *handle);
 void          tmux_destroy(tmux_session *handle);
