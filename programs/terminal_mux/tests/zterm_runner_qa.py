@@ -99,6 +99,17 @@ try:
     check("an empty argv is refused", not J(ctl_sock, {"cmd": "spawn", "argv": []})["ok"])
     check("a spawn without argv never claims exec", "exec" not in J(ctl_sock, {"cmd": "spawn", "name": "plain-shell"}))
     J(ctl_sock, {"cmd": "kill", "pane": ax["pane"]})
+    # ── a pane addressed by its designation: ids renumber when the server
+    # restarts, names do not. Every command but spawn takes `name` for `pane`.
+    nm = J(ctl_sock, {"cmd": "spawn", "name": "by-name", "argv": ["/bin/sh", "-c", "echo named-pane-up; exec sleep 30"]})
+    check("capture by designation", wait_for(lambda: "named-pane-up" in req(ctl_sock, {"cmd": "capture", "name": "BY-NAME"}), 10))
+    vs = socket.socket(socket.AF_UNIX); vs.settimeout(5); vs.connect(ctl_sock)
+    vs.sendall(json.dumps({"cmd": "view", "name": "by-name"}).encode() + b"\n")
+    hello = json.loads(vs.makefile().readline()); vs.close()
+    check("view (attach) by designation", hello.get("t") == "hello" and hello.get("pane") == nm["pane"], hello)
+    check("an unknown designation is no such pane", "no such pane" in req(ctl_sock, {"cmd": "capture", "name": "nobody-here"}))
+    check("kill by designation", J(ctl_sock, {"cmd": "kill", "name": "by-name"})["ok"]
+          and not [r for r in J(ctl_sock, {"cmd": "list"}) if r["name"] == "by-name"])
     ready = lambda: J(ctl_sock, {"cmd": "send", "pane": pane, "text": "touch " + wd + "/ready", "enter": True})["ok"] and os.path.exists(wd + "/ready")
     check("JSON send+enter executes in the pane (shell booted)", wait_for(ready, 30))
     r = subprocess.run([Z, "cli", "send", str(pane), "--", "pwd", ">", wd + "/pwd.txt"], env=env, capture_output=True, text=True)

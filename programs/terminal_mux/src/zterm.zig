@@ -45,6 +45,9 @@
 //!              kill    {pane}
 //!              title   {pane, title}                          (sets the designation)
 //!              resize  {pane, rows, cols}
+//!            Every command but spawn may name its pane by designation
+//!            (`"name":…`, any case) instead of `"pane":<id>`; so may `view`,
+//!            and `zterm attach <name>`. Ids renumber when the server restarts.
 //!   * `{"verb":...}` — baton's RUNNER CONTRACT (baton src/runner/contract.rs):
 //!              hello, status, list, send, stop.
 //!
@@ -834,6 +837,15 @@ const Server = struct {
         return null;
     }
 
+    /// The id of the pane with this designation (any case), or 0 for none.
+    fn paneIdNamed(self: *Server, name: []const u8) u64 {
+        var db: [32]u8 = undefined;
+        for (self.panes.items) |*p| {
+            if (std.ascii.eqlIgnoreCase(p.designation(&db), name)) return p.id;
+        }
+        return 0;
+    }
+
     fn nameTaken(self: *Server, name: []const u8, except: u64) bool {
         var db: [32]u8 = undefined;
         for (self.panes.items) |*p| {
@@ -1230,7 +1242,15 @@ const Server = struct {
 
     /// The JSON control protocol (shared vocabulary with ctl.zig).
     fn handleCmd(self: *Server, conn: c.fd_t, v: std.json.Value, cmd: []const u8) !Disposition {
-        const pane_id: u64 = @intCast(@max(jsonInt(v, "pane") orelse 0, 0));
+        // A pane is addressed by id, or — for every command but spawn, where
+        // `name` names the NEW pane — by its designation in `name`. A name
+        // survives a server restart renumbering the panes; an id does not.
+        const pane_id: u64 = if (jsonInt(v, "pane")) |n|
+            @intCast(@max(n, 0))
+        else if (!std.mem.eql(u8, cmd, "spawn"))
+            (if (jsonStr(v, "name")) |n| self.paneIdNamed(n) else 0)
+        else
+            0;
 
         if (std.mem.eql(u8, cmd, "list")) {
             try self.writeList(conn);
@@ -2512,17 +2532,23 @@ fn sendKeys(fd: c.fd_t, alloc: std.mem.Allocator, bytes: []const u8) void {
 
 fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
     const id_str = if (args.len > 0) args[0] else "1";
-    const pane_id = std.fmt.parseInt(u64, id_str, 10) catch {
-        std.debug.print("zterm attach: '{s}' is not a pane id (see `zterm cli list`)\n", .{id_str});
+    // A number is a pane id; anything else is a designation (`spawn` name).
+    const pane_id: ?u64 = std.fmt.parseInt(u64, id_str, 10) catch null;
+    if (pane_id == null and !validName(id_str)) {
+        std.debug.print("zterm attach: '{s}' is neither a pane id nor a designation (see `zterm cli list`)\n", .{id_str});
         return error.BadUsage;
-    };
+    }
 
     const fd = try connectServer(alloc);
     defer pclose(fd);
 
     // Attach at OUR terminal's size so the pane matches this window.
     var ws = pty.getTerminalSize(posix.STDIN_FILENO) catch pty.Winsize{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 };
-    sendView(fd, alloc, .{ .cmd = "view", .pane = pane_id, .rows = ws.ws_row, .cols = ws.ws_col });
+    if (pane_id) |id| {
+        sendView(fd, alloc, .{ .cmd = "view", .pane = id, .rows = ws.ws_row, .cols = ws.ws_col });
+    } else {
+        sendView(fd, alloc, .{ .cmd = "view", .name = id_str, .rows = ws.ws_row, .cols = ws.ws_col });
+    }
 
     var raw = try pty.RawMode.enter(posix.STDIN_FILENO);
     defer raw.exit();
@@ -2637,14 +2663,15 @@ fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
     // Leave the host terminal as we found it.
     cwrite(posix.STDOUT_FILENO, "\x1b[?1l\x1b[?2004l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[0m\x1b[0 q\x1b[?25h\x1b[?1049l");
     raw.exit();
+    // The pane as the operator named it: its id, or its designation.
     switch (ending) {
-        .detached => std.debug.print("[zterm: detached — pane {d} keeps running; `zterm attach {d}` to return]\n", .{ pane_id, pane_id }),
+        .detached => std.debug.print("[zterm: detached — pane {s} keeps running; `zterm attach {s}` to return]\n", .{ id_str, id_str }),
         .exited => if (exit_code) |code|
-            std.debug.print("[zterm: pane {d} exited ({d})]\n", .{ pane_id, code })
+            std.debug.print("[zterm: pane {s} exited ({d})]\n", .{ id_str, code })
         else
-            std.debug.print("[zterm: pane {d} exited]\n", .{pane_id}),
+            std.debug.print("[zterm: pane {s} exited]\n", .{id_str}),
         .lost => std.debug.print("[zterm: the server went away]\n", .{}),
-        .refused => std.debug.print("[zterm: no pane {d} (see `zterm cli list`)]\n", .{pane_id}),
+        .refused => std.debug.print("[zterm: no pane {s} (see `zterm cli list`)]\n", .{id_str}),
     }
 }
 
