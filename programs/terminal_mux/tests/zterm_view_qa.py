@@ -53,10 +53,11 @@ def request(obj):
 
 class View:
     """A view-protocol client that keeps every message and a reconstructed screen."""
-    def __init__(self, pane, rows=None, cols=None):
+    def __init__(self, pane, rows=None, cols=None, watch=False):
         self.s = socket.socket(socket.AF_UNIX); self.s.connect(sock); self.s.settimeout(0.1)
         req = {"cmd": "view", "pane": pane}
         if rows: req.update(rows=rows, cols=cols)
+        if watch: req["watch"] = True
         self.send(req); self.buf = b""; self.msgs = []; self.rows = {}
     def send(self, o): self.s.sendall(json.dumps(o).encode() + b"\n")
     def pump(self, t):
@@ -137,6 +138,31 @@ try:
           [l["n"] for l in h["lines"]] == [last["oldest"], last["oldest"] + 1], h["lines"][:2])
     counts = {r["pane"]: r["viewers"] for r in json.loads(cli("list"))}
     check("list reports how many clients view each pane", counts.get(1) == 1, counts)
+
+    # ── watch-only viewers ────────────────────────────────────────────────
+    # A dashboard drawing a pane must not resize it, type into it, or read as
+    # someone driving it.
+    w = View(1, 30, 100, watch=True)
+    w.until(lambda: len(w.frames()) >= 1 and "40" in w.text())
+    wf = w.frames()[0] if w.frames() else {}
+    check("a watcher gets hello, then a full frame at the PANE's size (its rows/cols ignored)",
+          w.msgs[0]["t"] == "hello" and wf.get("full") and (wf.get("rows"), wf.get("cols")) == (14, 60),
+          (w.msgs[0].get("t"), wf.get("rows"), wf.get("cols")))
+    counts = {r["pane"]: r["viewers"] for r in json.loads(cli("list"))}
+    check("a watcher is not counted in list's viewers", counts.get(1) == 1, counts)
+    w.send({"input": "text", "data": "echo WATCHER-TYPED\r"})
+    w.send({"resize": {"rows": 20, "cols": 70}})
+    v.send({"input": "text", "data": "echo after-watch\r"})
+    v.until(lambda: "after-watch" in v.text())
+    check("a watcher's input never reaches the pane", "WATCHER-TYPED" not in v.text(), v.text()[-200:])
+    check("a watcher's resize is ignored",
+          not any((f["rows"], f["cols"]) == (20, 70) for f in v.frames() + w.frames()))
+    check("a watcher still receives the pane's frames", w.until(lambda: "after-watch" in w.text(), 5))
+    lw = w.frames()[-1]
+    w.send({"history": {"from": lw["oldest"], "count": 1}})
+    check("a watcher may ask for history",
+          w.until(lambda: any(m["t"] == "history" for m in w.msgs), 5))
+    w.s.close()
     seqs = [f["seq"] for f in v.frames()]
     check("frame seq counts up by one", seqs == list(range(1, len(seqs) + 1)))
 

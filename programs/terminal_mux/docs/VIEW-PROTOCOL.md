@@ -34,6 +34,15 @@ message either way is **one JSON object followed by `\n`**. Unknown message
 types and unknown keys MUST be ignored (additive evolution without a version
 bump). A breaking change bumps `v`.
 
+`"watch":true` opens a **watch-only** view, for a dashboard that draws a
+pane without driving it: it receives `hello`, frames, `marks`, `bell`,
+`clipboard` and `exit` like any viewer, and may send `history`, but
+`rows`/`cols` on the request are ignored (it never resizes the pane), its
+`input`, `focus` and `resize` messages are dropped, and it is **not counted**
+in `list`'s `viewers` — so "nobody is viewing this pane" stays true for a
+front end deciding whether to take it over. A server older than this ignores
+the key and treats the connection as an ordinary viewer.
+
 If the pane does not exist the server answers
 `{"t":"error","error":"no such pane"}` and closes.
 
@@ -61,7 +70,7 @@ A front end that wants its panes back after it restarts spawns them with a
 stable `name` it can derive again (`{"cmd":"spawn","name":…}`), and on start
 reads `{"cmd":"list"}`: each entry carries `name`, `alive` and `viewers` — the
 number of clients drawing that pane right now (view connections plus raw
-`zterm attach`es). Take over a named pane only when it is `alive` and
+`zterm attach`es; watch-only views are not counted). Take over a named pane only when it is `alive` and
 `viewers` is 0, so two windows never drive one pane; a dead one is `kill`ed
 and respawned. The screen arrives in the first `full` frame; ask for
 `history` to refill scrollback.

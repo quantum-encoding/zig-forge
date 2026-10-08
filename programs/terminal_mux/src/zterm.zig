@@ -579,6 +579,11 @@ const Attach = struct { conn: c.fd_t, pane_id: u64 };
 const Viewer = struct {
     conn: c.fd_t,
     pane_id: u64,
+    /// Opened with `"watch":true`: frames out, nothing in. A watcher never
+    /// resizes the pane, its input/focus/resize messages are ignored (it may
+    /// still ask for `history`), and it is not counted in `viewers` — a
+    /// dashboard watching a pane must not read as someone driving it.
+    watch: bool = false,
     seq: u64 = 0,
     /// Bytes owed to the client, from `out_off`.
     out: std.ArrayList(u8) = .empty,
@@ -1497,7 +1502,7 @@ const Server = struct {
     fn viewerCount(self: *Server, pane_id: u64) usize {
         var n: usize = 0;
         for (self.viewers.items) |v| {
-            if (v.conn >= 0 and v.pane_id == pane_id) n += 1;
+            if (v.conn >= 0 and v.pane_id == pane_id and !v.watch) n += 1;
         }
         for (self.attaches.items) |a| {
             if (a.conn >= 0 and a.pane_id == pane_id) n += 1;
@@ -1515,12 +1520,13 @@ const Server = struct {
             cwrite(conn, "{\"t\":\"error\",\"error\":\"no such pane\"}\n");
             return .close;
         };
+        const watch = jsonBool(v, "watch") orelse false;
         const rows = clampDim(jsonInt(v, "rows"), 0);
         const cols = clampDim(jsonInt(v, "cols"), 0);
-        if (rows >= 2 and cols >= 2) self.resizePane(p, rows, cols);
+        if (!watch and rows >= 2 and cols >= 2) self.resizePane(p, rows, cols);
         const fl = c.fcntl(conn, c.F.GETFL, @as(c_int, 0));
         _ = c.fcntl(conn, c.F.SETFL, fl | @as(c_int, @bitCast(c.O{ .NONBLOCK = true })));
-        try self.viewers.append(self.alloc, .{ .conn = conn, .pane_id = p.id });
+        try self.viewers.append(self.alloc, .{ .conn = conn, .pane_id = p.id, .watch = watch });
         const vw = &self.viewers.items[self.viewers.items.len - 1];
         // hello carries the theme: the colours every palette index and
         // "default" resolve to — the same theme zterm answers OSC 10/11 from.
@@ -1763,7 +1769,7 @@ const Server = struct {
         const p = self.findPane(v.pane_id) orelse return;
 
         if (m.object.get("resize")) |r| {
-            if (r != .object) return;
+            if (r != .object or v.watch) return;
             const rows = clampDim(jsonInt(r, "rows"), 0);
             const cols = clampDim(jsonInt(r, "cols"), 0);
             if (rows >= 2 and cols >= 2) self.resizePane(p, rows, cols);
@@ -1780,6 +1786,7 @@ const Server = struct {
             aw.writer.writeByte('\n') catch return;
             return;
         }
+        if (v.watch) return; // a watcher sends nothing to the pane
         if (p.hup) return; // input to a finished pane goes nowhere
         p.noteInput();
         if (jsonBool(m, "focus")) |focused| {
