@@ -64,7 +64,8 @@ UI surface.
 | Function | Purpose |
 |---|---|
 | `const char *zterm_version(void)` | Library version string. |
-| `zterm_session *zterm_create(uint16_t rows, uint16_t cols, const char *shell, uint64_t *out_id)` | Allocate a `rows`×`cols` terminal and spawn `shell` (NULL → `$SHELL`, else `/bin/zsh` on macOS) in its first pane. Writes the new id to `out_id` if non-NULL. 0 rows/cols default to 24/80. |
+| `zterm_session *zterm_create(uint16_t rows, uint16_t cols, const char *shell, uint64_t *out_id)` | Allocate a `rows`×`cols` terminal and spawn `shell` (NULL → `$SHELL`, else the passwd login shell, else `/bin/zsh` on macOS / `/bin/bash` elsewhere) in its first pane. That shell is the session's: splits and new windows spawn it too. Writes the new id to `out_id` if non-NULL. 0 rows/cols default to 24/80. |
+| `zterm_session *zterm_create_argv(uint16_t rows, uint16_t cols, const char *const *argv, size_t argc, uint64_t *out_id)` | As `zterm_create`, but the first pane runs `argv` itself (no shell, nothing typed; `argv[0]` absolute). Splits and new windows of such a session get the default shell. NULL on any failure. |
 | `zterm_session *zterm_attach(uint64_t id)` | Re-acquire a live session by id; NULL if not found. |
 | `void zterm_detach(zterm_session *)` | Release the logical hold; session keeps running. |
 | `void zterm_destroy(zterm_session *)` | Kill the shell, free the terminal, unregister. Handle invalid afterward. |
@@ -94,14 +95,70 @@ UI surface.
 `ch` (Unicode codepoint), `{fg,bg}_{kind,idx,r,g,b}` (kind = `ZTERM_COLOR_*`),
 `attrs` (`ZTERM_ATTR_*` bitfield), `width` (1, or 2 for wide CJK glyphs).
 
+### Host effects: bell, clipboard, replies, title
+The emulator cannot act on the host; these queue what the application asked
+for. Drain them on every wake, alongside `zterm_drain`.
+
+| Function | Purpose |
+|---|---|
+| `uint32_t zterm_take_bell(zterm_session *)` | BEL strokes since the last call (read-and-clear). |
+| `size_t zterm_take_clipboard(zterm_session *, uint8_t *out, size_t max)` | The last OSC 52 write, `"Pc;Pd"` (Pd = base64), read-and-clear. **Whole or nothing:** a payload longer than `max` is not copied, stays pending, and 0 is returned; `out == NULL` returns the pending length without taking it, so the host can size its buffer. Payloads are at most 131072 bytes (128 KiB of base64, ~96 KiB of text); the emulator drops a longer one whole. A host that passes a 4096-byte buffer receives payloads up to 4096 bytes and never a truncated one. |
+| `size_t zterm_take_responses(zterm_session *, uint8_t *out, size_t max)` | Replies the emulator owes the application (DA1/DA2, DSR/CPR, OSC 10/11 colours, OSC 52 read refusals), read-and-clear. Write them back with `zterm_send`: vim, fzf and an inner tmux block on them. Pass `max >= 64`. |
+| `size_t zterm_title(zterm_session *, uint8_t *out, size_t max)` | The window title (OSC 0/2), UTF-8, not NUL-terminated; returns the length copied. |
+
+An application's clipboard **read** (`OSC 52 ; Pc ; ?`) is answered with an
+empty payload (`ESC ] 52 ; Pc ; ESC \`) through `zterm_take_responses`, so an
+app waiting on the answer proceeds; the host's clipboard never reaches it.
+
 ### Window / pane control
 | Function | Purpose |
 |---|---|
-| `int zterm_split(zterm_session *, int horizontal)` | Split active pane (≠0 = left/right), spawn a shell in the new pane. |
-| `int zterm_new_window(zterm_session *)` | New window + shell, made active. |
+| `int zterm_split(zterm_session *, int horizontal)` | Split active pane (≠0 = left/right), spawn the session's shell (the one `zterm_create` started) in the new pane. |
+| `int zterm_new_window(zterm_session *)` | New window running the session's shell, made active. |
 | `int zterm_select_window(zterm_session *, uint8_t index)` | Switch active window. |
 | `uint8_t zterm_window_count(zterm_session *)` | Window count. |
 | `int zterm_focus_next_pane(zterm_session *)` | Cycle focus within the active window. |
+
+### Pane-aware surface
+Pane indices are positions in the active window's pane list at call time. The
+full set (rects, focus, per-pane fds, cursors, cells, scroll, absolute lines)
+is documented in the header; one call is described here because of its memory
+contract:
+
+| Function | Purpose |
+|---|---|
+| `size_t zterm_pane_cwd(zterm_session *, size_t idx, uint8_t *out, size_t max)` | The working directory pane `idx`'s shell last reported with OSC 7 (`file://host/path`, percent-decoded): an absolute path, as the shell sent it, **not NUL-terminated**. |
+
+`zterm_pane_cwd` memory and results:
+
+- The caller owns `out`; the library copies into it and keeps no reference
+  (the same convention as `zterm_title`). A 4096-byte buffer always suffices.
+- Returns the path's length. Returns 0 when the shell has reported none (no
+  shell integration, or before its first prompt), for a bad handle or `idx`,
+  for a NULL `out`, and when the path is longer than `max` — a path is never
+  truncated, because a prefix of one names a different directory.
+- It is a getter: calling it twice returns the same path.
+- OSC 7 reports that fail to parse leave the previous directory in place:
+  another URL scheme, no absolute path, a malformed `%` escape, a path longer
+  than `PATH_MAX`, or one that decodes to a control character (NUL, newline —
+  a pasted path containing a newline would run a command).
+- The URL's host is not checked: a shell running over ssh reports a path on
+  the remote machine.
+- zsh, fish and `vte.sh` emit OSC 7 at each prompt; a shell without such
+  integration never does, and the call returns 0.
+
+### Emulator behaviour a host can rely on
+- **SGR colours**, both spellings xterm accepts: `38;5;n`, `38;2;r;g;b`
+  (semicolons) and `38:5:n`, `38:2::r:g:b`, `38:2:Pi:r:g:b`, `38:2:r:g:b`
+  (colons; `Pi` ignored); the same for 48. `4:n` is an underline
+  (`4:3` curly and other styles draw as the single underline the cell
+  carries); `4:0` turns it off. An out-of-range component (> 255) leaves the
+  colour unchanged.
+- **Alternate screen** (`zterm_modes` & 4): DECSET 47 switches without
+  saving the cursor and the alternate buffer keeps its contents across
+  switches; 1047 clears the alternate buffer when leaving it; 1049 saves the
+  cursor and clears the alternate buffer on entry, restoring the cursor on
+  exit. RIS returns to the primary screen.
 
 ---
 
@@ -199,10 +256,12 @@ The hot path was lifted ~3× (mixed) / ~4.7× (plain text):
   (`physRow` = one conditional subtract, no division). A full-screen scroll is a
   pointer bump + clearing the newly exposed rows — no row memcpy. Sub-region
   scrolls still shift via contiguous per-row copies.
-- **Zero heap allocations on the PTY path**: CSI params are a fixed `[16]u16`;
-  scrollback is a single preallocated flat ring (`Scrollback`) whose `push`
-  copies a scrolled-off row into the next slot with no allocator call. The old
-  per-scroll `alloc` is gone.
+- **No heap allocation for ordinary output**: CSI params and their `:`
+  sub-parameters are fixed arrays; scrollback is a single preallocated flat
+  ring (`Scrollback`) whose `push` copies a scrolled-off row into the next slot
+  with no allocator call. The old per-scroll `alloc` is gone. Only payloads
+  that outgrow fixed buffers use the heap, each bounded: OSC 52 clipboard
+  writes (128 KiB) and Kitty graphics APC strings.
 
 The remaining ceiling is memory bandwidth on 16-byte `Cell` writes (plain feed
 moves ~3 GB/s of cells), not dispatch — so the next lever, if needed, is a

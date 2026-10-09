@@ -191,7 +191,9 @@ input the way the application expects:
 ```
 
 `clipboard` is an OSC 52 write by the application; the client decides whether
-to honour it. After `exit` no further frames arrive; the last frame is the
+to honour it. `b64` is the base64 the application wrote (its `Pd`), always
+base64 text, so a client may pass it straight to its own terminal's OSC 52.
+Writes over 128 KiB of base64 are dropped by the server, never truncated. After `exit` no further frames arrive; the last frame is the
 pane's final screen, and the server keeps the connection open until the client
 closes it. `code`/`signal` are the child's real status, or `null` when it
 could not be read (the child closed its terminal but kept running for more
