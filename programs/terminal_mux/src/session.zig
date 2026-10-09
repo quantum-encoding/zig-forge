@@ -615,6 +615,12 @@ pub const Session = struct {
     // Configuration
     scrollback_lines: u32,
 
+    /// The shell the session was started with, for the shells of its later
+    /// panes (splits, new windows): splitting a session started with an
+    /// explicit shell must not quietly switch to $SHELL. Owned. Null when
+    /// none was recorded (the first pane ran a program, not a shell).
+    shell: ?[]u8 = null,
+
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, name: []const u8, rect: Rect, scrollback: u32) !*Self {
@@ -648,7 +654,15 @@ pub const Session = struct {
             window.deinit();
         }
         self.windows.deinit(self.allocator);
+        if (self.shell) |s| self.allocator.free(s);
         self.allocator.destroy(self);
+    }
+
+    /// Record the shell later panes are spawned with (copied).
+    pub fn setShell(self: *Self, path: []const u8) !void {
+        const copy = try self.allocator.dupe(u8, path);
+        if (self.shell) |s| self.allocator.free(s);
+        self.shell = copy;
     }
 
     /// Get the currently active window

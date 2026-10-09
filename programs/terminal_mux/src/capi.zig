@@ -421,6 +421,12 @@ fn createWith(rows: u16, cols: u16, shell: ?[]const u8, argv: []const [:0]const 
             return null;
         };
     }
+    // Splits and new windows reuse the session's shell; a program session
+    // records none, so its later panes get the default shell.
+    if (argv.len == 0) sess.setShell(shell_path) catch {
+        sess.deinit();
+        return null;
+    };
 
     const handle = alloc.create(ZtermSession) catch {
         sess.deinit();
@@ -991,23 +997,30 @@ pub export fn zterm_scroll_offset(handle: ?*ZtermSession) c_long {
 // Window / pane control
 // =============================================================================
 
-/// Split the active pane and spawn a shell in the new one. `horizontal` != 0
-/// splits left/right, else top/bottom. Returns 0 on success, -1 on error.
+/// The shell for a session's later panes: the one it was created with, else
+/// (a session that started a program) the default shell.
+fn sessionShell(h: *ZtermSession) []const u8 {
+    return h.sess.shell orelse defaultShell();
+}
+
+/// Split the active pane and spawn the session's shell (the one
+/// `zterm_create` started) in the new one. `horizontal` != 0 splits
+/// left/right, else top/bottom. Returns 0 on success, -1 on error.
 pub export fn zterm_split(handle: ?*ZtermSession, horizontal: c_int) c_int {
     const h = handle orelse return -1;
     const dir: session.SplitDirection = if (horizontal != 0) .horizontal else .vertical;
     const new_pane = h.sess.getActiveWindow().split(dir, DEFAULT_SCROLLBACK) catch return -1;
-    new_pane.spawn(defaultShell(), childEnviron()) catch return -1;
+    new_pane.spawn(sessionShell(h), childEnviron()) catch return -1;
     return 0;
 }
 
-/// Create a new window, make it active, and spawn a shell in it. Returns 0 on
-/// success, -1 on error.
+/// Create a new window, make it active, and spawn the session's shell in it.
+/// Returns 0 on success, -1 on error.
 pub export fn zterm_new_window(handle: ?*ZtermSession) c_int {
     const h = handle orelse return -1;
     _ = h.sess.createWindow() catch return -1;
     h.sess.nextWindow();
-    activePane(h).spawn(defaultShell(), childEnviron()) catch return -1;
+    activePane(h).spawn(sessionShell(h), childEnviron()) catch return -1;
     return 0;
 }
 
@@ -1549,6 +1562,48 @@ test "pane-aware surface: split, rects tile with a border gap, focus, close" {
     try std.testing.expectEqual(@as(c_int, 0), zterm_close_pane(h, 1));
     try std.testing.expectEqual(@as(usize, 1), zterm_pane_count(h));
     try std.testing.expectEqual(@as(c_int, -1), zterm_close_pane(h, 0)); // last pane refused
+}
+
+/// Drain `h` until pane `idx` of the active window shows `needle`, for up to
+/// 5 s. The pane's screen text, one line per row, is checked after each drain.
+fn paneShows(h: *ZtermSession, idx: usize, needle: []const u8) !bool {
+    var cells: [24 * 80]CCell = undefined;
+    var text: [24 * 81]u8 = undefined;
+    var waited: usize = 0;
+    while (waited < 5000) : (waited += 10) {
+        _ = zterm_drain(h);
+        var cols: u16 = 0;
+        if (zterm_pane_rect(h, idx, null, null, &cols, null) != 0) return error.NoSuchPane;
+        const n = zterm_pane_read_cells(h, idx, &cells, cells.len);
+        var len: usize = 0;
+        for (cells[0..n], 0..) |c, i| {
+            text[len] = if (c.ch >= 0x20 and c.ch < 0x7f) @intCast(c.ch) else ' ';
+            len += 1;
+            if ((i + 1) % cols == 0) {
+                text[len] = '\n';
+                len += 1;
+            }
+        }
+        if (std.mem.indexOf(u8, text[0..len], needle) != null) return true;
+        var no_fds = [_]posix.pollfd{};
+        _ = posix.poll(&no_fds, 10) catch {};
+    }
+    return false;
+}
+
+test "split and new window run the session's shell, not $SHELL" {
+    try pty.skipIfUnavailable();
+    var id: u64 = 0;
+    // /usr/bin/env as the session's "shell": it prints the environment and
+    // exits. COLORTERM=truecolor is the last line it prints (childEnviron
+    // appends it); a $SHELL login shell prints no such line by itself.
+    const h = zterm_create(24, 80, "/usr/bin/env", &id) orelse return error.CreateFailed;
+    defer zterm_destroy(h);
+    try std.testing.expect(try paneShows(h, 0, "COLORTERM=truecolor"));
+    try std.testing.expectEqual(@as(c_int, 0), zterm_split(h, 1));
+    try std.testing.expect(try paneShows(h, 1, "COLORTERM=truecolor"));
+    try std.testing.expectEqual(@as(c_int, 0), zterm_new_window(h));
+    try std.testing.expect(try paneShows(h, 0, "COLORTERM=truecolor"));
 }
 
 test "zterm_take_responses drains the emulator's device replies, never splitting one" {
