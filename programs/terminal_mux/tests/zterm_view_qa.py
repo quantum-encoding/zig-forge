@@ -97,8 +97,12 @@ class View:
         return False
 
 def cpr_prog(path):
-    return ("python3 -c \"import tty,os;tty.setraw(0);os.write(1,b'\\033[6n');r=b''\n"
+    # The tty mode is put back afterwards: left raw (no OPOST/ONLCR), every
+    # later line in the pane would start where the last one ended, and text
+    # the checks look for could straddle a wrap.
+    return ("python3 -c \"import tty,os,termios;m=termios.tcgetattr(0);tty.setraw(0);os.write(1,b'\\033[6n');r=b''\n"
             "while not r.endswith(b'R'): r+=os.read(0,1)\n"
+            "termios.tcsetattr(0,termios.TCSADRAIN,m)\n"
             f"open('{path}','wb').write(r)\"\r")
 
 srv = subprocess.Popen([Z, "server", "--no-runner"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
