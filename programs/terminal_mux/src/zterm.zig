@@ -1546,6 +1546,11 @@ const Server = struct {
     /// dimensions, so only a full frame describes it.
     fn resizePane(self: *Server, p: *Pane, rows: u16, cols: u16) void {
         _ = capi.zterm_resize(p.handle, rows, cols);
+        // The resize marks every row dirty. Every viewer of the pane gets a
+        // full frame, which carries those rows; left set, they would be
+        // folded into the frame after it (at the pane's next output) and
+        // re-sent though nothing in them changed.
+        p.spane().terminal.clearDirty();
         p.noteInput(); // a window being dragged wants its frames now
         for (self.viewers.items) |*v| {
             if (v.conn < 0 or v.pane_id != p.id) continue;
@@ -1587,15 +1592,26 @@ const Server = struct {
             }
             if (marks_touched) |line| v.marks_from = if (v.marks_from) |cur| @min(cur, line) else line;
             if (bells > 0) self.viewerEvent(v, .{ .t = "bell", .pane = p.id });
-            if (clip.len > 0) {
-                const enc = std.base64.standard.Encoder;
-                const b64 = self.alloc.alloc(u8, enc.calcSize(clip.len)) catch continue;
-                defer self.alloc.free(b64);
-                self.viewerEvent(v, .{ .t = "clipboard", .pane = p.id, .b64 = enc.encode(b64, clip) });
-            }
+            if (clipboardEventB64(clip)) |b64| self.viewerEvent(v, .{ .t = "clipboard", .pane = p.id, .b64 = b64 });
         }
         t.clearClipboard();
         t.clearDirty();
+    }
+
+    /// What a viewer's `clipboard` event carries for an OSC 52 write
+    /// ("Pc;Pd"): Pd, the base64 the application wrote, which a client hands
+    /// to its own terminal's OSC 52 as is. Null when Pd is empty or is not
+    /// base64 text: a client writes it inside an OSC string, where any other
+    /// byte could end that string and inject a sequence into its terminal.
+    fn clipboardEventB64(payload: []const u8) ?[]const u8 {
+        const semi = std.mem.indexOfScalar(u8, payload, ';') orelse return null;
+        const pd = payload[semi + 1 ..];
+        if (pd.len == 0) return null;
+        for (pd) |ch| switch (ch) {
+            'A'...'Z', 'a'...'z', '0'...'9', '+', '/', '=' => {},
+            else => return null,
+        };
+        return pd;
     }
 
     /// Queue one small JSON message for a viewer. If events pile up past the
@@ -2822,6 +2838,21 @@ test {
     // these; lib.zig's suite imports neither.
     _ = ctl;
     _ = view;
+}
+
+test "a clipboard event carries the application's base64 as written, or nothing" {
+    // docs/VIEW-PROTOCOL.md: {"t":"clipboard","b64":"aGVsbG8="} for "hello".
+    // The event once carried base64 of the whole "c;aGVsbG8=" payload, so a
+    // client's terminal set its clipboard to the literal text "c;aGVsbG8=".
+    const f = Server.clipboardEventB64;
+    try testing.expectEqualStrings("aGVsbG8=", f("c;aGVsbG8=").?);
+    try testing.expectEqualStrings("QQ==", f("0;QQ==").?);
+    try testing.expectEqualStrings("a+/9", f(";a+/9").?); // empty Pc: xterm's "s 0"
+    try testing.expect(f("c;") == null);
+    try testing.expect(f("aGVsbG8=") == null); // no Pc;Pd split
+    try testing.expect(f("c;aGk\x07=") == null); // BEL would end the client's OSC
+    try testing.expect(f("c;\x1b]0;owned") == null);
+    try testing.expect(f("c;aGk=?") == null);
 }
 
 test "runner socket path follows baton's home_base tiers" {
