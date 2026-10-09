@@ -436,6 +436,14 @@ test "ctlseqs SGR: a colon-form colour leaves the parameters after it alone" {
     try std.testing.expect(b.attrs.underline);
 }
 
+test "ctlseqs SGR: each sequence's sub-parameters are its own" {
+    // The parser keeps one sub-parameter table; a sequence must never see
+    // the sub-parameters a previous one left in it.
+    try expectRgb((try sgrCell("\x1b[38:5:9m\x1b[38:2::1:2:3m")).fg, 1, 2, 3);
+    try expectIndexed((try sgrCell("\x1b[48:2::1:2:3m\x1b[48:5:7m")).bg, 7);
+    try std.testing.expect(!(try sgrCell("\x1b[4:3m\x1b[4:0m")).attrs.underline);
+}
+
 test "kitty underline styles: 4:n is an underline, 4:0 turns it off" {
     // kitty's "Colored and styled underlines": 4:0 none, 4:1 straight,
     // 4:2 double, 4:3 curly, 4:4 dotted, 4:5 dashed.
