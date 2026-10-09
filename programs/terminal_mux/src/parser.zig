@@ -1086,13 +1086,30 @@ fn handleDecPrivateMode(term: *Terminal, seq: CsiSequence, enable: bool) void {
             1003 => term.modes.mouse_tracking = if (enable) .any else .none,
             1004 => term.modes.focus_events = enable,
             1006 => term.modes.mouse_sgr = enable,
+            // Alternate screen buffer (xterm ctlseqs, DECSET/DECRST):
+            //   47    plain switch, no cursor save; the alternate buffer
+            //         keeps its contents across switches.
+            //   1047  set: switch; reset: clear the alternate buffer, then
+            //         switch back to the normal one.
+            //   1049  set: save the cursor (DECSC), switch, clearing the
+            //         alternate buffer first; reset: as 1047, then restore
+            //         the cursor (DECRC).
+            47 => if (enable) {
+                term.enterAltScreen(.keep) catch {};
+            } else {
+                term.exitAltScreen(.keep);
+            },
+            1047 => if (enable) {
+                term.enterAltScreen(.keep) catch {};
+            } else {
+                term.exitAltScreen(.clear);
+            },
             1049 => {
-                // Alternate screen buffer with cursor save
                 if (enable) {
                     term.saveCursor();
-                    term.enterAltScreen() catch {};
+                    term.enterAltScreen(.clear) catch {};
                 } else {
-                    term.exitAltScreen();
+                    term.exitAltScreen(.clear);
                     term.restoreCursor();
                 }
             },

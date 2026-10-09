@@ -647,6 +647,10 @@ pub const Terminal = struct {
     // Grid state
     grid: Grid,
     alt_grid: ?Grid, // Alternate screen buffer
+    /// The alternate screen's contents while the primary is showing, kept by
+    /// a mode-47 exit: xterm has one alternate buffer, and only 1047 (on
+    /// exit) and 1049 (on entry) clear it. Null when there is none to keep.
+    kept_alt: ?Grid = null,
 
     // Cursor
     cursor: Cursor,
@@ -809,6 +813,7 @@ pub const Terminal = struct {
         if (self.alt_grid) |*g| {
             g.deinit();
         }
+        if (self.kept_alt) |*g| g.deinit();
 
         self.scrollback.deinit();
 
@@ -1415,19 +1420,35 @@ pub const Terminal = struct {
         }
     }
 
+    /// What happens to the alternate screen's contents across a switch.
+    pub const AltContents = enum {
+        /// Entering: show what a `.keep` exit left there (blank if nothing).
+        /// Exiting: keep the contents for the next `.keep` entry. Mode 47.
+        keep,
+        /// Entering: start blank. Exiting: discard. Modes 1047/1049.
+        clear,
+    };
+
     /// Switch to the alternate screen buffer — SWAP semantics: the primary
-    /// grid is stashed aside untouched and `self.grid` becomes a fresh blank
+    /// grid is stashed aside untouched and `self.grid` becomes the alternate
     /// grid, so every write path (putChar, erases, scrolls — they all target
     /// `self.grid`) is alt-correct with no per-callsite dispatch. The old
     /// design kept writing to the primary while readers looked at an
     /// always-empty alt grid: vim rendered into your scrollback and quitting
     /// it never restored the screen.
-    pub fn enterAltScreen(self: *Self) !void {
+    pub fn enterAltScreen(self: *Self, contents: AltContents) !void {
         if (self.modes.alt_screen) return;
 
-        const fresh = try Grid.init(self.allocator, self.grid.rows, self.grid.cols);
+        const alt = if (contents == .keep and self.kept_alt != null) blk: {
+            const g = self.kept_alt.?;
+            self.kept_alt = null;
+            break :blk g;
+        } else blk: {
+            self.dropKeptAlt();
+            break :blk try Grid.init(self.allocator, self.grid.rows, self.grid.cols);
+        };
         self.alt_grid = self.grid; // stash the primary
-        self.grid = fresh;
+        self.grid = alt;
         // Graphics ride the SAME swap: stash the primary placements/images and
         // give the alt screen a fresh empty set (DOOM's per-frame placements
         // must never leak back to the primary). Any in-flight transmission is
@@ -1441,13 +1462,19 @@ pub const Terminal = struct {
         self.graphics_gen +%= 1;
     }
 
-    /// Return to the main screen buffer: discard the alt contents and restore
-    /// the stashed primary grid byte-exact (what `less`/vim quitting expects).
-    pub fn exitAltScreen(self: *Self) void {
+    /// Return to the main screen buffer, restoring the stashed primary grid
+    /// byte-exact (what `less`/vim quitting expects). The alternate screen's
+    /// text is kept for the next `.keep` entry or discarded, per `contents`;
+    /// its images are always discarded.
+    pub fn exitAltScreen(self: *Self, contents: AltContents) void {
         if (!self.modes.alt_screen) return;
 
         if (self.alt_grid) |g| {
-            self.grid.deinit(); // the alt screen's contents die here
+            self.dropKeptAlt();
+            switch (contents) {
+                .keep => self.kept_alt = self.grid,
+                .clear => self.grid.deinit(), // the alt screen's contents die here
+            }
             self.grid = g;
             self.alt_grid = null;
         }
@@ -1464,6 +1491,11 @@ pub const Terminal = struct {
         self.pending_wrap = false;
         self.markAllDirty();
         self.graphics_gen +%= 1;
+    }
+
+    fn dropKeptAlt(self: *Self) void {
+        if (self.kept_alt) |*g| g.deinit();
+        self.kept_alt = null;
     }
 
     /// Resize terminal
@@ -1484,6 +1516,7 @@ pub const Terminal = struct {
         if (self.alt_grid) |*g| {
             try g.resize(rows, cols);
         }
+        if (self.kept_alt) |*g| try g.resize(rows, cols);
         try self.scrollback.resizeCols(cols);
 
         self.scroll_region = .{ .top = 0, .bottom = rows - 1 };
@@ -1636,6 +1669,11 @@ pub const Terminal = struct {
     }
 
     pub fn reset(self: *Self) void {
+        // RIS returns to the primary screen: resetting `modes` alone would
+        // leave the alternate grid showing as "primary" with the real primary
+        // stashed, and the next alt-screen entry would overwrite (leak) it.
+        self.exitAltScreen(.clear);
+        self.dropKeptAlt();
         self.cursor = .{};
         self.resp_len = 0; // RIS: replies owed to the pre-reset app are void
         self.current_attrs = .{};

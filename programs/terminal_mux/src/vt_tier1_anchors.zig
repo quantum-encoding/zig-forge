@@ -203,6 +203,92 @@ test "ctlseqs 1049: cursor position is saved on enter and restored on exit" {
     try std.testing.expectEqual(@as(u16, 6), h.cursor().col);
 }
 
+// ctlseqs DECSET/DECRST: "47 → Use Alternate Screen Buffer" / "Use Normal
+// Screen Buffer"; "1047 → Use Alternate Screen Buffer" / "Use Normal Screen
+// Buffer ... Clear the screen first if in the Alternate Screen Buffer";
+// "1049 → Save cursor as in DECSC ... switch to the Alternate Screen Buffer,
+// clearing it first". xterm has ONE alternate buffer: 47 never clears it.
+
+test "ctlseqs 47: a plain switch — primary restored, no cursor save, alt buffer kept" {
+    var h = try Harness.init(5, 20);
+    defer h.deinit();
+    var buf: [32]u8 = undefined;
+    h.feed("primary\x1b[3;5H"); // cursor row 2, col 4
+    h.feed("\x1b[?47h");
+    try std.testing.expect(h.term().terminal.modes.alt_screen);
+    try std.testing.expectEqualStrings("", h.rowText(0, &buf)); // nothing drawn here yet
+    h.feed("\x1b[1;1HALT47"); // cursor ends row 0, col 5
+    h.feed("\x1b[?47l");
+    try std.testing.expect(!h.term().terminal.modes.alt_screen);
+    try std.testing.expectEqualStrings("primary", h.rowText(0, &buf));
+    // No DECRC: the cursor is where the alternate screen left it.
+    try std.testing.expectEqual(@as(u16, 0), h.cursor().row);
+    try std.testing.expectEqual(@as(u16, 5), h.cursor().col);
+    // The alternate buffer still holds what was drawn on it.
+    h.feed("\x1b[?47h");
+    try std.testing.expectEqualStrings("ALT47", h.rowText(0, &buf));
+    h.feed("\x1b[?47l");
+    try std.testing.expectEqualStrings("primary", h.rowText(0, &buf));
+}
+
+test "ctlseqs 1047: the alternate buffer is cleared on the way out, not the way in" {
+    var h = try Harness.init(5, 20);
+    defer h.deinit();
+    var buf: [32]u8 = undefined;
+    h.feed("primary");
+    h.feed("\x1b[?47h\x1b[HKEPT\x1b[?47l"); // leave content in the alt buffer
+    h.feed("\x1b[?1047h");
+    try std.testing.expectEqualStrings("KEPT", h.rowText(0, &buf)); // 1047h does not clear
+    h.feed("\x1b[HDRAWN");
+    h.feed("\x1b[?1047l");
+    try std.testing.expectEqualStrings("primary", h.rowText(0, &buf));
+    h.feed("\x1b[?47h"); // what 1047l left behind: nothing
+    try std.testing.expectEqualStrings("", h.rowText(0, &buf));
+    h.feed("\x1b[?47l");
+}
+
+test "ctlseqs 1049 clears the alternate buffer a 47 exit kept" {
+    var h = try Harness.init(5, 20);
+    defer h.deinit();
+    var buf: [32]u8 = undefined;
+    h.feed("\x1b[?47h\x1b[HKEPT\x1b[?47l");
+    h.feed("\x1b[?1049h");
+    try std.testing.expectEqualStrings("", h.rowText(0, &buf));
+    h.feed("\x1b[?1049l");
+}
+
+test "RIS inside the alternate screen returns to the primary and frees the alternate" {
+    // std.testing.allocator fails this test on a leak: before, RIS reset the
+    // mode flag only, so the alternate grid stayed on screen as "primary" and
+    // the next 1049h stashed it over the real primary, which leaked.
+    var h = try Harness.init(5, 20);
+    defer h.deinit();
+    var buf: [32]u8 = undefined;
+    h.feed("\x1b[?47h\x1b[HKEPT\x1b[?47l"); // a kept alternate buffer too
+    h.feed("\x1b[?1049h\x1b[HALT");
+    h.feed("\x1bc"); // RIS
+    try std.testing.expect(!h.term().terminal.modes.alt_screen);
+    try std.testing.expect(h.term().terminal.alt_grid == null);
+    try std.testing.expect(h.term().terminal.kept_alt == null);
+    try std.testing.expectEqualStrings("", h.rowText(0, &buf));
+    h.feed("main\x1b[?1049h\x1b[?1049l");
+    try std.testing.expectEqualStrings("main", h.rowText(0, &buf));
+}
+
+test "a kept alternate buffer follows a resize" {
+    var h = try Harness.init(5, 20);
+    defer h.deinit();
+    var buf: [32]u8 = undefined;
+    h.feed("\x1b[?47h\x1b[HKEPT\x1b[?47l");
+    try h.term().resize(.{ .x = 0, .y = 0, .width = 30, .height = 8 });
+    h.feed("\x1b[?47h");
+    try std.testing.expectEqual(@as(u16, 8), h.term().terminal.grid.rows);
+    try std.testing.expectEqual(@as(u16, 30), h.term().terminal.grid.cols);
+    try std.testing.expectEqualStrings("KEPT", h.rowText(0, &buf));
+    h.feed("\x1b[8;30HZ"); // the last cell exists
+    try std.testing.expectEqual(@as(u21, 'Z'), h.charAt(7, 29));
+}
+
 test "alt screen writes never leak into primary scrollback" {
     var h = try Harness.init(3, 10);
     defer h.deinit();
