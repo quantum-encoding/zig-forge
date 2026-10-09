@@ -72,6 +72,12 @@ Thumbs.db
 # Keep iOS pre-built static libraries (intentional distribution)
 !libs/ios-libs/**/*.a
 
+# Stamps beside built archives (`baton release stamp`) and chronos-ledger's vendored
+# archive + its source-id stamp. Tracked, they would change the source trees whose
+# identity they record.
+*.release-stamp.json
+programs/cognitive_telemetry_kit/chronos-ledger/swift/Vendor/
+
 # ── Zigix OS build artifacts ─────────────────────────────────────
 *.img
 *.iso

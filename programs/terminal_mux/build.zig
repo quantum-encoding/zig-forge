@@ -8,6 +8,7 @@
 //!
 //! Usage:
 //!   zig build              - Build the C ABI static library + the zterm executable
+//!   zig build lib          - Build the C ABI static library + header only
 //!   zig build test         - Run all unit tests (Zig lib + C ABI)
 //!   zig build run          - Run the standalone terminal multiplexer
 //!   zig build bench        - Run the C ABI throughput/latency benchmark
@@ -46,6 +47,12 @@ pub fn build(b: *std.Build) void {
     lib.bundle_compiler_rt = true;
     lib.installHeader(b.path("include/terminal_mux.h"), "terminal_mux.h");
     b.installArtifact(lib);
+
+    // `zig build lib` installs the archive and its header alone. Consumers'
+    // builds (scripts/build-macos-lib.sh) use it so building the library does
+    // not also replace zig-out/bin/zterm, the CLI on PATH.
+    const lib_step = b.step("lib", "Build and install libterminal_mux.a and its header only");
+    lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step);
 
     // ==========================================================================
     // Benchmark (drives the C ABI like a host application would)

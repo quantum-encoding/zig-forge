@@ -318,6 +318,30 @@ zig build
 
 All binaries are placed in `zig-out/bin/` at the repository root.
 
+### Libraries other repos link
+
+Cosmic Duck OS, AI Conductor, Cifra, Metatron Security and other apps link static archives built in this tree. One command builds every one of them from a clean checkout, with or without `.git`:
+
+```bash
+scripts/build-consumed-libs.sh                # every library in libs.toml
+scripts/build-consumed-libs.sh terminal_mux   # just the named ones
+```
+
+[`libs.toml`](libs.toml) lists each library with its exact build command, its artifacts, and the `sources` a consumer's `release.toml` must declare. Each build is a release mode, repacked for Apple's ld-prime (Zig 0.16 writes 2-byte-aligned archive members; ld-prime needs 8), and stamped with `<lib>-source-id.txt` from `scripts/zig-source-id.sh`, which hashes every file the build reads, including the sibling directories `build.zig` imports. In a git checkout that `baton release` products point at, the command also writes `<archive>.release-stamp.json` for each consuming product. That stamp is what makes the input read `fresh` in `baton release plan`, and it is refused when the product's `release.toml` declares the input differently from `libs.toml`. The command exits non-zero if any library fails to build, comes out as a Debug or ReleaseSafe build, carries a stale stamp, or cannot be stamped.
+
+| Library | Archive | Mode | Linked by |
+|---|---|---|---|
+| quantum_crypto | `programs/simd_crypto_ffi/zig-out/lib/libquantum_crypto.a` | ReleaseSmall | Cosmic Duck OS, CryptoWalletKit, Cifra |
+| terminal_mux | `programs/terminal_mux/zig-out/lib/libterminal_mux.a` | ReleaseSmall | Cosmic Duck OS, AI Conductor, rust_agent |
+| zig_docx | `programs/zig_docx/zig-out/lib/libzig_docx.a` | ReleaseSmall | Cosmic Duck OS |
+| zigpdf | `programs/zig_pdf_generator/zig-out/lib/libzigpdf.a` | ReleaseSmall | Cosmic Duck OS |
+| zsss | `zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-macos.a` (plus iOS and Linux) | ReleaseFast | Cosmic Duck OS, Cifra, Tessera |
+| chronos_ledger | `programs/cognitive_telemetry_kit/chronos-ledger/swift/Vendor/libchronos_ledger.a` | ReleaseSmall | Cosmic Duck OS, AI Conductor |
+| zdedupe | `programs/zdedupe/zig-out/lib/libzdedupe.a` | ReleaseFast | zdedupe app (builds its own xcframework from this source) |
+| endpoint_sec | `programs/zig_endpoint_sec/zig-out/lib/libes_core_zig.a`, `libendpoint_sec.a` | ReleaseFast | Metatron Security (builds its own copy from this source) |
+
+Rebuilding one by hand: `scripts/build-macos-lib.sh <program-dir> [ReleaseSmall|ReleaseFast]`. A plain `zig build` in a program directory is Debug and unrepacked; nothing should link it.
+
 ### Build Specific Programs
 
 ```bash
@@ -353,7 +377,6 @@ zig build zig_pdf_engine
 zig build audio_forge
 zig build zig_inference
 zig build zig_websocket
-zig build zig_json
 zig build zig_toml
 zig build zig_msgpack
 zig build zig_xlsx

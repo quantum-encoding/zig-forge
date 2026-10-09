@@ -1,28 +1,38 @@
 #!/usr/bin/env bash
 #
-# ensure-fresh-lib.sh — rebuild libterminal_mux.a when the Zig sources are newer.
+# ensure-fresh-lib.sh — rebuild libterminal_mux.a unless it is the canonical build of
+# the current sources.
 #
 # The Swift host (aiconductor) links zig-out/lib/libterminal_mux.a by relative
 # path. Nothing in the Xcode build graph knows about src/*.zig, so an edited
 # core links against yesterday's archive and the change silently does not exist
-# at runtime. This script closes that gap: it compares the newest mtime under
-# the Zig source set against the archive and rebuilds (+ repacks for ld-prime)
-# only when the archive is older or missing.
+# at runtime. This script closes that gap.
+#
+# The archive is current when ALL of these hold:
+#   - libterminal_mux-source-id.txt beside it equals scripts/zig-source-id.sh for
+#     the program now (same sources, by content — not by mtime);
+#   - the archive is not newer than that stamp. scripts/build-macos-lib.sh writes the
+#     stamp after the archive, so an archive newer than its stamp was written by
+#     something else — typically a hand-run `zig build`, which is Debug and
+#     unrepacked for ld-prime.
+# Otherwise it is rebuilt with scripts/build-macos-lib.sh (ReleaseSmall, repacked,
+# stamped), the same command consumers' release.toml files declare.
 #
 # Wire it as a Run Script build phase placed BEFORE "Compile Sources", or run it
 # by hand before an Xcode build:
 #
 #     zig-forge/programs/terminal_mux/scripts/ensure-fresh-lib.sh
 #
-# Exit status: 0 when the archive is fresh (already or after rebuilding),
+# Exit status: 0 when the archive is current (already or after rebuilding),
 # non-zero when the rebuild failed — which fails the Xcode build, by design.
 
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-root="$(dirname "$here")"
-archive="$root/zig-out/lib/libterminal_mux.a"
-repack="$root/../../scripts/repack-for-xcode.sh"
+program="$(dirname "$here")"
+repo="$(cd "$program/../.." && pwd)"
+archive="$program/zig-out/lib/libterminal_mux.a"
+stamp="$program/zig-out/lib/libterminal_mux-source-id.txt"
 
 # Xcode's Run Script phases run with a minimal PATH that usually lacks zig.
 if ! command -v zig >/dev/null 2>&1; then
@@ -38,47 +48,26 @@ if ! command -v zig >/dev/null 2>&1; then
     exit 1
 fi
 
-# The inputs that can invalidate the archive. build.zig.zon is optional.
-sources=("$root/src" "$root/include" "$root/build.zig")
-[[ -f "$root/build.zig.zon" ]] && sources+=("$root/build.zig.zon")
-
-stale=0
+reason=""
 if [[ ! -f "$archive" ]]; then
-    stale=1
     reason="archive missing"
+elif [[ ! -f "$stamp" ]]; then
+    reason="archive has no source-identity stamp"
+elif [[ "$archive" -nt "$stamp" ]]; then
+    reason="archive was written after its stamp, not by build-macos-lib.sh"
 else
-    # -newer is a per-file mtime comparison, so a single find over every input
-    # answers "is anything newer than the archive?" without parsing timestamps.
-    newer="$(find "${sources[@]}" -type f -newer "$archive" -print -quit 2>/dev/null || true)"
-    if [[ -n "$newer" ]]; then
-        stale=1
-        reason="newer than archive: ${newer#"$root/"}"
+    expected="$("$repo/scripts/zig-source-id.sh" "$program")"
+    actual="$(tr -d '[:space:]' < "$stamp")"
+    if [[ "$actual" != "$expected" ]]; then
+        reason="sources changed since the archive was built"
     fi
 fi
 
-# A hand-run `zig build` writes a fresh archive that is newer than every
-# source yet was never repacked, so ld-prime drops its members as "not 8-byte
-# aligned". The stamp records the last repack; an archive newer than it is
-# repacked here, with no rebuild.
-stamp="$archive.repacked"
-if [[ $stale -eq 0 ]]; then
-    if [[ "$(uname -s)" == "Darwin" && -x "$repack" ]] && [[ ! -f "$stamp" || "$archive" -nt "$stamp" ]]; then
-        echo "repacking libterminal_mux.a (written since its last repack)"
-        "$repack" "$archive"
-        touch "$stamp"
-    fi
+if [[ -z "$reason" ]]; then
     echo "libterminal_mux.a is current"
     exit 0
 fi
 
 echo "rebuilding libterminal_mux.a ($reason)"
-( cd "$root" && zig build )
-
-# Zig 0.16 emits 2-byte-aligned Mach-O archive members; Apple's ld-prime needs
-# 8-byte or the link fails with "not 8-byte aligned". Repack on Darwin.
-if [[ "$(uname -s)" == "Darwin" && -x "$repack" ]]; then
-    "$repack" "$archive"
-    touch "$stamp"
-fi
-
+"$repo/scripts/build-macos-lib.sh" programs/terminal_mux
 echo "libterminal_mux.a rebuilt"

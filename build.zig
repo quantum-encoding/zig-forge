@@ -34,6 +34,8 @@ pub fn build(b: *std.Build) void {
     buildProgram(b, "simd_crypto_ffi", target, optimize, build_all);
     buildProgram(b, "zig-quantum-encryption", target, optimize, build_all);
     buildProgram(b, "zig_jwt", target, optimize, build_all);
+    buildProgram(b, "zig_darwin_kit", target, optimize, build_all);
+    buildProgram(b, "zig_endpoint_sec", target, optimize, build_all);
     buildProgram(b, "zig_secret_scanner", target, optimize, build_all);
     buildProgram(b, "guardian_shield", target, optimize, build_all);
     buildProgram(b, "zig_jail", target, optimize, build_all);
@@ -43,12 +45,12 @@ pub fn build(b: *std.Build) void {
     buildProgram(b, "quantum_seed_vault", target, optimize, build_all);
 
     // ── Data Formats and Serialization ───────────────────────────────
-    buildProgram(b, "zig_json", target, optimize, build_all);
     buildProgram(b, "zig_toml", target, optimize, build_all);
     buildProgram(b, "zig_msgpack", target, optimize, build_all);
     buildProgram(b, "zig_xlsx", target, optimize, build_all);
     buildProgram(b, "zig_docx", target, optimize, build_all);
     buildProgram(b, "zig_base58", target, optimize, build_all);
+    buildProgram(b, "zig_csv2json", target, optimize, build_all);
 
     // ── PDF and Document Generation ──────────────────────────────────
     buildProgram(b, "zig_pdf_engine", target, optimize, build_all);
@@ -129,17 +131,19 @@ pub fn build(b: *std.Build) void {
     testProgram(b, "financial_engine", test_all);
     testProgram(b, "async_scheduler", test_all);
     testProgram(b, "zig_xlsx", test_all);
-    testProgram(b, "zig_json", test_all);
     testProgram(b, "zig_toml", test_all);
     testProgram(b, "zig_msgpack", test_all);
     testProgram(b, "zig_docx", test_all);
     testProgram(b, "zig_base58", test_all);
+    testProgram(b, "zig_csv2json", test_all);
     testProgram(b, "zig_cron", test_all);
     testProgram(b, "zig_watch", test_all);
     testProgram(b, "zig_inference", test_all);
     testProgram(b, "simd_crypto_ffi", test_all);
     testProgram(b, "zig-quantum-encryption", test_all);
     testProgram(b, "zig_jwt", test_all);
+    testProgram(b, "zig_darwin_kit", test_all);
+    testProgram(b, "zig_endpoint_sec", test_all);
     testProgram(b, "zig_secret_scanner", test_all);
     testProgram(b, "electrum_ffi", test_all);
     testProgram(b, "mempool_sniffer", test_all);
