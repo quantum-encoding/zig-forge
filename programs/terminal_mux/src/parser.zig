@@ -79,14 +79,26 @@ pub const Action = union(enum) {
     clipboard_end: void,
 };
 
+/// The ':'-separated sub-parameters of a CSI sequence's parameters
+/// (ECMA-48 §5.4.2): `vals[i][0..counts[i]]` follow `params[i]`. An empty
+/// sub-parameter reads 0.
+pub const SubParams = struct {
+    vals: [MAX_PARAMS][MAX_SUBPARAMS]u16 = undefined,
+    counts: [MAX_PARAMS]u8 = @splat(0),
+};
+
 /// CSI sequence data
 pub const CsiSequence = struct {
     params: [MAX_PARAMS]u16,
     param_count: u8,
-    /// `subparams[i][0..sub_counts[i]]` are the ':'-separated sub-parameters
-    /// written after `params[i]` (ECMA-48 §5.4.2). An empty one reads 0.
-    subparams: [MAX_PARAMS][MAX_SUBPARAMS]u16 = undefined,
-    sub_counts: [MAX_PARAMS]u8 = @splat(0),
+    /// The sequence's sub-parameters, or null when it had no ':'. Points into
+    /// the parser, like `OscSequence.data`: valid until the parser's next
+    /// `feed`. A pointer, not a copy: every CSI is dispatched by value and
+    /// most carry none, and ~200 bytes copied per SGR costs ~30% of
+    /// SGR-heavy throughput (zterm-bench feed_mixed). align(1) keeps the
+    /// sequence (and every parser Action) at its 2-byte alignment: ~1% of
+    /// that benchmark's instructions.
+    subs: ?*const SubParams align(1) = null,
     intermediates: [2]u8,
     intermediate_count: u8,
     final_byte: u8,
@@ -103,8 +115,9 @@ pub const CsiSequence = struct {
     /// The sub-parameters of parameter `idx`: `38:2::10:20:30` gives
     /// 2, 0, 10, 20, 30 for the 38. Empty when it has none.
     pub fn subParams(self: *const CsiSequence, idx: usize) []const u16 {
+        const s = self.subs orelse return &.{};
         if (idx >= self.param_count or idx >= MAX_PARAMS) return &.{};
-        return self.subparams[idx][0..self.sub_counts[idx]];
+        return s.vals[idx][0..s.counts[idx]];
     }
 };
 
@@ -145,9 +158,10 @@ pub const Parser = struct {
     /// belong to the current parameter's sub-parameters, never to a
     /// top-level parameter (ECMA-48 §5.4.2 colon separators).
     in_subparam: bool,
-    /// Sub-parameters of each parameter; see `CsiSequence.subparams`.
-    subparams: [MAX_PARAMS][MAX_SUBPARAMS]u16,
-    sub_counts: [MAX_PARAMS]u8,
+    /// Sub-parameters of the sequence being parsed; see `SubParams`.
+    subs: SubParams,
+    /// The sequence being parsed has had a ':' (its `subs.counts` are live).
+    sub_used: bool,
     /// The sub-parameter being written has a slot (false past
     /// MAX_SUBPARAMS: its digits are dropped).
     sub_open: bool,
@@ -177,8 +191,8 @@ pub const Parser = struct {
             .intermediates = undefined,
             .intermediate_count = 0,
             .in_subparam = false,
-            .subparams = undefined,
-            .sub_counts = @splat(0),
+            .subs = .{},
+            .sub_used = false,
             .sub_open = false,
             .osc_buffer = undefined,
             .osc_len = 0,
@@ -405,7 +419,10 @@ pub const Parser = struct {
         self.param_count = 0;
         self.intermediate_count = 0;
         self.in_subparam = false;
-        @memset(&self.sub_counts, 0);
+        if (self.sub_used) {
+            @memset(&self.subs.counts, 0);
+            self.sub_used = false;
+        }
         self.sub_open = false;
 
         switch (byte) {
@@ -439,8 +456,7 @@ pub const Parser = struct {
         return .{ .csi_dispatch = .{
             .params = self.params,
             .param_count = self.param_count,
-            .subparams = self.subparams,
-            .sub_counts = self.sub_counts,
+            .subs = if (self.sub_used) &self.subs else null,
             .intermediates = self.intermediates,
             .intermediate_count = self.intermediate_count,
             .final_byte = final,
@@ -451,21 +467,19 @@ pub const Parser = struct {
         switch (byte) {
             0x30...0x39 => {
                 // Digit: accumulates into the current parameter, or into its
-                // current sub-parameter after a ':'. Saturating, so a huge
-                // number cannot wrap around to a small, valid one.
+                // current sub-parameter after a ':' (saturating there, so a
+                // huge colour component cannot wrap around to a valid one).
                 if (self.param_count == 0) {
                     self.param_count = 1;
                 }
                 const idx = self.param_count - 1;
-                if (idx >= MAX_PARAMS) return .{ .none = {} };
-                const d: u16 = byte - '0';
                 if (self.in_subparam) {
                     if (self.sub_open) {
-                        const sp = &self.subparams[idx][self.sub_counts[idx] - 1];
-                        sp.* = sp.* *| 10 +| d;
+                        const sp = &self.subs.vals[idx][self.subs.counts[idx] - 1];
+                        sp.* = sp.* *| 10 +| (byte - '0');
                     }
-                } else {
-                    self.params[idx] = self.params[idx] *| 10 +| d;
+                } else if (idx < MAX_PARAMS) {
+                    self.params[idx] = self.params[idx] *% 10 +% (byte - '0');
                 }
                 return .{ .none = {} };
             },
@@ -488,11 +502,12 @@ pub const Parser = struct {
                 // would shift every parameter after it.
                 if (self.param_count == 0) self.param_count = 1;
                 self.in_subparam = true;
+                self.sub_used = true;
                 const idx = self.param_count - 1;
-                self.sub_open = idx < MAX_PARAMS and self.sub_counts[idx] < MAX_SUBPARAMS;
+                self.sub_open = idx < MAX_PARAMS and self.subs.counts[idx] < MAX_SUBPARAMS;
                 if (self.sub_open) {
-                    self.subparams[idx][self.sub_counts[idx]] = 0;
-                    self.sub_counts[idx] += 1;
+                    self.subs.vals[idx][self.subs.counts[idx]] = 0;
+                    self.subs.counts[idx] += 1;
                 }
                 return .{ .none = {} };
             },
@@ -1236,7 +1251,7 @@ fn handleSgr(term: *Terminal, seq: CsiSequence) void {
 ///     its arguments are sub-parameters, so `i` stays put.
 ///   semicolon (konsole's legacy form): `38;5;n`, `38;2;r;g;b`; its
 ///     arguments are the following parameters, and `i` moves past them.
-fn extendedColor(seq: *const CsiSequence, i: *u8) ?CellColor {
+inline fn extendedColor(seq: *const CsiSequence, i: *u8) ?CellColor {
     const sub = seq.subParams(i.*);
     if (sub.len > 0) {
         switch (sub[0]) {

@@ -707,9 +707,9 @@ pub const Terminal = struct {
 
     /// The working directory the application last reported with OSC 7
     /// (`file://host/path`, percent-decoded; see `parser.parseOsc7`): an
-    /// absolute path, or empty until one is reported.
-    cwd: [CWD_CAP]u8 = undefined,
-    cwd_len: usize = 0,
+    /// absolute path, or empty until one is reported. On the heap, so a
+    /// terminal whose shell never reports one carries no PATH_MAX buffer.
+    cwd: std.ArrayListUnmanaged(u8) = .empty,
 
     // DECSCUSR cursor style (CSI Ps SP q). Default = blinking block.
     cursor_shape: u8 = 0, // 0 block, 1 underline, 2 bar
@@ -849,6 +849,7 @@ pub const Terminal = struct {
         self.marks.deinit(self.allocator);
         self.clipboard_pending.deinit(self.allocator);
         self.clipboard_accum.deinit(self.allocator);
+        self.cwd.deinit(self.allocator);
     }
 
     /// The lowest code point in each table below; the fast paths depend on
@@ -1619,13 +1620,17 @@ pub const Terminal = struct {
 
     /// The working directory last reported with OSC 7, or empty.
     pub fn reportedCwd(self: *const Self) []const u8 {
-        return self.cwd[0..self.cwd_len];
+        return self.cwd.items;
     }
 
+    /// Record an OSC 7 directory (at most CWD_CAP bytes). On allocation
+    /// failure the previous one stands.
     pub fn setCwd(self: *Self, path: []const u8) void {
-        if (path.len > self.cwd.len) return;
-        @memcpy(self.cwd[0..path.len], path);
-        self.cwd_len = path.len;
+        if (path.len > CWD_CAP) return;
+        var next: std.ArrayListUnmanaged(u8) = .empty;
+        next.appendSlice(self.allocator, path) catch return;
+        self.cwd.deinit(self.allocator);
+        self.cwd = next;
     }
 
     // =========================================================================
