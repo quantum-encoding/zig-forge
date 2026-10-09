@@ -927,9 +927,20 @@ test "close returns at once and the reaper ends and reaps the whole group" {
     }
     try std.testing.expect(job > 0);
 
+    // `close` must hand the child to the reaper, not wait for it. A close
+    // that waited could not return before REAP_GRACE_MS: this shell ignores
+    // HUP and TERM, so nothing ends it but the reaper's SIGKILL once the
+    // grace (counted from inside close) has run out — and it would have
+    // reaped the leader. So both halves are measured against the grace, not
+    // against a few-ms budget a loaded machine blows: close returned inside
+    // it, and the leader was still alive when it did. Given the first, the
+    // second holds on any machine: the SIGKILL cannot have been sent yet.
     const t0 = monotonicMsForTest();
     p.close();
-    try std.testing.expect(monotonicMsForTest() - t0 < 50);
+    const leader_alive_after_close = pidExists(leader);
+    const close_ms = monotonicMsForTest() - t0;
+    try std.testing.expect(close_ms < REAP_GRACE_MS);
+    try std.testing.expect(leader_alive_after_close);
     try std.testing.expect(p.child_pid == null);
 
     const deadline = monotonicMsForTest() + REAP_GRACE_MS + 3000;
