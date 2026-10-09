@@ -30,6 +30,7 @@ const TemplateMode = enum {
     legend_letter,
     legend_describe,
     legend_docx,
+    solar_letter,
 };
 
 /// Company / legal document sub-types selected via `--certificate <type>`.
@@ -132,6 +133,7 @@ pub fn main(init: std.process.Init) !void {
     var opt_legend_letter = false;
     var opt_legend_describe = false;
     var opt_legend_docx = false;
+    var opt_solar_letter = false;
     var cert_type: ?CertType = null;
 
     var input_path: ?[]const u8 = null;
@@ -171,6 +173,8 @@ pub fn main(init: std.process.Init) !void {
             opt_legend_describe = true;
         } else if (std.mem.eql(u8, arg, "--legend-letter-docx")) {
             opt_legend_docx = true;
+        } else if (std.mem.eql(u8, arg, "--solar-letter")) {
+            opt_solar_letter = true;
         } else if (std.mem.eql(u8, arg, "--certificate")) {
             opt_certificate = true;
             // Consume the next token as the document <type>. The loop's
@@ -221,7 +225,9 @@ pub fn main(init: std.process.Init) !void {
     const letter_md_val: usize = if (opt_letter_md) 1 else 0;
     const legend_val: usize = (if (opt_legend_letter) @as(usize, 1) else 0) + (if (opt_legend_describe) @as(usize, 1) else 0) + (if (opt_legend_docx) @as(usize, 1) else 0);
 
-    const total_flags = basic_val + minimalist_val + letter_val + letter_md_val + presentation_val + proposal_val + certificate_val + beacon_report_val + health_report_val + legend_val;
+    const solar_letter_val: usize = if (opt_solar_letter) 1 else 0;
+
+    const total_flags = basic_val + minimalist_val + letter_val + letter_md_val + presentation_val + proposal_val + certificate_val + beacon_report_val + health_report_val + legend_val + solar_letter_val;
     if (total_flags > 1) {
         try stderr.writeAll("Error: Multiple template flags specified. Template flags (--basic, --minimalist, --letter, --presentation, --proposal, --certificate) are mutually exclusive.\n");
         try stderr.flush();
@@ -251,6 +257,8 @@ pub fn main(init: std.process.Init) !void {
         .legend_describe
     else if (opt_legend_docx)
         .legend_docx
+    else if (opt_solar_letter)
+        .solar_letter
     else
         .basic;
 
@@ -272,6 +280,24 @@ pub fn main(init: std.process.Init) !void {
         } orelse std.process.exit(1);
         defer allocator.free(out);
         writeOutputData(output_path, out, stdout, stderr) catch |err| {
+            try stderr.print("Error: Failed to write output data: {s}\n", .{@errorName(err)});
+            try stderr.flush();
+            std.process.exit(1);
+        };
+        return;
+    }
+
+    // Solar letters report which field or which part of the page is at fault.
+    if (mode == .solar_letter) {
+        var diag = lib.solar_letter.Diagnostic{};
+        const pdf = lib.solar_letter.generate(allocator, json_data, &diag) catch |err| {
+            const detail = if (diag.len > 0) diag.text() else @errorName(err);
+            stderr.print("Error: --solar-letter: {s}\n", .{detail}) catch {};
+            stderr.flush() catch {};
+            std.process.exit(1);
+        };
+        defer allocator.free(pdf);
+        writeOutputData(output_path, pdf, stdout, stderr) catch |err| {
             try stderr.print("Error: Failed to write output data: {s}\n", .{@errorName(err)});
             try stderr.flush();
             std.process.exit(1);
@@ -435,6 +461,8 @@ fn printUsage(stderr: *std.Io.Writer) void {
         \\                       from a typed legend (see "Legend letters" below)
         \\  --legend-describe    Print a legend's variables and scenarios as JSON
         \\  --legend-letter-docx Legend letter as an editable Word .docx
+        \\  --solar-letter       One-page personalised solar letter (installer brand,
+        \\                       system, figures, price/finance/grant offer, QR code)
         \\
         \\Certificate Types (used as: --certificate <type>):
         \\  contract               share-certificate      dividend-voucher
@@ -521,6 +549,7 @@ fn generatePdfBytes(allocator: std.mem.Allocator, mode: TemplateMode, cert_type:
             return try lib.generateWebsiteHealthReportFromJson(allocator, json_data);
         },
         .legend_letter, .legend_describe, .legend_docx => unreachable, // handled by runLegend
+        .solar_letter => unreachable, // handled before generatePdfBytes
         .certificate => {
             // cert_type is always set when mode == .certificate (the arg parser
             // resolves it before selecting this mode), but assert defensively.

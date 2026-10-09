@@ -582,6 +582,22 @@ uint8_t* zigpdf_generate_legend_letter(const char* json_input, size_t* output_le
 ZigPdfError zigpdf_generate_legend_letter_to_file(const char* json_input, const char* output_path);
 
 /**
+ * @brief Generate a one-page personalised solar letter
+ *
+ * Input: {installer, letter, package, stats, image, offer}; see
+ * src/solar_letter.zig and templates/solar-letter/ for the schema and samples.
+ * The offer is a price, finance or grant block; a finance offer must carry
+ * every part of its representative example. Returns NULL (and
+ * zigpdf_get_error() names the field, prefixed "Solar letter: ") on a
+ * missing, unknown or unprintable field, an unreadable image, or text that
+ * doesn't fit its space on the page.
+ *
+ * @note Caller must free the returned buffer with zigpdf_free()
+ */
+uint8_t* zigpdf_generate_solar_letter(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_solar_letter_to_file(const char* json_input, const char* output_path);
+
+/**
  * @brief Render a legend letter's text only (no PDF)
  *
  * Same input as zigpdf_generate_legend_letter. Returns UTF-8 JSON (not

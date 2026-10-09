@@ -63,6 +63,7 @@ pub const template_card = @import("template_card.zig");
 pub const order_email = @import("order_email.zig");
 pub const letter = @import("letter.zig");
 pub const legend_letter = @import("legend_letter.zig");
+pub const solar_letter = @import("solar_letter.zig");
 pub const docx_bridge = @import("docx_bridge.zig");
 pub const pdf_crypt = @import("pdf_crypt.zig");
 pub const types = @import("types.zig");
@@ -249,6 +250,9 @@ pub const generateLetterFromJson = letter.generateLetterFromJson;
 pub const generateLegendLetter = legend_letter.generate;
 pub const describeLegend = legend_letter.describe;
 
+// Solar letter (one-page personalised solar marketing letter)
+pub const generateSolarLetter = solar_letter.generate;
+
 // Template Card types
 pub const TemplateCardData = template_card.TemplateCardData;
 pub const TemplateCardRenderer = template_card.TemplateCardRenderer;
@@ -296,6 +300,8 @@ pub const zigpdf_generate_template_card_to_file = ffi.zigpdf_generate_template_c
 pub const zigpdf_generate_letter = ffi.zigpdf_generate_letter;
 pub const zigpdf_generate_letter_to_file = ffi.zigpdf_generate_letter_to_file;
 pub const zigpdf_generate_legend_letter = ffi.zigpdf_generate_legend_letter;
+pub const zigpdf_generate_solar_letter = ffi.zigpdf_generate_solar_letter;
+pub const zigpdf_generate_solar_letter_to_file = ffi.zigpdf_generate_solar_letter_to_file;
 pub const zigpdf_generate_legend_letter_to_file = ffi.zigpdf_generate_legend_letter_to_file;
 pub const zigpdf_legend_render_text = ffi.zigpdf_legend_render_text;
 pub const zigpdf_legend_describe = ffi.zigpdf_legend_describe;
@@ -598,6 +604,7 @@ test {
     _ = @import("order_email.zig");
     _ = @import("letter.zig");
     _ = @import("legend_letter_tests.zig");
+    _ = @import("solar_letter_tests.zig");
     _ = @import("docx_bridge_tests.zig");
     _ = @import("pdf_crypt.zig");
     // seal.zig imports the `ml_dsa` module (native targets only). Importing it

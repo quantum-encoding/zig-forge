@@ -1,0 +1,70 @@
+{
+  "installer": {
+    "name": "Example Solar Ltd",
+    "phone": "0300 000 0000",
+    "website": "examplesolar.co.uk",
+    "logo": "templates/solar-letter/example-logo.png",
+    "primary_hex": "#1f4e79",
+    "tint_hex": "#e8f0f7",
+    "accreditations": [
+      "templates/solar-letter/badge-1.png",
+      "templates/solar-letter/badge-2.png",
+      "templates/solar-letter/badge-3.png"
+    ],
+    "legal_line": "Example Solar Ltd, a fictional company used to show this template."
+  },
+  "letter": {
+    "reference": "EX-000123",
+    "date": "9 October 2026",
+    "recipient": [
+      "The Occupier",
+      "12 Example Road",
+      "Anytown",
+      "AB1 2CD"
+    ],
+    "headline": "Your home could qualify for free solar panels.",
+    "intro": "Your area is part of a government scheme that pays for energy improvements in some homes. Your roof could take 16 solar panels. We can check whether your household qualifies and, if it does, arrange the survey through your council.",
+    "qr_url": "https://examplesolar.co.uk/r/EX-000123",
+    "qr_caption": "Scan to see your roof and your full quote",
+    "small_print": "Figures are estimates from your roof's size, pitch and direction and typical sunshine for your area; your surveyor confirms them before you decide. This letter went to the occupier of this address. If you would rather not hear from us, call 0300 000 0000 and we will take the address off our list.",
+    "package_title": "What your roof could take"
+  },
+  "package": [
+    {
+      "label": "Solar panels your roof could take",
+      "value": "16 (6.96 kWp)"
+    },
+    {
+      "label": "Estimated generation",
+      "value": "6,240 kWh a year"
+    }
+  ],
+  "stats": [
+    {
+      "label": "Panels",
+      "value": "16",
+      "note": "on the south and west slopes"
+    },
+    {
+      "label": "Generation",
+      "value": "6,240 kWh",
+      "note": "a year"
+    }
+  ],
+  "image": {
+    "src": "templates/solar-letter/placeholder-roof.png",
+    "caption": "Panel layout shown for illustration"
+  },
+  "offer": {
+    "kind": "grant",
+    "scheme": "Warm Homes: Local Grant",
+    "headline": "Check whether your household qualifies",
+    "body": "The scheme is run by councils in England. If you qualify, the work is paid for by the grant.",
+    "criteria": [
+      "A household income under £36,000, a means-tested benefit, or a qualifying postcode",
+      "An energy rating (EPC) of D to G",
+      "You own the home or rent it privately",
+      "Your council is taking part"
+    ]
+  }
+}

@@ -541,6 +541,61 @@ a multi-page letter now register on the correct page.)
 
 ---
 
+## Template: `solar_letter`
+
+A **one-page A4 personalised solar letter** from an installer to a householder:
+installer brand, address block, headline and intro, the proposed system,
+two or three figure cards beside a roof picture, an offer block with a QR code,
+a phone strip, accreditation marks and small print. Everything about the
+installer (name, logo, colours, marks) arrives in the payload; the template
+holds layout and the wording the law requires. Figures are display strings
+formatted by the caller. Samples: `templates/solar-letter/{price,finance,grant}.json`.
+
+C exports (native, iOS, Android): `zigpdf_generate_solar_letter`,
+`zigpdf_generate_solar_letter_to_file`. WASM (`wasm` and `wasm-web`):
+`zigpdf_generate_solar_letter` with the `(ptr, len, out_len)` ABI. CLI:
+`pdf-gen --solar-letter in.json out.pdf`. Lib: `solar_letter.generate`.
+Source: `src/solar_letter.zig`.
+
+| Field | Type | Req | Notes |
+|---|---|---|---|
+| `installer.name` / `phone` / `website` | string | ✓ | Website is linked; phone is a `tel:` link in the strip |
+| `installer.logo` | image | ✓ | PNG/JPEG as base64, `data:` URL or (CLI) path; fitted to 150×44 pt |
+| `installer.primary_hex` | `#RRGGBB` | ✓ | Headline, first figure card, offer border, phone strip |
+| `installer.tint_hex` | `#RRGGBB` | | Other figure cards (default pale green) |
+| `installer.accreditations` | image[] | | Up to 10 marks, scaled to one row |
+| `installer.legal_line` | string | | Appended to the small print |
+| `letter.reference` / `date` | string | ✓ | Header, right |
+| `letter.recipient` | string[] | ✓ | 2 to 7 address lines |
+| `letter.headline` | string | ✓ | Up to 2 lines at 20 pt |
+| `letter.intro` | string | ✓ | Up to 4 lines |
+| `letter.qr_url` | string | ✓ | Must be `https://`; drawn as a vector QR code and linked |
+| `letter.qr_caption` | string | ✓ | Up to 2 lines under the QR code |
+| `letter.small_print` | string | ✓ | Fills the space left at the foot of the page |
+| `letter.package_title` | string | | Heading over `package` (default "Your recommended system") |
+| `package[]` | `{label, value}` | ✓ | 1 to 4 rows |
+| `stats[]` | `{label, value, note?}` | ✓ | 1 to 3 cards beside the picture |
+| `image.src` | image | ✓ | Roof picture, cropped to fill its box |
+| `image.caption` | string | | One line over the foot of the picture |
+| `offer.kind` | `price` \| `finance` \| `grant` | ✓ | Selects the fields below |
+
+Offers (unknown fields are refused, so a grant letter can't carry a price):
+- **price**: `headline`, `price`, `price_note?`, `includes[]?` (up to 3).
+- **finance**: `headline`, `monthly`, `apr`, `term_months`, `interest_rate`,
+  `credit`, `deposit`, `cash_price`, `total_payable`, `lender`,
+  `other_charges?`. These are the parts of a representative example
+  (FCA CONC 3.5.5R); the template writes the example sentence and shows the
+  representative APR at the same size as the monthly payment
+  (CONC 3.5.7R(2)).
+- **grant**: `scheme`, `headline`, `body`, `criteria[]` (1 to 4).
+
+Refusals (an error naming the field, never a PDF): a missing, unknown or
+empty field; a character outside the fonts' character set (WinAnsi); a colour
+that isn't `#RRGGBB`; a non-https QR address; an image that isn't a PNG or
+JPEG; a list outside its limits; text too long for its space on the page.
+
+---
+
 ## Template: `legend_letter`
 
 A `letter` whose **body is rendered from a [zig_legend](../zig_legend/README.md)
@@ -890,6 +945,7 @@ Refer to the **clean_quote** tables above for the full field list —
 | `proposal_legacy`   | `zigpdf_generate_proposal`            | `proposal.zig`     | ✗ (CLI / demo fixture only)                  | ✗                                |
 | `letter`            | `zigpdf_generate_letter`              | `letter.zig`       | ✗ (JSON / CLI / WASM)                        | ✗                                |
 | `legend_letter`     | `zigpdf_generate_legend_letter`       | `legend_letter.zig`| ✗ (JSON / CLI / WASM)                        | ✗                                |
+| `solar_letter`      | `zigpdf_generate_solar_letter`        | `solar_letter.zig` | ✗ (JSON / CLI / WASM)                        | ✗                                |
 | Word → letter       | `zigpdf_docx_to_letter`               | `docx_bridge.zig`  | ✗ (CLI / WASM)                               | ✗                                |
 | Word → template     | `zigpdf_docx_to_legend_template`      | `docx_bridge.zig`  | ✗ (CLI / WASM)                               | ✗                                |
 | legend letter → Word| `zigpdf_legend_letter_to_docx`        | `docx_bridge.zig`  | ✗ (CLI / WASM)                               | ✗                                |

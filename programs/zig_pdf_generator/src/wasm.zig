@@ -65,6 +65,7 @@ const template_card = @import("template_card.zig");
 const order_email = @import("order_email.zig");
 const letter = @import("letter.zig");
 const legend_letter = @import("legend_letter.zig");
+const solar_letter = @import("solar_letter.zig");
 const docx_bridge = @import("docx_bridge.zig");
 
 // =============================================================================
@@ -399,6 +400,25 @@ fn setLegendError(err: legend_letter.Error, diag: *const legend_letter.Diagnosti
     var buf: [256]u8 = undefined;
     const detail = if (diag.len > 0) diag.text() else @errorName(err);
     setLastError(std.fmt.bufPrint(&buf, "Legend letter: {s}", .{detail}) catch "Legend letter error");
+}
+
+fn setSolarLetterError(err: solar_letter.Error, diag: *const solar_letter.Diagnostic) void {
+    var buf: [256]u8 = undefined;
+    const detail = if (diag.len > 0) diag.text() else @errorName(err);
+    setLastError(std.fmt.bufPrint(&buf, "Solar letter: {s}", .{detail}) catch "Solar letter error");
+}
+
+/// One-page personalised solar letter. Null on error; zigpdf_get_error() names the field.
+export fn zigpdf_generate_solar_letter(json_ptr: [*]const u8, json_len: usize, output_len: *usize) ?[*]u8 {
+    const json_slice = json_ptr[0..json_len];
+    if (!legendUtf8Ok(json_slice)) return null;
+    var diag = solar_letter.Diagnostic{};
+    const pdf_bytes = solar_letter.generate(wasm_allocator, json_slice, &diag) catch |err| {
+        setSolarLetterError(err, &diag);
+        return null;
+    };
+    output_len.* = pdf_bytes.len;
+    return pdf_bytes.ptr;
 }
 
 /// Letter PDF with a body rendered from {legend_toml, template, scenario?,

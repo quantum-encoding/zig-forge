@@ -46,6 +46,7 @@ const clean_quote = @import("clean_quote.zig");
 const letter_quote = @import("letter_quote.zig");
 const letter = @import("letter.zig");
 const legend_letter = @import("legend_letter.zig");
+const solar_letter = @import("solar_letter.zig");
 const docx_bridge = @import("docx_bridge.zig");
 const markdown = @import("markdown.zig");
 const template_card = @import("template_card.zig");
@@ -1482,6 +1483,34 @@ pub export fn zigpdf_legend_describe(json_input: [*:0]const u8, output_len: *usi
     };
     output_len.* = out.len;
     return out.ptr;
+}
+
+fn setSolarLetterError(err: solar_letter.Error, diag: *const solar_letter.Diagnostic) void {
+    var buf: [256]u8 = undefined;
+    const detail = if (diag.len > 0) diag.text() else @errorName(err);
+    setLastError(std.fmt.bufPrint(&buf, "Solar letter: {s}", .{detail}) catch "Solar letter error");
+}
+
+/// One-page personalised solar letter (src/solar_letter.zig). Returns NULL on
+/// any missing, unknown or unprintable field, bad image, or text that doesn't
+/// fit; zigpdf_get_error() names it, prefixed "Solar letter: ".
+/// Caller frees the result with zigpdf_free.
+pub export fn zigpdf_generate_solar_letter(json_input: [*:0]const u8, output_len: *usize) ?[*]u8 {
+    var diag = solar_letter.Diagnostic{};
+    const pdf_bytes = solar_letter.generate(ffi_allocator, std.mem.span(json_input), &diag) catch |err| {
+        setSolarLetterError(err, &diag);
+        return null;
+    };
+    output_len.* = pdf_bytes.len;
+    return pdf_bytes.ptr;
+}
+
+/// Generate a solar letter and write it to an absolute path.
+pub export fn zigpdf_generate_solar_letter_to_file(json_input: [*:0]const u8, output_path: [*:0]const u8) ZigPdfError {
+    var len: usize = 0;
+    const pdf_ptr = zigpdf_generate_solar_letter(json_input, &len) orelse return .invalid_json;
+    defer zigpdf_free(pdf_ptr, len);
+    return writeFileAbsolute(std.mem.span(output_path), pdf_ptr[0..len]);
 }
 
 fn setLegendError(err: legend_letter.Error, diag: *const legend_letter.Diagnostic) void {

@@ -1,0 +1,77 @@
+{
+  "installer": {
+    "name": "Example Solar Ltd",
+    "phone": "0300 000 0000",
+    "website": "examplesolar.co.uk",
+    "logo": "templates/solar-letter/example-logo.png",
+    "primary_hex": "#1f4e79",
+    "tint_hex": "#e8f0f7",
+    "accreditations": [
+      "templates/solar-letter/badge-1.png",
+      "templates/solar-letter/badge-2.png",
+      "templates/solar-letter/badge-3.png"
+    ],
+    "legal_line": "Example Solar Ltd, a fictional company used to show this template."
+  },
+  "letter": {
+    "reference": "EX-000123",
+    "date": "9 October 2026",
+    "recipient": [
+      "The Occupier",
+      "12 Example Road",
+      "Anytown",
+      "AB1 2CD"
+    ],
+    "headline": "Your roof has room for 16 solar panels.",
+    "intro": "We looked at your roof from above and measured how much of it faces the sun. Here is the system we would fit, what it could generate each year and what it would cost. Nothing is booked until a surveyor has visited and you have agreed.",
+    "qr_url": "https://examplesolar.co.uk/r/EX-000123",
+    "qr_caption": "Scan to see your roof and your full quote",
+    "small_print": "Figures are estimates from your roof's size, pitch and direction and typical sunshine for your area; your surveyor confirms them before you decide. This letter went to the occupier of this address. If you would rather not hear from us, call 0300 000 0000 and we will take the address off our list."
+  },
+  "package": [
+    {
+      "label": "All-black solar panels",
+      "value": "16 x 435 W (6.96 kWp)"
+    },
+    {
+      "label": "Battery storage",
+      "value": "5.12 kWh"
+    },
+    {
+      "label": "Estimated generation",
+      "value": "6,240 kWh a year"
+    }
+  ],
+  "stats": [
+    {
+      "label": "Estimated saving",
+      "value": "£1,050",
+      "note": "in the first year"
+    },
+    {
+      "label": "Panels",
+      "value": "16",
+      "note": "on the south and west slopes"
+    },
+    {
+      "label": "Generation",
+      "value": "6,240 kWh",
+      "note": "a year"
+    }
+  ],
+  "image": {
+    "src": "templates/solar-letter/placeholder-roof.png",
+    "caption": "Panel layout shown for illustration"
+  },
+  "offer": {
+    "kind": "price",
+    "headline": "Fully installed, with scaffolding and certification",
+    "price": "£8,450",
+    "price_note": "including VAT at 0%",
+    "includes": [
+      "MCS certificate",
+      "10-year workmanship warranty",
+      "Battery and inverter"
+    ]
+  }
+}
