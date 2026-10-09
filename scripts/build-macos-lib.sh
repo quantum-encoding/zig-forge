@@ -23,6 +23,16 @@
 # A program whose build.zig declares a `lib` step is built with that step, so building
 # its library does not also reinstall its executables (terminal_mux's `zterm` in
 # zig-out/bin is the CLI on PATH).
+#
+# On a Mac the target is explicit: <arch>-macos.14.0. Zig's native target stamps every
+# object with the HOST's macOS version as its minimum (27.0 on a Mac running 27) and
+# tunes for the host CPU. Linked into an app whose floor is lower, ld warns "built for
+# newer 'macOS' version", and an archive built on an M5 may use instructions an M1
+# lacks. Zig ignores MACOSX_DEPLOYMENT_TARGET, so the floor has to be in the target.
+# 14.0 is the lowest floor among the apps that link these archives, the same value
+# the fleet's Rust FFI build scripts pin. A non-native target also turns off Zig's SDK
+# detection, so the SDK's usr/ is passed as a search prefix: without it a program that
+# links a system library (zig_endpoint_sec's -lEndpointSecurity) finds nothing.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -50,7 +60,17 @@ fi
 # that reads stale, never one that claims a newer source than the archive holds.
 id="$("$ROOT/scripts/zig-source-id.sh" "$ROOT/$DIR")"
 
-zig build "$step" -Doptimize="$MODE"
+if [ "$(uname -s)" = Darwin ]; then
+  case "$(uname -m)" in
+    arm64) arch=aarch64 ;;
+    x86_64) arch=x86_64 ;;
+    *) echo "error: no macOS target for architecture $(uname -m)" >&2; exit 1 ;;
+  esac
+  sdk="$(xcrun --sdk macosx --show-sdk-path)"
+  zig build "$step" -Doptimize="$MODE" -Dtarget="$arch-macos.14.0" --search-prefix "$sdk/usr"
+else
+  zig build "$step" -Doptimize="$MODE"
+fi
 
 built=0
 for archive in zig-out/lib/*.a; do
