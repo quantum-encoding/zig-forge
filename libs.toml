@@ -80,8 +80,8 @@ dir       = "programs/zdedupe"
 build     = "scripts/build-macos-lib.sh programs/zdedupe ReleaseFast"
 artifacts = ["programs/zdedupe/zig-out/lib/libzdedupe.a"]
 sources   = ["programs/zdedupe", "scripts/build-macos-lib.sh", "scripts/repack-for-xcode.sh"]
-consumers = []
-notes     = "tauri_apps/zdedupe builds its own xcframework from this directory (scripts/build-zig-xcframework.sh, ReleaseFast); this row proves the program builds from a clean checkout in the mode it ships in."
+consumers = ["zdedupe"]
+notes     = "tauri_apps/zdedupe links vendored copies its scripts/vendor-core.sh builds from one zig-forge commit (ReleaseFast); this row proves the program builds from a clean checkout in that mode, and its stamp is what zdedupe's inputs-fresh gate reads."
 
 [[lib]]
 name      = "endpoint_sec"
