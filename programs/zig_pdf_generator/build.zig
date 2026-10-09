@@ -4,7 +4,9 @@
 //! Target platforms: Linux, Android, iOS, macOS, Windows, WebAssembly (Edge)
 //!
 //! Usage:
-//!   zig build              - Build native library and CLI
+//!   zig build              - Build the CLIs, libzigpdf.dylib and zig-out/lib/dev/libzigpdf.a
+//!   zig build lib          - The consumed archive zig-out/lib/libzigpdf.a (release modes
+//!                            only; scripts/build-macos-lib.sh runs it, then repacks and stamps)
 //!   zig build android      - Build for Android ARM64
 //!   zig build wasm         - Build WebAssembly module for edge deployment
 //!   zig build test         - Run all tests
@@ -84,7 +86,28 @@ pub fn build(b: *std.Build) void {
     lib.bundle_compiler_rt = true;
 
     lib.root_module.addImport("ml_dsa", ml_dsa_mod);
-    b.installArtifact(lib);
+
+    // zig-out/lib/libzigpdf.a is the archive other repos link (libs.toml row
+    // `zigpdf`), stamped beside it by scripts/build-macos-lib.sh and
+    // scripts/build-consumed-libs.sh. Only the `lib` step writes that path,
+    // and only in a release mode; build-macos-lib.sh runs `zig build lib`.
+    // Every other build — `zig build`, `zig build run`, any -Doptimize —
+    // installs its archive under zig-out/lib/dev/, so a local build never
+    // replaces the stamped release archive.
+    const lib_step = b.step("lib", "Build the consumed archive zig-out/lib/libzigpdf.a (release modes only; use scripts/build-macos-lib.sh)");
+    switch (optimize) {
+        .ReleaseSmall, .ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step),
+        .Debug, .ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
+            "zig build lib writes zig-out/lib/libzigpdf.a, the archive consumers link; " ++
+                "a {t} build keeps Zig's panic machinery and is never that archive. " ++
+                "Run scripts/build-macos-lib.sh programs/zig_pdf_generator from the repo root " ++
+                "(ReleaseSmall, repacked, stamped), or plain `zig build` for zig-out/lib/dev/libzigpdf.a",
+            .{optimize},
+        )).step),
+    }
+    b.getInstallStep().dependOn(&b.addInstallArtifact(lib, .{
+        .dest_dir = .{ .override = .{ .custom = "lib/dev" } },
+    }).step);
 
     // ==========================================================================
     // Consumable Zig module (for in-tree `@import("zigpdf")` consumers).
@@ -117,7 +140,7 @@ pub fn build(b: *std.Build) void {
     shared_lib.root_module.link_libc = true;
     shared_lib.root_module.addImport("ml_dsa", ml_dsa_mod);
 
-    // Always install the shared lib alongside the static lib
+    // The install step always writes the shared lib to zig-out/lib/.
     b.installArtifact(shared_lib);
 
     const shared_step = b.step("shared", "Build shared library (libzigpdf.so) for FFI");
