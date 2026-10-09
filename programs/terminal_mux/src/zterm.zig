@@ -111,6 +111,8 @@ const is_darwin = builtin.os.tag.isDarwin();
 extern "c" fn tcgetpgrp(fd: c_int) c.pid_t;
 /// libproc (Darwin): a process's short name. Only referenced on Darwin.
 extern "c" fn proc_name(pid: c_int, buffer: [*]u8, buffersize: u32) c_int;
+/// libproc (Darwin): a process's executable path. Only referenced on Darwin.
+extern "c" fn proc_pidpath(pid: c_int, buffer: [*]u8, buffersize: u32) c_int;
 /// std.c has no signal(3) on this toolchain; same declaration as main.zig.
 const SignalHandler = ?*const fn (c_int) callconv(.c) void;
 extern "c" fn signal(sig: c_int, handler: SignalHandler) SignalHandler;
@@ -482,6 +484,49 @@ pub fn isAgentComm(comm: []const u8, env_list: ?[]const u8) bool {
     return false;
 }
 
+/// Is `path` a Claude Code release binary, `<anything>/claude/versions/<semver>`
+/// (optionally `.exe`)? Claude Code's native installer runs each release from
+/// that folder, so the process's short name is its version (`2.1.294`), which
+/// no allowlist names. The version must be dotted digits with an optional
+/// `-prerelease`, so a stray binary dropped into the folder under another name
+/// is not admitted. baton's `is_versioned_claude` (src/wez/driver.rs), verbatim.
+pub fn isVersionedClaude(path: []const u8) bool {
+    var it = std.mem.splitBackwardsAny(u8, path, "/\\");
+    const file = it.next() orelse return false;
+    const versions = it.next() orelse return false;
+    const claude = it.next() orelse return false;
+    if (!std.mem.eql(u8, versions, "versions") or !std.mem.eql(u8, claude, "claude")) return false;
+    const ver = if (std.mem.endsWith(u8, file, ".exe")) file[0 .. file.len - 4] else file;
+    var core = ver;
+    if (std.mem.indexOfScalar(u8, ver, '-')) |k| {
+        const pre = ver[k + 1 ..];
+        if (pre.len == 0) return false;
+        for (pre) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '.')) return false;
+        core = ver[0..k];
+    }
+    var parts = std.mem.splitScalar(u8, core, '.');
+    var n: usize = 0;
+    while (parts.next()) |part| {
+        if (part.len == 0) return false;
+        for (part) |ch| if (!std.ascii.isDigit(ch)) return false;
+        n += 1;
+    }
+    return n == 3;
+}
+
+/// Is the process `pid`, whose short name is `comm`, an allowed agent? The
+/// name decides, except for Claude Code's native install, whose name is its
+/// version: there the executable's path is checked with [`isVersionedClaude`],
+/// and it counts only while `claude` itself is allowed. An unreadable path is
+/// not an agent (fail closed).
+pub fn isAgentProc(pid: c.pid_t, comm: []const u8, env_list: ?[]const u8) bool {
+    if (isAgentComm(comm, env_list)) return true;
+    if (!isAgentComm("claude", env_list) and !isAgentComm("claude.exe", env_list)) return false;
+    var pb: [4096]u8 = undefined;
+    const path = procPath(pid, &pb) orelse return false;
+    return isVersionedClaude(path);
+}
+
 // ══ process introspection ═════════════════════════════════════════════════════════════════════════════
 
 /// A process's short name (Linux /proc/<pid>/comm, Darwin proc_name). Null
@@ -499,6 +544,25 @@ fn procComm(pid: c.pid_t, buf: []u8) ?[]const u8 {
         return std.mem.trimEnd(u8, buf[0..@intCast(n)], "\n");
     } else if (comptime is_darwin) {
         const n = proc_name(pid, buf.ptr, @intCast(buf.len));
+        if (n <= 0) return null;
+        return buf[0..@intCast(n)];
+    } else {
+        return null;
+    }
+}
+
+/// A process's executable path (Linux /proc/<pid>/exe, Darwin proc_pidpath).
+/// Null when unreadable.
+fn procPath(pid: c.pid_t, buf: []u8) ?[]const u8 {
+    if (pid <= 0) return null;
+    if (comptime is_linux) {
+        var pb: [48]u8 = undefined;
+        const path = std.fmt.bufPrintZ(&pb, "/proc/{d}/exe", .{pid}) catch return null;
+        const n = c.readlink(path.ptr, buf.ptr, buf.len);
+        if (n <= 0) return null;
+        return buf[0..@intCast(n)];
+    } else if (comptime is_darwin) {
+        const n = proc_pidpath(pid, buf.ptr, @intCast(buf.len));
         if (n <= 0) return null;
         return buf[0..@intCast(n)];
     } else {
@@ -1397,7 +1461,7 @@ const Server = struct {
             var busy: usize = 0;
             for (self.panes.items) |*p| {
                 var cb: [64]u8 = undefined;
-                if (!p.hup and isAgentComm(procComm(p.foregroundPgid(), &cb) orelse "", self.agent_env)) busy += 1;
+                if (!p.hup and isAgentProc(p.foregroundPgid(), procComm(p.foregroundPgid(), &cb) orelse "", self.agent_env)) busy += 1;
             }
             self.reply(conn, .{ .ok = true, .busy = busy, .sessions = self.panes.items.len });
         } else if (std.mem.eql(u8, verb, "list")) {
@@ -1422,7 +1486,7 @@ const Server = struct {
             }
             var cb: [64]u8 = undefined;
             const fg = procComm(p.foregroundPgid(), &cb) orelse "";
-            if (!isAgentComm(fg, self.agent_env)) {
+            if (!isAgentProc(p.foregroundPgid(), fg, self.agent_env)) {
                 // The contract's hard rule: a failure never falls through to
                 // shell input. A pane at a prompt is not an agent.
                 const why = try std.fmt.allocPrint(self.alloc, "session '{s}' is not accepting input (no agent in the foreground; '{s}' is)", .{ desig, if (fg.len > 0) fg else "unknown" });
@@ -1476,7 +1540,7 @@ const Server = struct {
     fn sessionPid(self: *Server, p: *const Pane) i64 {
         var cb: [64]u8 = undefined;
         const fg = p.foregroundPgid();
-        if (fg > 0 and isAgentComm(procComm(fg, &cb) orelse "", self.agent_env)) return fg;
+        if (fg > 0 and isAgentProc(fg, procComm(fg, &cb) orelse "", self.agent_env)) return fg;
         return p.childPid();
     }
 
@@ -1943,7 +2007,7 @@ const Server = struct {
             const child = p.childPid();
             const fg_pid = if (alive) p.foregroundPgid() else 0;
             const fg = if (alive) procComm(fg_pid, &s.fg) orelse "" else "";
-            const agent = alive and isAgentComm(fg, self.agent_env);
+            const agent = alive and isAgentProc(fg_pid, fg, self.agent_env);
             const pid: i64 = if (agent) fg_pid else child;
             const state: []const u8 = if (agent)
                 "live"
@@ -3002,6 +3066,26 @@ test "designations: valid names, pid: addressing, case-insensitive match" {
     try testing.expect(!answersTo("scribe", 0, "pid:0"));
     try testing.expect(!answersTo("scribe", 42, "42"));
     try testing.expect(!answersTo("scribe", 42, "pid:abc"));
+}
+
+test "a Claude Code release binary is recognised by its path, as baton does" {
+    try testing.expect(isVersionedClaude("/Users/d/.local/share/claude/versions/2.1.294"));
+    try testing.expect(isVersionedClaude("/home/f/.local/share/claude/versions/2.1.294-beta.1"));
+    try testing.expect(isVersionedClaude("C:\\Users\\d\\claude\\versions\\2.1.294.exe"));
+    // A bare version, another folder, or a stray name in the folder is not.
+    try testing.expect(!isVersionedClaude("2.1.294"));
+    try testing.expect(!isVersionedClaude("/x/codex/versions/2.1.294"));
+    try testing.expect(!isVersionedClaude("/x/claude/versions/evil"));
+    try testing.expect(!isVersionedClaude("/x/claude/versions/2.1"));
+    try testing.expect(!isVersionedClaude("/x/claude/versions/2.1.294-"));
+    try testing.expect(!isVersionedClaude("/x/claude/versions/2.1.294-rc;1"));
+}
+
+test "this process is not an agent, whatever its path" {
+    // The test binary's own path is not a Claude release, and its name is not
+    // on the list: fail closed.
+    try testing.expect(!isAgentProc(c.getpid(), "test", null));
+    try testing.expect(!isAgentProc(0, "", null));
 }
 
 test "agent detection uses baton's list, or $BATON_AGENT_EXES instead of it" {
