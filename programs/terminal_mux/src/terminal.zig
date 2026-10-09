@@ -97,6 +97,9 @@ pub const Cursor = struct {
     };
 };
 
+/// Longest working directory an OSC 7 report may set.
+pub const CWD_CAP: usize = std.fs.max_path_bytes;
+
 /// Most bytes of one OSC 52 payload ("Pc;Pd", Pd = base64): 128 KiB of
 /// base64 is ~96 KiB of text. A longer payload is dropped whole, so an
 /// application cannot make the emulator allocate without bound.
@@ -701,6 +704,12 @@ pub const Terminal = struct {
     // Terminal title (set via OSC)
     title: [256]u8,
     title_len: usize,
+
+    /// The working directory the application last reported with OSC 7
+    /// (`file://host/path`, percent-decoded; see `parser.parseOsc7`): an
+    /// absolute path, or empty until one is reported.
+    cwd: [CWD_CAP]u8 = undefined,
+    cwd_len: usize = 0,
 
     // DECSCUSR cursor style (CSI Ps SP q). Default = blinking block.
     cursor_shape: u8 = 0, // 0 block, 1 underline, 2 bar
@@ -1606,6 +1615,17 @@ pub const Terminal = struct {
         if (bytes.len > self.resp_pending.len - self.resp_len) return;
         @memcpy(self.resp_pending[self.resp_len..][0..bytes.len], bytes);
         self.resp_len += bytes.len;
+    }
+
+    /// The working directory last reported with OSC 7, or empty.
+    pub fn reportedCwd(self: *const Self) []const u8 {
+        return self.cwd[0..self.cwd_len];
+    }
+
+    pub fn setCwd(self: *Self, path: []const u8) void {
+        if (path.len > self.cwd.len) return;
+        @memcpy(self.cwd[0..path.len], path);
+        self.cwd_len = path.len;
     }
 
     // =========================================================================

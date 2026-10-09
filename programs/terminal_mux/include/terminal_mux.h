@@ -185,6 +185,16 @@ int      zterm_focus_pane(zterm_session *handle, size_t idx);
 int      zterm_pane_pty_fd(zterm_session *handle, size_t idx);
 void     zterm_pane_cursor(zterm_session *handle, size_t idx, uint16_t *out_row, uint16_t *out_col, bool *out_visible);
 size_t   zterm_pane_read_cells(zterm_session *handle, size_t idx, zterm_cell *out, size_t max_cells);
+/* The working directory pane idx's shell last reported with OSC 7
+ * (file://host/path, percent-decoded): an absolute path, as the shell sent it,
+ * NOT NUL-terminated. The caller owns `out`; the library keeps no reference.
+ * Copies the path and returns its length. Returns 0 when the shell has
+ * reported none (no shell integration, or before its first prompt), for a bad
+ * handle or idx or a NULL out, and when the path is longer than max — never a
+ * truncated path, since a prefix names a different directory. A 4096-byte
+ * buffer always suffices. The URL's host is not checked: a shell running over
+ * ssh reports a path on the remote machine. */
+size_t   zterm_pane_cwd(zterm_session *handle, size_t idx, uint8_t *out, size_t max);
 int      zterm_close_pane(zterm_session *handle, size_t idx);
 long     zterm_pane_scroll(zterm_session *handle, size_t idx, int delta, uint16_t row, uint16_t col);
 int      zterm_resize_split(zterm_session *handle, size_t idx, int dx, int dy);

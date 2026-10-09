@@ -1350,8 +1350,49 @@ pub fn parseMark(data: []const u8) ?struct { kind: terminal.Mark.Kind, exit: ?i3
     return .{ .kind = kind, .exit = exit };
 }
 
+/// The directory an OSC 7 payload reports: `file://host/path`, with the path
+/// percent-decoded (RFC 3986 §2.1) into `buf`. Null for anything else: another
+/// scheme, no absolute path, a malformed %-escape, a path longer than `buf`,
+/// or a control character once decoded (NUL included — a C consumer would cut
+/// the path there — and newline, which would turn a pasted path into a
+/// command). The host part is not checked: it is whatever the shell calls
+/// its machine, and a shell over ssh reports a path on the remote one.
+pub fn parseOsc7(data: []const u8, buf: []u8) ?[]const u8 {
+    const scheme = "file://";
+    if (data.len < scheme.len or !std.ascii.eqlIgnoreCase(data[0..scheme.len], scheme)) return null;
+    const rest = data[scheme.len..];
+    const enc = rest[std.mem.indexOfScalar(u8, rest, '/') orelse return null ..];
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < enc.len) : (n += 1) {
+        if (n == buf.len) return null;
+        var b = enc[i];
+        if (b == '%') {
+            if (i + 2 >= enc.len) return null;
+            const hi = std.fmt.charToDigit(enc[i + 1], 16) catch return null;
+            const lo = std.fmt.charToDigit(enc[i + 2], 16) catch return null;
+            b = hi * 16 + lo;
+            i += 3;
+        } else {
+            i += 1;
+        }
+        if (b < 0x20 or b == 0x7F) return null;
+        buf[n] = b;
+    }
+    return buf[0..n];
+}
+
 fn handleOsc(term: *Terminal, seq: OscSequence) void {
     switch (seq.command) {
+        7 => {
+            // Current directory (shell integration: zsh/fish/vte.sh emit
+            // `OSC 7 ; file://host/path` at each prompt). A truncated
+            // string would be a different, shorter path: ignore it.
+            var buf: [terminal.CWD_CAP]u8 = undefined;
+            if (!seq.truncated) {
+                if (parseOsc7(seq.data, &buf)) |path| term.setCwd(path);
+            }
+        },
         0, 2 => {
             // Set window title
             const len = @min(seq.data.len, term.title.len);
@@ -1434,6 +1475,56 @@ test "utf8 decode" {
 
     // 4-byte: 😀 (U+1F600)
     try std.testing.expectEqual(@as(?u21, 0x1F600), decodeUtf8(&[_]u8{ 0xF0, 0x9F, 0x98, 0x80 }));
+}
+
+test "OSC 7 payloads: file:// URL, percent-decoded path, refusals" {
+    // RFC 8089 file URI (`file://host/path`) with RFC 3986 §2.1 escapes, as
+    // vte.sh / zsh / fish emit it.
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("/Users/me/my dir", parseOsc7("file://mac.local/Users/me/my%20dir", &buf).?);
+    try std.testing.expectEqualStrings("/tmp", parseOsc7("file:///tmp", &buf).?); // empty host
+    try std.testing.expectEqualStrings("/a%b", parseOsc7("FILE://h/a%25b", &buf).?); // scheme is case-blind
+    try std.testing.expectEqualStrings("/caf\xc3\xa9", parseOsc7("file://h/caf%C3%A9", &buf).?);
+    try std.testing.expectEqualStrings("/", parseOsc7("file://h/", &buf).?);
+    try std.testing.expect(parseOsc7("http://h/tmp", &buf) == null); // another scheme
+    try std.testing.expect(parseOsc7("file://host", &buf) == null); // no path
+    try std.testing.expect(parseOsc7("/tmp", &buf) == null);
+    try std.testing.expect(parseOsc7("file://h/a%2", &buf) == null); // escape cut short
+    try std.testing.expect(parseOsc7("file://h/a%zz", &buf) == null); // not hex
+    try std.testing.expect(parseOsc7("file://h/a%+9", &buf) == null);
+    try std.testing.expect(parseOsc7("file://h/x%0Arm%20-rf%20~", &buf) == null); // newline
+    try std.testing.expect(parseOsc7("file://h/a%00b", &buf) == null); // NUL
+    try std.testing.expect(parseOsc7("file://h/a\x1bb", &buf) == null);
+    var tiny: [4]u8 = undefined;
+    try std.testing.expect(parseOsc7("file://h/abcd", &tiny) == null); // longer than the buffer
+    try std.testing.expectEqualStrings("/abc", parseOsc7("file://h/abc", &tiny).?);
+}
+
+test "OSC 7 through the parser sets the cwd; a bad or truncated one leaves it" {
+    var t = try Terminal.init(std.testing.allocator, 3, 20, 10);
+    defer t.deinit();
+    var p = Parser.init();
+    const feed = struct {
+        fn f(pp: *Parser, tt: *Terminal, bytes: []const u8) void {
+            for (bytes) |b| applyAction(tt, pp.feed(b));
+        }
+    }.f;
+    feed(&p, &t, "\x1b]7;file://h/srv/app\x07");
+    try std.testing.expectEqualStrings("/srv/app", t.reportedCwd());
+    feed(&p, &t, "\x1b]7;file://h/x%0Aecho\x07"); // refused
+    try std.testing.expectEqualStrings("/srv/app", t.reportedCwd());
+    // Longer than the OSC buffer: the parser keeps only its start, and the
+    // start of a path is another directory. The escapes make the kept start
+    // a well-formed, short path ("/s/" + 679 'a'), so only the truncation
+    // flag can refuse it.
+    const prefix = "file://h/s/";
+    comptime std.debug.assert((MAX_OSC_LEN - prefix.len) % 3 == 0);
+    feed(&p, &t, "\x1b]7;" ++ prefix);
+    for (0..1000) |_| feed(&p, &t, "%61");
+    feed(&p, &t, "\x1b\\");
+    try std.testing.expectEqualStrings("/srv/app", t.reportedCwd());
+    feed(&p, &t, "\x1b]7;file://h/home\x1b\\");
+    try std.testing.expectEqualStrings("/home", t.reportedCwd());
 }
 
 test "OSC 133 payloads: letter, options and D's exit status" {

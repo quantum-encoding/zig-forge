@@ -1113,6 +1113,24 @@ pub export fn zterm_pane_read_cells(handle: ?*ZtermSession, idx: usize, out: ?[*
     return readTerminalCells(&p.terminal, buf, max_cells);
 }
 
+/// The working directory pane `idx`'s shell last reported with OSC 7
+/// (`file://host/path`, percent-decoded; see `parser.parseOsc7`): an absolute
+/// path, as the shell sent it, NOT NUL-terminated. The caller owns `out` and
+/// the library keeps no reference to it. Copies the path and returns its
+/// length; returns 0 when the shell has reported none, for a bad handle or
+/// idx or a NULL `out`, and when the path is longer than `max` — a path is
+/// never truncated, because a prefix of one names a different directory.
+/// `terminal.CWD_CAP` (`PATH_MAX`, at most 4096) bytes always suffice.
+pub export fn zterm_pane_cwd(handle: ?*ZtermSession, idx: usize, out: ?[*]u8, max: usize) usize {
+    const h = handle orelse return 0;
+    const p = paneAt(h, idx) orelse return 0;
+    const buf = out orelse return 0;
+    const cwd = p.terminal.reportedCwd();
+    if (cwd.len > max) return 0;
+    @memcpy(buf[0..cwd.len], cwd);
+    return cwd.len;
+}
+
 /// Close pane `idx`: kills its shell and re-tiles the survivors. Refused (-1)
 /// for the last pane of the window — destroy the session instead.
 pub export fn zterm_close_pane(handle: ?*ZtermSession, idx: usize) c_int {
@@ -1457,6 +1475,28 @@ test "zterm_take_clipboard hands over a whole payload or nothing" {
     // Read-and-clear.
     try std.testing.expectEqual(@as(usize, 0), zterm_take_clipboard(h, &buf, buf.len));
     try std.testing.expectEqual(@as(usize, 0), zterm_take_clipboard(h, null, 0));
+}
+
+test "zterm_pane_cwd returns the OSC 7 directory whole, or nothing" {
+    var hs = try testHandle(5, 20);
+    defer hs.sess.deinit();
+    const h = &hs;
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), zterm_pane_cwd(h, 0, &buf, buf.len)); // none reported
+
+    const seq = "\x1b]7;file://mac.local/Users/me/my%20dir\x1b\\";
+    zterm_feed(h, seq, seq.len);
+    const n = zterm_pane_cwd(h, 0, &buf, buf.len);
+    try std.testing.expectEqualStrings("/Users/me/my dir", buf[0..n]);
+    // Not a prefix of the path when the buffer is short: nothing.
+    var small: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), zterm_pane_cwd(h, 0, &small, small.len));
+    // A getter, not read-and-clear.
+    try std.testing.expectEqual(n, zterm_pane_cwd(h, 0, &buf, buf.len));
+    // Bad idx / NULL out / NULL handle.
+    try std.testing.expectEqual(@as(usize, 0), zterm_pane_cwd(h, 1, &buf, buf.len));
+    try std.testing.expectEqual(@as(usize, 0), zterm_pane_cwd(h, 0, null, buf.len));
+    try std.testing.expectEqual(@as(usize, 0), zterm_pane_cwd(null, 0, &buf, buf.len));
 }
 
 test "CCell layout is stable for the C header" {
