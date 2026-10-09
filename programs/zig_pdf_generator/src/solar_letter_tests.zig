@@ -101,7 +101,8 @@ test "values the letter can't print or use are refused" {
     const a = arena.allocator();
     try expectRefusal(try edited(a, "price", &.{ "letter", "headline" }, .{ .string = "Sunny days \u{2600}" }), error.InvalidInput, "can't print");
     try expectRefusal(try edited(a, "price", &.{ "letter", "qr_url" }, .{ .string = "http://example.com" }), error.InvalidInput, "https://");
-    try expectRefusal(try edited(a, "price", &.{ "installer", "primary_hex" }, .{ .string = "blue" }), error.InvalidInput, "primary_hex");
+    try expectRefusal(try edited(a, "price", &.{ "installer", "theme", "primary_hex" }, .{ .string = "blue" }), error.InvalidInput, "primary_hex");
+    try expectRefusal(try edited(a, "price", &.{ "letter", "headline_highlight" }, .{ .string = "seventeen panels" }), error.InvalidInput, "not part of the headline");
     try expectRefusal(try edited(a, "price", &.{ "offer", "kind" }, .{ .string = "loan" }), error.InvalidInput, "price, finance or grant");
     try expectRefusal(try edited(a, "price", &.{ "image", "src" }, .{ .string = "bm90IGFuIGltYWdl" }), error.ImageInvalid, "image.src");
 }
@@ -110,6 +111,6 @@ test "text too long for its space is refused, not squeezed" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const long = "Your roof has room for sixteen solar panels and a battery, and it faces the right way to make the most of the sun all year round.";
+    const long = "Your roof has room for 16 solar panels and a battery, and it faces the right way to make the most of the sun all year round, every year.";
     try expectRefusal(try edited(a, "price", &.{ "letter", "headline" }, .{ .string = long }), error.TooLong, "letter.headline");
 }

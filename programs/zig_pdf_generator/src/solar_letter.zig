@@ -7,22 +7,34 @@
 //! formatted by the caller; this module checks they are present, not their
 //! arithmetic.
 //!
+//! Layout, top to bottom: a gradient bar; logo with phone, website and date;
+//! the address block (dark on white, where a window envelope shows it); the
+//! headline with one phrase marked by a highlighter band; the intro; the roof
+//! picture full width; up to three figure cards in a row; the package as ticked
+//! columns; the offer block with its QR code; a phone strip; accreditation
+//! marks; small print.
+//!
 //! Input shape (every field required unless marked optional):
 //! ```json
 //! {
 //!   "installer": { "name", "phone", "website", "logo",
-//!                  "primary_hex": "#2b6531", "tint_hex": "#eef6ef",   // tint optional
+//!                  "theme": { "ink_hex", "dark_hex", "primary_hex",
+//!                             "accent_hex", "label_hex", "link_hex" },
 //!                  "accreditations": ["<image>", ...],              // optional, up to 10
 //!                  "legal_line": "Registered in England ..." },     // optional
 //!   "letter":    { "reference", "date", "recipient": ["The Occupier", "1 High St", ...],
-//!                  "headline", "intro", "qr_url": "https://...", "qr_caption",
-//!                  "small_print", "package_title" (optional) },
-//!   "package":   [ { "label", "value" } ],                           // 1 to 4 rows
+//!                  "headline", "headline_highlight" (optional, a phrase of the headline),
+//!                  "intro", "qr_url": "https://...", "qr_caption", "small_print" },
+//!   "package":   [ { "label", "value" } ],                           // 1 to 4 ticked columns
 //!   "stats":     [ { "label", "value", "note" (optional) } ],        // 1 to 3 cards
 //!   "image":     { "src", "caption" (optional) },
 //!   "offer":     { "kind": "price" | "finance" | "grant", ... }
 //! }
 //! ```
+//! Theme: ink is the headline and the darkest card and strip; dark and primary
+//! are the other cards, the offer gradient and the ticks; accent is the
+//! highlighter, the price and the phone number on dark; label is small capitals
+//! on dark; link is the website and date line and the end of the top bar.
 //! Images (logo, accreditations, image.src) are PNG or JPEG as raw base64, a
 //! `data:` URL, or (CLI only) a file path.
 //!
@@ -87,13 +99,21 @@ pub const Diagnostic = struct {
 // Input model
 // =============================================================================
 
+pub const Theme = struct {
+    ink: Color,
+    dark: Color,
+    primary: Color,
+    accent: Color,
+    label: Color,
+    link: Color,
+};
+
 pub const Installer = struct {
     name: []const u8,
     phone: []const u8,
     website: []const u8,
     logo: []const u8,
-    primary: Color,
-    tint: Color,
+    theme: Theme,
     accreditations: []const []const u8,
     legal_line: ?[]const u8,
 };
@@ -141,12 +161,12 @@ pub const Letter = struct {
     date: []const u8,
     recipient: []const []const u8,
     headline: []const u8,
+    /// A phrase of the headline drawn over a highlighter band.
+    headline_highlight: ?[]const u8,
     intro: []const u8,
     qr_url: []const u8,
     qr_caption: []const u8,
     small_print: []const u8,
-    /// Heading over the package rows; "Your recommended system" when absent.
-    package_title: ?[]const u8,
     package: []const Row,
     stats: []const Stat,
     image_src: []const u8,
@@ -302,7 +322,17 @@ pub fn parse(arena: Allocator, json_str: []const u8, diag: *Diagnostic) Error!Le
     try root.only(&.{ "installer", "letter", "package", "stats", "image", "offer" });
 
     const ins = try root.child("installer");
-    try ins.only(&.{ "name", "phone", "website", "logo", "primary_hex", "tint_hex", "accreditations", "legal_line" });
+    try ins.only(&.{ "name", "phone", "website", "logo", "theme", "accreditations", "legal_line" });
+    const th = try ins.child("theme");
+    try th.only(&.{ "ink_hex", "dark_hex", "primary_hex", "accent_hex", "label_hex", "link_hex" });
+    const theme = Theme{
+        .ink = (try th.colour("ink_hex", true)).?,
+        .dark = (try th.colour("dark_hex", true)).?,
+        .primary = (try th.colour("primary_hex", true)).?,
+        .accent = (try th.colour("accent_hex", true)).?,
+        .label = (try th.colour("label_hex", true)).?,
+        .link = (try th.colour("link_hex", true)).?,
+    };
     const accr_items = try ins.array("accreditations", 0, 10, false);
     const accreditations = try arena.alloc([]const u8, accr_items.len);
     for (accr_items, 0..) |item, i| accreditations[i] = try ins.imageRef(item, "accreditations[]");
@@ -311,14 +341,19 @@ pub fn parse(arena: Allocator, json_str: []const u8, diag: *Diagnostic) Error!Le
         .phone = try ins.str("phone"),
         .website = try ins.str("website"),
         .logo = try ins.imageRef(try ins.get("logo"), "logo"),
-        .primary = (try ins.colour("primary_hex", true)).?,
-        .tint = (try ins.colour("tint_hex", false)) orelse Color{ .r = 0.93, .g = 0.96, .b = 0.93 },
+        .theme = theme,
         .accreditations = accreditations,
         .legal_line = try ins.optStr("legal_line"),
     };
 
     const let = try root.child("letter");
-    try let.only(&.{ "reference", "date", "recipient", "headline", "intro", "qr_url", "qr_caption", "small_print", "package_title" });
+    try let.only(&.{ "reference", "date", "recipient", "headline", "headline_highlight", "intro", "qr_url", "qr_caption", "small_print" });
+    const headline = try let.str("headline");
+    const highlight = try let.optStr("headline_highlight");
+    if (highlight) |h| if (std.mem.indexOf(u8, headline, h) == null) {
+        diag.set("input.letter.headline_highlight '{s}' is not part of the headline", .{h});
+        return error.InvalidInput;
+    };
     const qr_url = try let.str("qr_url");
     if (!std.mem.startsWith(u8, qr_url, "https://")) {
         diag.set("input.letter.qr_url must start with https://", .{});
@@ -349,12 +384,12 @@ pub fn parse(arena: Allocator, json_str: []const u8, diag: *Diagnostic) Error!Le
         .reference = try let.str("reference"),
         .date = try let.str("date"),
         .recipient = try let.strList("recipient", 2, 7, true),
-        .headline = try let.str("headline"),
+        .headline = headline,
+        .headline_highlight = highlight,
         .intro = try let.str("intro"),
         .qr_url = qr_url,
         .qr_caption = try let.str("qr_caption"),
         .small_print = try let.str("small_print"),
-        .package_title = try let.optStr("package_title"),
         .package = package,
         .stats = stats,
         .image_src = try img.imageRef(try img.get("src"), "src"),
@@ -409,17 +444,22 @@ fn parseOffer(o: Obj) Error!Offer {
 
 const PAGE_W: f32 = document.A4_WIDTH;
 const PAGE_H: f32 = document.A4_HEIGHT;
-const MARGIN: f32 = 40;
+const MARGIN: f32 = 30;
 const CONTENT_W: f32 = PAGE_W - 2 * MARGIN;
-const BOTTOM: f32 = 24; // lowest point text may reach, from the page bottom
+const BOTTOM: f32 = 18; // lowest point text may reach, from the page bottom
 
-const INK = Color{ .r = 0.12, .g = 0.16, .b = 0.12 };
-const MUTED = Color{ .r = 0.36, .g = 0.40, .b = 0.36 };
-const RULE = Color{ .r = 0.84, .g = 0.86, .b = 0.83 };
+const BODY = Color{ .r = 0.17, .g = 0.21, .b = 0.17 };
+const MUTED = Color{ .r = 0.29, .g = 0.33, .b = 0.29 };
+const FINE = Color{ .r = 0.36, .g = 0.40, .b = 0.36 };
 const WHITE = Color.white;
 
 const REGULAR: Font = .montserrat_regular;
 const BOLD: Font = .montserrat_bold;
+
+/// `a` blended toward `b` by `t` (0 = a, 1 = b).
+fn mix(a: Color, b: Color, t: f32) Color {
+    return .{ .r = a.r + (b.r - a.r) * t, .g = a.g + (b.g - a.g) * t, .b = a.b + (b.b - a.b) * t };
+}
 
 const Renderer = struct {
     a: Allocator,
@@ -430,16 +470,25 @@ const Renderer = struct {
     f_reg: []const u8 = "",
     f_bold: []const u8 = "",
     /// Distance of the layout cursor from the top of the page.
-    top: f32 = 36,
+    top: f32 = 0,
+
+    fn th(self: *const Renderer) Theme {
+        return self.l.installer.theme;
+    }
 
     fn fontId(self: *const Renderer, f: Font) []const u8 {
         return if (f == BOLD) self.f_bold else self.f_reg;
     }
 
-    /// PDF y (from the page bottom) of a text baseline whose line starts `t`
-    /// points below the top of the page.
-    fn baseline(t: f32, size: f32) f32 {
-        return PAGE_H - t - size * 0.78;
+    /// PDF y (from the page bottom) of a text baseline whose line box starts
+    /// `t` points below the top of the page, for a line `leading` tall.
+    fn baseline(t: f32, size: f32, leading: f32) f32 {
+        return PAGE_H - t - (leading - size) / 2 - size * 0.8;
+    }
+
+    /// PDF y of the bottom of a box `h` tall whose top is `t` below the page top.
+    fn boxY(t: f32, h: f32) f32 {
+        return PAGE_H - t - h;
     }
 
     fn text(self: *Renderer, s: []const u8, x: f32, y: f32, f: Font, size: f32, c: Color) !void {
@@ -450,9 +499,11 @@ const Renderer = struct {
         try self.cs.drawText(s, right - f.measureText(s, size), y, self.fontId(f), size, c);
     }
 
-    fn caps(self: *Renderer, s: []const u8, x: f32, y: f32, size: f32, c: Color) !void {
+    fn caps(self: *Renderer, s: []const u8, x: f32, y: f32, size: f32, c: Color) !f32 {
         const upper = try std.ascii.allocUpperString(self.a, s);
-        try self.cs.drawTrackedText(upper, x, y, self.f_bold, size, size * 0.12, c);
+        const tracking = size * 0.12;
+        try self.cs.drawTrackedText(upper, x, y, self.f_bold, size, tracking, c);
+        return BOLD.measureTracked(upper, size, tracking);
     }
 
     /// Wrap `s` to `width`; refuse it if it needs more than `max_lines`.
@@ -465,12 +516,30 @@ const Renderer = struct {
         return w.lines;
     }
 
-    /// Draw wrapped lines from `t` (top of first line); returns the height used.
+    /// One line that must fit `width` as it is.
+    fn oneLine(self: *Renderer, s: []const u8, f: Font, size: f32, width: f32, what: []const u8) !void {
+        if (f.measureText(s, size) > width) {
+            self.diag.set("{s} '{s}' is too long for its space", .{ what, s });
+            return error.TooLong;
+        }
+    }
+
+    /// Draw wrapped lines from `t`; returns the height used.
     fn paragraph(self: *Renderer, ls: []const []const u8, x: f32, t: f32, f: Font, size: f32, leading: f32, c: Color) !f32 {
         for (ls, 0..) |ln, i| {
-            try self.text(ln, x, baseline(t + @as(f32, @floatFromInt(i)) * leading, size), f, size, c);
+            try self.text(ln, x, baseline(t + @as(f32, @floatFromInt(i)) * leading, size, leading), f, size, c);
         }
         return @as(f32, @floatFromInt(ls.len)) * leading;
+    }
+
+    /// The largest size, from `start` down to `min`, at which `s` fits `width`.
+    fn fitSize(self: *Renderer, s: []const u8, f: Font, start: f32, min: f32, width: f32, what: []const u8) !f32 {
+        var size = start;
+        while (size >= min) : (size -= 0.5) {
+            if (f.measureText(s, size) <= width) return size;
+        }
+        self.diag.set("{s} '{s}' is too long for its space", .{ what, s });
+        return error.TooLong;
     }
 
     fn loadImage(self: *Renderer, src: []const u8, what: []const u8) !struct { id: []const u8, w: f32, h: f32 } {
@@ -486,252 +555,276 @@ const Renderer = struct {
         return .{ .id = id, .w = @floatFromInt(loaded.image.width), .h = @floatFromInt(loaded.image.height) };
     }
 
+    /// A rounded box filled with a diagonal gradient from `c0` (top left) to `c1`.
+    fn gradientBox(self: *Renderer, x: f32, y: f32, w: f32, h: f32, r: f32, c0: Color, c1: Color) !void {
+        const id = self.doc.getAxialShadingId(c0, c1, x, y + h, x + w, y);
+        try self.cs.saveState();
+        try self.cs.clipRoundedRect(x, y, w, h, r);
+        try self.cs.paintShading(id);
+        try self.cs.restoreState();
+    }
+
+    /// A tick mark in a filled circle, drawn as lines (the fonts have no tick).
+    fn tick(self: *Renderer, cx: f32, cy: f32, r: f32, bg: Color, fg: Color) !void {
+        try self.cs.drawCircle(cx, cy, r, bg, null);
+        try self.cs.saveState();
+        try self.cs.buffer.appendSlice(self.a, "1 J 1 j\n");
+        try self.cs.setStrokeColor(fg);
+        try self.cs.setLineWidth(r * 0.2);
+        try self.cs.moveTo(cx - r * 0.42, cy + r * 0.02);
+        try self.cs.lineTo(cx - r * 0.12, cy - r * 0.3);
+        try self.cs.lineTo(cx + r * 0.45, cy + r * 0.32);
+        try self.cs.stroke();
+        try self.cs.restoreState();
+    }
+
     // ── Sections, top to bottom ──────────────────────────────────────────
+
+    fn topBar(self: *Renderer) !void {
+        const h: f32 = 6.75;
+        const id = self.doc.getAxialShadingId(self.th().dark, self.th().link, 0, PAGE_H, PAGE_W, PAGE_H);
+        try self.cs.saveState();
+        try self.cs.clipRect(0, PAGE_H - h, PAGE_W, h);
+        try self.cs.paintShading(id);
+        try self.cs.restoreState();
+        self.top = h + 16;
+    }
 
     fn header(self: *Renderer) !void {
         const ins = self.l.installer;
         const logo = try self.loadImage(ins.logo, "installer.logo");
-        const box_w: f32 = 150;
-        const box_h: f32 = 44;
-        const scale = @min(box_w / logo.w, box_h / logo.h);
+        const box_h: f32 = 39;
+        const scale = @min(170 / logo.w, box_h / logo.h);
         const lw = logo.w * scale;
         const lh = logo.h * scale;
-        try self.cs.drawImage(logo.id, MARGIN, PAGE_H - self.top - lh, lw, lh);
+        try self.cs.drawImage(logo.id, MARGIN, boxY(self.top + (box_h - lh) / 2, lh), lw, lh);
 
         const right = PAGE_W - MARGIN;
-        try self.textRight(ins.phone, right, baseline(self.top, 13), BOLD, 13, ins.primary);
-        try self.textRight(ins.website, right, baseline(self.top + 18, 8.5), REGULAR, 8.5, MUTED);
-        const site_w = REGULAR.measureText(ins.website, 8.5);
+        try self.oneLine(ins.phone, BOLD, 15, CONTENT_W - lw - 20, "installer.phone");
+        try self.textRight(ins.phone, right, baseline(self.top + 4, 15, 18), BOLD, 15, self.th().dark);
+        const line2 = try std.fmt.allocPrint(self.a, "{s}  \u{00B7}  {s}", .{ ins.website, self.l.date });
+        try self.oneLine(line2, REGULAR, 8.6, CONTENT_W - lw - 20, "installer.website and letter.date");
+        const y2 = baseline(self.top + 22, 8.6, 12);
+        try self.textRight(line2, right, y2, REGULAR, 8.6, self.th().link);
+        const site_w = REGULAR.measureText(ins.website, 8.6);
+        const line_w = REGULAR.measureText(line2, 8.6);
         const href = if (std.mem.startsWith(u8, ins.website, "http")) ins.website else try std.fmt.allocPrint(self.a, "https://{s}", .{ins.website});
-        try self.doc.addLinkAnnotation(right - site_w, baseline(self.top + 18, 8.5) - 2, right, baseline(self.top + 18, 8.5) + 8, href);
-        const dated = try std.fmt.allocPrint(self.a, "{s}  \u{00B7}  Ref {s}", .{ self.l.date, self.l.reference });
-        try self.textRight(dated, right, baseline(self.top + 31, 8), REGULAR, 8, MUTED);
-
-        self.top += @max(lh, 42) + 12;
-        try self.cs.drawLine(MARGIN, PAGE_H - self.top, PAGE_W - MARGIN, PAGE_H - self.top, RULE, 0.6);
-        self.top += 16;
+        try self.doc.addLinkAnnotation(right - line_w, y2 - 2, right - line_w + site_w, y2 + 8, href);
+        self.top += box_h + 18;
     }
 
     fn recipient(self: *Renderer) !void {
-        for (self.l.recipient) |ln| {
-            const w = REGULAR.measureText(ln, 9.5);
-            if (w > CONTENT_W * 0.6) {
-                self.diag.set("letter.recipient line '{s}' is too long for the address block", .{ln});
-                return error.TooLong;
+        for (self.l.recipient) |ln| try self.oneLine(ln, REGULAR, 9.75, CONTENT_W * 0.6, "letter.recipient line");
+        self.top += try self.paragraph(self.l.recipient, MARGIN, self.top, REGULAR, 9.75, 14.6, self.th().ink);
+        self.top += 16;
+    }
+
+    fn headline(self: *Renderer) !void {
+        const size: f32 = 25.5;
+        const leading: f32 = 28.5;
+        const ls = try self.lines(self.l.headline, BOLD, size, CONTENT_W, 2, "letter.headline");
+        // The highlighter: a band across the lower part of the line, behind the
+        // marked phrase only, wherever the wrap put it.
+        if (self.l.headline_highlight) |hl| {
+            const start = std.mem.indexOf(u8, self.l.headline, hl).?;
+            const end = start + hl.len;
+            for (ls, 0..) |ln, i| {
+                const ln_start = @intFromPtr(ln.ptr) - @intFromPtr(self.l.headline.ptr);
+                const ln_end = ln_start + ln.len;
+                const a = @max(start, ln_start);
+                const b = @min(end, ln_end);
+                if (a >= b) continue;
+                const x0 = MARGIN + BOLD.measureText(ln[0 .. a - ln_start], size) - 2.25;
+                const x1 = MARGIN + BOLD.measureText(ln[0 .. b - ln_start], size) + 2.25;
+                const t = self.top + @as(f32, @floatFromInt(i)) * leading;
+                try self.cs.drawRect(x0, boxY(t + leading * 0.52, leading * 0.40), x1 - x0, leading * 0.40, self.th().accent, null);
             }
         }
-        self.top += try self.paragraph(self.l.recipient, MARGIN, self.top, REGULAR, 9.5, 13, INK);
-        self.top += 14;
+        self.top += try self.paragraph(ls, MARGIN, self.top, BOLD, size, leading, self.th().ink);
+        self.top += 5;
     }
 
     fn intro(self: *Renderer) !void {
-        const head = try self.lines(self.l.headline, BOLD, 20, CONTENT_W, 2, "letter.headline");
-        self.top += try self.paragraph(head, MARGIN, self.top, BOLD, 20, 24, self.l.installer.primary);
-        self.top += 4;
-        const body = try self.lines(self.l.intro, REGULAR, 9.5, CONTENT_W, 4, "letter.intro");
-        self.top += try self.paragraph(body, MARGIN, self.top, REGULAR, 9.5, 14, INK);
-        self.top += 12;
+        const ls = try self.lines(self.l.intro, REGULAR, 9.4, CONTENT_W, 4, "letter.intro");
+        self.top += try self.paragraph(ls, MARGIN, self.top, REGULAR, 9.4, 14.5, BODY);
+        self.top += 10;
     }
 
-    fn package(self: *Renderer) !void {
-        try self.caps(self.l.package_title orelse "Your recommended system", MARGIN, baseline(self.top, 7.5), 7.5, self.l.installer.primary);
-        self.top += 13;
-        const row_h: f32 = 19;
-        for (self.l.package) |row| {
-            const label_w = REGULAR.measureText(row.label, 9.5);
-            const value_w = BOLD.measureText(row.value, 10);
-            if (label_w + value_w + 16 > CONTENT_W) {
-                self.diag.set("package row '{s}' is too long for one line", .{row.label});
-                return error.TooLong;
-            }
-            try self.text(row.label, MARGIN, baseline(self.top + 4, 9.5), REGULAR, 9.5, INK);
-            try self.textRight(row.value, PAGE_W - MARGIN, baseline(self.top + 4, 10), BOLD, 10, INK);
-            self.top += row_h;
-            try self.cs.drawLine(MARGIN, PAGE_H - self.top + 2, PAGE_W - MARGIN, PAGE_H - self.top + 2, RULE, 0.5);
-        }
-        self.top += 12;
-    }
-
-    fn hero(self: *Renderer) !void {
-        const h: f32 = 196;
-        const gap: f32 = 10;
-        const img_w = CONTENT_W * 0.6 - gap / 2;
-        const y = PAGE_H - self.top - h;
-
-        // The picture, cropped to fill its box.
+    fn picture(self: *Renderer) !void {
+        const h: f32 = 171;
+        const y = boxY(self.top, h);
         const pic = try self.loadImage(self.l.image_src, "image.src");
-        const scale = @max(img_w / pic.w, h / pic.h);
+        const scale = @max(CONTENT_W / pic.w, h / pic.h);
         const dw = pic.w * scale;
         const dh = pic.h * scale;
         try self.cs.saveState();
-        try self.cs.clipRoundedRect(MARGIN, y, img_w, h, 8);
-        try self.cs.drawImage(pic.id, MARGIN + (img_w - dw) / 2, y + (h - dh) / 2, dw, dh);
+        try self.cs.clipRoundedRect(MARGIN, y, CONTENT_W, h, 10.5);
+        try self.cs.drawImage(pic.id, MARGIN + (CONTENT_W - dw) / 2, y + (h - dh) / 2, dw, dh);
         if (self.l.image_caption) |cap| {
-            const cap_ls = try self.lines(cap, REGULAR, 7, img_w - 16, 1, "image.caption");
+            try self.oneLine(cap, REGULAR, 7, CONTENT_W - 20, "image.caption");
             try self.cs.saveState();
             try self.cs.setExtGState(self.doc.getOpacityExtGStateId(0.55));
-            try self.cs.drawRect(MARGIN, y, img_w, 17, Color.black, null);
+            try self.cs.drawRect(MARGIN, y, CONTENT_W, 17, Color.black, null);
             try self.cs.restoreState();
-            try self.text(cap_ls[0], MARGIN + 8, y + 6, REGULAR, 7, WHITE);
+            try self.text(cap, MARGIN + 10, y + 6, REGULAR, 7, WHITE);
         }
         try self.cs.restoreState();
-
-        // Figures beside it, the first in the brand colour.
-        const col_x = MARGIN + img_w + gap;
-        const col_w = CONTENT_W - img_w - gap;
-        const n: f32 = @floatFromInt(self.l.stats.len);
-        const card_gap: f32 = 8;
-        const card_h = (h - card_gap * (n - 1)) / n;
-        const primary = self.l.installer.primary;
-        for (self.l.stats, 0..) |st, i| {
-            const cy = y + h - (@as(f32, @floatFromInt(i)) + 1) * card_h - @as(f32, @floatFromInt(i)) * card_gap;
-            const first = i == 0;
-            const bg = if (first) primary else self.l.installer.tint;
-            const fg = if (first) WHITE else primary;
-            const sub = if (first) WHITE else MUTED;
-            try self.cs.drawRoundedRect(col_x, cy, col_w, card_h, 8, bg);
-
-            const label_ls = try self.lines(st.label, BOLD, 7, col_w - 24, 1, "stats label");
-            const value_size = try self.fitSize(st.value, BOLD, if (card_h > 70) 26 else 20, 13, col_w - 24, "stats value");
-            const note_h: f32 = if (st.note != null) 11 else 0;
-            const block = 9 + 6 + value_size * 0.8 + note_h;
-            const top_pad = (card_h - block) / 2;
-            const t0 = PAGE_H - (cy + card_h) + top_pad;
-            const upper = try std.ascii.allocUpperString(self.a, label_ls[0]);
-            const lw = BOLD.measureTracked(upper, 7, 0.84);
-            try self.cs.drawTrackedText(upper, col_x + (col_w - lw) / 2, baseline(t0, 7), self.f_bold, 7, 0.84, sub);
-            const vw = BOLD.measureText(st.value, value_size);
-            try self.text(st.value, col_x + (col_w - vw) / 2, baseline(t0 + 15, value_size), BOLD, value_size, fg);
-            if (st.note) |note| {
-                const note_ls = try self.lines(note, REGULAR, 8, col_w - 20, 1, "stats note");
-                const nw = REGULAR.measureText(note_ls[0], 8);
-                try self.text(note_ls[0], col_x + (col_w - nw) / 2, baseline(t0 + 15 + value_size * 0.8 + 5, 8), REGULAR, 8, sub);
-            }
-        }
-        self.top += h + 12;
+        self.top += h + 7.5;
     }
 
-    /// The largest size, from `start` down to `min`, at which `s` fits `width`.
-    fn fitSize(self: *Renderer, s: []const u8, f: Font, start: f32, min: f32, width: f32, what: []const u8) !f32 {
-        var size = start;
-        while (size >= min) : (size -= 1) {
-            if (f.measureText(s, size) <= width) return size;
+    fn stats(self: *Renderer) !void {
+        const n = self.l.stats.len;
+        const gap: f32 = 7.5;
+        const w = (CONTENT_W - gap * @as(f32, @floatFromInt(n - 1))) / @as(f32, @floatFromInt(n));
+        const h: f32 = 54;
+        const t = self.th();
+        // Lightest to darkest, left to right; fewer cards use the darker end.
+        const fills = [3]Color{ t.primary, t.dark, t.ink };
+        for (self.l.stats, 0..) |st, i| {
+            const x = MARGIN + @as(f32, @floatFromInt(i)) * (w + gap);
+            const fill = fills[3 - n + i];
+            try self.cs.drawRoundedRect(x, boxY(self.top, h), w, h, 9, fill);
+            const inner = w - 21;
+            try self.oneLine(st.label, BOLD, 6.4, inner, "stats label");
+            _ = try self.caps(st.label, x + 10.5, baseline(self.top + 8, 6.4, 8), 6.4, t.label);
+            const size = try self.fitSize(st.value, BOLD, 21, 13, inner, "stats value");
+            try self.text(st.value, x + 10.5, baseline(self.top + 17, size, 22), BOLD, size, WHITE);
+            if (st.note) |note| {
+                try self.oneLine(note, REGULAR, 7.9, inner, "stats note");
+                try self.text(note, x + 10.5, baseline(self.top + 39, 7.9, 9.5), REGULAR, 7.9, mix(fill, WHITE, 0.85));
+            }
         }
-        self.diag.set("{s} '{s}' is too long for its card", .{ what, s });
-        return error.TooLong;
+        self.top += h + 9;
+    }
+
+    fn package(self: *Renderer) !void {
+        const n = self.l.package.len;
+        const gap: f32 = 21;
+        const w = (CONTENT_W - gap * @as(f32, @floatFromInt(n - 1))) / @as(f32, @floatFromInt(n));
+        for (self.l.package, 0..) |row, i| {
+            const x = MARGIN + @as(f32, @floatFromInt(i)) * (w + gap);
+            try self.oneLine(row.label, REGULAR, 9, w, "package label");
+            try self.oneLine(row.value, BOLD, 9, w, "package value");
+            try self.tick(x + 8.25, PAGE_H - self.top - 8.25, 8.25, self.th().primary, WHITE);
+            try self.text(row.label, x, baseline(self.top + 20, 9, 11), REGULAR, 9, MUTED);
+            try self.text(row.value, x, baseline(self.top + 31, 9, 11), BOLD, 9, self.th().ink);
+        }
+        self.top += 42 + 9;
     }
 
     fn offer(self: *Renderer) !void {
-        const qr_size: f32 = 84;
-        const pad: f32 = 14;
-        const primary = self.l.installer.primary;
-        const inner_x = MARGIN + pad;
-        const qr_col_w: f32 = 104;
-        const text_w = CONTENT_W - 2 * pad - qr_col_w - 10;
+        const t = self.th();
+        const pad_x: f32 = 13.5;
+        const pad_y: f32 = 12;
+        const qr_tile_w: f32 = 96;
+        const qr_size: f32 = 75;
+        const text_x = MARGIN + pad_x;
+        const text_w = CONTENT_W - 2 * pad_x - qr_tile_w - 12;
+        const soft = mix(t.label, WHITE, 0.55);
 
-        // Lay the text out first so the box can grow to fit it.
-        var t: f32 = 0;
-        const Item = struct { ls: []const []const u8, f: Font, size: f32, leading: f32, c: Color, gap_after: f32 };
-        var items: std.ArrayListUnmanaged(Item) = .empty;
-        var figures: ?[2][2][]const u8 = null; // finance: equal-size monthly and APR
-        var big_price: ?[2][]const u8 = null; // price: the figure and its note
+        // Lay out first, so the box can grow to fit its text.
+        const Line = struct { s: []const u8, f: Font, size: f32, leading: f32, c: Color };
+        var body: std.ArrayListUnmanaged(Line) = .empty;
+        var figures: ?[2][2][]const u8 = null; // finance: monthly and APR, the same size
+        var price: ?[2][]const u8 = null; // price: the figure and its note
+        var tag: []const u8 = "";
+        var after: std.ArrayListUnmanaged(Line) = .empty; // below the figures
 
         switch (self.l.offer) {
             .price => |p| {
-                try items.append(self.a, .{ .ls = &.{"Your price"}, .f = BOLD, .size = 7.5, .leading = 13, .c = primary, .gap_after = 0 });
-                try items.append(self.a, .{ .ls = try self.lines(p.headline, BOLD, 12, text_w, 1, "offer.headline"), .f = BOLD, .size = 12, .leading = 16, .c = INK, .gap_after = 4 });
-                big_price = .{ p.price, p.price_note orelse "" };
+                tag = "Your price";
+                for (try self.lines(p.headline, BOLD, 11.25, text_w, 2, "offer.headline")) |ln| try body.append(self.a, .{ .s = ln, .f = BOLD, .size = 11.25, .leading = 15, .c = WHITE });
+                price = .{ p.price, p.price_note orelse "" };
                 if (p.includes.len > 0) {
                     const joined = try std.mem.join(self.a, "  \u{00B7}  ", p.includes);
-                    try items.append(self.a, .{ .ls = try self.lines(joined, REGULAR, 8.5, text_w, 2, "offer.includes"), .f = REGULAR, .size = 8.5, .leading = 12, .c = MUTED, .gap_after = 0 });
+                    for (try self.lines(joined, REGULAR, 8.25, text_w, 2, "offer.includes")) |ln| try after.append(self.a, .{ .s = ln, .f = REGULAR, .size = 8.25, .leading = 11.5, .c = soft });
                 }
             },
             .finance => |fi| {
-                try items.append(self.a, .{ .ls = &.{"Finance"}, .f = BOLD, .size = 7.5, .leading = 13, .c = primary, .gap_after = 0 });
-                try items.append(self.a, .{ .ls = try self.lines(fi.headline, BOLD, 12, text_w, 1, "offer.headline"), .f = BOLD, .size = 12, .leading = 16, .c = INK, .gap_after = 4 });
+                tag = "Finance";
+                for (try self.lines(fi.headline, BOLD, 11.25, text_w, 2, "offer.headline")) |ln| try body.append(self.a, .{ .s = ln, .f = BOLD, .size = 11.25, .leading = 15, .c = WHITE });
                 figures = .{ .{ "Monthly payment", fi.monthly }, .{ "Representative APR", fi.apr } };
                 const charges = if (fi.other_charges) |oc| try std.fmt.allocPrint(self.a, " Other charges: {s}.", .{oc}) else "";
                 const example = try std.fmt.allocPrint(self.a, "Representative example: cash price {s}, deposit {s}, total amount of credit {s}, repayable by {s} monthly payments of {s}. Interest rate {s}. Representative APR {s}. Total amount payable {s}.{s} Credit is provided by {s}.", .{ fi.cash_price, fi.deposit, fi.credit, fi.term_months, fi.monthly, fi.interest_rate, fi.apr, fi.total_payable, charges, fi.lender });
-                try items.append(self.a, .{ .ls = try self.lines(example, REGULAR, 8, text_w, 4, "offer representative example"), .f = REGULAR, .size = 8, .leading = 10.5, .c = INK, .gap_after = 0 });
+                for (try self.lines(example, REGULAR, 7.6, text_w, 5, "offer representative example")) |ln| try after.append(self.a, .{ .s = ln, .f = REGULAR, .size = 7.6, .leading = 10, .c = WHITE });
             },
             .grant => |g| {
-                try items.append(self.a, .{ .ls = &.{g.scheme}, .f = BOLD, .size = 7.5, .leading = 13, .c = primary, .gap_after = 0 });
-                try items.append(self.a, .{ .ls = try self.lines(g.headline, BOLD, 12, text_w, 2, "offer.headline"), .f = BOLD, .size = 12, .leading = 15, .c = INK, .gap_after = 3 });
-                try items.append(self.a, .{ .ls = try self.lines(g.body, REGULAR, 8.5, text_w, 2, "offer.body"), .f = REGULAR, .size = 8.5, .leading = 12, .c = INK, .gap_after = 3 });
+                tag = g.scheme;
+                for (try self.lines(g.headline, BOLD, 11.25, text_w, 2, "offer.headline")) |ln| try body.append(self.a, .{ .s = ln, .f = BOLD, .size = 11.25, .leading = 15, .c = WHITE });
+                for (try self.lines(g.body, REGULAR, 8.4, text_w, 2, "offer.body")) |ln| try body.append(self.a, .{ .s = ln, .f = REGULAR, .size = 8.4, .leading = 11.5, .c = soft });
                 for (g.criteria) |cr| {
                     const bullet = try std.fmt.allocPrint(self.a, "\u{2022}  {s}", .{cr});
-                    try items.append(self.a, .{ .ls = try self.lines(bullet, REGULAR, 8.5, text_w, 1, "offer.criteria"), .f = REGULAR, .size = 8.5, .leading = 11.5, .c = INK, .gap_after = 0 });
+                    try self.oneLine(bullet, REGULAR, 8.4, text_w, "offer.criteria");
+                    try after.append(self.a, .{ .s = bullet, .f = REGULAR, .size = 8.4, .leading = 11.5, .c = WHITE });
                 }
             },
         }
-        for (items.items, 0..) |it, i| {
-            t += @as(f32, @floatFromInt(it.ls.len)) * it.leading + it.gap_after;
-            if (i == 1) {
-                if (figures != null) t += 40;
-                if (big_price != null) t += 34;
-            }
-        }
-        const box_h = @max(qr_size + 2 * pad + 14, t + 2 * pad);
-        const box_y = PAGE_H - self.top - box_h;
-        try self.cs.drawRoundedRectEx(MARGIN, box_y, CONTENT_W, box_h, 10, WHITE, primary, 1.2);
+        try self.oneLine(tag, BOLD, 7.5, text_w, "offer label");
+
+        var text_h: f32 = 13; // the tag line
+        for (body.items) |ln| text_h += ln.leading;
+        if (figures != null) text_h += 47;
+        if (price != null) text_h += 40;
+        for (after.items) |ln| text_h += ln.leading;
+        const cap_ls = try self.lines(self.l.qr_caption, REGULAR, 6.4, qr_tile_w - 12, 2, "letter.qr_caption");
+        const tile_h = 7.5 + qr_size + 5 + @as(f32, @floatFromInt(cap_ls.len)) * 8 + 6;
+        const box_h = @max(text_h, tile_h) + 2 * pad_y;
+        const box_y = boxY(self.top, box_h);
+        try self.gradientBox(MARGIN, box_y, CONTENT_W, box_h, 12, t.dark, t.primary);
 
         // Text column.
-        var ty = self.top + pad;
-        for (items.items, 0..) |it, i| {
-            if (i == 0) {
-                const upper = try std.ascii.allocUpperString(self.a, it.ls[0]);
-                try self.cs.drawTrackedText(upper, inner_x, baseline(ty, it.size), self.f_bold, it.size, it.size * 0.12, it.c);
-                ty += it.leading;
-            } else {
-                ty += try self.paragraph(it.ls, inner_x, ty, it.f, it.size, it.leading, it.c);
-                ty += it.gap_after;
+        var ty = self.top + pad_y + @max(0, (box_h - 2 * pad_y - text_h) / 2);
+        _ = try self.caps(tag, text_x, baseline(ty, 7.5, 13), 7.5, t.label);
+        ty += 13;
+        for (body.items) |ln| {
+            try self.text(ln.s, text_x, baseline(ty, ln.size, ln.leading), ln.f, ln.size, ln.c);
+            ty += ln.leading;
+        }
+        if (price) |pr| {
+            const size = try self.fitSize(pr[0], BOLD, 34.5, 20, text_w * 0.62, "offer.price");
+            try self.text(pr[0], text_x, baseline(ty, size, 40), BOLD, size, t.accent);
+            if (pr[1].len > 0) {
+                const pw = BOLD.measureText(pr[0], size);
+                try self.oneLine(pr[1], REGULAR, 9, text_w - pw - 8, "offer.price_note");
+                try self.text(pr[1], text_x + pw + 6, baseline(ty, size, 40), REGULAR, 9, WHITE);
             }
-            if (i == 1) {
-                if (figures) |fig| {
-                    // CONC 3.5.7R(2): the representative APR at the same size as the monthly figure.
-                    const col = text_w / 2;
-                    for (fig, 0..) |pair, k| {
-                        const x = inner_x + @as(f32, @floatFromInt(k)) * col;
-                        const upper = try std.ascii.allocUpperString(self.a, pair[0]);
-                        try self.cs.drawTrackedText(upper, x, baseline(ty, 6.5), self.f_bold, 6.5, 0.78, MUTED);
-                    }
-                    const size = @min(try self.fitSize(fig[0][1], BOLD, 22, 14, col - 8, "offer.monthly"), try self.fitSize(fig[1][1], BOLD, 22, 14, col - 8, "offer.apr"));
-                    for (fig, 0..) |pair, k| {
-                        const x = inner_x + @as(f32, @floatFromInt(k)) * col;
-                        try self.text(pair[1], x, baseline(ty + 10, size), BOLD, size, primary);
-                    }
-                    ty += 40;
-                }
-                if (big_price) |bp| {
-                    const size = try self.fitSize(bp[0], BOLD, 26, 16, text_w * 0.6, "offer.price");
-                    try self.text(bp[0], inner_x, baseline(ty, size), BOLD, size, primary);
-                    if (bp[1].len > 0) {
-                        const pw = BOLD.measureText(bp[0], size);
-                        const note_ls = try self.lines(bp[1], REGULAR, 9, text_w - pw - 10, 1, "offer.price_note");
-                        try self.text(note_ls[0], inner_x + pw + 8, baseline(ty + size * 0.8 - 9, 9), REGULAR, 9, MUTED);
-                    }
-                    ty += 34;
-                }
+            ty += 40;
+        }
+        if (figures) |fig| {
+            ty += 5;
+            // CONC 3.5.7R(2): the representative APR at the same size as the monthly figure.
+            const col = text_w / 2;
+            const size = @min(try self.fitSize(fig[0][1], BOLD, 26, 14, col - 8, "offer.monthly"), try self.fitSize(fig[1][1], BOLD, 26, 14, col - 8, "offer.apr"));
+            for (fig, 0..) |pair, k| {
+                const x = text_x + @as(f32, @floatFromInt(k)) * col;
+                _ = try self.caps(pair[0], x, baseline(ty, 6.4, 10), 6.4, t.label);
+                try self.text(pair[1], x, baseline(ty + 10, size, 30), BOLD, size, t.accent);
             }
+            ty += 42;
+        }
+        for (after.items) |ln| {
+            try self.text(ln.s, text_x, baseline(ty, ln.size, ln.leading), ln.f, ln.size, ln.c);
+            ty += ln.leading;
         }
 
-        // QR code and its caption on the right, linked to the same address.
-        const qr_x = PAGE_W - MARGIN - pad - qr_col_w + (qr_col_w - qr_size) / 2;
-        const qr_y = box_y + box_h - pad - qr_size;
-        try self.qr(self.l.qr_url, qr_x, qr_y, qr_size);
+        // QR tile on the right, linked to the same address.
+        const tile_x = PAGE_W - MARGIN - pad_x - qr_tile_w;
+        const tile_y = box_y + (box_h - tile_h) / 2;
+        try self.cs.drawRoundedRect(tile_x, tile_y, qr_tile_w, tile_h, 9, WHITE);
+        const qr_x = tile_x + (qr_tile_w - qr_size) / 2;
+        const qr_y = tile_y + tile_h - 7.5 - qr_size;
+        try self.qr(self.l.qr_url, qr_x, qr_y, qr_size, t.ink);
         try self.doc.addLinkAnnotation(qr_x, qr_y, qr_x + qr_size, qr_y + qr_size, self.l.qr_url);
-        const cap_ls = try self.lines(self.l.qr_caption, REGULAR, 7, qr_col_w, 2, "letter.qr_caption");
         for (cap_ls, 0..) |ln, i| {
-            const w = REGULAR.measureText(ln, 7);
-            try self.text(ln, PAGE_W - MARGIN - pad - qr_col_w + (qr_col_w - w) / 2, qr_y - 10 - @as(f32, @floatFromInt(i)) * 9, REGULAR, 7, MUTED);
+            const w = REGULAR.measureText(ln, 6.4);
+            try self.text(ln, tile_x + (qr_tile_w - w) / 2, qr_y - 9 - @as(f32, @floatFromInt(i)) * 8, REGULAR, 6.4, MUTED);
         }
-
-        self.top += box_h + 10;
+        self.top += box_h + 9;
     }
 
     /// QR code as vector squares (one rectangle per run of dark modules), so
     /// it prints sharp at any size.
-    fn qr(self: *Renderer, url: []const u8, x: f32, y: f32, size: f32) !void {
+    fn qr(self: *Renderer, url: []const u8, x: f32, y: f32, size: f32, c: Color) !void {
         var code = qrcode.encode(self.a, url, .{ .ec_level = .M, .quiet_zone = 0 }) catch {
             self.diag.set("letter.qr_url can't be encoded as a QR code", .{});
             return error.InvalidInput;
@@ -740,7 +833,7 @@ const Renderer = struct {
         const n: usize = code.size;
         const m = size / @as(f32, @floatFromInt(n));
         try self.cs.saveState();
-        try self.cs.setFillColor(INK);
+        try self.cs.setFillColor(c);
         var row: usize = 0;
         while (row < n) : (row += 1) {
             var col: usize = 0;
@@ -762,16 +855,19 @@ const Renderer = struct {
 
     fn phoneStrip(self: *Renderer) !void {
         const h: f32 = 30;
-        const y = PAGE_H - self.top - h;
+        const y = boxY(self.top, h);
         const ins = self.l.installer;
-        try self.cs.drawRoundedRect(MARGIN, y, CONTENT_W, h, 8, ins.primary);
-        const call = try std.fmt.allocPrint(self.a, "Call us on {s}", .{ins.phone});
-        try self.text(call, MARGIN + 14, y + 10.5, BOLD, 12, WHITE);
-        try self.textRight(ins.website, PAGE_W - MARGIN - 14, y + 11, REGULAR, 9, WHITE);
-        const tel = try std.fmt.allocPrint(self.a, "tel:{s}", .{ins.phone});
-        const tel_clean = try std.mem.replaceOwned(u8, self.a, tel, " ", "");
-        try self.doc.addLinkAnnotation(MARGIN, y, MARGIN + CONTENT_W / 2, y + h, tel_clean);
-        self.top += h + 12;
+        const t = self.th();
+        try self.cs.drawRoundedRect(MARGIN, y, CONTENT_W, h, 9, t.ink);
+        const lead = "Call us on ";
+        const lead_w = BOLD.measureText(lead, 12);
+        try self.oneLine(ins.phone, BOLD, 12, CONTENT_W * 0.6 - lead_w, "installer.phone");
+        try self.text(lead, MARGIN + 13.5, y + 10.5, BOLD, 12, WHITE);
+        try self.text(ins.phone, MARGIN + 13.5 + lead_w, y + 10.5, BOLD, 12, t.accent);
+        try self.textRight(ins.website, PAGE_W - MARGIN - 13.5, y + 11, REGULAR, 9, WHITE);
+        const tel = try std.mem.replaceOwned(u8, self.a, try std.fmt.allocPrint(self.a, "tel:{s}", .{ins.phone}), " ", "");
+        try self.doc.addLinkAnnotation(MARGIN, y, MARGIN + CONTENT_W / 2, y + h, tel);
+        self.top += h + 9;
     }
 
     fn accreditations(self: *Renderer) !void {
@@ -779,55 +875,57 @@ const Renderer = struct {
         if (marks.len == 0) return;
         const Mark = struct { id: []const u8, w: f32, h: f32 };
         const loaded = try self.a.alloc(Mark, marks.len);
-        var h: f32 = 26;
-        const gap: f32 = 16;
+        const row_h: f32 = 22.5;
+        var h = row_h;
+        const gap: f32 = 19.5;
+        const gaps = gap * @as(f32, @floatFromInt(marks.len - 1));
         var total: f32 = 0;
         for (marks, 0..) |src, i| {
-            const what = try std.fmt.allocPrint(self.a, "installer.accreditations[{d}]", .{i});
-            const img = try self.loadImage(src, what);
+            const img = try self.loadImage(src, try std.fmt.allocPrint(self.a, "installer.accreditations[{d}]", .{i}));
             loaded[i] = .{ .id = img.id, .w = img.w, .h = img.h };
             total += h * img.w / img.h;
         }
-        total += gap * @as(f32, @floatFromInt(marks.len - 1));
-        if (total > CONTENT_W) {
-            const shrink = (CONTENT_W - gap * @as(f32, @floatFromInt(marks.len - 1))) / (total - gap * @as(f32, @floatFromInt(marks.len - 1)));
-            h *= shrink;
-            total = CONTENT_W;
+        if (total + gaps > CONTENT_W) {
+            h *= (CONTENT_W - gaps) / total;
+            total = CONTENT_W - gaps;
         }
-        var x = MARGIN + (CONTENT_W - total) / 2;
-        const y = PAGE_H - self.top - 26 + (26 - h) / 2;
+        var x = MARGIN + (CONTENT_W - total - gaps) / 2;
+        const y = boxY(self.top, row_h) + (row_h - h) / 2;
         for (loaded) |mk| {
             const w = h * mk.w / mk.h;
             try self.cs.drawImage(mk.id, x, y, w, h);
             x += w + gap;
         }
-        self.top += 26 + 10;
+        self.top += row_h + 7;
     }
 
     fn smallPrint(self: *Renderer) !void {
         const ins = self.l.installer;
         const all = if (ins.legal_line) |ll| try std.fmt.allocPrint(self.a, "{s} {s}", .{ self.l.small_print, ll }) else self.l.small_print;
         const room = PAGE_H - self.top - BOTTOM;
-        const leading: f32 = 8.6;
+        const leading: f32 = 9.1;
         const max_lines: usize = @intFromFloat(@max(0, @floor(room / leading)));
-        const w = try document.wrapText(self.a, all, REGULAR, 6.6, CONTENT_W);
+        const w = try document.wrapText(self.a, all, REGULAR, 6.3, CONTENT_W);
         if (w.lines.len > max_lines) {
             const over = @as(f32, @floatFromInt(w.lines.len)) * leading - room;
             self.diag.set("the letter runs {d:.0}pt past the bottom of the page; shorten the intro, offer or small print", .{over});
             return error.TooLong;
         }
-        _ = try self.paragraph(w.lines, MARGIN, self.top, REGULAR, 6.6, leading, MUTED);
+        _ = try self.paragraph(w.lines, MARGIN, self.top, REGULAR, 6.3, leading, FINE);
     }
 
     fn render(self: *Renderer) ![]const u8 {
         self.f_reg = self.doc.getFontId(REGULAR);
         self.f_bold = self.doc.getFontId(BOLD);
         self.doc.setInfo(.{ .title = self.l.headline, .author = self.l.installer.name, .creator = "zig_pdf_generator solar_letter" });
+        try self.topBar();
         try self.header();
         try self.recipient();
+        try self.headline();
         try self.intro();
+        try self.picture();
+        try self.stats();
         try self.package();
-        try self.hero();
         try self.offer();
         try self.phoneStrip();
         try self.accreditations();

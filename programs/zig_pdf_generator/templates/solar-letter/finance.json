@@ -4,14 +4,20 @@
     "phone": "0300 000 0000",
     "website": "examplesolar.co.uk",
     "logo": "templates/solar-letter/example-logo.png",
-    "primary_hex": "#1f4e79",
-    "tint_hex": "#e8f0f7",
     "accreditations": [
       "templates/solar-letter/badge-1.png",
       "templates/solar-letter/badge-2.png",
       "templates/solar-letter/badge-3.png"
     ],
-    "legal_line": "Example Solar Ltd, a fictional company used to show this template."
+    "legal_line": "Example Solar Ltd, a fictional company used to show this template.",
+    "theme": {
+      "ink_hex": "#0f2033",
+      "dark_hex": "#1d3b5a",
+      "primary_hex": "#2a5885",
+      "accent_hex": "#ffd34d",
+      "label_hex": "#a9c8e8",
+      "link_hex": "#2a5885"
+    }
   },
   "letter": {
     "reference": "EX-000123",
@@ -26,7 +32,8 @@
     "intro": "We looked at your roof from above and measured how much of it faces the sun. Here is the system we would fit, what it could generate each year and what it would cost. Nothing is booked until a surveyor has visited and you have agreed.",
     "qr_url": "https://examplesolar.co.uk/r/EX-000123",
     "qr_caption": "Scan to see your roof and your full quote",
-    "small_print": "Figures are estimates from your roof's size, pitch and direction and typical sunshine for your area; your surveyor confirms them before you decide. This letter went to the occupier of this address. If you would rather not hear from us, call 0300 000 0000 and we will take the address off our list."
+    "small_print": "Figures are estimates from your roof's size, pitch and direction and typical sunshine for your area; your surveyor confirms them before you decide. This letter went to the occupier of this address. If you would rather not hear from us, call 0300 000 0000 and we will take the address off our list.",
+    "headline_highlight": "16 solar panels"
   },
   "package": [
     {
@@ -60,8 +67,7 @@
     }
   ],
   "image": {
-    "src": "templates/solar-letter/placeholder-roof.png",
-    "caption": "Panel layout shown for illustration"
+    "src": "templates/solar-letter/placeholder-roof.png"
   },
   "offer": {
     "kind": "finance",

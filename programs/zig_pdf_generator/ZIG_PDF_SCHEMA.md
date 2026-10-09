@@ -544,9 +544,11 @@ a multi-page letter now register on the correct page.)
 ## Template: `solar_letter`
 
 A **one-page A4 personalised solar letter** from an installer to a householder:
-installer brand, address block, headline and intro, the proposed system,
-two or three figure cards beside a roof picture, an offer block with a QR code,
-a phone strip, accreditation marks and small print. Everything about the
+a gradient bar, logo and contact line, the address block, a headline with one
+phrase highlighted, the intro, the roof picture full width, up to three figure
+cards, the package as ticked columns, an offer block with a QR code, a phone
+strip, accreditation marks and small print. Colours come from a six-colour
+theme in the payload. Everything about the
 installer (name, logo, colours, marks) arrives in the payload; the template
 holds layout and the wording the law requires. Figures are display strings
 formatted by the caller. Samples: `templates/solar-letter/{price,finance,grant}.json`.
@@ -561,21 +563,25 @@ Source: `src/solar_letter.zig`.
 |---|---|---|---|
 | `installer.name` / `phone` / `website` | string | ✓ | Website is linked; phone is a `tel:` link in the strip |
 | `installer.logo` | image | ✓ | PNG/JPEG as base64, `data:` URL or (CLI) path; fitted to 150×44 pt |
-| `installer.primary_hex` | `#RRGGBB` | ✓ | Headline, first figure card, offer border, phone strip |
-| `installer.tint_hex` | `#RRGGBB` | | Other figure cards (default pale green) |
+| `installer.theme.ink_hex` | `#RRGGBB` | ✓ | Headline text, darkest figure card, phone strip |
+| `installer.theme.dark_hex` | `#RRGGBB` | ✓ | Middle figure card, offer gradient start, header phone, top bar start |
+| `installer.theme.primary_hex` | `#RRGGBB` | ✓ | First figure card, offer gradient end, tick circles |
+| `installer.theme.accent_hex` | `#RRGGBB` | ✓ | Headline highlighter, price and figures, phone number on dark |
+| `installer.theme.label_hex` | `#RRGGBB` | ✓ | Small capitals on dark (card and offer labels) |
+| `installer.theme.link_hex` | `#RRGGBB` | ✓ | Website and date line, top bar end |
 | `installer.accreditations` | image[] | | Up to 10 marks, scaled to one row |
 | `installer.legal_line` | string | | Appended to the small print |
 | `letter.reference` / `date` | string | ✓ | Header, right |
 | `letter.recipient` | string[] | ✓ | 2 to 7 address lines |
-| `letter.headline` | string | ✓ | Up to 2 lines at 20 pt |
+| `letter.headline` | string | ✓ | Up to 2 lines at 25.5 pt |
+| `letter.headline_highlight` | string | | A phrase of the headline drawn over a highlighter band (refused if not in the headline) |
 | `letter.intro` | string | ✓ | Up to 4 lines |
 | `letter.qr_url` | string | ✓ | Must be `https://`; drawn as a vector QR code and linked |
 | `letter.qr_caption` | string | ✓ | Up to 2 lines under the QR code |
 | `letter.small_print` | string | ✓ | Fills the space left at the foot of the page |
-| `letter.package_title` | string | | Heading over `package` (default "Your recommended system") |
-| `package[]` | `{label, value}` | ✓ | 1 to 4 rows |
-| `stats[]` | `{label, value, note?}` | ✓ | 1 to 3 cards beside the picture |
-| `image.src` | image | ✓ | Roof picture, cropped to fill its box |
+| `package[]` | `{label, value}` | ✓ | 1 to 4 ticked columns under the figure cards |
+| `stats[]` | `{label, value, note?}` | ✓ | 1 to 3 figure cards in a row under the picture |
+| `image.src` | image | ✓ | Roof picture, full width, cropped to fill its box |
 | `image.caption` | string | | One line over the foot of the picture |
 | `offer.kind` | `price` \| `finance` \| `grant` | ✓ | Selects the fields below |
 
