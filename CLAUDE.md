@@ -41,6 +41,16 @@ any binary-serialisation parser for money-touching paths; use a vetted dependenc
 side or wait for the audit. Mark existing hand-rolled parsers `// TODO(audit): migrate to <canonical>`
 instead of extending them.
 
+## Libraries other repos link
+
+- `libs.toml` lists every archive another repo links; `scripts/build-consumed-libs.sh [name…]`
+  builds, checks and stamps them. Never hand a consumer a plain `zig build` archive (Debug,
+  unrepacked, unstamped). A new consumer or archive is a new `libs.toml` row.
+- A row's `build` and `sources` are part of the consumer's `baton release` identity: change
+  one and every consumer's `release.toml` must change with it, or the script refuses to stamp.
+- A new `b.path("../…")` or `.path = "../…"` in a consumed program's build makes the script
+  fail until the row's `sources` covers it (`scripts/zig-source-id.sh --deps <dir>`).
+
 ## Anti-patterns: grep for these before reading a file in detail
 
 `zig-lens --strict programs/<dir>/` catches 1–4. 5–7 are human-review only.
