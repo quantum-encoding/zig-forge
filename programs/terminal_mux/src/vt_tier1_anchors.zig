@@ -280,14 +280,107 @@ test "ECMA-48 CUP with a leading empty parameter: ESC[;5H is row-default col-5" 
 test "ECMA-48 colon sub-parameters do not corrupt following params" {
     // SGR 4:3 (curly underline) and 38:2::r:g:b use ':' SUB-parameters
     // (ECMA-48 §5.4.2). Promoting them to top-level params made everything
-    // after them mis-parse. We skip sub-params; the params AFTER the
-    // colon-carrying one must still land correctly.
+    // after them mis-parse: sub-params belong to their parameter, and the
+    // params AFTER the colon-carrying one must still land correctly.
     var h = try Harness.init(5, 20);
     defer h.deinit();
     h.feed("\x1b[4:3;1mZ"); // underline(with subparam) ; bold
     const cell = h.term().terminal.grid.getCellConst(0, 0);
     try std.testing.expectEqual(@as(u21, 'Z'), cell.char);
     try std.testing.expect(cell.attrs.bold); // the ;1 survived the 4:3
+}
+
+// ── SGR extended colour (xterm ctlseqs "SGR", ITU T.416) ────────────────────
+
+const terminal = @import("terminal.zig");
+
+/// The cell `text` lands in after `sgr` is applied on a fresh 3x30 screen.
+fn sgrCell(sgr: []const u8) !terminal.Cell {
+    var h = try Harness.init(3, 30);
+    defer h.deinit();
+    h.feed(sgr);
+    h.feed("Z");
+    return h.term().terminal.grid.getCellConst(0, 0).*;
+}
+
+fn expectRgb(c: terminal.CellColor, r: u8, g: u8, b: u8) !void {
+    switch (c) {
+        .rgb => |v| {
+            try std.testing.expectEqual(r, v.r);
+            try std.testing.expectEqual(g, v.g);
+            try std.testing.expectEqual(b, v.b);
+        },
+        else => return error.NotRgb,
+    }
+}
+
+fn expectIndexed(c: terminal.CellColor, n: u8) !void {
+    switch (c) {
+        .indexed => |v| try std.testing.expectEqual(n, v),
+        else => return error.NotIndexed,
+    }
+}
+
+test "ctlseqs SGR 38/48: colon form, with and without the colour-space id" {
+    // ctlseqs: "38:2:Pi:Pr:Pg:Pb Set foreground color using RGB values ...
+    // The color space identifier Pi is ignored"; "38:5:Ps ... indexed color".
+    // `38:2::r:g:b` (empty Pi) is what kitty/foot-style apps emit; `38:2:r:g:b`
+    // (no Pi) is the other spelling in the wild.
+    try expectRgb((try sgrCell("\x1b[38:2::10:20:30m")).fg, 10, 20, 30);
+    try expectRgb((try sgrCell("\x1b[38:2:0:10:20:30m")).fg, 10, 20, 30);
+    try expectRgb((try sgrCell("\x1b[38:2:10:20:30m")).fg, 10, 20, 30);
+    try expectRgb((try sgrCell("\x1b[48:2::1:2:3m")).bg, 1, 2, 3);
+    try expectIndexed((try sgrCell("\x1b[38:5:123m")).fg, 123);
+    try expectIndexed((try sgrCell("\x1b[48:5:7m")).bg, 7);
+    // The konsole-compatible semicolon form still works.
+    try expectRgb((try sgrCell("\x1b[38;2;10;20;30m")).fg, 10, 20, 30);
+    try expectIndexed((try sgrCell("\x1b[48;5;200m")).bg, 200);
+}
+
+test "ctlseqs SGR: a colon-form colour leaves the parameters after it alone" {
+    // The sub-parameters are the colour's own; the `;1` / `;4` that follow
+    // are ordinary SGR parameters (the semicolon form, by contrast, eats the
+    // parameters after it, so a `;1` there would be read as a component).
+    const a = try sgrCell("\x1b[38:2::1:2:3;1m");
+    try expectRgb(a.fg, 1, 2, 3);
+    try std.testing.expect(a.attrs.bold);
+    const b = try sgrCell("\x1b[38:5:9;48:2::4:5:6;4m");
+    try expectIndexed(b.fg, 9);
+    try expectRgb(b.bg, 4, 5, 6);
+    try std.testing.expect(b.attrs.underline);
+}
+
+test "kitty underline styles: 4:n is an underline, 4:0 turns it off" {
+    // kitty's "Colored and styled underlines": 4:0 none, 4:1 straight,
+    // 4:2 double, 4:3 curly, 4:4 dotted, 4:5 dashed.
+    try std.testing.expect((try sgrCell("\x1b[4:3m")).attrs.underline);
+    try std.testing.expect((try sgrCell("\x1b[4:1m")).attrs.underline);
+    try std.testing.expect((try sgrCell("\x1b[4m")).attrs.underline);
+    try std.testing.expect(!(try sgrCell("\x1b[4m\x1b[4:0m")).attrs.underline);
+}
+
+test "SGR 58 (underline colour) consumes its arguments in either form" {
+    // `58;2;255;0;0` read as separate SGR codes would be dim (2) and then a
+    // full reset (0), dropping the bold before it.
+    try std.testing.expect((try sgrCell("\x1b[1;58;2;255;0;0m")).attrs.bold);
+    try std.testing.expect(!(try sgrCell("\x1b[1;58;2;255;0;0m")).attrs.dim);
+    try std.testing.expect((try sgrCell("\x1b[1;58:2::255:0:0m")).attrs.bold);
+}
+
+test "out-of-range SGR colours and ED/EL modes are ignored, never a crash" {
+    // A component past 255 names no colour (xterm ignores it). A u16 param
+    // was narrowed to u8 with @intCast, a safety panic in Debug/ReleaseSafe:
+    // any program in a pane could take the whole server down with one printf.
+    try std.testing.expect((try sgrCell("\x1b[38;5;300m")).fg == .default);
+    try std.testing.expect((try sgrCell("\x1b[38;2;300;0;0m")).fg == .default);
+    try std.testing.expect((try sgrCell("\x1b[48:2::0:999:0m")).bg == .default);
+    try std.testing.expect((try sgrCell("\x1b[38:5:65535m")).fg == .default);
+    // The semicolon form still consumes its arguments: the 1 after is bold.
+    try std.testing.expect((try sgrCell("\x1b[38;5;300;1m")).attrs.bold);
+    var h = try Harness.init(3, 10);
+    defer h.deinit();
+    h.feed("abc\x1b[256J\x1b[300K\x1b[65535J");
+    try std.testing.expectEqual(@as(u21, 'a'), h.charAt(0, 0)); // nothing erased
 }
 
 // ── erase display / scrollback ──────────────────────────────────────────────
@@ -448,7 +541,6 @@ test "OSC 10/11 '?' answer the themed fg/bg as 16-bit rgb:" {
 }
 
 test "the reply queue is bounded: a query burst drops whole replies, never partial ones" {
-    const terminal = @import("terminal.zig");
     var h = try Harness.init(10, 40);
     defer h.deinit();
     // Each DA1 reply is 9 bytes; 64 bytes of capacity holds 7 with 1 left over,

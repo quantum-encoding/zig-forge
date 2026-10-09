@@ -43,6 +43,10 @@ pub const State = enum {
 /// Maximum number of CSI parameters
 const MAX_PARAMS = 16;
 
+/// Most ':' sub-parameters kept per CSI parameter: enough for the longest
+/// SGR colour form, `38:2:Pi:Pr:Pg:Pb` (ITU T.416). Further ones are dropped.
+pub const MAX_SUBPARAMS = 6;
+
 /// Maximum OSC string length
 const MAX_OSC_LEN = 2048;
 
@@ -69,6 +73,10 @@ pub const Action = union(enum) {
 pub const CsiSequence = struct {
     params: [MAX_PARAMS]u16,
     param_count: u8,
+    /// `subparams[i][0..sub_counts[i]]` are the ':'-separated sub-parameters
+    /// written after `params[i]` (ECMA-48 §5.4.2). An empty one reads 0.
+    subparams: [MAX_PARAMS][MAX_SUBPARAMS]u16 = undefined,
+    sub_counts: [MAX_PARAMS]u8 = @splat(0),
     intermediates: [2]u8,
     intermediate_count: u8,
     final_byte: u8,
@@ -80,6 +88,13 @@ pub const CsiSequence = struct {
             return p;
         }
         return default;
+    }
+
+    /// The sub-parameters of parameter `idx`: `38:2::10:20:30` gives
+    /// 2, 0, 10, 20, 30 for the 38. Empty when it has none.
+    pub fn subParams(self: *const CsiSequence, idx: usize) []const u16 {
+        if (idx >= self.param_count or idx >= MAX_PARAMS) return &.{};
+        return self.subparams[idx][0..self.sub_counts[idx]];
     }
 };
 
@@ -114,10 +129,16 @@ pub const Parser = struct {
     param_count: u8,
     intermediates: [2]u8,
     intermediate_count: u8,
-    /// Inside a ':' sub-parameter chain (SGR 4:3, 38:2::r:g:b): sub-params are
-    /// skipped rather than promoted to top-level params, which mis-parsed the
-    /// whole sequence (ECMA-48 §5.4.2 colon separators).
+    /// Inside a ':' sub-parameter chain (SGR 4:3, 38:2::r:g:b). Its digits
+    /// belong to the current parameter's sub-parameters, never to a
+    /// top-level parameter (ECMA-48 §5.4.2 colon separators).
     in_subparam: bool,
+    /// Sub-parameters of each parameter; see `CsiSequence.subparams`.
+    subparams: [MAX_PARAMS][MAX_SUBPARAMS]u16,
+    sub_counts: [MAX_PARAMS]u8,
+    /// The sub-parameter being written has a slot (false past
+    /// MAX_SUBPARAMS: its digits are dropped).
+    sub_open: bool,
 
     // OSC state
     osc_buffer: [MAX_OSC_LEN]u8,
@@ -139,6 +160,9 @@ pub const Parser = struct {
             .intermediates = undefined,
             .intermediate_count = 0,
             .in_subparam = false,
+            .subparams = undefined,
+            .sub_counts = @splat(0),
+            .sub_open = false,
             .osc_buffer = undefined,
             .osc_len = 0,
             .osc_command = 0,
@@ -357,6 +381,8 @@ pub const Parser = struct {
         self.param_count = 0;
         self.intermediate_count = 0;
         self.in_subparam = false;
+        @memset(&self.sub_counts, 0);
+        self.sub_open = false;
 
         switch (byte) {
             0x30...0x39, ';' => {
@@ -374,14 +400,7 @@ pub const Parser = struct {
             },
             0x40...0x7E => {
                 // Final byte immediately
-                self.state = .ground;
-                return .{ .csi_dispatch = .{
-                    .params = self.params,
-                    .param_count = self.param_count,
-                    .intermediates = self.intermediates,
-                    .intermediate_count = self.intermediate_count,
-                    .final_byte = byte,
-                } };
+                return self.csiDispatch(byte);
             },
             else => {
                 self.state = .csi_ignore;
@@ -390,18 +409,39 @@ pub const Parser = struct {
         }
     }
 
+    /// The finished CSI sequence ending in `final`; back to ground.
+    fn csiDispatch(self: *Self, final: u8) Action {
+        self.state = .ground;
+        return .{ .csi_dispatch = .{
+            .params = self.params,
+            .param_count = self.param_count,
+            .subparams = self.subparams,
+            .sub_counts = self.sub_counts,
+            .intermediates = self.intermediates,
+            .intermediate_count = self.intermediate_count,
+            .final_byte = final,
+        } };
+    }
+
     fn handleCsiParam(self: *Self, byte: u8) Action {
         switch (byte) {
             0x30...0x39 => {
-                // Digit - accumulate parameter (sub-parameter digits after a
-                // ':' are skipped, not merged into the top-level param).
-                if (self.in_subparam) return .{ .none = {} };
+                // Digit: accumulates into the current parameter, or into its
+                // current sub-parameter after a ':'. Saturating, so a huge
+                // number cannot wrap around to a small, valid one.
                 if (self.param_count == 0) {
                     self.param_count = 1;
                 }
                 const idx = self.param_count - 1;
-                if (idx < MAX_PARAMS) {
-                    self.params[idx] = self.params[idx] *% 10 +% (byte - '0');
+                if (idx >= MAX_PARAMS) return .{ .none = {} };
+                const d: u16 = byte - '0';
+                if (self.in_subparam) {
+                    if (self.sub_open) {
+                        const sp = &self.subparams[idx][self.sub_counts[idx] - 1];
+                        sp.* = sp.* *| 10 +| d;
+                    }
+                } else {
+                    self.params[idx] = self.params[idx] *| 10 +| d;
                 }
                 return .{ .none = {} };
             },
@@ -410,6 +450,7 @@ pub const Parser = struct {
                 // first parameter: ESC[;5H is row-default col-5 — the old code
                 // collapsed it so 5 landed in params[0] (wrong row).
                 self.in_subparam = false;
+                self.sub_open = false;
                 if (self.param_count == 0) {
                     self.param_count = 2; // empty first + open second
                 } else if (self.param_count < MAX_PARAMS) {
@@ -418,11 +459,17 @@ pub const Parser = struct {
                 return .{ .none = {} };
             },
             ':' => {
-                // Colon introduces SUB-parameters of the current param
-                // (SGR 4:3, 38:2::r:g:b). Skip them; promoting them to
-                // top-level params corrupted every following parameter.
+                // Colon opens a SUB-parameter of the current param (SGR 4:3,
+                // 38:2::r:g:b). It never becomes a top-level param: that
+                // shifted every parameter after it.
                 if (self.param_count == 0) self.param_count = 1;
                 self.in_subparam = true;
+                const idx = self.param_count - 1;
+                self.sub_open = idx < MAX_PARAMS and self.sub_counts[idx] < MAX_SUBPARAMS;
+                if (self.sub_open) {
+                    self.subparams[idx][self.sub_counts[idx]] = 0;
+                    self.sub_counts[idx] += 1;
+                }
                 return .{ .none = {} };
             },
             0x20...0x2F => {
@@ -436,14 +483,7 @@ pub const Parser = struct {
             },
             0x40...0x7E => {
                 // Final byte
-                self.state = .ground;
-                return .{ .csi_dispatch = .{
-                    .params = self.params,
-                    .param_count = self.param_count,
-                    .intermediates = self.intermediates,
-                    .intermediate_count = self.intermediate_count,
-                    .final_byte = byte,
-                } };
+                return self.csiDispatch(byte);
             },
             else => {
                 self.state = .csi_ignore;
@@ -464,14 +504,7 @@ pub const Parser = struct {
             },
             0x40...0x7E => {
                 // Final byte
-                self.state = .ground;
-                return .{ .csi_dispatch = .{
-                    .params = self.params,
-                    .param_count = self.param_count,
-                    .intermediates = self.intermediates,
-                    .intermediate_count = self.intermediate_count,
-                    .final_byte = byte,
-                } };
+                return self.csiDispatch(byte);
             },
             else => {
                 self.state = .csi_ignore;
@@ -870,12 +903,12 @@ fn handleCsi(term: *Terminal, seq: CsiSequence) void {
             term.setCursorPos(if (row > 0) row - 1 else 0, if (col > 0) col - 1 else 0);
         },
         'J' => {
-            // ED - Erase Display
-            term.eraseDisplay(@intCast(seq.getParam(0, 0)));
+            // ED - Erase Display. A mode past u8 names no erase at all.
+            if (std.math.cast(u8, seq.getParam(0, 0))) |mode| term.eraseDisplay(mode);
         },
         'K' => {
             // EL - Erase Line
-            term.eraseLine(@intCast(seq.getParam(0, 0)));
+            if (std.math.cast(u8, seq.getParam(0, 0))) |mode| term.eraseLine(mode);
         },
         'P' => {
             // DCH - Delete Character (was silently ignored — zsh/fzf in-place
@@ -1100,7 +1133,13 @@ fn handleSgr(term: *Terminal, seq: CsiSequence) void {
             1 => term.current_attrs.bold = true,
             2 => term.current_attrs.dim = true,
             3 => term.current_attrs.italic = true,
-            4 => term.current_attrs.underline = true,
+            4 => {
+                // `4:n` picks an underline style (kitty / ITU T.416): 0 none,
+                // 1 single, 2 double, 3 curly, 4 dotted, 5 dashed. A cell has
+                // one underline bit, so every style but 0 draws as single.
+                const sub = seq.subParams(i);
+                term.current_attrs.underline = sub.len == 0 or sub[0] != 0;
+            },
             5 => term.current_attrs.blink = true,
             7 => term.current_attrs.inverse = true,
             8 => term.current_attrs.invisible = true,
@@ -1117,52 +1156,66 @@ fn handleSgr(term: *Terminal, seq: CsiSequence) void {
             28 => term.current_attrs.invisible = false,
             29 => term.current_attrs.strikethrough = false,
             30...37 => term.current_fg = .{ .indexed = @intCast(param - 30) },
-            38 => {
-                // Extended foreground color
-                if (i + 1 < seq.param_count and seq.params[i + 1] == 5) {
-                    // 256 color mode: 38;5;n
-                    if (i + 2 < seq.param_count) {
-                        term.current_fg = .{ .indexed = @intCast(seq.params[i + 2]) };
-                        i += 2;
-                    }
-                } else if (i + 1 < seq.param_count and seq.params[i + 1] == 2) {
-                    // RGB mode: 38;2;r;g;b
-                    if (i + 4 < seq.param_count) {
-                        term.current_fg = .{ .rgb = .{
-                            .r = @intCast(seq.params[i + 2]),
-                            .g = @intCast(seq.params[i + 3]),
-                            .b = @intCast(seq.params[i + 4]),
-                        } };
-                        i += 4;
-                    }
-                }
+            // Extended colours: foreground, background, underline. The
+            // underline colour is not drawn, but its arguments must still be
+            // consumed or `58;2;255;0;0` would apply 2 (dim) and 0 (reset).
+            38, 48, 58 => if (extendedColor(&seq, &i)) |col| switch (param) {
+                38 => term.current_fg = col,
+                48 => term.current_bg = col,
+                else => {},
             },
             39 => term.current_fg = .{ .default = {} },
             40...47 => term.current_bg = .{ .indexed = @intCast(param - 40) },
-            48 => {
-                // Extended background color
-                if (i + 1 < seq.param_count and seq.params[i + 1] == 5) {
-                    if (i + 2 < seq.param_count) {
-                        term.current_bg = .{ .indexed = @intCast(seq.params[i + 2]) };
-                        i += 2;
-                    }
-                } else if (i + 1 < seq.param_count and seq.params[i + 1] == 2) {
-                    if (i + 4 < seq.param_count) {
-                        term.current_bg = .{ .rgb = .{
-                            .r = @intCast(seq.params[i + 2]),
-                            .g = @intCast(seq.params[i + 3]),
-                            .b = @intCast(seq.params[i + 4]),
-                        } };
-                        i += 4;
-                    }
-                }
-            },
             49 => term.current_bg = .{ .default = {} },
             90...97 => term.current_fg = .{ .indexed = @intCast(param - 90 + 8) },
             100...107 => term.current_bg = .{ .indexed = @intCast(param - 100 + 8) },
             else => {},
         }
     }
+}
+
+/// The colour an SGR 38/48/58 at parameter `i.*` selects, or null when it
+/// names none or a component is out of range (an out-of-range colour is
+/// ignored, as xterm does). Two spellings (xterm ctlseqs, "SGR"):
+///   colon (ITU T.416): `38:5:n`, `38:2:Pi:r:g:b` (Pi, the colour-space id,
+///     is usually empty and is ignored), and the common `38:2:r:g:b`;
+///     its arguments are sub-parameters, so `i` stays put.
+///   semicolon (konsole's legacy form): `38;5;n`, `38;2;r;g;b`; its
+///     arguments are the following parameters, and `i` moves past them.
+fn extendedColor(seq: *const CsiSequence, i: *u8) ?CellColor {
+    const sub = seq.subParams(i.*);
+    if (sub.len > 0) {
+        switch (sub[0]) {
+            5 => return if (sub.len >= 2) indexedColor(sub[1]) else null,
+            2 => {
+                const rgb = if (sub.len >= 5) sub[2..5] else if (sub.len == 4) sub[1..4] else return null;
+                return rgbColor(rgb[0], rgb[1], rgb[2]);
+            },
+            else => return null,
+        }
+    }
+    const rest = seq.params[i.* + 1 .. seq.param_count];
+    if (rest.len >= 2 and rest[0] == 5) {
+        i.* += 2;
+        return indexedColor(rest[1]);
+    }
+    if (rest.len >= 4 and rest[0] == 2) {
+        i.* += 4;
+        return rgbColor(rest[1], rest[2], rest[3]);
+    }
+    return null;
+}
+
+fn indexedColor(n: u16) ?CellColor {
+    return .{ .indexed = std.math.cast(u8, n) orelse return null };
+}
+
+fn rgbColor(r: u16, g: u16, b: u16) ?CellColor {
+    return .{ .rgb = .{
+        .r = std.math.cast(u8, r) orelse return null,
+        .g = std.math.cast(u8, g) orelse return null,
+        .b = std.math.cast(u8, b) orelse return null,
+    } };
 }
 
 fn handleEscape(term: *Terminal, seq: EscSequence) void {
