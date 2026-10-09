@@ -29,6 +29,7 @@ runner_sock = f"{bh}/var/zterm.sock"
 env = dict(os.environ, HOME=home, SHELL="/bin/sh", ZTERM_SOCKET=ctl_sock, BATON_HOME=bh,
            PATH=os.path.join(HERE, "fixtures", "fake_agent") + ":" + os.environ["PATH"])
 env.pop("BATON_AGENT_EXES", None)
+env.pop("ZTERM_RUNNER_SOCKET", None)   # the runner door is the temp BATON_HOME's
 env["WEZTERM_PANE"] = "77"; env["ZTERM_PANE"] = "88"   # must NOT reach any pane
 srv = subprocess.Popen([Z, "server"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 fails = []

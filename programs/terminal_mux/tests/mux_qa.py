@@ -24,7 +24,10 @@ SIGWINCH resize, split + spawn, pane focus cycling, new window + switching.
 
 Hermetic, like the other two harnesses: a temp HOME and /bin/sh panes, so no
 personal shell startup file runs — one that prompts (for a passphrase, say)
-would otherwise receive every readiness probe this harness types.
+would otherwise receive every readiness probe this harness types. Every mux
+and server it starts binds a private temp socket, and BATON_HOME is a temp
+directory with the runner door off: it never binds, unlinks or connects to the
+user's /tmp/zterm-<uid>.sock or a live zterm service's sockets.
 """
 import errno
 import fcntl
@@ -44,6 +47,12 @@ os.environ["SHELL"] = "/bin/sh"
 os.environ.pop("ZDOTDIR", None)
 os.environ.pop("ENV", None)
 os.environ.pop("BASH_ENV", None)
+# A bare mux binds $ZTERM_SOCKET, else /tmp/zterm-<uid>.sock — unlinking
+# whatever is there (newest binder wins). Never the user's.
+DEFAULT_SOCK = tempfile.mktemp(prefix="mux-qa-mux-", suffix=".sock")
+os.environ["ZTERM_SOCKET"] = DEFAULT_SOCK
+os.environ["BATON_HOME"] = tempfile.mkdtemp(prefix="muxqa-bh-")
+os.environ.pop("ZTERM_RUNNER_SOCKET", None)
 
 MUX = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "zig-out", "bin", "zterm")
@@ -416,7 +425,7 @@ def scenario_control_socket():
         assert not screen.scrolls, f"host scrolled during CLI driving: {screen.scrolls[:5]}"
         print("PASS control-socket (list/split/send/enter/capture/focus/kill)")
     finally:
-        del os.environ["ZTERM_SOCKET"]
+        os.environ["ZTERM_SOCKET"] = DEFAULT_SOCK
 
 def scenario_persistent_detach():
     """`zterm server` + attach relay: the shell — including its variable state —
@@ -428,7 +437,7 @@ def scenario_persistent_detach():
     zterm = os.path.join(os.path.dirname(MUX), "zterm")
     sock_path = tempfile.mktemp(prefix="mux-qa-detach-", suffix=".sock")
     env = dict(os.environ, ZTERM_SOCKET=sock_path)
-    srv = subprocess.Popen([zterm, "server"], env=env,
+    srv = subprocess.Popen([zterm, "server", "--no-runner"], env=env,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         deadline = time.time() + 30
@@ -523,4 +532,6 @@ if __name__ == "__main__":
     scenario_background_drain()
     scenario_control_socket()
     scenario_persistent_detach()
+    if os.path.exists(DEFAULT_SOCK):
+        os.unlink(DEFAULT_SOCK)   # left by a SIGKILLed mux
     print("ALL QA SCENARIOS PASS")

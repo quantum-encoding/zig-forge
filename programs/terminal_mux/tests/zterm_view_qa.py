@@ -4,11 +4,16 @@ for `zterm attach`, which is built on it.
 
 Run:  python3 tests/zterm_view_qa.py [path-to-zterm]   (default ../zig-out/bin/zterm)
 
-Hermetic: temp HOME, /bin/sh panes, short /tmp socket paths (sun_path).
+Hermetic: temp HOME and BATON_HOME, /bin/sh panes, its own server on a short
+/tmp socket path (sun_path) with no runner door — it never reaches a zterm
+server it did not start.
 
 What it holds the server to:
   * hello, then a FULL frame at the requested size; later frames carry only
-    the rows that changed; seq counts up by one;
+    the rows that changed (a resize's full frame is not followed by a re-send
+    of every row); seq counts up by one;
+  * OSC 52 writes reach the view as the application's base64, whole up to the
+    128 KiB cap and not at all past it;
   * the server — never the client — answers terminal queries (CPR);
   * wide characters arrive as their own two-column spans (zterm's widths);
   * resize (by a viewer, or by the one-shot `resize` request) yields a full
@@ -23,7 +28,7 @@ What it holds the server to:
     resizes the pane on SIGWINCH, detaches with the pane alive, and
     reports the pane's exit status.
 """
-import fcntl, json, os, pty, select, shutil, signal, socket, struct, subprocess, sys, tempfile, termios, time
+import base64, fcntl, json, os, pty, select, shutil, signal, socket, struct, subprocess, sys, tempfile, termios, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 Z = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "zig-out", "bin", "zterm")
@@ -31,7 +36,8 @@ base = tempfile.mkdtemp(prefix="ztvq-", dir="/tmp")
 home = os.path.join(base, "home"); os.makedirs(home)
 open(os.path.join(home, ".profile"), "w").close()
 sock = os.path.join(base, "c.sock")
-env = dict(os.environ, HOME=home, SHELL="/bin/sh", ZTERM_SOCKET=sock)
+env = dict(os.environ, HOME=home, SHELL="/bin/sh", ZTERM_SOCKET=sock, BATON_HOME=os.path.join(base, "bh"))
+env.pop("ZTERM_RUNNER_SOCKET", None)
 fails = []
 
 def check(name, ok, detail=""):
@@ -104,14 +110,25 @@ try:
     # ── the protocol, driven directly ─────────────────────────────────────
     v = View(1, 10, 40)
     v.until(lambda: len(v.frames()) >= 1 and "$" in v.text())
+    v.pump(0.5)   # the shell's own redraw on the resize (SIGWINCH) lands here
     check("hello first, then a full frame at the requested size",
           v.msgs[0]["t"] == "hello" and v.msgs[0]["v"] == 1 and v.frames()[0]["full"]
           and (v.frames()[0]["rows"], v.frames()[0]["cols"]) == (10, 40), v.msgs[:2])
+    # One key at the prompt changes one row. Every frame since the open's
+    # full frame — the shell redrawing its prompt on the resize, the key's
+    # echo — must carry that row alone: a resize once left every row marked
+    # changed, and the next frame re-sent the whole screen (10 of 10 rows).
+    prompt_y = max((y for y, t in v.rows.items() if "$" in t), default=None)
+    v.send({"input": "text", "data": "x"})
+    typed = v.until(lambda: prompt_y is not None and v.rows.get(prompt_y, "").endswith("x"), 10)
+    carried = sorted({l["y"] for f in v.frames() if not f["full"] for l in f["lines"]})
+    check("later frames carry only changed rows (a key at the prompt: its row alone)",
+          typed and carried == [prompt_y],
+          (prompt_y, [(f["seq"], [l["y"] for l in f["lines"]]) for f in v.frames()]))
+    v.send({"input": "text", "data": "\x15"})   # Ctrl-U: the line is empty again
+    v.until(lambda: not v.rows.get(prompt_y, "").endswith("x"), 10)
     v.send({"input": "text", "data": "echo ok-$((6*7)) 日本\r"})
     check("typed input runs and is drawn", v.until(lambda: "ok-42" in v.text()))
-    incr = [f for f in v.frames() if not f["full"]]
-    check("later frames carry only changed rows", incr and all(len(f["lines"]) < 10 for f in incr[-3:]),
-          [len(f["lines"]) for f in incr[-3:]])
     wide = [sp for f in v.frames() for l in f["lines"] for sp in l["spans"] if sp.get("w") == 2]
     check("a CJK run is ONE w:2 span (every code point two columns)", any(sp["text"] == "\u65e5\u672c" for sp in wide), wide[:2])
     th = v.msgs[0].get("theme", {})
@@ -165,6 +182,32 @@ try:
     w.s.close()
     seqs = [f["seq"] for f in v.frames()]
     check("frame seq counts up by one", seqs == list(range(1, len(seqs) + 1)))
+
+    # ── OSC 52 clipboard writes ───────────────────────────────────────────
+    # The event carries the base64 the application wrote (VIEW-PROTOCOL.md:
+    # "aGVsbG8=" for "hello"), so a client hands it to its own OSC 52 as is.
+    clips = lambda: [m for m in v.msgs if m["t"] == "clipboard"]
+    v.send({"input": "text", "data": "printf '\\033]52;c;aGVsbG8=\\007'\r"})
+    v.until(lambda: len(clips()) >= 1, 10)
+    check("an OSC 52 write reaches the view as the application's base64",
+          [m.get("b64") for m in clips()] == ["aGVsbG8="], clips())
+    # ~90 KB of base64: far past the old 2 KiB parser / 4 KiB emulator cuts.
+    big = base64.b64encode(b"z" * 67500).decode()
+    # The program prints `<mark>-DONE` after its write; the typed command line
+    # spells it in two pieces, so only the program's output can match.
+    osc_prog = lambda n, mark: ("python3 -c \"import sys,base64;sys.stdout.write('\\033]52;c;'+"
+                                f"base64.b64encode(b'z'*{n}).decode()+'\\007');print('{mark}'+'-DONE')\"\r")
+    v.send({"input": "text", "data": osc_prog(67500, "CLIP-BIG")})
+    v.until(lambda: len(clips()) >= 2, 15)
+    got = clips()[1].get("b64", "") if len(clips()) >= 2 else ""
+    check("a 90 KB OSC 52 payload arrives whole", got == big, (len(got), len(big)))
+    # Past the 128 KiB cap the write is dropped whole: no event at all, never
+    # a truncated one. The marker printed after it bounds the wait.
+    v.send({"input": "text", "data": osc_prog(150000, "CLIP-OVER")})
+    over_done = v.until(lambda: "CLIP-OVER-DONE" in v.text(), 15)
+    v.pump(0.5)
+    check("an OSC 52 payload past the cap is dropped, not truncated", over_done and len(clips()) == 2,
+          (over_done, [len(m.get("b64", "")) for m in clips()]))
 
     # ── spawn env + OSC 133 marks ─────────────────────────────────────────
     # The skip variables keep /etc/profile.d shell integrations (wezterm.sh,
@@ -311,34 +354,46 @@ try:
             os.execve(Z, [Z, "attach", str(ap)], env)
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         return pid, fd
-    def drain(fd, t):
+    def drain(fd, t, done=lambda out: False):
+        """Read the client's output for up to `t` s, until `done(out)` or it exits."""
         out = b""; end = time.time() + t
-        while time.time() < end:
+        while time.time() < end and not done(out):
             r, _, _ = select.select([fd], [], [], 0.1)
             if r:
-                try: out += os.read(fd, 65536)
+                try: d = os.read(fd, 65536)
                 except OSError: break
+                if not d: break
+                out += d
         return out
     def pane_dims():
         return [(r["rows"], r["cols"]) for r in json.loads(cli("list")) if r["pane"] == ap]
-    pid, fd = attach(20, 70); out = drain(fd, 1.5)
+    def until(pred, t=10):
+        end = time.time() + t
+        while time.time() < end and not pred(): time.sleep(0.1)
+        return pred()
+    # Waits are on what the client printed, not on fixed sleeps: on a loaded
+    # machine the client can take over a second to start, and it enters raw
+    # mode with TCSAFLUSH, which DISCARDS anything typed before then — so
+    # nothing is typed until it has drawn (its \e[?1049h follows raw mode).
+    pid, fd = attach(20, 70); out = drain(fd, 15, lambda o: b"\x1b[?1049h" in o and b"$" in o)
+    out += drain(fd, 0.3)
     check("attach enters the host alt screen and draws the pane", b"\x1b[?1049h" in out and b"$" in out)
     check("attach draws in the SERVER's theme (truecolour), not the host palette", b";38;2;" in out and b";48;2;" in out)
-    check("attach sizes the pane to the window", pane_dims() == [(20, 70)], pane_dims())
+    check("attach sizes the pane to the window", until(lambda: pane_dims() == [(20, 70)]), pane_dims())
     probe2 = os.path.join(base, "cpr2")
-    os.write(fd, cpr_prog(probe2).encode()); out = drain(fd, 2.5)
+    os.write(fd, cpr_prog(probe2).encode()); out = drain(fd, 15, lambda o: os.path.exists(probe2))
+    out += drain(fd, 0.3)
     check("attach never relays a raw query to the host terminal", b"\x1b[6n" not in out)
     check("…the server answered it instead", os.path.exists(probe2))
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0)); os.kill(pid, signal.SIGWINCH)
-    drain(fd, 1.0)
-    check("SIGWINCH resizes the pane", pane_dims() == [(30, 100)], pane_dims())
-    os.write(fd, b"MARK=kept\r"); drain(fd, 0.5)
-    os.write(fd, b"\x02d"); out = drain(fd, 1.0); os.waitpid(pid, 0)
+    check("SIGWINCH resizes the pane", until(lambda: (drain(fd, 0.2), pane_dims())[1] == [(30, 100)]), pane_dims())
+    os.write(fd, b"MARK=kept\r"); drain(fd, 10, lambda o: b"MARK=kept" in o)
+    os.write(fd, b"\x02d"); out = drain(fd, 10); os.waitpid(pid, 0)   # until the client exits
     check("Ctrl-b d detaches and restores the host screen", b"detached" in out and b"\x1b[?1049l" in out)
-    pid, fd = attach(30, 100); drain(fd, 1.0)
-    os.write(fd, b"echo state-$MARK\r"); out = drain(fd, 1.0)
-    check("reattach finds the same shell", b"state-kept" in out)
-    os.write(fd, b"exit 5\r"); out = drain(fd, 3.0); os.waitpid(pid, 0)
+    pid, fd = attach(30, 100); drain(fd, 15, lambda o: b"\x1b[?1049h" in o and b"$" in o)
+    os.write(fd, b"echo state-$MARK\r"); out = drain(fd, 15, lambda o: b"state-kept" in o)
+    check("reattach finds the same shell", b"state-kept" in out, out[-120:])
+    os.write(fd, b"exit 5\r"); out = drain(fd, 15); os.waitpid(pid, 0)   # until the client exits
     check("attach reports the pane's exit status", b"exited (5)" in out, out[-80:])
 finally:
     srv.terminate()
