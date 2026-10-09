@@ -855,6 +855,7 @@ test "close reaps a child whose output nobody read" {
         if (isUnavailableError(err)) return error.SkipZigTest;
         return err;
     };
+    // zig-lens-ignore: SHELL-CHILD test fixture: a fixed literal script, no outside input reaches it
     const argv = [_:null]?[*:0]const u8{ "sh", "-c", "yes x | head -c 2000000; sleep 100" };
     try p.spawn("/bin/sh", &argv, std.c.environ);
     var no_fds = [_]posix.pollfd{};
@@ -906,6 +907,7 @@ test "close returns at once and the reaper ends and reaps the whole group" {
         if (isUnavailableError(err)) return error.SkipZigTest;
         return err;
     };
+    // zig-lens-ignore: SHELL-CHILD test fixture: a fixed literal script, no outside input reaches it
     const argv = [_:null]?[*:0]const u8{ "sh", "-c", "trap '' HUP TERM; sleep 100 & echo JOB=$!; wait" };
     try p.spawn("/bin/sh", &argv, std.c.environ);
     const leader = p.child_pid.?;
@@ -957,6 +959,7 @@ test "close of an ordinary shell reaps it on the hangup, before the grace" {
         if (isUnavailableError(err)) return error.SkipZigTest;
         return err;
     };
+    // zig-lens-ignore: SHELL-CHILD test fixture: a fixed literal script, no outside input reaches it
     const argv = [_:null]?[*:0]const u8{ "sh", "-c", "sleep 100" };
     try p.spawn("/bin/sh", &argv, std.c.environ);
     const pid = p.child_pid.?;
