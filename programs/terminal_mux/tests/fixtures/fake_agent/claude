@@ -2,8 +2,9 @@
 """Stand-in agent for tests/zterm_runner_qa.py.
 
 Named `claude` so the zterm runner sees an agent in the pane's foreground
-(the direct interpreter shebang keeps /proc/<pid>/comm == "claude"; an
-`env` shebang would re-exec and read as "python3"). Like a real TUI it turns
+(on Linux the direct interpreter shebang keeps /proc/<pid>/comm == "claude";
+an `env` shebang would re-exec and read as "python3". macOS names a process
+after its executable, so there the harness uses claude.c). Like a real TUI it turns
 on bracketed paste, then logs every byte it receives, raw, so the test can
 assert on the exact paste brackets and the submitting CR.
 """

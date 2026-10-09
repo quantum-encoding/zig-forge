@@ -5,9 +5,11 @@ runner contract (hello/list/status/send/stop), against a real PTY pool.
 Run:  python3 tests/zterm_runner_qa.py [path-to-zterm]   (default ../zig-out/bin/zterm)
 
 Hermetic: a temp HOME (so no personal shell startup file can prompt), /bin/sh
-as the pane shell, a temp BATON_HOME, and a stand-in agent
-(tests/fixtures/fake_agent/claude) on PATH. Socket paths live under a short
-/tmp directory because sun_path is only 104-108 bytes.
+as the pane shell, a temp BATON_HOME, and a stand-in agent named `claude` on
+PATH: tests/fixtures/fake_agent/claude on Linux, where /proc/<pid>/comm is the
+script's name; on macOS, where a process's name is its executable's file name
+(a script reads as "Python"), the same agent compiled from claude.c. Socket
+paths live under a short /tmp directory because sun_path is only 104-108 bytes.
 
 What it holds the runner to — the contract's own rules:
   * a pane at a shell prompt is NOT addressable and a send there FAILS with
@@ -26,8 +28,13 @@ home = os.path.join(base, "home"); os.makedirs(home)
 ctl_sock, bh = f"{base}/c.sock", f"{base}/bh"
 os.makedirs(f"{bh}/var", exist_ok=True)
 runner_sock = f"{bh}/var/zterm.sock"
+agent_dir = os.path.join(HERE, "fixtures", "fake_agent")
+if sys.platform == "darwin":
+    agent_dir = os.path.join(base, "agent"); os.makedirs(agent_dir)
+    subprocess.run(["cc", "-O", "-o", os.path.join(agent_dir, "claude"),
+                    os.path.join(HERE, "fixtures", "fake_agent", "claude.c")], check=True)
 env = dict(os.environ, HOME=home, SHELL="/bin/sh", ZTERM_SOCKET=ctl_sock, BATON_HOME=bh,
-           PATH=os.path.join(HERE, "fixtures", "fake_agent") + ":" + os.environ["PATH"])
+           PATH=agent_dir + ":" + os.environ["PATH"])
 env.pop("BATON_AGENT_EXES", None)
 env.pop("ZTERM_RUNNER_SOCKET", None)   # the runner door is the temp BATON_HOME's
 env["WEZTERM_PANE"] = "77"; env["ZTERM_PANE"] = "88"   # must NOT reach any pane
@@ -99,6 +106,7 @@ try:
     check("argv and run are exclusive", not J(ctl_sock, {"cmd": "spawn", "argv": ["/bin/sh"], "run": "true"})["ok"])
     check("an empty argv is refused", not J(ctl_sock, {"cmd": "spawn", "argv": []})["ok"])
     check("a spawn without argv never claims exec", "exec" not in J(ctl_sock, {"cmd": "spawn", "name": "plain-shell"}))
+    J(ctl_sock, {"cmd": "kill", "name": "plain-shell"})   # like every pane made for one check
     J(ctl_sock, {"cmd": "kill", "pane": ax["pane"]})
     # ── a pane addressed by its designation: ids renumber when the server
     # restarts, names do not. Every command but spawn takes `name` for `pane`.
@@ -115,7 +123,10 @@ try:
     check("JSON send+enter executes in the pane (shell booted)", wait_for(ready, 30))
     r = subprocess.run([Z, "cli", "send", str(pane), "--", "pwd", ">", wd + "/pwd.txt"], env=env, capture_output=True, text=True)
     check("`zterm cli send -- …` works against the headless server", wait_for(lambda: os.path.exists(wd + "/pwd.txt")), r.stdout + r.stderr)
-    check("pane started in the requested cwd", open(wd + "/pwd.txt").read().strip() == wd if os.path.exists(wd + "/pwd.txt") else False)
+    # The same directory by either name: on macOS /tmp is a symlink to
+    # /private/tmp, and a shell started there reports the resolved path.
+    check("pane started in the requested cwd",
+          open(wd + "/pwd.txt").read().strip() in (wd, os.path.realpath(wd)) if os.path.exists(wd + "/pwd.txt") else False)
     # Each pane knows its own id (an agent's SessionStart hook registers with
     # it), and never inherits a pane identity from whatever started the server.
     J(ctl_sock, {"cmd": "send", "pane": pane, "text": f"echo \"$ZTERM_PANE|$WEZTERM_PANE\" > {wd}/ids.txt", "enter": True})
