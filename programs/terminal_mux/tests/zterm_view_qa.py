@@ -118,17 +118,20 @@ try:
     check("hello first, then a full frame at the requested size",
           v.msgs[0]["t"] == "hello" and v.msgs[0]["v"] == 1 and v.frames()[0]["full"]
           and (v.frames()[0]["rows"], v.frames()[0]["cols"]) == (10, 40), v.msgs[:2])
-    # One key at the prompt changes one row. Every frame since the open's
-    # full frame — the shell redrawing its prompt on the resize, the key's
-    # echo — must carry that row alone. A resize that left every row marked
-    # changed would make the next frame re-send the whole screen.
+    # Only the prompt is on screen: the rows it occupies (one, or two when a
+    # long host/user/cwd wraps it at 40 columns) are the only ones the shell
+    # writes — its own redraw on the resize, then one key's echo. Every frame
+    # since the open's full frame must carry those rows and no blank one. A
+    # resize that left every row marked changed would make the next frame
+    # re-send the whole screen, blank rows included.
     prompt_y = max((y for y, t in v.rows.items() if "$" in t), default=None)
     v.send({"input": "text", "data": "x"})
     typed = v.until(lambda: prompt_y is not None and v.rows.get(prompt_y, "").endswith("x"), 10)
-    carried = sorted({l["y"] for f in v.frames() if not f["full"] for l in f["lines"]})
-    check("later frames carry only changed rows (a key at the prompt: its row alone)",
-          typed and carried == [prompt_y],
-          (prompt_y, [(f["seq"], [l["y"] for l in f["lines"]]) for f in v.frames()]))
+    prompt_rows = {y for y, t in v.rows.items() if t.strip()}
+    carried = {l["y"] for f in v.frames() if not f["full"] for l in f["lines"]}
+    check("later frames carry only changed rows (a key at the prompt: the prompt's rows alone)",
+          typed and prompt_y in carried and carried <= prompt_rows,
+          (sorted(prompt_rows), [(f["seq"], [l["y"] for l in f["lines"]]) for f in v.frames()]))
     v.send({"input": "text", "data": "\x15"})   # Ctrl-U: the line is empty again
     v.until(lambda: not v.rows.get(prompt_y, "").endswith("x"), 10)
     v.send({"input": "text", "data": "echo ok-$((6*7)) 日本\r"})
