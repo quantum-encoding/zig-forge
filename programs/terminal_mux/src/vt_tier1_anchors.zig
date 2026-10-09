@@ -647,3 +647,80 @@ test "RIS voids replies owed to the pre-reset app" {
     h.feed("\x1bc"); // RIS
     try std.testing.expectEqual(@as(usize, 0), h.takeResp().len);
 }
+
+// ── OSC strings: command numbers, OSC 52 clipboard ──────────────────────────
+
+test "ctlseqs OSC: the command number ends at the first ';' — digits after it are data" {
+    // "OSC Ps ; Pt ST": Pt is text. Digits right after the ';' used to keep
+    // accumulating into Ps, so a title starting with a number set nothing.
+    var h = try Harness.init(3, 20);
+    defer h.deinit();
+    const t = &h.term().terminal;
+    h.feed("\x1b]0;2024 report\x07");
+    try std.testing.expectEqualStrings("2024 report", t.title[0..t.title_len]);
+    h.feed("\x1b]2;;x\x1b\\"); // an empty first field is still text
+    try std.testing.expectEqualStrings(";x", t.title[0..t.title_len]);
+    h.feed("\x1b]52;0;aGk=\x07"); // Pc is cut buffer 0, not part of Ps
+    try std.testing.expectEqualStrings("0;aGk=", t.pendingClipboard());
+}
+
+/// "\x1b]52;c;" ++ `n` base64 characters ++ BEL.
+fn osc52(alloc: std.mem.Allocator, n: usize) ![]u8 {
+    const out = try alloc.alloc(u8, 7 + n + 1);
+    @memcpy(out[0..7], "\x1b]52;c;");
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (out[7 .. 7 + n], 0..) |*ch, i| ch.* = alphabet[(i * 7) % alphabet.len];
+    out[out.len - 1] = 0x07;
+    return out;
+}
+
+test "OSC 52: a ~100 KB payload arrives whole, BEL- or ST-terminated" {
+    // The parser's OSC buffer (2 KiB) and the old 4 KiB clipboard slot both
+    // cut a real copy mid-base64; the host's decode then failed and the copy
+    // was silently lost.
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(3, 20);
+    defer h.deinit();
+    const t = &h.term().terminal;
+    const seq = try osc52(alloc, 100_000);
+    defer alloc.free(seq);
+    h.feed(seq);
+    try std.testing.expectEqualStrings(seq[5 .. seq.len - 1], t.pendingClipboard());
+    t.clearClipboard();
+    // ST instead of BEL, delivered in the small pieces a PTY read gives.
+    var off: usize = 0;
+    while (off < seq.len - 1) : (off += 4093) h.feed(seq[off..@min(off + 4093, seq.len - 1)]);
+    h.feed("\x1b\\after");
+    try std.testing.expectEqualStrings(seq[5 .. seq.len - 1], t.pendingClipboard());
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("after", h.rowText(0, &buf)); // ST's '\' not printed
+}
+
+test "OSC 52: a payload over the cap is dropped whole, never truncated" {
+    const alloc = std.testing.allocator;
+    var h = try Harness.init(3, 20);
+    defer h.deinit();
+    const t = &h.term().terminal;
+    h.feed("\x1b]52;c;aGk=\x07");
+    const big = try osc52(alloc, terminal.CLIPBOARD_CAP); // "c;" + this > cap
+    defer alloc.free(big);
+    h.feed(big);
+    try std.testing.expectEqualStrings("c;aGk=", t.pendingClipboard()); // the earlier one stands
+    // Exactly at the cap is still whole.
+    const fits = try osc52(alloc, terminal.CLIPBOARD_CAP - 2);
+    defer alloc.free(fits);
+    h.feed(fits);
+    try std.testing.expectEqual(terminal.CLIPBOARD_CAP, t.pendingClipboard().len);
+}
+
+test "OSC 52 '?' (read the clipboard) is refused with an empty reply, never the contents" {
+    var h = try Harness.init(3, 20);
+    defer h.deinit();
+    const t = &h.term().terminal;
+    h.feed("\x1b]52;c;c2VjcmV0\x07"); // something the host has pending
+    h.feed("\x1b]52;c;?\x07");
+    try std.testing.expectEqualStrings("\x1b]52;c;\x1b\\", h.takeResp());
+    try std.testing.expectEqualStrings("c;c2VjcmV0", t.pendingClipboard()); // the query replaced nothing
+    h.feed("\x1b]52;x\x7f;?\x1b\\"); // a selection xterm does not define is not echoed
+    try std.testing.expectEqualStrings("\x1b]52;c;\x1b\\", h.takeResp());
+}

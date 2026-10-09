@@ -753,15 +753,21 @@ pub export fn zterm_take_bell(handle: ?*ZtermSession) u32 {
 }
 
 /// The pending OSC 52 clipboard payload ("Pc;Pd", Pd = base64), read-and-clear.
-/// Returns the copied length (0 = none pending).
+/// Copies it into `out` and returns its length (0 = none pending). A payload
+/// is never handed over in part: when it is longer than `max`, nothing is
+/// copied, it stays pending, and 0 is returned. With `out` NULL, returns the
+/// pending payload's length without taking it, so a host can size its
+/// buffer. A payload is at most `terminal.CLIPBOARD_CAP` (128 KiB); a longer
+/// one was dropped whole by the emulator.
 pub export fn zterm_take_clipboard(handle: ?*ZtermSession, out: ?[*]u8, max: usize) usize {
     const h = handle orelse return 0;
-    const buf = out orelse return 0;
     const t = &activePane(h).terminal;
-    if (t.clipboard_len == 0) return 0;
-    const n = @min(t.clipboard_len, max);
-    @memcpy(buf[0..n], t.clipboard_pending[0..n]);
-    t.clipboard_len = 0;
+    const payload = t.pendingClipboard();
+    const buf = out orelse return payload.len;
+    if (payload.len == 0 or payload.len > max) return 0;
+    const n = payload.len;
+    @memcpy(buf[0..n], payload);
+    t.clearClipboard();
     return n;
 }
 
@@ -1422,6 +1428,35 @@ test "feed maps bytes into the grid" {
     const grid = &pane.terminal.grid;
     try std.testing.expectEqual(@as(u21, 'H'), grid.getCellConst(0, 0).char);
     try std.testing.expectEqual(@as(u21, 'i'), grid.getCellConst(0, 1).char);
+}
+
+/// A handle over a session with no PTY: enough for every call that only
+/// reads or feeds the emulator.
+fn testHandle(rows: u16, cols: u16) !ZtermSession {
+    const rect = session.Rect{ .x = 0, .y = 0, .width = cols, .height = rows };
+    return .{ .id = 0, .sess = try session.Session.init(std.testing.allocator, "t", rect, 100), .attached = true };
+}
+
+test "zterm_take_clipboard hands over a whole payload or nothing" {
+    var hs = try testHandle(5, 20);
+    defer hs.sess.deinit();
+    const h = &hs;
+    var small: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), zterm_take_clipboard(h, null, 0)); // none pending
+
+    const seq = "\x1b]52;c;aGVsbG8gd29ybGQ=\x07"; // "c;" + 16 base64 chars
+    zterm_feed(h, seq, seq.len);
+    // NULL asks the size and takes nothing.
+    try std.testing.expectEqual(@as(usize, 18), zterm_take_clipboard(h, null, 0));
+    // Too small a buffer gets nothing — not the first 8 bytes — and the
+    // payload stays for a call that can hold it.
+    try std.testing.expectEqual(@as(usize, 0), zterm_take_clipboard(h, &small, small.len));
+    var buf: [64]u8 = undefined;
+    const n = zterm_take_clipboard(h, &buf, buf.len);
+    try std.testing.expectEqualStrings("c;aGVsbG8gd29ybGQ=", buf[0..n]);
+    // Read-and-clear.
+    try std.testing.expectEqual(@as(usize, 0), zterm_take_clipboard(h, &buf, buf.len));
+    try std.testing.expectEqual(@as(usize, 0), zterm_take_clipboard(h, null, 0));
 }
 
 test "CCell layout is stable for the C header" {

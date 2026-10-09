@@ -1572,7 +1572,7 @@ const Server = struct {
         const bells = t.bell_pending;
         t.bell_pending = 0;
         const marks_touched = t.takeMarksTouched();
-        const clip = t.clipboard_pending[0..t.clipboard_len];
+        const clip = t.pendingClipboard();
         const rows = t.getCurrentGrid().rows;
         for (self.viewers.items) |*v| {
             if (v.conn < 0 or v.pane_id != p.id) continue;
@@ -1594,7 +1594,7 @@ const Server = struct {
                 self.viewerEvent(v, .{ .t = "clipboard", .pane = p.id, .b64 = enc.encode(b64, clip) });
             }
         }
-        t.clipboard_len = 0;
+        t.clearClipboard();
         t.clearDirty();
     }
 

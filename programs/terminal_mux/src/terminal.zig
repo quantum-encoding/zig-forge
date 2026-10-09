@@ -97,6 +97,11 @@ pub const Cursor = struct {
     };
 };
 
+/// Most bytes of one OSC 52 payload ("Pc;Pd", Pd = base64): 128 KiB of
+/// base64 is ~96 KiB of text. A longer payload is dropped whole, so an
+/// application cannot make the emulator allocate without bound.
+pub const CLIPBOARD_CAP: usize = 128 * 1024;
+
 /// Reply-queue capacity. A CPR is ~10 bytes and a DA ~9, so 64 holds a burst
 /// of several queries between host drains without ever reallocating.
 pub const RESP_CAPACITY = 64;
@@ -710,8 +715,13 @@ pub const Terminal = struct {
     // (BEL) and the last OSC 52 clipboard payload ("Pc;Pd", Pd = base64).
     // The C API's take_* calls read-and-clear these.
     bell_pending: u32 = 0,
-    clipboard_pending: [4096]u8 = undefined,
-    clipboard_len: usize = 0,
+    /// The last complete OSC 52 payload, waiting for the host; empty when
+    /// none. See `pendingClipboard`.
+    clipboard_pending: std.ArrayListUnmanaged(u8) = .empty,
+    /// The OSC 52 payload being received, bounded by CLIPBOARD_CAP.
+    clipboard_accum: std.ArrayListUnmanaged(u8) = .empty,
+    /// The payload being received passed CLIPBOARD_CAP: it is dropped whole.
+    clipboard_overflow: bool = false,
 
     /// Device-report replies the emulator owes the app: DA1/DA2 (`CSI c`),
     /// DSR-CPR (`CSI 6 n`), OSC 10/11 colour queries. The emulator must not
@@ -828,6 +838,8 @@ pub const Terminal = struct {
         self.apc_accum.deinit(self.allocator);
         if (self.graphics_pending) |*p| p.data.deinit(self.allocator);
         self.marks.deinit(self.allocator);
+        self.clipboard_pending.deinit(self.allocator);
+        self.clipboard_accum.deinit(self.allocator);
     }
 
     /// The lowest code point in each table below; the fast paths depend on
@@ -1594,6 +1606,65 @@ pub const Terminal = struct {
         if (bytes.len > self.resp_pending.len - self.resp_len) return;
         @memcpy(self.resp_pending[self.resp_len..][0..bytes.len], bytes);
         self.resp_len += bytes.len;
+    }
+
+    // =========================================================================
+    // OSC 52 clipboard writes
+    // =========================================================================
+
+    /// The OSC 52 payload ("Pc;Pd", Pd = base64) waiting for the host, or
+    /// empty. Always a whole payload as the application wrote it.
+    pub fn pendingClipboard(self: *const Self) []const u8 {
+        return self.clipboard_pending.items;
+    }
+
+    /// The host has taken the pending payload.
+    pub fn clearClipboard(self: *Self) void {
+        self.clipboard_pending.clearAndFree(self.allocator);
+    }
+
+    pub fn clipboardStart(self: *Self) void {
+        self.clipboard_accum.clearRetainingCapacity();
+        self.clipboard_overflow = false;
+    }
+
+    pub fn clipboardPut(self: *Self, byte: u8) void {
+        if (self.clipboard_overflow) return;
+        if (self.clipboard_accum.items.len >= CLIPBOARD_CAP) {
+            self.clipboard_overflow = true;
+            return;
+        }
+        self.clipboard_accum.append(self.allocator, byte) catch {
+            self.clipboard_overflow = true;
+        };
+    }
+
+    /// The OSC 52 string ended. A payload over CLIPBOARD_CAP is dropped
+    /// whole (never cut mid-base64, which the host would decode to garbage
+    /// or a silent no-op); a well-formed one replaces the pending payload.
+    /// `Pd` = "?" asks for the clipboard's contents: that is refused with an
+    /// empty reply, so an application waiting for an answer gets one, and the
+    /// host's clipboard never reaches the application.
+    pub fn clipboardEnd(self: *Self) void {
+        defer {
+            self.clipboard_accum.clearAndFree(self.allocator);
+            self.clipboard_overflow = false;
+        }
+        if (self.clipboard_overflow) return;
+        const payload = self.clipboard_accum.items;
+        const semi = std.mem.indexOfScalar(u8, payload, ';') orelse return;
+        const pc = payload[0..semi];
+        if (std.mem.eql(u8, payload[semi + 1 ..], "?")) {
+            // Echo the selection only when it is one xterm defines.
+            const valid = pc.len <= 16 and for (pc) |ch| {
+                if (std.mem.indexOfScalar(u8, "cpqs01234567", ch) == null) break false;
+            } else true;
+            var buf: [32]u8 = undefined;
+            const reply = std.fmt.bufPrint(&buf, "\x1b]52;{s};\x1b\\", .{if (valid) pc else "c"}) catch return;
+            self.queueResponse(reply);
+            return;
+        }
+        std.mem.swap(std.ArrayListUnmanaged(u8), &self.clipboard_pending, &self.clipboard_accum);
     }
 
     // =========================================================================

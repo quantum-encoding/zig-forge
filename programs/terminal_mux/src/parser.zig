@@ -32,6 +32,10 @@ pub const State = enum {
     dcs_passthrough,
     dcs_ignore,
     osc_string,
+    /// OSC 52 (clipboard) after its command number: the payload streams to
+    /// the emulator's bounded heap accumulator (clipboard_put), since it
+    /// outgrows the OSC buffer; BEL or ST emits clipboard_end.
+    osc_clipboard,
     sos_pm_apc_string,
     /// APC (ESC _) string — Kitty graphics protocol. Distinct from SOS/PM,
     /// whose content is still ignored. Payload is streamed to the emulator's
@@ -67,6 +71,12 @@ pub const Action = union(enum) {
     apc_put: u8,
     /// APC string terminated (ST) — dispatch the accumulated payload.
     apc_end: void,
+    /// OSC 52 — begin a clipboard payload ("Pc;Pd").
+    clipboard_start: void,
+    /// OSC 52 payload byte.
+    clipboard_put: u8,
+    /// OSC 52 terminated — publish (or drop) the payload.
+    clipboard_end: void,
 };
 
 /// CSI sequence data
@@ -109,6 +119,8 @@ pub const EscSequence = struct {
 pub const OscSequence = struct {
     command: u16,
     data: []const u8,
+    /// The string outgrew the OSC buffer and `data` is only its start.
+    truncated: bool = false,
 };
 
 /// DCS sequence data
@@ -144,6 +156,11 @@ pub const Parser = struct {
     osc_buffer: [MAX_OSC_LEN]u8,
     osc_len: usize,
     osc_command: u16,
+    /// The command number has ended (at the first non-digit): digits after
+    /// it are data, so `OSC 0;2024 BEL` titles the window "2024".
+    osc_cmd_done: bool,
+    /// Bytes past MAX_OSC_LEN were dropped from the current string.
+    osc_overflow: bool,
 
     // UTF-8 state
     utf8_buffer: [4]u8,
@@ -166,6 +183,8 @@ pub const Parser = struct {
             .osc_buffer = undefined,
             .osc_len = 0,
             .osc_command = 0,
+            .osc_cmd_done = false,
+            .osc_overflow = false,
             .utf8_buffer = undefined,
             .utf8_len = 0,
             .utf8_expected = 0,
@@ -186,7 +205,9 @@ pub const Parser = struct {
         // apc_string joins osc_string / dcs_passthrough here so ESC (0x1B)
         // reaches the string handler and is recognized as ST, rather than being
         // swallowed by handleC0 (which would never emit apc_end).
-        if (byte < 0x20 and self.state != .osc_string and self.state != .dcs_passthrough and self.state != .apc_string) {
+        if (byte < 0x20 and self.state != .osc_string and self.state != .osc_clipboard and
+            self.state != .dcs_passthrough and self.state != .apc_string)
+        {
             return self.handleC0(byte);
         }
 
@@ -199,6 +220,7 @@ pub const Parser = struct {
             .csi_intermediate => self.handleCsiIntermediate(byte),
             .csi_ignore => self.handleCsiIgnore(byte),
             .osc_string => self.handleOscString(byte),
+            .osc_clipboard => self.handleOscClipboard(byte),
             .dcs_entry => self.handleDcsEntry(byte),
             .dcs_param => self.handleDcsParam(byte),
             .dcs_intermediate => self.handleDcsIntermediate(byte),
@@ -316,6 +338,8 @@ pub const Parser = struct {
                 // OSC
                 self.osc_len = 0;
                 self.osc_command = 0;
+                self.osc_cmd_done = false;
+                self.osc_overflow = false;
                 self.state = .osc_string;
                 return .{ .none = {} };
             },
@@ -525,10 +549,7 @@ pub const Parser = struct {
             0x07 => {
                 // BEL - string terminator
                 self.state = .ground;
-                return .{ .osc_dispatch = .{
-                    .command = self.osc_command,
-                    .data = self.osc_buffer[0..self.osc_len],
-                } };
+                return self.oscDispatch();
             },
             0x1B => {
                 // ST is ESC \ — dispatch now, but land in ESCAPE state so the
@@ -537,43 +558,56 @@ pub const Parser = struct {
                 // ST-terminated OSC (tmux, iTerm2 shell integration, systemd).
                 self.state = .escape;
                 self.intermediate_count = 0;
-                return .{ .osc_dispatch = .{
-                    .command = self.osc_command,
-                    .data = self.osc_buffer[0..self.osc_len],
-                } };
+                return self.oscDispatch();
             },
-            0x30...0x39 => {
-                // Digit - part of command number
-                if (self.osc_len == 0) {
-                    self.osc_command = self.osc_command *% 10 +% (byte - '0');
-                    return .{ .none = {} };
-                }
-                // Fall through to collect as data
-                if (self.osc_len < MAX_OSC_LEN) {
-                    self.osc_buffer[self.osc_len] = byte;
-                    self.osc_len += 1;
+            else => {},
+        }
+        if (!self.osc_cmd_done) {
+            if (byte >= '0' and byte <= '9') {
+                self.osc_command = self.osc_command *| 10 +| (byte - '0');
+                return .{ .none = {} };
+            }
+            self.osc_cmd_done = true;
+            if (byte == ';') {
+                // The separator between command and data is not data.
+                if (self.osc_command == 52) {
+                    self.state = .osc_clipboard;
+                    return .{ .clipboard_start = {} };
                 }
                 return .{ .none = {} };
+            }
+        }
+        if (self.osc_len < MAX_OSC_LEN) {
+            self.osc_buffer[self.osc_len] = byte;
+            self.osc_len += 1;
+        } else {
+            self.osc_overflow = true;
+        }
+        return .{ .none = {} };
+    }
+
+    fn oscDispatch(self: *Self) Action {
+        return .{ .osc_dispatch = .{
+            .command = self.osc_command,
+            .data = self.osc_buffer[0..self.osc_len],
+            .truncated = self.osc_overflow,
+        } };
+    }
+
+    /// OSC 52 payload: every byte goes to the emulator until BEL or ST.
+    fn handleOscClipboard(self: *Self, byte: u8) Action {
+        switch (byte) {
+            0x07 => {
+                self.state = .ground;
+                return .{ .clipboard_end = {} };
             },
-            ';' => {
-                // Separator between command and data
-                if (self.osc_len == 0) {
-                    // First semicolon marks end of command number
-                    return .{ .none = {} };
-                }
-                if (self.osc_len < MAX_OSC_LEN) {
-                    self.osc_buffer[self.osc_len] = byte;
-                    self.osc_len += 1;
-                }
-                return .{ .none = {} };
+            0x1B => {
+                // ST: consume the trailing '\' in ESCAPE state (see above).
+                self.state = .escape;
+                self.intermediate_count = 0;
+                return .{ .clipboard_end = {} };
             },
-            else => {
-                if (self.osc_len < MAX_OSC_LEN) {
-                    self.osc_buffer[self.osc_len] = byte;
-                    self.osc_len += 1;
-                }
-                return .{ .none = {} };
-            },
+            else => return .{ .clipboard_put = byte },
         }
     }
 
@@ -815,6 +849,9 @@ pub fn applyAction(term: *Terminal, action: Action) void {
         .apc_end => {
             term.graphicsApcEnd();
         },
+        .clipboard_start => term.clipboardStart(),
+        .clipboard_put => |byte| term.clipboardPut(byte),
+        .clipboard_end => term.clipboardEnd(),
     }
 }
 
@@ -1348,16 +1385,8 @@ fn handleOsc(term: *Terminal, seq: OscSequence) void {
             // Options after the letter (";aid=…", ";cl=…") are ignored.
             if (parseMark(seq.data)) |m| term.recordMark(m.kind, m.exit);
         },
-        52 => {
-            // Clipboard (OSC 52;Pc;Pd, Pd = base64). Queue the payload for the
-            // host to decode + place on the system pasteboard. '?' (a clipboard
-            // READ request) is skipped — we never leak the host clipboard.
-            if (seq.data.len > 0 and !std.mem.endsWith(u8, seq.data, "?")) {
-                const n = @min(seq.data.len, term.clipboard_pending.len);
-                @memcpy(term.clipboard_pending[0..n], seq.data[0..n]);
-                term.clipboard_len = n;
-            }
-        },
+        // 52 (clipboard) never arrives here with a payload: it streams to the
+        // emulator as clipboard_start/put/end (see State.osc_clipboard).
         else => {},
     }
 }

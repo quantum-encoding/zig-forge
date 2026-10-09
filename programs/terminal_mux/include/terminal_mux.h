@@ -133,6 +133,14 @@ long zterm_pane_scroll_to(zterm_session *handle, size_t idx, int64_t line);
 bool     zterm_sync_suppressed(zterm_session *handle);
 void     zterm_cursor_style(zterm_session *handle, uint8_t *out_shape, bool *out_blink);
 uint32_t zterm_take_bell(zterm_session *handle);
+/* The last OSC 52 clipboard write ("Pc;Pd", Pd = base64), read-and-clear.
+ * Copies it into `out` and returns its length (0 = none pending). A payload
+ * is never handed over in part: longer than `max`, nothing is copied, it stays
+ * pending, and 0 is returned. With out == NULL, returns the pending length
+ * without taking it, so the host can size its buffer. Payloads are at most
+ * 131072 bytes; the emulator drops a longer one whole. An application's
+ * clipboard READ (Pd = "?") is answered with an empty payload via
+ * zterm_take_responses — the host clipboard never reaches the application. */
 size_t   zterm_take_clipboard(zterm_session *handle, uint8_t *out, size_t max);
 /* Device-report replies the emulator owes the app (DA1/DA2, DSR/CPR, OSC 10/11
  * colour queries), read-and-clear. Drain on every wake alongside zterm_drain and
