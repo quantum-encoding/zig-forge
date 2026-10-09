@@ -116,8 +116,8 @@ try:
           and (v.frames()[0]["rows"], v.frames()[0]["cols"]) == (10, 40), v.msgs[:2])
     # One key at the prompt changes one row. Every frame since the open's
     # full frame — the shell redrawing its prompt on the resize, the key's
-    # echo — must carry that row alone: a resize once left every row marked
-    # changed, and the next frame re-sent the whole screen (10 of 10 rows).
+    # echo — must carry that row alone. A resize that left every row marked
+    # changed would make the next frame re-send the whole screen.
     prompt_y = max((y for y, t in v.rows.items() if "$" in t), default=None)
     v.send({"input": "text", "data": "x"})
     typed = v.until(lambda: prompt_y is not None and v.rows.get(prompt_y, "").endswith("x"), 10)
@@ -191,7 +191,7 @@ try:
     v.until(lambda: len(clips()) >= 1, 10)
     check("an OSC 52 write reaches the view as the application's base64",
           [m.get("b64") for m in clips()] == ["aGVsbG8="], clips())
-    # ~90 KB of base64: far past the old 2 KiB parser / 4 KiB emulator cuts.
+    # ~90 KB of base64: far past the parser's 2 KiB OSC buffer.
     big = base64.b64encode(b"z" * 67500).decode()
     # The program prints `<mark>-DONE` after its write; the typed command line
     # spells it in two pieces, so only the program's output can match.

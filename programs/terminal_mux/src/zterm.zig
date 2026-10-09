@@ -2842,8 +2842,8 @@ test {
 
 test "a clipboard event carries the application's base64 as written, or nothing" {
     // docs/VIEW-PROTOCOL.md: {"t":"clipboard","b64":"aGVsbG8="} for "hello".
-    // The event once carried base64 of the whole "c;aGVsbG8=" payload, so a
-    // client's terminal set its clipboard to the literal text "c;aGVsbG8=".
+    // Base64 of the whole "c;aGVsbG8=" payload would make a client's terminal
+    // set its clipboard to the literal text "c;aGVsbG8=".
     const f = Server.clipboardEventB64;
     try testing.expectEqualStrings("aGVsbG8=", f("c;aGVsbG8=").?);
     try testing.expectEqualStrings("QQ==", f("0;QQ==").?);

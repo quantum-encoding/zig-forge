@@ -258,9 +258,9 @@ test "ctlseqs 1049 clears the alternate buffer a 47 exit kept" {
 }
 
 test "RIS inside the alternate screen returns to the primary and frees the alternate" {
-    // std.testing.allocator fails this test on a leak: before, RIS reset the
-    // mode flag only, so the alternate grid stayed on screen as "primary" and
-    // the next 1049h stashed it over the real primary, which leaked.
+    // std.testing.allocator fails this test on a leak: an RIS that reset only
+    // the mode flag would leave the alternate grid on screen as "primary",
+    // and the next 1049h would stash it over the real primary, leaking it.
     var h = try Harness.init(5, 20);
     defer h.deinit();
     var buf: [32]u8 = undefined;
@@ -454,8 +454,8 @@ test "SGR 58 (underline colour) consumes its arguments in either form" {
 }
 
 test "out-of-range SGR colours and ED/EL modes are ignored, never a crash" {
-    // A component past 255 names no colour (xterm ignores it). A u16 param
-    // was narrowed to u8 with @intCast, a safety panic in Debug/ReleaseSafe:
+    // A component past 255 names no colour (xterm ignores it). Narrowing the
+    // u16 param to u8 with @intCast is a safety panic in Debug/ReleaseSafe:
     // any program in a pane could take the whole server down with one printf.
     try std.testing.expect((try sgrCell("\x1b[38;5;300m")).fg == .default);
     try std.testing.expect((try sgrCell("\x1b[38;2;300;0;0m")).fg == .default);
@@ -651,8 +651,8 @@ test "RIS voids replies owed to the pre-reset app" {
 // ── OSC strings: command numbers, OSC 52 clipboard ──────────────────────────
 
 test "ctlseqs OSC: the command number ends at the first ';' — digits after it are data" {
-    // "OSC Ps ; Pt ST": Pt is text. Digits right after the ';' used to keep
-    // accumulating into Ps, so a title starting with a number set nothing.
+    // "OSC Ps ; Pt ST": Pt is text. Digits after the ';' read into Ps would
+    // make a title that starts with a number set nothing at all.
     var h = try Harness.init(3, 20);
     defer h.deinit();
     const t = &h.term().terminal;
@@ -675,9 +675,8 @@ fn osc52(alloc: std.mem.Allocator, n: usize) ![]u8 {
 }
 
 test "OSC 52: a ~100 KB payload arrives whole, BEL- or ST-terminated" {
-    // The parser's OSC buffer (2 KiB) and the old 4 KiB clipboard slot both
-    // cut a real copy mid-base64; the host's decode then failed and the copy
-    // was silently lost.
+    // A real copy is far larger than the parser's 2 KiB OSC buffer. Cut
+    // mid-base64, the host's decode fails and the copy is silently lost.
     const alloc = std.testing.allocator;
     var h = try Harness.init(3, 20);
     defer h.deinit();

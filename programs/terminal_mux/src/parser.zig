@@ -484,8 +484,8 @@ pub const Parser = struct {
             },
             ':' => {
                 // Colon opens a SUB-parameter of the current param (SGR 4:3,
-                // 38:2::r:g:b). It never becomes a top-level param: that
-                // shifted every parameter after it.
+                // 38:2::r:g:b). It never becomes a top-level param, which
+                // would shift every parameter after it.
                 if (self.param_count == 0) self.param_count = 1;
                 self.in_subparam = true;
                 const idx = self.param_count - 1;
