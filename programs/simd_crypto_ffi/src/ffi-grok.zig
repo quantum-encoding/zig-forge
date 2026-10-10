@@ -303,7 +303,7 @@ export fn quantum_blake3_variable(
 ///
 /// Returns:
 /// - 0 on success
-/// - negative error code on failure
+/// - negative error code on failure (invalid_input when counter + ceil(len / 64) > 2^32)
 export fn quantum_chacha20_encrypt(
     key: [*c]const u8,
     nonce: [*c]const u8,
@@ -327,6 +327,14 @@ export fn quantum_chacha20_encrypt(
     if (@intFromPtr(ciphertext) == 0) {
         setLastError("ChaCha20: ciphertext pointer is null");
         return @intFromEnum(QuantumCryptoError.invalid_output);
+    }
+    // RFC 8439 2.4: the 32-bit block counter must not wrap, so one (key, nonce) covers at most
+    // 2^32 - counter blocks. Past that, std's vectorised ChaCha20 carries into the first nonce
+    // word (emitting the keystream of nonce + 1, a reuse) and its scalar path wraps to block 0 of
+    // the same nonce (also a reuse), and the two disagree. Refuse instead.
+    if (plaintext_len > 0 and (plaintext_len - 1) / 64 > std.math.maxInt(u32) - counter) {
+        setLastError("ChaCha20: counter + blocks exceeds 2^32 (RFC 8439 2.4)");
+        return @intFromEnum(QuantumCryptoError.invalid_input);
     }
     var key_arr: [32]u8 = key[0..32].*;
     // Scrub the on-stack copy of the symmetric key before returning so it does
