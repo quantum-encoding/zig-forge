@@ -1,0 +1,23 @@
+[package]
+name = "crypto-refgen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Test-only: writes the differential corpora that programs/simd_crypto_ffi and programs/zig-quantum-encryption check under `zig build test`. Expected values come from these reference crates (the ones tauri_packages/walletcore links), never from the Zig code."
+
+# Exact pins: the corpus header records them, and `scripts/crypto-conformance.sh` regenerates the
+# corpus and diffs it, so a version change shows up as a corpus change, not silently.
+[dependencies]
+sha2 = "=0.10.9"
+sha3 = "=0.10.9"
+hmac = "=0.12.1"
+hkdf = "=0.12.4"
+pbkdf2 = "=0.12.2"
+blake3 = "=1.8.5"
+chacha20 = "=0.9.1"
+ripemd = "=0.1.3"
+k256 = { version = "=0.13.4", features = ["ecdsa"] }
+bitcoin = "0.32"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[workspace]

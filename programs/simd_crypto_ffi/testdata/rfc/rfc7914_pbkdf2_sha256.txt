@@ -1,0 +1,14 @@
+# RFC 7914 section 11, PBKDF2-HMAC-SHA256
+# Source: https://www.rfc-editor.org/rfc/rfc7914.txt
+# Extracted by tools/extract_vectors.py; do not edit.
+
+password=706173737764
+salt=73616c74
+iterations=1
+dk=55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783
+
+password=50617373776f7264
+salt=4e61436c
+iterations=80000
+dk=4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56a1d425a1225833549adb841b51c9b3176a272bdebba1d078478f62b397f33c8d
+
