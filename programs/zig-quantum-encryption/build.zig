@@ -373,6 +373,23 @@ pub fn build(b: *std.Build) void {
     });
     const run_differential_tests = b.addRunArtifact(differential_tests);
 
+    // Every ML-KEM-768 / ML-DSA-65 case of the NIST ACVP gen-val set the interface can express
+    // (src/acvp_kats.zig; data in testdata/acvp/, extracted by tools/extract_acvp.py).
+    const acvp_kat_mod = b.createModule(.{
+        .root_source_file = b.path("src/acvp_kats.zig"),
+        .target = target,
+        // 60 signatures + 30 verifications over 2.5 MB of hex; Debug is needlessly slow.
+        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .link_libc = true,
+    });
+    inline for (.{
+        "mlkem768_keygen", "mlkem768_encaps", "mlkem768_decaps", "mlkem768_dkcheck",
+        "mlkem768_ekcheck", "mldsa65_keygen",  "mldsa65_siggen",  "mldsa65_sigver",
+    }) |name| {
+        acvp_kat_mod.addAnonymousImport("acvp_" ++ name, .{ .root_source_file = b.path("testdata/acvp/" ++ name ++ ".txt") });
+    }
+    const run_acvp_kat_tests = b.addRunArtifact(b.addTest(.{ .root_module = acvp_kat_mod }));
+
     // Test step
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_ffi_tests.step);
@@ -385,6 +402,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_kem_kat_tests.step);
     test_step.dependOn(&run_secrets_tests.step);
     test_step.dependOn(&run_differential_tests.step);
+    test_step.dependOn(&run_acvp_kat_tests.step);
 
     // ========================================================================
     // Constant-time regression guard

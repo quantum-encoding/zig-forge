@@ -875,6 +875,15 @@ pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) DsaError!Si
     return signFramed(sk, "", msg, randomized);
 }
 
+/// ML-DSA.Sign_internal(sk, M', rnd) (FIPS 204 Algorithm 7) with the caller's `rnd`: the
+/// framing of `sign`, with the 32 bytes that `randomized = true` would draw from the system RNG
+/// supplied instead (all-zero `rnd` is the deterministic variant). This is the entry point the
+/// ACVP hedged internal-interface vectors drive; production code should call `sign`, which
+/// draws `rnd` itself.
+pub fn signInternalWithRnd(sk: *const SecretKey, msg: []const u8, rnd: *const [32]u8) DsaError!Signature {
+    return signFramedRnd(sk, "", msg, rnd);
+}
+
 /// Longest message-representative framing: 0x00 ‖ len(ctx) ‖ ctx with a 255-byte context.
 pub const MAX_CONTEXT_LEN = 255;
 
@@ -898,8 +907,28 @@ pub fn signWithContext(sk: *const SecretKey, msg: []const u8, ctx: []const u8, r
     return signFramed(sk, framing[0 .. 2 + ctx.len], msg, randomized);
 }
 
-/// ML-DSA.Sign_internal with mu = H(tr ‖ framing ‖ msg).
+/// `signWithContext` with the caller's `rnd` (see `signInternalWithRnd`); drives the ACVP hedged
+/// external/pure vectors.
+pub fn signWithContextRnd(sk: *const SecretKey, msg: []const u8, ctx: []const u8, rnd: *const [32]u8) DsaError!Signature {
+    if (ctx.len > MAX_CONTEXT_LEN) return DsaError.ContextTooLong;
+    var framing: [2 + MAX_CONTEXT_LEN]u8 = undefined;
+    framing[0] = 0x00;
+    framing[1] = @intCast(ctx.len);
+    @memcpy(framing[2 .. 2 + ctx.len], ctx);
+    return signFramedRnd(sk, framing[0 .. 2 + ctx.len], msg, rnd);
+}
+
+/// ML-DSA.Sign_internal with mu = H(tr ‖ framing ‖ msg); `rnd` from the system RNG when
+/// `randomized`, all-zero otherwise.
 fn signFramed(sk: *const SecretKey, framing: []const u8, msg: []const u8, randomized: bool) DsaError!Signature {
+    var rnd: [32]u8 = [_]u8{0} ** 32;
+    defer scrubValue(&rnd);
+    if (randomized) rng.fillSecureRandomSafe(&rnd) catch return error.RandomnessFailure;
+    return signFramedRnd(sk, framing, msg, &rnd);
+}
+
+/// ML-DSA.Sign_internal with mu = H(tr ‖ framing ‖ msg) and the given `rnd`.
+fn signFramedRnd(sk: *const SecretKey, framing: []const u8, msg: []const u8, rnd_in: *const [32]u8) DsaError!Signature {
     // Extract components from secret key
     const rho = sk.getRho();
     const k_bytes = sk.getK();
@@ -961,13 +990,8 @@ fn signFramed(sk: *const SecretKey, framing: []const u8, msg: []const u8, random
     h.update(msg);
     h.squeeze(&mu);
 
-    // Get randomness for signing
-    var rnd: [32]u8 = undefined;
-    if (randomized) {
-        rng.fillSecureRandomSafe(&rnd) catch return error.RandomnessFailure;
-    } else {
-        @memset(&rnd, 0);
-    }
+    // Randomness for signing (FIPS 204 Algorithm 2 step 5 / Algorithm 7 input).
+    var rnd: [32]u8 = rnd_in.*;
 
     // Compute ρ' = H(K || rnd || μ)
     var rhoprime: [64]u8 = undefined;
