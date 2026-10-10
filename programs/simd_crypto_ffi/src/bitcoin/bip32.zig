@@ -41,7 +41,11 @@ pub const Ripemd160 = struct {
 
     state: [5]u32,
     buffer: [64]u8,
-    buffer_len: u6,
+    /// Bytes waiting in `buffer`, 0...64. It must be able to hold 64: this was a `u6`, which
+    /// overflowed when an update filled the block (so the block was never compressed) and in
+    /// `final` for every message of length 63 mod 64; the ReleaseSmall archive returned wrong
+    /// digests for both. Pinned by the tests below and by src/conformance.zig.
+    buffer_len: u7,
     total_len: u64,
 
     const initial_state: [5]u32 = .{
@@ -756,6 +760,34 @@ test "RIPEMD160 test vector abc" {
         0x4a, 0x8e, 0x98, 0xc6, 0xb0, 0x87, 0xf1, 0x5a, 0x0b, 0xfc,
     };
     try std.testing.expectEqual(expected, out);
+}
+
+test "RIPEMD160: lengths 63 and 127 (the final() padding edge) and block-filling incremental updates" {
+    // Expected digests from OpenSSL's RIPEMD-160 (CPython hashlib.new("ripemd160")), not from
+    // this code. Before buffer_len became a u7, len % 64 == 63 overflowed in final() and an
+    // update that completed a buffered block never compressed it.
+    var buf: [128]u8 = undefined;
+    @memset(&buf, 'a');
+    const Case = struct { len: usize, hex: *const [40]u8 };
+    for ([_]Case{
+        .{ .len = 63, .hex = "e640041293fe663b9bf3f8c21ffecac03819e6b2" },
+        .{ .len = 64, .hex = "9dfb7d374ad924f3f88de96291c33e9abed53e32" },
+        .{ .len = 127, .hex = "64f2d68b85f394e2e4f49009c4bd50224c2698ed" },
+    }) |c| {
+        var expected: [20]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&expected, c.hex);
+        var out: [20]u8 = undefined;
+        Ripemd160.hash(buf[0..c.len], &out, .{});
+        try std.testing.expectEqualSlices(u8, &expected, &out);
+        // Every split point, so some update fills the buffered block exactly.
+        for (1..c.len) |cut| {
+            var h = Ripemd160.init();
+            h.update(buf[0..cut]);
+            h.update(buf[cut..c.len]);
+            h.final(&out);
+            try std.testing.expectEqualSlices(u8, &expected, &out);
+        }
+    }
 }
 
 test "BIP32 master key from seed" {
