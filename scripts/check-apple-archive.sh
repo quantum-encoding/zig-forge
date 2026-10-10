@@ -56,12 +56,18 @@ for archive in "$@"; do
 
   # One defined external text symbol per member. nm reads the archive itself, so a
   # misaligned member is still listed here even though ld will skip it.
+  if ! listing="$(nm -gU "$archive" 2>&1)"; then
+    echo "✗ $archive: nm cannot read it:" >&2
+    printf '%s\n' "$listing" | sed 's/^/    /' >&2
+    failed=1; continue
+  fi
   syms=() flags=()
   while IFS= read -r s; do syms+=("$s"); flags+=("-Wl,-u,$s"); done < <(
-    nm -gU "$archive" 2>/dev/null |
-      awk '/:$/ {member=$0; next} member != "" && $2 == "T" {print $3; member=""}')
+    awk '/:$/ {member=$0; next} member != "" && $2 == "T" {print $3; member=""}' <<<"$listing")
   if [ ${#syms[@]} -eq 0 ]; then
-    echo "✗ $archive: no member defines an external text symbol" >&2; failed=1; continue
+    # zig_endpoint_sec's libendpoint_sec.a is one: a module archive with no exports.
+    echo "✓ $archive defines no external text symbol; there is nothing for ld to load"
+    continue
   fi
 
   rm -f "$work/a.out"
