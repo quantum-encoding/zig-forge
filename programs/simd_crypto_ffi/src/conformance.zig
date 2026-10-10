@@ -315,6 +315,21 @@ test "RFC 8439 ChaCha20: 2.4.2, A.1 #1-#5 (keystreams), A.2 #1-#3, encrypt and d
     try testing.expectEqual(@as(usize, 9), n);
 }
 
+test "ChaCha20 counter limit (RFC 8439 2.4): the last block is allowed, wrapping past 2^32 is refused" {
+    const key = [_]u8{7} ** 32;
+    const nonce = [_]u8{3} ** 12;
+    var buf = [_]u8{0} ** 129;
+    var out: [129]u8 = undefined;
+    // Exactly the last block of the counter space, and a partial last block.
+    try testing.expectEqual(@as(c_int, 0), c.quantum_chacha20_encrypt(&key, &nonce, 0xffffffff, &buf, 64, &out));
+    try testing.expectEqual(@as(c_int, 0), c.quantum_chacha20_encrypt(&key, &nonce, 0xfffffffe, &buf, 128, &out));
+    try testing.expectEqual(@as(c_int, 0), c.quantum_chacha20_encrypt(&key, &nonce, 0xffffffff, &buf, 0, &out));
+    // One byte into a block past 2^32 - 1: refused rather than reusing keystream.
+    try testing.expectEqual(@as(c_int, -1), c.quantum_chacha20_encrypt(&key, &nonce, 0xffffffff, &buf, 65, &out));
+    try testing.expectEqual(@as(c_int, -1), c.quantum_chacha20_encrypt(&key, &nonce, 0xfffffffe, &buf, 129, &out));
+    try testing.expectEqual(@as(c_int, -1), c.quantum_chacha20_decrypt(&key, &nonce, 0xffffffff, &buf, 65, &out));
+}
+
 // ---------------------------------------------------------------------------------------------
 // RIPEMD-160 (hand-written in bitcoin/bip32.zig, so it gets the designers' full set)
 // ---------------------------------------------------------------------------------------------
