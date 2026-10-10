@@ -103,7 +103,7 @@ instead of extending them.
   the repo (`zdedupe/src/testing_scratch.zig`).
 - Zig 0.16 emits 2-byte-aligned Mach-O members; ld-prime needs 8. After rebuilding any lib
   consumed by Xcode, run `scripts/repack-for-xcode.sh <lib.a …>`, then
-  `scripts/check-apple-archive.sh` (zsss's build.zig does both for its Apple steps).
+  `scripts/check-apple-archive.sh` (zsss: build.zig repacks, `scripts/build-zsss.sh` checks).
 - `@cImport` of `EndpointSecurity/EndpointSecurity.h` fails on the macOS 27 SDK (Zig's clang
   rejects a nullability attribute in `xpc/xpc.h`); bind by hand and anchor with
   `zig_endpoint_sec/tools/gen_layout_anchors.py`. `@Type` reification and `std.once` are gone.
