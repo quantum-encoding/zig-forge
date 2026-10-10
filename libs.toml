@@ -62,10 +62,10 @@ notes     = "build.zig imports ML-DSA, zig_docx, zig_legend and zig_toml from si
 name      = "zsss"
 dir       = "zig_core_utils/zsss"
 build     = "scripts/build-zsss.sh"
-artifacts = ["zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-macos.a"]
+artifacts = ["zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-macos.a", "zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-ios.a", "zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-ios-simulator.a"]
 sources   = ["zig_core_utils/zsss", "scripts/build-zsss.sh", "scripts/repack-for-xcode.sh"]
 consumers = ["cosmic-duck-os"]
-notes     = "ReleaseFast (fixed in zsss's build.zig per target). The same build writes the iOS, simulator and Linux archives Cifra and Tessera link; Cifra's check-zig-slices.sh compares their stamps."
+notes     = "ReleaseFast (fixed in zsss's build.zig per target). The same build writes the iOS, simulator and Linux archives Cifra and Tessera link; the iOS and simulator ones Cifra links are artifacts here so their stamps and links are checked too (437F922C). Cifra's check-zig-slices.sh compares their stamps and links each."
 
 [[lib]]
 name      = "chronos_ledger"

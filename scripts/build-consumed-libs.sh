@@ -10,7 +10,13 @@
 #   - every artifact exists;
 #   - no artifact carries Zig's safety-check panic strings ("index out of bounds"), so
 #     none is a Debug or ReleaseSafe build;
-#   - the `-source-id.txt` beside each artifact equals scripts/zig-source-id.sh <dir>;
+#   - the `-source-id.txt` beside each artifact equals scripts/zig-source-id.sh <dir>,
+#     and the `.a.sha256` beside it matches the artifact's bytes
+#     (scripts/check-archive-stamp.sh), so the stamp is this archive's and not one that
+#     arrived without it;
+#   - on a Mac, every Mach-O artifact links: ld loads each of its members
+#     (scripts/check-apple-archive.sh), so none was left with Zig's 2-byte member
+#     alignment, which ld64 skips with a warning;
 #   - the row's `sources` cover every directory the build reads
 #     (scripts/zig-source-id.sh --deps <dir>), so a consumer declaring them sees every
 #     change that alters the bytes.
@@ -36,7 +42,7 @@ want=""
 for arg in "$@"; do
   case "$arg" in
     --no-release-stamp) release_stamp=0 ;;
-    -h | --help) sed -n '2,28p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,34p' "$0"; exit 0 ;;
     -*) echo "error: unknown option $arg" >&2; exit 2 ;;
     *) want="$want $arg" ;;
   esac
@@ -159,11 +165,12 @@ while IFS= read -r row; do
     if LC_ALL=C grep -a -q 'index out of bounds' "$ROOT/$art"; then
       miss "$name: $art carries safety-check panic strings (a Debug or ReleaseSafe build)"; ok=0
     fi
-    stamp="$ROOT/${art%.a}-source-id.txt"
-    if [ ! -f "$stamp" ]; then
-      miss "$name: no ${stamp#"$ROOT"/}"; ok=0
-    elif [ "$(tr -d '[:space:]' < "$stamp")" != "$fresh" ]; then
-      miss "$name: ${stamp#"$ROOT"/} does not match zig-source-id.sh $dir"; ok=0
+    if ! why="$("$ROOT/scripts/check-archive-stamp.sh" "$ROOT/$art" "$ROOT/$dir" 2>&1)"; then
+      miss "$name: ${why//"$ROOT"\//}"; ok=0
+    fi
+    if [ "$(uname -s)" = Darwin ] && otool -hv "$ROOT/$art" 2>/dev/null | grep -q 'MH_MAGIC_64' &&
+       ! why="$("$ROOT/scripts/check-apple-archive.sh" "$ROOT/$art" 2>&1)"; then
+      miss "$name: $art does not link: ${why//"$ROOT"\//}"; ok=0
     fi
   done
 

@@ -57,6 +57,26 @@ mkdir -p "$OUTPUT_DIR/ios-sim-arm64"
 SUCCESS=0
 FAILED=0
 
+# Make one emitted archive linkable and record what it is, in this order:
+#
+#   1. repack it with libtool. Zig 0.16 pads Mach-O members to 2-byte alignment, and
+#      ld64 IGNORES a 64-bit member that is not 8-byte aligned ("ignoring archive member
+#      ... not 8-byte aligned"), so every symbol in it comes out undefined in the app's
+#      link, far from the cause;
+#   2. prove the repack took, with a link that must load every member;
+#   3. stamp it (scripts/stamp-archive.sh): `-source-id.txt`, so a consumer can tell it
+#      from one built months ago, and `.a.sha256`, so the stamp cannot vouch for any
+#      other archive. Last, because the sha256 is of the final bytes.
+finish_archive() {
+    local archive="$1" id="$2"
+    "$SCRIPT_DIR/../scripts/repack-for-xcode.sh" "$archive" >/dev/null &&
+        "$SCRIPT_DIR/../scripts/check-apple-archive.sh" "$archive" &&
+        "$SCRIPT_DIR/../scripts/stamp-archive.sh" "$archive" "$id" || {
+        echo -e "${RED}  ✗ $archive: repack, link check or stamp failed${NC}"
+        return 1
+    }
+}
+
 build_lib() {
     local lib_name=$1
     local dir=$2
@@ -75,6 +95,11 @@ build_lib() {
 
     echo -e "${CYAN}Building $lib_name...${NC}"
 
+    # The identity is taken BEFORE building: a source edited mid-build then leaves a
+    # stamp that reads stale, never one that claims a newer source than the archive.
+    local id
+    id="$("$SCRIPT_DIR/../scripts/zig-source-id.sh" "$full_dir")"
+
     # Build for iOS device (arm64)
     # Use ReleaseSmall + strip to avoid linking std.debug (which uses macOS-only APIs)
     echo -e "  → iOS Device ($IOS_TARGET)"
@@ -92,11 +117,7 @@ build_lib() {
         -femit-bin="$OUTPUT_DIR/ios-arm64/lib${lib_name}.a" \
         2>&1; then
         echo -e "${GREEN}  ✓ iOS Device${NC}"
-        # Record WHAT this archive was built from. A consumer linking a prebuilt
-        # `.a` cannot otherwise tell it apart from one built months ago, and its
-        # test suite goes green either way.
-        "$SCRIPT_DIR/../scripts/zig-source-id.sh" "$full_dir" \
-            > "$OUTPUT_DIR/ios-arm64/lib${lib_name}-source-id.txt"
+        finish_archive "$OUTPUT_DIR/ios-arm64/lib${lib_name}.a" "$id" || return 1
     else
         echo -e "${RED}  ✗ iOS Device failed${NC}"
         return 1
@@ -118,11 +139,7 @@ build_lib() {
         -femit-bin="$OUTPUT_DIR/ios-sim-arm64/lib${lib_name}.a" \
         2>&1; then
         echo -e "${GREEN}  ✓ iOS Simulator${NC}"
-        # Record WHAT this archive was built from. A consumer linking a prebuilt
-        # `.a` cannot otherwise tell it apart from one built months ago, and its
-        # test suite goes green either way.
-        "$SCRIPT_DIR/../scripts/zig-source-id.sh" "$full_dir" \
-            > "$OUTPUT_DIR/ios-sim-arm64/lib${lib_name}-source-id.txt"
+        finish_archive "$OUTPUT_DIR/ios-sim-arm64/lib${lib_name}.a" "$id" || return 1
     else
         echo -e "${RED}  ✗ iOS Simulator failed${NC}"
         return 1
@@ -151,7 +168,7 @@ SKIPPED=0
 for entry in "${LIBS[@]}"; do
     IFS='|' read -r name dir source <<< "$entry"
     if ! should_build "$name"; then
-        ((SKIPPED++))
+        SKIPPED=$((SKIPPED + 1))
         continue
     fi
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -164,46 +181,6 @@ echo -e "${GREEN}Succeeded: $SUCCESS${NC}"
 echo -e "${RED}Failed: $FAILED${NC}"
 echo ""
 
-# =============================================================================
-# Repack archives via libtool for Apple's linker.
-#
-# Zig 0.16's archive writer pads Mach-O archive members to 2-byte alignment.
-# Apple's ld-prime (Xcode 16+) rejects 64-bit Mach-O archive members that
-# aren't 8-byte aligned, with:
-#
-#   ld: 64-bit mach-o member 'libfoo_zcu.o' not 8-byte aligned in 'libfoo.a'
-#
-# `libtool -static` produces correctly-aligned archives. Repacking every
-# emitted .a here means the Tauri/xcodebuild link step never trips on this.
-# Without this step the iOS build will succeed up to the link phase and
-# then fail in a way that looks like "linker is broken" rather than
-# "archive alignment is wrong."
-# =============================================================================
-REPACK_SCRIPT="$SCRIPT_DIR/../scripts/repack-for-xcode.sh"
-if [ -x "$REPACK_SCRIPT" ]; then
-    echo -e "${CYAN}=== Repacking archives for Apple's linker (8-byte alignment) ===${NC}"
-
-    DEVICE_ARCHIVES=("$OUTPUT_DIR/ios-arm64/"*.a)
-    SIM_ARCHIVES=("$OUTPUT_DIR/ios-sim-arm64/"*.a)
-
-    if [ -e "${DEVICE_ARCHIVES[0]}" ]; then
-        echo -e "${CYAN}iOS Device:${NC}"
-        "$REPACK_SCRIPT" "${DEVICE_ARCHIVES[@]}"
-    fi
-    if [ -e "${SIM_ARCHIVES[0]}" ]; then
-        echo -e "${CYAN}iOS Simulator:${NC}"
-        "$REPACK_SCRIPT" "${SIM_ARCHIVES[@]}"
-    fi
-    echo ""
-else
-    echo -e "${YELLOW}WARNING: repack-for-xcode.sh not found at $REPACK_SCRIPT${NC}"
-    echo -e "${YELLOW}         Archives may fail Apple linker's 8-byte alignment check.${NC}"
-    echo -e "${YELLOW}         If the iOS app's link step fails with \"not 8-byte aligned\","
-    echo -e "${YELLOW}         repack manually with:${NC}"
-    echo -e "${YELLOW}           libtool -static -o repacked.a *.o   (per archive)${NC}"
-    echo ""
-fi
-
 echo -e "Libraries output to:"
 echo -e "  iOS Device:    ${CYAN}$OUTPUT_DIR/ios-arm64/${NC}"
 echo -e "  iOS Simulator: ${CYAN}$OUTPUT_DIR/ios-sim-arm64/${NC}"
@@ -215,3 +192,7 @@ ls -lh "$OUTPUT_DIR/ios-arm64/"*.a 2>/dev/null || echo "  (none)"
 echo ""
 echo -e "${CYAN}Built libraries (iOS Simulator):${NC}"
 ls -lh "$OUTPUT_DIR/ios-sim-arm64/"*.a 2>/dev/null || echo "  (none)"
+
+# A library that failed to build, repack, link-check or stamp fails the script, so a
+# caller (an Xcode Run Script phase) cannot carry on against the archive it left behind.
+[ "$FAILED" -eq 0 ] || exit 1

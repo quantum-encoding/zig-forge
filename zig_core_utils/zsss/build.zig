@@ -210,7 +210,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const macos_static_install = b.addInstallArtifact(macos_static, .{});
-        macos_step.dependOn(&macos_static_install.step);
+        macos_step.dependOn(repackForXcode(b, macos_static, macos_static_install));
 
         const macos_shared = b.addLibrary(.{
             .linkage = .dynamic,
@@ -243,7 +243,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const ios_static_install = b.addInstallArtifact(ios_static, .{});
-        ios_step.dependOn(&ios_static_install.step);
+        ios_step.dependOn(repackForXcode(b, ios_static, ios_static_install));
 
         // Note: iOS doesn't support dynamic libraries for apps, only static
     }
@@ -263,7 +263,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const ios_sim_install = b.addInstallArtifact(ios_sim_static, .{});
-        ios_step.dependOn(&ios_sim_install.step);
+        ios_step.dependOn(repackForXcode(b, ios_sim_static, ios_sim_install));
     }
 
     // Apple combined step
@@ -335,4 +335,28 @@ pub fn build(b: *std.Build) void {
     const slip39_vector_tests = b.addTest(.{ .root_module = slip39_vectors_module });
     const run_slip39_vector_tests = b.addRunArtifact(slip39_vector_tests);
     test_step.dependOn(&run_slip39_vector_tests.step);
+}
+
+/// The step that leaves an installed Apple static archive linkable, to depend on in place
+/// of `install` itself.
+///
+/// Zig 0.16's archive writer pads Mach-O members to 2-byte alignment, and ld64 IGNORES a
+/// 64-bit member that is not 8-byte aligned ("ignoring archive member ... not 8-byte
+/// aligned") instead of refusing the archive, so every `_zsss_*` symbol comes out
+/// undefined in the consumer's link (Cifra's simulator build, work item 437F922C). The
+/// archive is repacked with libtool after every install: the install step copies Zig's
+/// cached output over the repacked one whenever they differ, so this always runs. libtool
+/// exists only on macOS; elsewhere the archive is left as Zig wrote it.
+fn repackForXcode(
+    b: *std.Build,
+    lib: *std.Build.Step.Compile,
+    install: *std.Build.Step.InstallArtifact,
+) *std.Build.Step {
+    if (b.graph.host.result.os.tag != .macos) return &install.step;
+    const repack = b.addSystemCommand(&.{"bash"});
+    repack.addFileArg(b.path("../../scripts/repack-for-xcode.sh"));
+    repack.addArg(b.getInstallPath(.lib, lib.out_lib_filename));
+    repack.has_side_effects = true;
+    repack.step.dependOn(&install.step);
+    return &repack.step;
 }

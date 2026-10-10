@@ -78,6 +78,13 @@ Thumbs.db
 *.release-stamp.json
 programs/cognitive_telemetry_kit/chronos-ledger/swift/Vendor/
 
+# A stamp (scripts/stamp-archive.sh) describes the archive the build wrote beside it on
+# THIS machine, so it is never tracked where the archive is not. programs/ios-libs' stamps
+# once were while the archives were ignored, and pulling a restamp commit paired a new
+# stamp with an old archive that every freshness gate then called current (FB672FF4).
+programs/ios-libs/**/*-source-id.txt
+*.a.sha256
+
 # ── Zigix OS build artifacts ─────────────────────────────────────
 *.img
 *.iso

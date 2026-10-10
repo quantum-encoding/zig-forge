@@ -11,8 +11,9 @@
 # proved nothing about the iOS binary.
 #
 # This script exists so the correct build is the easy one: a release optimisation
-# mode, the Mach-O repack Xcode's linker requires, and a source-identity stamp
-# (`<lib>-source-id.txt`, from zig-source-id.sh) beside each archive.
+# mode, the Mach-O repack Xcode's linker requires (proven by a link), and the stamps
+# scripts/stamp-archive.sh writes beside each archive: `<lib>-source-id.txt` (from
+# zig-source-id.sh) and `<lib>.a.sha256`.
 #
 #   scripts/build-macos-lib.sh <program-dir> [ReleaseSmall|ReleaseFast]
 #
@@ -79,10 +80,11 @@ for archive in zig-out/lib/*.a; do
     # Zig 0.16 emits 2-byte-aligned Mach-O members; ld-prime needs 8. Skipping this
     # fails the LINK rather than shipping something wrong, but it fails confusingly.
     "$ROOT/scripts/repack-for-xcode.sh" "$archive" >/dev/null
+    # ld64 skips a misaligned member with a warning rather than refusing the archive,
+    # so prove the repack took: a link that must load every member.
+    "$ROOT/scripts/check-apple-archive.sh" "$archive" >/dev/null
   fi
-  stamp="${archive%.a}-source-id.txt"
-  printf '%s\n' "$id" > "$stamp.tmp"
-  mv "$stamp.tmp" "$stamp"
+  "$ROOT/scripts/stamp-archive.sh" "$archive" "$id"
   echo "built + stamped $DIR/$archive ($MODE)"
   built=$((built + 1))
 done

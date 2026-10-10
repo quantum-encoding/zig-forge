@@ -138,7 +138,7 @@ keep_sources() {
   perl -0 -ne '
     chomp;
     next if m{(^|/)(zig-out|\.zig-cache|zig-cache|\.git|\.worktrees|target|\.build|\.swiftpm|node_modules|__pycache__|DerivedData)/};
-    next if m{(^|/)\.DS_Store$} || m{-source-id\.txt$} || m{\.release-stamp\.json$}
+    next if m{(^|/)\.DS_Store$} || m{-source-id\.txt$} || m{\.release-stamp\.json$} || m{\.a\.sha256$}
          || m{\.repacked$} || m{\.(a|o|dylib|so)$};
     next if -l $_ || !-f _;
     $_ = "./$_" unless m{^\.\.?/};
