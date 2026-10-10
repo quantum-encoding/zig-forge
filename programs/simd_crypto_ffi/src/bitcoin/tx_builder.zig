@@ -595,30 +595,98 @@ fn feedOutputToHasher(hasher: *Sha256, output: *const TxDestination) void {
 // ECDSA Signing
 // =============================================================================
 
-/// Sign a 32-byte hash with a private key using RFC6979 deterministic k
+/// Sign a 32-byte digest with a private key: ECDSA over secp256k1 with the RFC 6979 section 3.2
+/// deterministic nonce (HMAC-SHA256 DRBG). Returns r || s, s not yet normalised; signatureToDer
+/// applies low-S. Together they produce the bytes libsecp256k1's secp256k1_ecdsa_sign does, so
+/// Bitcoin Core's published signatures (BIP-143) and the tiny-secp256k1 fixtures reproduce
+/// exactly (src/conformance.zig, test below).
+///
+/// This used to call std's Ecdsa.signPrehashed, whose deterministic nonce is NOT RFC 6979: it
+/// HMACs V || 0x00 || Z || x || h with a 32-byte noise block Z (zeros when no noise is given),
+/// so every signature differed from every other wallet's for the same key and digest. Those
+/// signatures were valid; they were not the documented ones.
+///
+/// The digest is signed as-is (consensus verifies ECDSA over the raw sighash; hashing it again
+/// would produce signatures every node rejects).
 pub fn signHash(hash: *const [32]u8, private_key: *const [32]u8) TxBuilderError![64]u8 {
-    // Use Zig's built-in ECDSA
-    const Ecdsa = crypto.sign.ecdsa.Ecdsa(Secp256k1, Sha256);
+    const Scalar = Secp256k1.scalar.Scalar;
+    const zero16 = [_]u8{0} ** 16;
 
-    // Create key pair from private key bytes
-    const secret_key = Ecdsa.SecretKey.fromBytes(private_key.*) catch
-        return TxBuilderError.InvalidPrivateKey;
+    var d = Scalar.fromBytes(private_key.*, .big) catch return TxBuilderError.InvalidPrivateKey;
+    defer crypto.secureZero(u8, std.mem.asBytes(&d));
+    if (d.isZero()) return TxBuilderError.InvalidPrivateKey;
 
-    const key_pair = Ecdsa.KeyPair.fromSecretKey(secret_key) catch
-        return TxBuilderError.InvalidPrivateKey;
+    // z = bits2int(h) mod n; with qlen = hlen = 256 bits2int is the identity.
+    const z = Scalar.fromBytes48(zero16 ++ hash.*, .big);
 
-    // Sign the (already double-SHA256'd) sighash as a PREHASHED message.
-    // sign() would hash its input again internally — signing
-    // SHA256(sighash) instead of the sighash — which produces signatures
-    // every Bitcoin node rejects. Consensus verifies ECDSA over the raw
-    // 32-byte digest, so signPrehashed is the only correct call here.
-    // Guarded by the BIP-143 published-vector test below.
-    const sig = key_pair.signPrehashed(hash.*, null) catch
-        return TxBuilderError.SigningFailed;
-
-    // Return signature in compact form (r || s)
-    return sig.toBytes();
+    var drbg = Rfc6979.init(private_key, &z.toBytes(.big));
+    defer drbg.scrub();
+    while (true) {
+        var k_bytes = drbg.generate();
+        defer crypto.secureZero(u8, &k_bytes);
+        // k must lie in [1, n-1]; otherwise RFC 6979 step h.3 asks for the next candidate.
+        var k = Scalar.fromBytes(k_bytes, .big) catch {
+            drbg.reseed();
+            continue;
+        };
+        defer crypto.secureZero(u8, std.mem.asBytes(&k));
+        if (k.isZero()) {
+            drbg.reseed();
+            continue;
+        }
+        const point = Secp256k1.basePoint.mul(k.toBytes(.big), .big) catch return TxBuilderError.SigningFailed;
+        const r = Scalar.fromBytes48(zero16 ++ point.affineCoordinates().x.toBytes(.big), .big);
+        const s = k.invert().mul(z.add(r.mul(d)));
+        if (r.isZero() or s.isZero()) {
+            // Probability ~2^-256; libsecp256k1 likewise draws the next RFC 6979 output.
+            drbg.reseed();
+            continue;
+        }
+        return r.toBytes(.big) ++ s.toBytes(.big);
+    }
 }
+
+/// RFC 6979 section 3.2 HMAC-DRBG for qlen = hlen = 256 (secp256k1 with HMAC-SHA256).
+const Rfc6979 = struct {
+    const Hmac = crypto.auth.hmac.sha2.HmacSha256;
+    v: [32]u8,
+    k: [32]u8,
+
+    /// Steps b-g: x = int2octets(private key), h = bits2octets(digest).
+    fn init(x: *const [32]u8, h: *const [32]u8) Rfc6979 {
+        var self = Rfc6979{ .v = [_]u8{0x01} ** 32, .k = [_]u8{0x00} ** 32 };
+        for ([_]u8{ 0x00, 0x01 }) |sep| {
+            var mac = Hmac.init(&self.k);
+            mac.update(&self.v);
+            mac.update(&[_]u8{sep});
+            mac.update(x);
+            mac.update(h);
+            mac.final(&self.k);
+            Hmac.create(&self.v, &self.v, &self.k);
+        }
+        return self;
+    }
+
+    /// Step h.2: one candidate (tlen = qlen = 256, so a single V suffices).
+    fn generate(self: *Rfc6979) [32]u8 {
+        Hmac.create(&self.v, &self.v, &self.k);
+        return self.v;
+    }
+
+    /// Step h.3: K = HMAC_K(V || 0x00); V = HMAC_K(V).
+    fn reseed(self: *Rfc6979) void {
+        var mac = Hmac.init(&self.k);
+        mac.update(&self.v);
+        mac.update(&[_]u8{0x00});
+        mac.final(&self.k);
+        Hmac.create(&self.v, &self.v, &self.k);
+    }
+
+    fn scrub(self: *Rfc6979) void {
+        crypto.secureZero(u8, &self.v);
+        crypto.secureZero(u8, &self.k);
+    }
+};
 
 /// Derive compressed public key from private key
 pub fn derivePublicKey(private_key: *const [32]u8) TxBuilderError![33]u8 {
@@ -1241,13 +1309,16 @@ test "BIP-143 native P2WPKH published vector: intermediate hashes, sighash, pubk
     const pubkey = try derivePublicKey(&privkey);
     try std.testing.expectEqualSlices(u8, &expected_pub, &pubkey);
 
-    // Consensus-semantics signature check. Note: the spec's exact signature
-    // bytes are NOT asserted because std's deterministic nonce zero-fills a
-    // noise slot into the HMAC input and therefore differs from strict
-    // RFC 6979; any valid low-S signature over the correct digest is
-    // consensus-valid, so verifyPrehashed against the published digest and
-    // pubkey is the correct, nonce-agnostic oracle.
+    // The published signature itself (Bitcoin Core: RFC 6979 nonce, low-S, DER, then the
+    // SIGHASH_ALL byte). Before signHash implemented RFC 6979 this could not be asserted.
     const sig_compact = try signHash(&sighash, &privkey);
+    var der: [72]u8 = undefined;
+    const der_len = try signatureToDer(&sig_compact, &der);
+    var expected_der: [70]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected_der, "304402203609e17b84f6a7d30c80bfa610b5b4542f32a8a0d5447a12fb1366d7f01cc44a0220573a954c4518331561406f90300e8f3358f51928d43c212a8caed02de67eebee");
+    try std.testing.expectEqualSlices(u8, &expected_der, der[0..der_len]);
+
+    // Consensus semantics, independently of the nonce.
     const Ecdsa = crypto.sign.ecdsa.Ecdsa(Secp256k1, Sha256);
     const sig = Ecdsa.Signature.fromBytes(sig_compact);
     const pk = try Ecdsa.PublicKey.fromSec1(&pubkey);
