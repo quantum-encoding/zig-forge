@@ -689,7 +689,7 @@ fn roundFunction(
     const iterations: u32 = (@as(u32, BASE_ITERATION_COUNT) << iteration_exponent) / ROUND_COUNT;
     // pbkdf2 can only fail on rounds < 1 or an absurdly long derived key;
     // iterations is at least 2500 and `out` is half a master secret.
-    std.crypto.pwhash.pbkdf2(out, password, salt, iterations, HmacSha256) catch unreachable;
+    try std.crypto.pwhash.pbkdf2(out, password, salt, iterations, HmacSha256);
 }
 
 fn feistel(

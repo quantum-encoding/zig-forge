@@ -102,14 +102,14 @@ pub const TicketData = struct {
         try appendField(&buf, allocator, "ticket_id", self.ticket_id);
 
         var num_buf: [24]u8 = undefined;
-        const issued_str = std.fmt.bufPrint(&num_buf, "{d}", .{self.issued_at}) catch unreachable;
+        const issued_str = try std.fmt.bufPrint(&num_buf, "{d}", .{self.issued_at});
         try appendField(&buf, allocator, "issued_at", issued_str);
 
         if (self.seat) |seat| try appendField(&buf, allocator, "seat", seat);
         if (self.tier) |tier| try appendField(&buf, allocator, "tier", tier);
 
         if (self.expires_at) |exp| {
-            const exp_str = std.fmt.bufPrint(&num_buf, "{d}", .{exp}) catch unreachable;
+            const exp_str = try std.fmt.bufPrint(&num_buf, "{d}", .{exp});
             try appendField(&buf, allocator, "expires_at", exp_str);
         }
 

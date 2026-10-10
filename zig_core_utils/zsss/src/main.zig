@@ -929,7 +929,7 @@ fn doSplit(allocator: Allocator, config: *const Config) !void {
         const filename = std.fmt.bufPrint(&filename_buf, "{s}/share-{d}.sss", .{
             output_dir,
             share.index,
-        }) catch unreachable;
+        }) catch return error.NameTooLong;
 
         if (config.hex_mode) {
             // Write as hex
@@ -1043,13 +1043,13 @@ fn doSplitSlip39(allocator: Allocator, config: *const Config, secret: []const u8
             std.fmt.bufPrint(&filename_buf, "{s}/share-{d}.slip39", .{
                 output_dir,
                 @as(usize, share.member_index) + 1,
-            }) catch unreachable
+            }) catch return error.NameTooLong
         else
             std.fmt.bufPrint(&filename_buf, "{s}/share-g{d}-{d}.slip39", .{
                 output_dir,
                 @as(usize, share.group_index) + 1,
                 @as(usize, share.member_index) + 1,
-            }) catch unreachable;
+            }) catch return error.NameTooLong;
 
         const mnemonic = try share.toMnemonic(allocator);
         defer {
@@ -1977,4 +1977,18 @@ test "SSS combine round-trip still recovers exact secret" {
     const recovered = try SSS.combine(allocator, &subset);
     defer allocator.free(recovered);
     try std.testing.expectEqualStrings(secret, recovered);
+}
+
+// Regression: the share file name is formatted into a 256-byte buffer, and an
+// `-o` directory too long for it used to reach `catch unreachable` (a panic in
+// Debug, undefined behaviour in the ReleaseFast archives apps link). It must be
+// refused with an error before any share is written.
+test "SLIP-39 split into an output path too long for a share file name is an error" {
+    const allocator = std.testing.allocator;
+    const config = Config{ .threshold = 2, .num_shares = 3, .iteration_exponent = 0 };
+    const long_dir = "/zsss-no-such-dir/" ++ "d" ** 300;
+    try std.testing.expectError(
+        error.NameTooLong,
+        doSplitSlip39(allocator, &config, "0123456789abcdef", long_dir),
+    );
 }
