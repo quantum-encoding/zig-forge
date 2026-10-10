@@ -461,7 +461,7 @@ fn verifyEcdsa(digest: *const [32]u8, sig: *const [64]u8, pubkey: *const [33]u8)
     if (!x.equivalent(r)) return error.SignatureVerificationFailed;
 }
 
-test "tiny-secp256k1 ecdsa.json (all valid fixtures): quantum_ecdsa_sign verifies and is low-S" {
+test "tiny-secp256k1 ecdsa.json (all valid fixtures): quantum_ecdsa_sign is RFC 6979 + low-S, byte-exact" {
     const parsed = try std.json.parseFromSlice(TinyEcdsa, a, @embedFile("tiny_ecdsa"), .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
     try testing.expect(parsed.value.valid.len >= 1000);
@@ -472,7 +472,8 @@ test "tiny-secp256k1 ecdsa.json (all valid fixtures): quantum_ecdsa_sign verifie
         _ = try std.fmt.hexToBytes(&digest, v.m);
         var pubkey: [33]u8 = undefined;
         try testing.expectEqual(@as(c_int, 0), c.quantum_derive_pubkey(&sk, &pubkey));
-        _ = try signAndCheck(&sk, &digest, &pubkey);
+        const sig = try signAndCheck(&sk, &digest, &pubkey);
+        try hexEq(v.signature, &sig);
     }
 }
 
@@ -607,7 +608,7 @@ test "differential: ChaCha20 (IETF, 0-16385 bytes, random counters) vs RustCrypt
     try testing.expectEqual(@as(usize, 81), n);
 }
 
-test "differential: secp256k1 pubkey, Hash160, P2WPKH (main/test) and ECDSA validity vs libsecp256k1/k256/bitcoin" {
+test "differential: secp256k1 pubkey, Hash160, P2WPKH (main/test) and ECDSA (byte-exact DER) vs libsecp256k1/k256/bitcoin" {
     var it = records.iterate(corpus);
     var n: usize = 0;
     while (it.next()) |r| {
@@ -631,6 +632,10 @@ test "differential: secp256k1 pubkey, Hash160, P2WPKH (main/test) and ECDSA vali
         defer a.free(ref_der);
         try testing.expectEqualSlices(u8, &try r.fixed(64, "sig"), &try derToCompact(ref_der));
         _ = try signAndCheck(&sk, &digest, &pubkey);
+        var der: [72]u8 = undefined;
+        var der_len: usize = 0;
+        try testing.expectEqual(@as(c_int, 0), c.quantum_ecdsa_sign(&digest, &sk, &der, &der_len));
+        try testing.expectEqualSlices(u8, ref_der, der[0..der_len]);
         n += 1;
     }
     try testing.expect(n >= 190);
