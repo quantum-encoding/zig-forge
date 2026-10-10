@@ -390,6 +390,24 @@ pub fn build(b: *std.Build) void {
     }
     const run_acvp_kat_tests = b.addRunArtifact(b.addTest(.{ .root_module = acvp_kat_mod }));
 
+    // The hybrid KEM's classical half: RFC 7748, Wycheproof X25519, ACVP SHA3-256 / HMAC-SHA3-256
+    // and the Rust differential corpus for X25519 and the combiners (src/classical_conformance.zig).
+    const classical_mod = b.createModule(.{
+        .root_source_file = b.path("src/classical_conformance.zig"),
+        .target = target,
+        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .link_libc = true,
+    });
+    for ([_][2][]const u8{
+        .{ "rfc7748_x25519", "testdata/rfc7748/x25519.txt" },
+        .{ "wycheproof_x25519", "testdata/wycheproof/x25519_test.json" },
+        .{ "acvp_sha3_256_aft", "testdata/acvp/sha3_256_aft.txt" },
+        .{ "acvp_sha3_256_mct", "testdata/acvp/sha3_256_mct.txt" },
+        .{ "acvp_hmac_sha3_256", "testdata/acvp/hmac_sha3_256.txt" },
+        .{ "rust_reference", "testdata/differential/rust_reference.txt" },
+    }) |imp| classical_mod.addAnonymousImport(imp[0], .{ .root_source_file = b.path(imp[1]) });
+    const run_classical_tests = b.addRunArtifact(b.addTest(.{ .root_module = classical_mod }));
+
     // Test step
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_ffi_tests.step);
@@ -403,6 +421,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_secrets_tests.step);
     test_step.dependOn(&run_differential_tests.step);
     test_step.dependOn(&run_acvp_kat_tests.step);
+    test_step.dependOn(&run_classical_tests.step);
 
     // ========================================================================
     // Constant-time regression guard
