@@ -50,6 +50,11 @@ instead of extending them.
   one and every consumer's `release.toml` must change with it, or the script refuses to stamp.
 - A new `b.path("../…")` or `.path = "../…"` in a consumed program's build makes the script
   fail until the row's `sources` covers it (`scripts/zig-source-id.sh --deps <dir>`).
+- Stamp an archive only through `scripts/stamp-archive.sh` (`<lib>-source-id.txt` +
+  `<lib>.a.sha256`), after its last write; gates verify with `scripts/check-archive-stamp.sh`.
+  Never track a stamp whose archive is ignored. Prove an Apple archive with
+  `scripts/check-apple-archive.sh` (ld64 skips a misaligned member with only a warning).
+  `scripts/test-archive-gates.sh` covers all of it.
 - Only the program's `zig build lib` step writes an archive at a row's `artifacts` path, and only
   in ReleaseSmall/ReleaseFast (Debug/ReleaseSafe fail with a pointer to the script). Plain
   `zig build` and every other step install under `zig-out/lib/dev/` (endpoint_sec's `xcode` under
@@ -97,7 +102,8 @@ instead of extending them.
   runs `git add .`, so hostile fixtures get committed. Use `$TMPDIR` and assert the path is outside
   the repo (`zdedupe/src/testing_scratch.zig`).
 - Zig 0.16 emits 2-byte-aligned Mach-O members; ld-prime needs 8. After rebuilding any lib
-  consumed by Xcode, run `scripts/repack-for-xcode.sh <lib.a …>`.
+  consumed by Xcode, run `scripts/repack-for-xcode.sh <lib.a …>`, then
+  `scripts/check-apple-archive.sh` (zsss's build.zig does both for its Apple steps).
 - `@cImport` of `EndpointSecurity/EndpointSecurity.h` fails on the macOS 27 SDK (Zig's clang
   rejects a nullability attribute in `xpc/xpc.h`); bind by hand and anchor with
   `zig_endpoint_sec/tools/gen_layout_anchors.py`. `@Type` reification and `std.once` are gone.
