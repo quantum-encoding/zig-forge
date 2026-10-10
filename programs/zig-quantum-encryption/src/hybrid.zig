@@ -352,10 +352,13 @@ pub const kat_seed_x25519_sk = [_]u8{0xa3} ** 32;
 pub const kat_seed_m = [_]u8{0xa4} ** 32;
 pub const kat_seed_eph_sk = [_]u8{0xa5} ** 32;
 
-pub fn hexToArray(comptime n: usize, hex: *const [2 * n]u8) [n]u8 {
-    var out: [n]u8 = undefined;
-    _ = std.fmt.hexToBytes(&out, hex) catch unreachable;
-    return out;
+/// Decode a hex literal at compile time (KAT constants); a malformed literal is a compile error.
+pub fn hexToArray(comptime n: usize, comptime hex: *const [2 * n]u8) [n]u8 {
+    return comptime blk: {
+        var out: [n]u8 = undefined;
+        _ = std.fmt.hexToBytes(&out, hex) catch |e| @compileError("hexToArray: " ++ @errorName(e) ++ " in \"" ++ hex ++ "\"");
+        break :blk out;
+    };
 }
 
 // ============================================================================
