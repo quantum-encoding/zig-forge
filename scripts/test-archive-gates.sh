@@ -17,6 +17,7 @@
 #   - a stamp pulled through git onto a clone holding an older archive (the 338c9594
 #     restamp case, replayed with real repos) fails check-archive-stamp.sh;
 #   - so do a missing .a.sha256, a missing archive, and a stale source-id;
+#   - build-android-libs.sh stamps what it builds (A4E49146: it wrote no stamp);
 #   - this repo's .gitignore refuses the programs/ios-libs stamps and every .a.sha256,
 #     and nothing of the kind is tracked.
 #
@@ -132,6 +133,16 @@ elif grep -q 'its sources are now' <<<"$out"; then
   ok "an archive whose sources changed since stamping fails the gate"
 else
   bad "a stale archive failed for the wrong reason: $out"
+fi
+
+# A4E49146: the Android archive was the one producer that wrote no stamp at all.
+android="$ROOT/programs/simd_crypto_ffi/zig-out/lib/android-arm64/libquantum_crypto.a"
+if ! zsh -lc '"$0" quantum_crypto' "$ROOT/programs/build-android-libs.sh" >"$tmp/android.log" 2>&1; then
+  bad "build-android-libs.sh quantum_crypto failed:"; sed 's/^/      /' "$tmp/android.log"
+elif out="$("$S/check-archive-stamp.sh" "$android" "$ROOT/programs/simd_crypto_ffi" 2>&1)"; then
+  ok "build-android-libs.sh stamps the Android quantum_crypto archive (source-id + sha256)"
+else
+  bad "the Android archive is not verifiable: $out"
 fi
 
 ignored=(programs/ios-libs/ios-arm64/libquantum_crypto-source-id.txt

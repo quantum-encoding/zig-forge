@@ -1,6 +1,15 @@
 #!/bin/bash
 # Build all Zig libraries for Android (aarch64-linux-android).
-# Usage: ./build-android-libs.sh
+# Usage: ./build-android-libs.sh                   # every library below
+#        ./build-android-libs.sh quantum_crypto    # only the named ones (lib names, or
+#                                                  # financial_engine / mempool_sniffer
+#                                                  # for the native steps)
+#
+# Every archive is stamped (scripts/stamp-archive.sh) like the iOS, macOS and zsss
+# ones: <lib>-source-id.txt and <lib>.a.sha256 beside it, so a consumer
+# (quantum_vault's src-tauri/build.rs) can tell it is current and is the archive the
+# stamp was written for. Until 2026-10-10 the Android archives were the only ones
+# that carried no stamp (quantum_vault A4E49146).
 #
 # Mirror of build-ios-libs.sh — same lib set, same per-program directory
 # layout, same `zig build-lib` invocation shape. Differences:
@@ -24,6 +33,16 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ZIG="${ZIG:-zig}"
+SOURCE_ID="$SCRIPT_DIR/../scripts/zig-source-id.sh"
+STAMP="$SCRIPT_DIR/../scripts/stamp-archive.sh"
+
+WANTED=("$@")
+should_build() {
+    [ ${#WANTED[@]} -eq 0 ] && return 0
+    local w
+    for w in "${WANTED[@]}"; do [ "$w" = "$1" ] && return 0; done
+    return 1
+}
 ANDROID_TARGET="aarch64-linux-android"
 
 # Colors
@@ -40,6 +59,14 @@ echo ""
 
 SUCCESS=0
 FAILED=0
+SKIPPED=0
+count() {
+    case "$1" in
+        0) SUCCESS=$((SUCCESS + 1)) ;;
+        2) SKIPPED=$((SKIPPED + 1)) ;;
+        *) FAILED=$((FAILED + 1)) ;;
+    esac
+}
 
 # Build a single lib for android-arm64.
 #
@@ -64,9 +91,15 @@ build_lib() {
         return 1
     fi
 
+    should_build "$lib_name" || return 2
     mkdir -p "$output_dir"
 
     echo -e "${CYAN}Building $lib_name...${NC}"
+
+    # The identity is taken BEFORE building: a source edited mid-build then leaves a
+    # stamp that reads stale, never one that claims a newer source than the archive.
+    local id
+    id="$("$SOURCE_ID" "$full_dir")"
     echo -e "  → Android arm64 ($ANDROID_TARGET)"
 
     # Use ReleaseSmall + strip — same rationale as the iOS build:
@@ -90,7 +123,11 @@ build_lib() {
         "$full_dir/$source" \
         -femit-bin="$output_dir/lib${lib_name}.a" \
         2>&1; then
-        echo -e "${GREEN}  ✓ Android arm64${NC}"
+        "$STAMP" "$output_dir/lib${lib_name}.a" "$id" || {
+            echo -e "${RED}  ✗ stamping $output_dir/lib${lib_name}.a failed${NC}"
+            return 1
+        }
+        echo -e "${GREEN}  ✓ Android arm64 (stamped)${NC}"
         return 0
     else
         echo -e "${RED}  ✗ Android arm64 failed${NC}"
@@ -102,31 +139,31 @@ build_lib() {
 # Format: build_lib "lib_name" "directory" "source_file"
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "quantum_crypto" "simd_crypto_ffi" "src/ffi-grok.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
+build_lib "quantum_crypto" "simd_crypto_ffi" "src/ffi-grok.zig" && count 0 || count $?
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "http_sentinel" "http_sentinel_ffi" "src/ffi.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
+build_lib "http_sentinel" "http_sentinel_ffi" "src/ffi.zig" && count 0 || count $?
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "electrum_ffi" "electrum_ffi" "src/ffi.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
+build_lib "electrum_ffi" "electrum_ffi" "src/ffi.zig" && count 0 || count $?
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "market_data_core" "market_data_parser" "src/market_data_core.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
+build_lib "market_data_core" "market_data_parser" "src/market_data_core.zig" && count 0 || count $?
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "lockfree_core" "lockfree_queue" "src/lockfree_core.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
+build_lib "lockfree_core" "lockfree_queue" "src/lockfree_core.zig" && count 0 || count $?
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "async_core" "async_scheduler" "src/async_core.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
+build_lib "async_core" "async_scheduler" "src/async_core.zig" && count 0 || count $?
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "memory_pool_core" "memory_pool" "src/memory_pool_core.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
+build_lib "memory_pool_core" "memory_pool" "src/memory_pool_core.zig" && count 0 || count $?
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "financial_core" "financial_engine" "src/financial_core.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
+build_lib "financial_core" "financial_engine" "src/financial_core.zig" && count 0 || count $?
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "zigpdf" "zig_pdf_generator" "src/ffi.zig" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
+build_lib "zigpdf" "zig_pdf_generator" "src/ffi.zig" && count 0 || count $?
 
 # =============================================================================
 # Programs with their own `zig build android` step.
@@ -160,9 +197,16 @@ native_android_step() {
         return 1
     fi
 
+    should_build "$dir" || return 2
     echo -e "${CYAN}Native zig build android in $dir...${NC}"
+    local id archive
+    id="$("$SOURCE_ID" "$full_dir")"
     if (cd "$full_dir" && $ZIG build android) 2>&1; then
-        echo -e "${GREEN}  ✓ $dir android step${NC}"
+        for archive in "$full_dir"/zig-out/lib/android-arm64/*.a; do
+            [ -e "$archive" ] || continue
+            "$STAMP" "$archive" "$id" || { echo -e "${RED}  ✗ stamping $archive failed${NC}"; return 1; }
+        done
+        echo -e "${GREEN}  ✓ $dir android step (stamped)${NC}"
         return 0
     else
         echo -e "${RED}  ✗ $dir android step failed${NC}"
@@ -171,10 +215,10 @@ native_android_step() {
 }
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-native_android_step "financial_engine" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
+native_android_step "financial_engine" && count 0 || count $?
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-native_android_step "mempool_sniffer" && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
+native_android_step "mempool_sniffer" && count 0 || count $?
 
 # zsss lives under zig_core_utils/, not programs/. The iOS build
 # skips it with a "directory not found" warning because of the same
@@ -192,6 +236,7 @@ echo ""
 echo -e "${CYAN}=== Build Summary ===${NC}"
 echo -e "${GREEN}Succeeded: $SUCCESS${NC}"
 echo -e "${RED}Failed: $FAILED${NC}"
+echo -e "Skipped (not named): $SKIPPED"
 echo ""
 echo -e "Libraries output to per-program:"
 echo -e "  ${CYAN}<program>/zig-out/lib/android-arm64/lib<name>.a${NC}"
@@ -202,3 +247,7 @@ echo -e "${CYAN}Built libraries:${NC}"
 find "$SCRIPT_DIR" -path "*/zig-out/lib/android-arm64/*.a" 2>/dev/null | sort | while read p; do
     echo "  $(ls -lh "$p" | awk '{print $5}')  $p"
 done
+
+# A library that failed to build or stamp fails the script, so a caller cannot carry
+# on against the archive it left behind.
+[ "$FAILED" -eq 0 ] || exit 1
