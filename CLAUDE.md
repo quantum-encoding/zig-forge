@@ -50,6 +50,12 @@ instead of extending them.
   one and every consumer's `release.toml` must change with it, or the script refuses to stamp.
 - A new `b.path("../…")` or `.path = "../…"` in a consumed program's build makes the script
   fail until the row's `sources` covers it (`scripts/zig-source-id.sh --deps <dir>`).
+- Only the program's `zig build lib` step writes an archive at a row's `artifacts` path, and only
+  in ReleaseSmall/ReleaseFast (Debug/ReleaseSafe fail with a pointer to the script). Plain
+  `zig build` and every other step install under `zig-out/lib/dev/` (endpoint_sec's `xcode` under
+  `zig-out/lib/xcode/`), so a local build cannot replace a stamped archive the stamp still calls
+  fresh. A new row whose artifact sits in its program's `zig-out/lib/` needs the same `lib` step
+  (`programs/simd_crypto_ffi/build.zig`); never `b.installArtifact` the consumed archive.
 
 ## Anti-patterns: grep for these before reading a file in detail
 

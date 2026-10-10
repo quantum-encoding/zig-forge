@@ -60,7 +60,7 @@ zig build
 ./zig-out/bin/zig-docx --help
 ```
 
-`zig build` produces the CLI **and** `libzig_docx.a` (static library). For the dynamic library, run `zig build dylib` (outputs `libzig_docx.dylib` on macOS, `.so` on Linux). For WASM, see the [WASM library](#wasm-library) section below.
+`zig build` produces the CLI **and** a Debug `zig-out/lib/dev/libzig_docx.a` (static library). `zig-out/lib/libzig_docx.a` is the archive other repos link; only `zig build lib` in ReleaseSmall or ReleaseFast writes it, and on macOS `scripts/build-macos-lib.sh programs/zig_docx` from the repo root (or `./build-libs.sh`) is the build to use, since it also repacks the archive for ld-prime and stamps its source identity. For the dynamic library, run `zig build dylib` (outputs `libzig_docx.dylib` on macOS, `.so` on Linux). For WASM, see the [WASM library](#wasm-library) section below.
 
 Requires Zig 0.16.0 (stable) or later. For PDF extraction, install `poppler` (`brew install poppler` on macOS, `apt install poppler-utils` on Linux).
 

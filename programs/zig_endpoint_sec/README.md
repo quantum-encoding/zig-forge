@@ -69,7 +69,7 @@ Against the four promotion checks in the repo `CLAUDE.md`:
 
 1. **External anchors.** Struct sizes, field offsets and enumerator values from Apple clang (`layout_anchors.zig`); the message-version gate table from the header's own comments; block ABI against libdispatch; audit-token indices against libbsm; deadline arithmetic against the kernel `CLOCK_UPTIME_RAW` clock; `es_new_client` called for real and observed to refuse the unentitled test binary. No roundtrip tests.
 2. **Name.** A client binding has one direction; `zig_endpoint_sec` reads events and writes responses, both covered.
-3. **build.zig** exposes `addModule("endpoint_sec")`, a static `libendpoint_sec.a`, `zig build test`, the example, and `zig build gen-anchors`.
+3. **build.zig** exposes `addModule("endpoint_sec")`, the static `libendpoint_sec.a` and `libes_core_zig.a` (`zig build lib`, release modes only, writes them to `zig-out/lib/`; plain `zig build` to `zig-out/lib/dev/`; `zig build xcode` repacked to `zig-out/lib/xcode/`), `zig build test`, the example, and `zig build gen-anchors`.
 4. **README first sentence** matches the source: client creation, subscription, payload access, AUTH response, muting.
 
 Mutation tests, each observed red then restored green:

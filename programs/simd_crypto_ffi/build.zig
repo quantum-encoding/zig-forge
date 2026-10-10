@@ -26,8 +26,27 @@ pub fn build(b: *std.Build) void {
     // Strip debug symbols for production (reduces binary size)
     lib.root_module.strip = optimize != .Debug;
 
-    // Install to zig-out/lib/
-    b.installArtifact(lib);
+    // zig-out/lib/libquantum_crypto.a is the archive other repos link (libs.toml
+    // row `quantum_crypto`), stamped beside it by scripts/build-macos-lib.sh and
+    // scripts/build-consumed-libs.sh. Only the `lib` step writes that path, and
+    // only in a release mode; build-macos-lib.sh runs `zig build lib`. Every
+    // other build — `zig build`, any -Doptimize — installs its archive under
+    // zig-out/lib/dev/, so a local build never replaces the stamped release
+    // archive.
+    const lib_step = b.step("lib", "Build the consumed archive zig-out/lib/libquantum_crypto.a (release modes only; use scripts/build-macos-lib.sh)");
+    switch (optimize) {
+        .ReleaseSmall, .ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step),
+        .Debug, .ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
+            "zig build lib writes zig-out/lib/libquantum_crypto.a, the archive consumers link; " ++
+                "a {t} build keeps Zig's panic machinery and is never that archive. " ++
+                "Run scripts/build-macos-lib.sh programs/simd_crypto_ffi from the repo root " ++
+                "(ReleaseSmall, repacked, stamped), or plain `zig build` for zig-out/lib/dev/libquantum_crypto.a",
+            .{optimize},
+        )).step),
+    }
+    b.getInstallStep().dependOn(&b.addInstallArtifact(lib, .{
+        .dest_dir = .{ .override = .{ .custom = "lib/dev" } },
+    }).step);
 
     // =============================================================================
     // Android ARM64 Cross-Compilation Target

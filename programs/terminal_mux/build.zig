@@ -7,8 +7,10 @@
 //!   (e.g. a Swift/SwiftUI front-end) — see include/terminal_mux.h
 //!
 //! Usage:
-//!   zig build              - Build the C ABI static library + the zterm executable
-//!   zig build lib          - Build the C ABI static library + header only
+//!   zig build              - Build the zterm executable + zig-out/lib/dev/libterminal_mux.a
+//!   zig build lib          - The consumed archive zig-out/lib/libterminal_mux.a + header only
+//!                            (release modes only; scripts/build-macos-lib.sh runs it,
+//!                            then repacks and stamps)
 //!   zig build test         - Run all unit tests (Zig lib + C ABI)
 //!   zig build run          - Run the standalone terminal multiplexer
 //!   zig build bench        - Run the C ABI throughput/latency benchmark
@@ -46,13 +48,29 @@ pub fn build(b: *std.Build) void {
     // linker (Xcode's ld) consumes it.
     lib.bundle_compiler_rt = true;
     lib.installHeader(b.path("include/terminal_mux.h"), "terminal_mux.h");
-    b.installArtifact(lib);
 
-    // `zig build lib` installs the archive and its header alone. Consumers'
-    // builds (scripts/build-macos-lib.sh) use it so building the library does
-    // not also replace zig-out/bin/zterm, the CLI on PATH.
-    const lib_step = b.step("lib", "Build and install libterminal_mux.a and its header only");
-    lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step);
+    // zig-out/lib/libterminal_mux.a is the archive other repos link (libs.toml
+    // row `terminal_mux`), stamped beside it by scripts/build-macos-lib.sh and
+    // scripts/build-consumed-libs.sh. Only the `lib` step writes that path, and
+    // only in a release mode; it installs the archive and its header alone, so
+    // building the library does not also replace zig-out/bin/zterm, the CLI on
+    // PATH. Every other build — `zig build`, `zig build run`, any -Doptimize —
+    // installs its archive under zig-out/lib/dev/, so a local build never
+    // replaces the stamped release archive.
+    const lib_step = b.step("lib", "Build the consumed archive zig-out/lib/libterminal_mux.a and its header only (release modes only; use scripts/build-macos-lib.sh)");
+    switch (optimize) {
+        .ReleaseSmall, .ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step),
+        .Debug, .ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
+            "zig build lib writes zig-out/lib/libterminal_mux.a, the archive consumers link; " ++
+                "a {t} build keeps Zig's panic machinery and is never that archive. " ++
+                "Run scripts/build-macos-lib.sh programs/terminal_mux from the repo root " ++
+                "(ReleaseSmall, repacked, stamped), or plain `zig build` for zig-out/lib/dev/libterminal_mux.a",
+            .{optimize},
+        )).step),
+    }
+    b.getInstallStep().dependOn(&b.addInstallArtifact(lib, .{
+        .dest_dir = .{ .override = .{ .custom = "lib/dev" } },
+    }).step);
 
     // ==========================================================================
     // Benchmark (drives the C ABI like a host application would)

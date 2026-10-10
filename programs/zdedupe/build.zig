@@ -37,7 +37,28 @@ pub fn build(b: *std.Build) void {
     // toolchain provides those, so without this the archive links under
     // `zig build` and fails under Xcode's ld and Rust's linker alike.
     static_lib.bundle_compiler_rt = true;
-    b.installArtifact(static_lib);
+
+    // zig-out/lib/libzdedupe.a is the archive libs.toml row `zdedupe` stamps
+    // (scripts/build-macos-lib.sh and scripts/build-consumed-libs.sh), and the
+    // stamp zdedupe's inputs-fresh gate reads. Only the `lib` step writes that
+    // path, and only in a release mode; build-macos-lib.sh runs `zig build lib`.
+    // Every other build — `zig build`, `zig build run`, any -Doptimize —
+    // installs its archive under zig-out/lib/dev/, so a local build never
+    // replaces the stamped release archive.
+    const lib_step = b.step("lib", "Build the consumed archive zig-out/lib/libzdedupe.a (release modes only; use scripts/build-macos-lib.sh)");
+    switch (optimize) {
+        .ReleaseSmall, .ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(static_lib, .{}).step),
+        .Debug, .ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
+            "zig build lib writes zig-out/lib/libzdedupe.a, the archive libs.toml stamps; " ++
+                "a {t} build keeps Zig's panic machinery and is never that archive. " ++
+                "Run scripts/build-macos-lib.sh programs/zdedupe ReleaseFast from the repo root " ++
+                "(repacked, stamped), or plain `zig build` for zig-out/lib/dev/libzdedupe.a",
+            .{optimize},
+        )).step),
+    }
+    b.getInstallStep().dependOn(&b.addInstallArtifact(static_lib, .{
+        .dest_dir = .{ .override = .{ .custom = "lib/dev" } },
+    }).step);
 
     // ============================================================
     // Shared Library (for dynamic linking)

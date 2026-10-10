@@ -55,7 +55,28 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
     });
     static_lib.bundle_compiler_rt = true;
-    b.installArtifact(static_lib);
+
+    // zig-out/lib/libzig_docx.a is the archive other repos link (libs.toml row
+    // `zig_docx`), stamped beside it by scripts/build-macos-lib.sh and
+    // scripts/build-consumed-libs.sh. Only the `lib` step writes that path, and
+    // only in a release mode; build-macos-lib.sh runs `zig build lib`. Every
+    // other build — `zig build`, `zig build run`, any -Doptimize — installs its
+    // archive under zig-out/lib/dev/, so a local build never replaces the
+    // stamped release archive.
+    const lib_step = b.step("lib", "Build the consumed archive zig-out/lib/libzig_docx.a (release modes only; use scripts/build-macos-lib.sh)");
+    switch (optimize) {
+        .ReleaseSmall, .ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(static_lib, .{}).step),
+        .Debug, .ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
+            "zig build lib writes zig-out/lib/libzig_docx.a, the archive consumers link; " ++
+                "a {t} build keeps Zig's panic machinery and is never that archive. " ++
+                "Run scripts/build-macos-lib.sh programs/zig_docx from the repo root " ++
+                "(ReleaseSmall, repacked, stamped), or plain `zig build` for zig-out/lib/dev/libzig_docx.a",
+            .{optimize},
+        )).step),
+    }
+    b.getInstallStep().dependOn(&b.addInstallArtifact(static_lib, .{
+        .dest_dir = .{ .override = .{ .custom = "lib/dev" } },
+    }).step);
 
     // ============================================================
     // Dynamic Library (libzig_docx.dylib / .so)

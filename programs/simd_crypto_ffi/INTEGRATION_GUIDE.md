@@ -17,10 +17,10 @@ Production-ready cryptographic functions for Rust via Zig FFI.
 
 ```bash
 cd <zig-forge>/programs/simd_crypto_ffi
-zig build -Doptimize=ReleaseFast
+zig build lib -Doptimize=ReleaseFast
 ```
 
-This creates: `zig-out/lib/libquantum_crypto.a` (36KB)
+This creates: `zig-out/lib/libquantum_crypto.a`. On macOS, `scripts/build-macos-lib.sh programs/simd_crypto_ffi` from the repo root is the build to link: it also repacks the archive for ld-prime and stamps its source identity.
 
 ### 2. Test with C
 
@@ -292,20 +292,22 @@ We do **NOT** implement custom crypto. We only provide FFI wrappers.
 ### Debug Build
 
 ```bash
-zig build  # Default: Debug mode
+zig build  # Default: Debug mode, writes zig-out/lib/dev/libquantum_crypto.a
 ```
 
 ### Release Build (Recommended)
 
 ```bash
-zig build -Doptimize=ReleaseFast
+zig build lib -Doptimize=ReleaseFast
 ```
 
 ### Release with Size Optimization
 
 ```bash
-zig build -Doptimize=ReleaseSmall
+zig build lib -Doptimize=ReleaseSmall
 ```
+
+Only `zig build lib`, and only in ReleaseFast or ReleaseSmall, writes `zig-out/lib/libquantum_crypto.a`; any other build installs to `zig-out/lib/dev/`.
 
 Results:
 - `ReleaseFast`: 36KB (fastest)
@@ -331,7 +333,7 @@ println!("cargo:rustc-link-lib=static=quantum_crypto");
 
 **Solution**: Library not built or wrong architecture. Rebuild:
 ```bash
-zig build -Doptimize=ReleaseFast
+zig build lib -Doptimize=ReleaseFast
 ```
 
 ## Next Steps

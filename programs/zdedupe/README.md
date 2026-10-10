@@ -43,7 +43,7 @@ With `--dirs`, `--min-size`/`--max-size` filter the reported file groups only (t
 
 ## Library / FFI
 
-`zig build` produces `libzdedupe.a`; `zig build shared` produces the dynamic library; `zig build header` installs `include/zdedupe.h`.
+`zig build` produces a Debug `zig-out/lib/dev/libzdedupe.a`; `zig build lib -Doptimize=ReleaseFast` produces `zig-out/lib/libzdedupe.a`, the archive libs.toml stamps (only `zig build lib`, only in a release mode, writes it); `zig build shared` produces the dynamic library; `zig build header` installs `include/zdedupe.h`.
 
 The C ABI is 21 symbols (`zdedupe_init` … `zdedupe_version`), all declared in `include/zdedupe.h`. **The JSON document returned by `zdedupe_run_sync` is part of the ABI**: the Tauri app (`src-tauri/src/ffi.rs`, serde) and the native Swift app (`ZDedupeEngine.swift`, `JSONDecoder`) decode it into typed models to decide which files to offer for deletion. Field names and types are documented in the header and asserted in `src/tier1_anchors.zig`; changing one without updating both consumers breaks them silently.
 
@@ -55,7 +55,7 @@ The C ABI is 21 symbols (`zdedupe_init` … `zdedupe_version`), all declared in 
 
 Duplicate groups list their files oldest first (mtime, then path) in every output.
 
-After rebuilding the static lib for the Xcode/Swift consumer, repack it: `zig-forge/scripts/repack-for-xcode.sh zig-out/lib/libzdedupe.a` (Zig 0.16 emits 2-byte-aligned Mach-O members; Apple's ld-prime needs 8).
+For the Xcode/Swift consumer, build it with `scripts/build-macos-lib.sh programs/zdedupe ReleaseFast` from the repo root: that runs `zig build lib`, repacks `zig-out/lib/libzdedupe.a` (Zig 0.16 emits 2-byte-aligned Mach-O members; Apple's ld-prime needs 8) and stamps its source identity.
 
 ## Correctness posture
 

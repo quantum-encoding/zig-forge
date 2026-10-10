@@ -13,8 +13,9 @@
 #     the program now (same sources, by content — not by mtime);
 #   - the archive is not newer than that stamp. scripts/build-macos-lib.sh writes the
 #     stamp after the archive, so an archive newer than its stamp was written by
-#     something else — typically a hand-run `zig build`, which is Debug and
-#     unrepacked for ld-prime.
+#     something else — a hand-run `zig build lib -Doptimize=…`, which is
+#     unrepacked for ld-prime and built for the host's macOS floor. (Plain
+#     `zig build` writes zig-out/lib/dev/ and never this archive.)
 # Otherwise it is rebuilt with scripts/build-macos-lib.sh (ReleaseSmall, repacked,
 # stamped), the same command consumers' release.toml files declare.
 #

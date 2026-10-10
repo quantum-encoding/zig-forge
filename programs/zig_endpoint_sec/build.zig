@@ -23,7 +23,6 @@ pub fn build(b: *std.Build) void {
         .name = "endpoint_sec",
         .root_module = mod,
     });
-    b.installArtifact(lib);
 
     // Tests: layout anchors need no entitlement; client tests exercise the
     // real es_new_client path and expect NOT_ENTITLED / NOT_PERMITTED.
@@ -56,12 +55,44 @@ pub fn build(b: *std.Build) void {
         .root_module = capi_mod,
     });
     capi.installHeader(b.path("include/es_core.h"), "es_core.h");
-    b.installArtifact(capi);
 
-    // `zig build xcode`: install, then repack the archive so Apple's ld accepts it.
-    const repack = b.addSystemCommand(&.{ "../../scripts/repack-for-xcode.sh", "zig-out/lib/libes_core_zig.a", "zig-out/lib/libendpoint_sec.a" });
-    repack.step.dependOn(b.getInstallStep());
-    const xcode_step = b.step("xcode", "Build and repack the static libraries for linking from Xcode");
+    // zig-out/lib/libes_core_zig.a and zig-out/lib/libendpoint_sec.a are the
+    // archives libs.toml row `endpoint_sec` stamps (scripts/build-macos-lib.sh,
+    // scripts/build-consumed-libs.sh). Only the `lib` step writes those paths,
+    // and only in a release mode; build-macos-lib.sh runs `zig build lib`.
+    // `zig build` and any -Doptimize install the archives under zig-out/lib/dev/,
+    // and `zig build xcode` under zig-out/lib/xcode/, so neither replaces the
+    // stamped release archives.
+    const lib_step = b.step("lib", "Build the archives libs.toml stamps into zig-out/lib/ (release modes only; use scripts/build-macos-lib.sh)");
+    switch (optimize) {
+        .ReleaseSmall, .ReleaseFast => {
+            lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step);
+            lib_step.dependOn(&b.addInstallArtifact(capi, .{}).step);
+        },
+        .Debug, .ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
+            "zig build lib writes zig-out/lib/libes_core_zig.a and libendpoint_sec.a, the archives libs.toml stamps; " ++
+                "a {t} build keeps Zig's panic machinery and is never those archives. " ++
+                "Run scripts/build-macos-lib.sh programs/zig_endpoint_sec ReleaseFast from the repo root " ++
+                "(repacked, stamped), plain `zig build` for zig-out/lib/dev/, or `zig build xcode` for zig-out/lib/xcode/",
+            .{optimize},
+        )).step),
+    }
+    const dev_dir: std.Build.Step.InstallArtifact.Options = .{ .dest_dir = .{ .override = .{ .custom = "lib/dev" } } };
+    b.getInstallStep().dependOn(&b.addInstallArtifact(lib, dev_dir).step);
+    b.getInstallStep().dependOn(&b.addInstallArtifact(capi, dev_dir).step);
+
+    // `zig build xcode` (MetatronSecurity's es-core/build.sh, any -Doptimize):
+    // install both archives under zig-out/lib/xcode/, then repack them so
+    // Apple's ld accepts them.
+    const xcode_dir: std.Build.InstallDir = .{ .custom = "lib/xcode" };
+    const repack = b.addSystemCommand(&.{
+        "../../scripts/repack-for-xcode.sh",
+        b.getInstallPath(xcode_dir, "libes_core_zig.a"),
+        b.getInstallPath(xcode_dir, "libendpoint_sec.a"),
+    });
+    repack.step.dependOn(&b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = xcode_dir } }).step);
+    repack.step.dependOn(&b.addInstallArtifact(capi, .{ .dest_dir = .{ .override = xcode_dir } }).step);
+    const xcode_step = b.step("xcode", "Build and repack the static libraries into zig-out/lib/xcode/ for linking from Xcode");
     xcode_step.dependOn(&repack.step);
 
     // Example: subscribe to a few NOTIFY events and print them. Needs the ES

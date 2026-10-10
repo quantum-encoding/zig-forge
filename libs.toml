@@ -9,7 +9,9 @@
 #   build      the command that builds it, run from the repo root. A consumer's
 #              release.toml must declare this exact string: `baton release` hashes it into
 #              the input's identity.
-#   artifacts  what the build produces, repo-relative
+#   artifacts  what the build produces, repo-relative. An archive in its program's zig-out/lib/ is
+#              written only by that program's `zig build lib` step, in a release mode; plain
+#              `zig build` installs under zig-out/lib/dev/, so it never replaces a stamped one.
 #   sources    what a consumer's release.toml must declare as `sources` (array form),
 #              repo-relative. It covers the program dir, every directory its build
 #              reaches into (scripts/zig-source-id.sh --deps <dir>), and the build scripts.
@@ -90,4 +92,4 @@ build     = "scripts/build-macos-lib.sh programs/zig_endpoint_sec ReleaseFast"
 artifacts = ["programs/zig_endpoint_sec/zig-out/lib/libes_core_zig.a", "programs/zig_endpoint_sec/zig-out/lib/libendpoint_sec.a"]
 sources   = ["programs/zig_endpoint_sec", "programs/zig_darwin_kit", "scripts/build-macos-lib.sh", "scripts/repack-for-xcode.sh"]
 consumers = []
-notes     = "MetatronSecurity's es-core/build.sh builds and copies libes_core_zig.a itself (`zig build -Doptimize=ReleaseFast xcode`); this row proves the program builds from a clean checkout in that mode."
+notes     = "MetatronSecurity's es-core/build.sh builds and copies libes_core_zig.a itself (`zig build -Doptimize=ReleaseFast xcode`, which writes zig-out/lib/xcode/); this row proves the program builds from a clean checkout in that mode."

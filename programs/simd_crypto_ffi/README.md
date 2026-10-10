@@ -33,9 +33,12 @@ Tests are externally anchored (NIST FIPS 180-4, RFC 4231, official BLAKE3 vector
 ## Build
 
 ```bash
-zig build          # host static lib -> zig-out/lib/libquantum_crypto.a
+zig build          # host static lib (Debug) -> zig-out/lib/dev/libquantum_crypto.a
+zig build lib -Doptimize=ReleaseSmall  # -> zig-out/lib/libquantum_crypto.a (release modes only)
 zig build android  # aarch64-linux-android (PIC, for the Tauri cdylib) -> zig-out/lib/android-arm64/
 zig build test     # FFI + Zig-module unit tests
 ```
+
+The macOS archive other repos link is `scripts/build-macos-lib.sh programs/simd_crypto_ffi` from the repo root: `zig build lib` in ReleaseSmall for a macOS 14.0 floor, repacked for ld-prime and stamped with its source identity. Only `zig build lib` writes `zig-out/lib/libquantum_crypto.a`, so a local build never replaces it.
 
 > macOS consumers: after rebuilding, repack the `.a` for Xcode via `zig-forge/scripts/repack-for-xcode.sh` (Zig 0.16 emits 2-byte-aligned Mach-O members; Apple's ld-prime needs 8-byte).
