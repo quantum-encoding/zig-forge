@@ -533,12 +533,12 @@ export fn zig_lens_analyze_source(
     // Language-specific analysis
     switch (lang) {
         .zig => {
-            const source_z = allocator.dupeZ(u8, source) catch {
+            const source_z = allocator.dupeSentinel(u8, source, 0) catch { // dupeZ is gone in Zig 0.17
                 setLastError("out of memory");
                 return @intFromEnum(ZigLensResult.err_oom);
             };
 
-            var ast = Ast.parse(allocator, source_z, .zig) catch {
+            var ast = Ast.parse(allocator, source_z, if (@hasDecl(Ast, "ParseOptions")) .{ .mode = .zig } else .zig) catch {
                 setLastError("zig parse failed");
                 return @intFromEnum(ZigLensResult.err_analysis);
             };

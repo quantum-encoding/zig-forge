@@ -193,7 +193,7 @@ fn writeTree(
 
     // Render
     try appendFmt(allocator, buf, "{s}/\n", .{project_name});
-    var ancestry: [64]bool = .{false} ** 64;
+    var ancestry: [64]bool = @splat(false);
     for (root.children.items, 0..) |child, i| {
         const is_last = (i == root.children.items.len - 1);
         try renderNode(allocator, buf, child, 0, is_last, &ancestry);

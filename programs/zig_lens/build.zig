@@ -1,5 +1,10 @@
 const std = @import("std");
 
+// Zig 0.17 renamed the optimize tags (Debug/ReleaseSafe/ReleaseFast/ReleaseSmall became
+// debug/safe/fast/small) and keeps the old names only as declarations on the enum, which an
+// enum literal cannot reach; naming them through the type compiles on 0.16 and 0.17.
+const Optimize = std.builtin.OptimizeMode;
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -36,9 +41,8 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    // Zig 0.17 removed `b.args` in favour of `addPassthruArgs`, which 0.16 lacks.
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zig-lens");
     run_step.dependOn(&run_cmd.step);
@@ -61,7 +65,7 @@ pub fn build(b: *std.Build) void {
     });
 
     lib.root_module.link_libc = true;
-    lib.root_module.strip = optimize != .Debug;
+    lib.root_module.strip = optimize != Optimize.Debug;
 
     b.installArtifact(lib);
 
@@ -81,14 +85,14 @@ pub fn build(b: *std.Build) void {
     const android_toml_module = b.createModule(.{
         .root_source_file = b.path("../zig_toml/src/lib.zig"),
         .target = android_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
         .link_libc = true,
     });
 
     const android_module = b.createModule(.{
         .root_source_file = b.path("src/ffi.zig"),
         .target = android_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     android_module.addImport("zig_toml", android_toml_module);
 

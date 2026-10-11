@@ -66,7 +66,8 @@ pub fn parseFile(
         return error.NestingTooDeep;
     }
 
-    var ast = Ast.parse(allocator, source, .zig) catch {
+    // Zig 0.17 takes an options struct here; 0.16 takes the mode enum.
+    var ast = Ast.parse(allocator, source, if (@hasDecl(Ast, "ParseOptions")) .{ .mode = .zig } else .zig) catch {
         allocator.free(source);
         return error.ParseFailed;
     };
