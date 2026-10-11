@@ -333,7 +333,7 @@ pub fn formatIdle(idle_secs: i64, buf: []u8) []const u8 {
 fn getIdleSeconds(line: []const u8) i64 {
     if (line.len == 0) return 0;
     var path_buf: [64]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/dev/{s}", .{line}) catch return 0;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "/dev/{s}", .{line}, 0) catch return 0;
     var st: libc.Stat = undefined;
     if (fstatat(AT_FDCWD, path.ptr, &st, 0) != 0) return 0;
     const atime_s: i64 = @intCast(st.atimespec.sec);
@@ -481,7 +481,7 @@ fn writeMinWidth(s: []const u8, width: usize) void {
 fn catUserFile(home: []const u8, name: []const u8, header: []const u8) void {
     if (home.len == 0) return;
     var path_buf: [1024]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ home, name }) catch return;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}", .{ home, name }, 0) catch return;
     const fd = libc.open(path.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
     if (fd < 0) return;
     defer _ = libc.close(fd);

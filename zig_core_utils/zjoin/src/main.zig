@@ -733,7 +733,7 @@ fn readWholeFile(arena: std.mem.Allocator, name: []const u8) ![]u8 {
     var fd: c_int = 0;
     if (!is_stdin) {
         var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{name}) catch {
+        const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{name}, 0) catch {
             die("zjoin: {s}: file name too long\n", .{name});
         };
         const fd_ret = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));

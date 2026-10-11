@@ -18,9 +18,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zmknod");
     run_step.dependOn(&run_cmd.step);
@@ -39,7 +37,7 @@ pub fn build(b: *std.Build) void {
     // GNU parity tests: shell out to the installed zmknod binary and diff
     // its behavior against the real GNU coreutils `mknod` binary.
     const test_options = b.addOptions();
-    test_options.addOption([]const u8, "zmknod_bin", b.getInstallPath(.bin, "zmknod"));
+    if (@hasDecl(std.Build, "getInstallPath")) test_options.addOption([]const u8, "zmknod_bin", b.getInstallPath(.bin, "zmknod")) else test_options.addOptionPath("zmknod_bin", exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{

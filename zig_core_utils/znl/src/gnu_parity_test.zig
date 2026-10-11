@@ -17,6 +17,17 @@
 //! (`znl_bin`) so `zig build test` exercises the real compiled executable.
 
 const std = @import("std");
+
+/// Comptime string repeat; Zig 0.17 removed the `**` operator.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n:0]u8 {
+    const final = comptime blk: {
+        var out: [s.len * n:0]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        out[s.len * n] = 0;
+        break :blk out;
+    };
+    return &final;
+}
 const build_options = @import("build_options");
 
 const znl_bin = build_options.znl_bin;
@@ -129,16 +140,16 @@ test "-b a: number all lines including blank" {
 
 test "-w 40: wide field must not drop the number (HIGH bug regression)" {
     // GNU right-justifies into 40 columns: 39 spaces then '1'.
-    const line1 = " " ** 39 ++ "1\talpha\n";
-    const line2 = " " ** 39 ++ "2\t\n";
-    const line3 = " " ** 39 ++ "3\tbeta\n";
+    const line1 = comptime repeat(" ", 39) ++ "1\talpha\n";
+    const line2 = comptime repeat(" ", 39) ++ "2\t\n";
+    const line3 = comptime repeat(" ", 39) ++ "3\tbeta\n";
     try expectOutput(&.{ "-w", "40", "-b", "a" }, three_lines, line1 ++ line2 ++ line3);
 }
 
 test "-w 100: very wide field" {
-    const line1 = " " ** 99 ++ "1\talpha\n";
-    const line2 = " " ** 99 ++ "2\t\n";
-    const line3 = " " ** 99 ++ "3\tbeta\n";
+    const line1 = comptime repeat(" ", 99) ++ "1\talpha\n";
+    const line2 = comptime repeat(" ", 99) ++ "2\t\n";
+    const line3 = comptime repeat(" ", 99) ++ "3\tbeta\n";
     try expectOutput(&.{ "-w", "100", "-b", "a" }, three_lines, line1 ++ line2 ++ line3);
 }
 
@@ -154,8 +165,8 @@ test "-n ln: left justified, no leading zeros" {
 
 test "-s long separator: unnumbered pad tracks width+separator (MED bug regression)" {
     // 70-char separator; pad on the blank line must be width(6)+sep(70) spaces.
-    const sep = "X" ** 70;
-    const pad = " " ** (6 + 70);
+    const sep = comptime repeat("X", 70);
+    const pad = comptime repeat(" ", 6 + 70);
     const expected = "     1" ++ sep ++ "alpha\n" ++ pad ++ "\n" ++ "     2" ++ sep ++ "beta\n";
     try expectOutput(&.{ "-s", sep }, three_lines, expected);
 }

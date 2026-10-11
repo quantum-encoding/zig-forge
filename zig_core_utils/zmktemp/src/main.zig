@@ -141,7 +141,7 @@ fn buildName(full: []const u8, explicit_suffix: ?[]const u8, out: []u8) GenError
 
 fn createTempFile(path: []const u8) bool {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return false;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return false;
     // Platform-correct flags via the typed std.c.O bitfield: O_CREAT|O_EXCL|O_RDWR.
     // O_EXCL is the anti-symlink / TOCTOU guarantee, so it must actually reach the
     // kernel on Darwin too (hardcoded Linux numeric literals silently mis-map here).
@@ -154,7 +154,7 @@ fn createTempFile(path: []const u8) bool {
 
 fn createTempDir(path: []const u8) bool {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return false;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return false;
     return libc.mkdir(path_z, @as(libc.mode_t, 0o700)) == 0;
 }
 

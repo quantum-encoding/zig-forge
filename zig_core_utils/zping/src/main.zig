@@ -17,18 +17,9 @@
 const std = @import("std");
 const posix = std.posix;
 
-const c = @cImport({
-    @cInclude("netdb.h");
-    @cInclude("sys/socket.h");
-    @cInclude("netinet/in.h");
-    @cInclude("netinet/ip_icmp.h");
-    @cInclude("arpa/inet.h");
-    @cInclude("unistd.h");
-    @cInclude("errno.h");
-    @cInclude("string.h");
-    @cInclude("poll.h");
-    @cInclude("time.h");
-});
+// Zig 0.17 removed @cImport; std.c carries identical prototypes for everything used here.
+const c = std.c;
+extern "c" fn strerror(errnum: c_int) [*:0]const u8;
 
 const VERSION = "1.0.0";
 
@@ -248,32 +239,32 @@ const PingStats = struct {
 // DNS Resolution
 // ============================================================================
 
-fn resolveHost(host: []const u8, addr_out: *c.struct_sockaddr_in) !void {
+fn resolveHost(host: []const u8, addr_out: *c.sockaddr.in) !void {
     var host_buf: [256]u8 = undefined;
     if (host.len >= host_buf.len) return error.HostTooLong;
 
     @memcpy(host_buf[0..host.len], host);
     host_buf[host.len] = 0;
 
-    var hints: c.struct_addrinfo = std.mem.zeroes(c.struct_addrinfo);
-    hints.ai_family = c.AF_INET;
-    hints.ai_socktype = c.SOCK_RAW;
+    var hints: c.addrinfo = std.mem.zeroes(c.addrinfo);
+    hints.family = c.AF.INET;
+    hints.socktype = c.SOCK.RAW;
 
-    var result: ?*c.struct_addrinfo = null;
-    const gai_ret = c.getaddrinfo(&host_buf, null, &hints, &result);
+    var result: ?*c.addrinfo = null;
+    const gai_ret = c.getaddrinfo(host_buf[0..host.len :0], null, &hints, &result);
 
-    if (gai_ret != 0 or result == null) {
+    if (@intFromEnum(gai_ret) != 0 or result == null) {
         return error.ResolutionFailed;
     }
-    defer c.freeaddrinfo(result);
+    defer c.freeaddrinfo(result.?);
 
-    const sockaddr: *c.struct_sockaddr_in = @ptrCast(@alignCast(result.?.ai_addr));
+    const sockaddr: *c.sockaddr.in = @ptrCast(@alignCast(result.?.addr));
     addr_out.* = sockaddr.*;
 }
 
-fn formatAddr(addr: *const c.struct_sockaddr_in) [16]u8 {
+fn formatAddr(addr: *const c.sockaddr.in) [16]u8 {
     var buf: [16]u8 = undefined;
-    const ip = addr.sin_addr.s_addr;
+    const ip = addr.addr;
     const b1: u8 = @truncate(ip);
     const b2: u8 = @truncate(ip >> 8);
     const b3: u8 = @truncate(ip >> 16);
@@ -295,7 +286,7 @@ fn ping(config: *const Config) !void {
     var err_out = Writer.stderr();
 
     // Resolve host
-    var dest_addr: c.struct_sockaddr_in = undefined;
+    var dest_addr: c.sockaddr.in = undefined;
     resolveHost(config.host, &dest_addr) catch {
         err_out.print("zping: {s}: Name or service not known\n", .{config.host});
         std.process.exit(2);
@@ -305,11 +296,11 @@ fn ping(config: *const Config) !void {
     const ip_slice = std.mem.sliceTo(&ip_str, 0);
 
     // Create raw socket
-    const sock = c.socket(c.AF_INET, c.SOCK_RAW, c.IPPROTO_ICMP);
+    const sock = c.socket(c.AF.INET, c.SOCK.RAW, c.IPPROTO.ICMP);
     if (sock < 0) {
         // Finding (gnu-parity): report the real errno, not a hardcoded EPERM.
         const e = std.c._errno().*;
-        err_out.print("zping: socket: {s}\n", .{std.mem.sliceTo(c.strerror(e), 0)});
+        err_out.print("zping: socket: {s}\n", .{std.mem.sliceTo(strerror(e), 0)});
         if (e == @intFromEnum(std.c.E.PERM) or e == @intFromEnum(std.c.E.ACCES)) {
             err_out.write("Try: sudo setcap cap_net_raw+ep ./zping\n");
         }
@@ -318,11 +309,11 @@ fn ping(config: *const Config) !void {
     defer _ = c.close(sock);
 
     // Set receive timeout
-    var tv: c.struct_timeval = .{
-        .tv_sec = @intCast(config.timeout_ms / 1000),
-        .tv_usec = @intCast((config.timeout_ms % 1000) * 1000),
+    var tv: c.timeval = .{
+        .sec = @intCast(config.timeout_ms / 1000),
+        .usec = @intCast((config.timeout_ms % 1000) * 1000),
     };
-    _ = c.setsockopt(sock, c.SOL_SOCKET, c.SO_RCVTIMEO, &tv, @sizeOf(@TypeOf(tv)));
+    _ = c.setsockopt(sock, c.SOL.SOCKET, c.SO.RCVTIMEO, &tv, @sizeOf(@TypeOf(tv)));
 
     // Print header (uses the tested formatHeaderLine so the on-wire header
     // byte-for-byte matches the pure function the tests anchor against).
@@ -379,7 +370,7 @@ fn ping(config: *const Config) !void {
             packet_size,
             0,
             @ptrCast(&dest_addr),
-            @sizeOf(c.struct_sockaddr_in),
+            @sizeOf(c.sockaddr.in),
         );
 
         if (sent < 0) {
@@ -398,21 +389,21 @@ fn ping(config: *const Config) !void {
         var total_elapsed_ns: u64 = 0;
 
         while (remaining_timeout > 0) {
-            var pfd: c.struct_pollfd = .{
+            var pfd: c.pollfd = .{
                 .fd = sock,
-                .events = c.POLLIN,
+                .events = c.POLL.IN,
                 .revents = 0,
             };
 
-            const poll_ret = c.poll(&pfd, 1, remaining_timeout);
+            const poll_ret = c.poll(@as(*[1]c.pollfd, &pfd), 1, remaining_timeout);
 
             if (poll_ret <= 0) {
                 break; // Timeout
             }
 
             // Receive reply
-            var from_addr: c.struct_sockaddr_in = undefined;
-            var from_len: c.socklen_t = @sizeOf(c.struct_sockaddr_in);
+            var from_addr: c.sockaddr.in = undefined;
+            var from_len: c.socklen_t = @sizeOf(c.sockaddr.in);
 
             const recv_len = c.recvfrom(
                 sock,
@@ -483,9 +474,9 @@ fn ping(config: *const Config) !void {
             const elapsed_ms = total_elapsed_ns / 1_000_000;
             if (elapsed_ms < config.interval_ms) {
                 const sleep_ms = config.interval_ms - @as(u32, @intCast(elapsed_ms));
-                var ts: c.struct_timespec = .{
-                    .tv_sec = @intCast(sleep_ms / 1000),
-                    .tv_nsec = @intCast((sleep_ms % 1000) * 1_000_000),
+                var ts: c.timespec = .{
+                    .sec = @intCast(sleep_ms / 1000),
+                    .nsec = @intCast((sleep_ms % 1000) * 1_000_000),
                 };
                 _ = c.nanosleep(&ts, null);
             }

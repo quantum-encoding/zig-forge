@@ -142,10 +142,10 @@ pub const Config = struct {
 };
 
 pub fn moveFile(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, config: *const Config) !void {
-    const src_z = try allocator.dupeZ(u8, src);
+    const src_z = try allocator.dupeSentinel(u8, src, 0);
     defer allocator.free(src_z);
 
-    const dst_z = try allocator.dupeZ(u8, dst);
+    const dst_z = try allocator.dupeSentinel(u8, dst, 0);
     defer allocator.free(dst_z);
 
     // Source existence via lstat: a dangling symlink is a movable entity
@@ -377,10 +377,10 @@ fn copyFileFallback(io: Io, src_file: Io.File, dst_file: Io.File) !void {
 pub fn copyDirectoryRecursive(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, config: *const Config) !void {
     const io = Io.Threaded.global_single_threaded.io();
 
-    const src_z = try allocator.dupeZ(u8, src);
+    const src_z = try allocator.dupeSentinel(u8, src, 0);
     defer allocator.free(src_z);
 
-    const dst_z = try allocator.dupeZ(u8, dst);
+    const dst_z = try allocator.dupeSentinel(u8, dst, 0);
     defer allocator.free(dst_z);
 
     // Get source directory permissions; propagate failure instead of passing
@@ -413,10 +413,10 @@ pub fn copyDirectoryRecursive(allocator: std.mem.Allocator, src: []const u8, dst
         const dst_full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dst, entry.name });
         defer allocator.free(dst_full);
 
-        const src_full_z = try allocator.dupeZ(u8, src_full);
+        const src_full_z = try allocator.dupeSentinel(u8, src_full, 0);
         defer allocator.free(src_full_z);
 
-        const dst_full_z = try allocator.dupeZ(u8, dst_full);
+        const dst_full_z = try allocator.dupeSentinel(u8, dst_full, 0);
         defer allocator.free(dst_full_z);
 
         const file_type = getFileType(src_full_z);
@@ -438,7 +438,7 @@ pub fn copyDirectoryRecursive(allocator: std.mem.Allocator, src: []const u8, dst
 pub fn deleteDirectoryRecursive(allocator: std.mem.Allocator, path: []const u8) !void {
     const io = Io.Threaded.global_single_threaded.io();
 
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     // Open and iterate; propagate failures so a half-deleted source is
@@ -454,7 +454,7 @@ pub fn deleteDirectoryRecursive(allocator: std.mem.Allocator, path: []const u8) 
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, entry.name });
         defer allocator.free(full_path);
 
-        const full_path_z = try allocator.dupeZ(u8, full_path);
+        const full_path_z = try allocator.dupeSentinel(u8, full_path, 0);
         defer allocator.free(full_path_z);
 
         const file_type = getFileType(full_path_z);
@@ -690,7 +690,7 @@ pub fn main(init: std.process.Init) void {
     var error_occurred = false;
 
     if (config.target_directory) |target_dir| {
-        const target_z = allocator.dupeZ(u8, target_dir) catch {
+        const target_z = allocator.dupeSentinel(u8, target_dir, 0) catch {
             printError("memory allocation failed");
             std.process.exit(1);
         };
@@ -720,7 +720,7 @@ pub fn main(init: std.process.Init) void {
             };
         }
     } else if (config.destination) |dest| {
-        const dest_z = allocator.dupeZ(u8, dest) catch {
+        const dest_z = allocator.dupeSentinel(u8, dest, 0) catch {
             printError("memory allocation failed");
             std.process.exit(1);
         };

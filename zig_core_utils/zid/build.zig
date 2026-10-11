@@ -19,9 +19,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zid");
     run_step.dependOn(&run_cmd.step);
@@ -36,7 +34,7 @@ pub fn build(b: *std.Build) void {
     const test_opts = b.addOptions();
     // Absolute path of the freshly-installed zid, so the test drives the build
     // it belongs to rather than whatever is on PATH.
-    test_opts.addOption([]const u8, "zid_path", b.getInstallPath(.bin, "zid"));
+    if (@hasDecl(std.Build, "getInstallPath")) test_opts.addOption([]const u8, "zid_path", b.getInstallPath(.bin, "zid")) else test_opts.addOptionPath("zid_path", exe.getEmittedBin());
     test_opts.addOption([]const u8, "gid_path", gid_path);
 
     const test_mod = b.createModule(.{

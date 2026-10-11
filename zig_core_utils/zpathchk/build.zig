@@ -23,6 +23,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    // Zig 0.17 cannot spell the install path at configure time, so the binary path is
+    // also baked in via build_options (the test falls back to it when ZPATHCHK_BIN is unset).
+    const test_opts = b.addOptions();
+    test_opts.addOptionPath("zpathchk_bin", exe.getEmittedBin());
+    test_mod.addOptions("build_options", test_opts);
     const tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(tests);
 
@@ -30,7 +35,7 @@ pub fn build(b: *std.Build) void {
     // first and hand the test its absolute path via ZPATHCHK_BIN.
     const install_exe = b.addInstallArtifact(exe, .{});
     run_tests.step.dependOn(&install_exe.step);
-    run_tests.setEnvironmentVariable("ZPATHCHK_BIN", b.getInstallPath(.bin, "zpathchk"));
+    if (@hasDecl(std.Build, "getInstallPath")) run_tests.setEnvironmentVariable("ZPATHCHK_BIN", b.getInstallPath(.bin, "zpathchk"));
 
     const test_step = b.step("test", "Run GNU-parity tests");
     test_step.dependOn(&run_tests.step);

@@ -206,7 +206,7 @@ fn parseMode(s: []const u8, umask_value: u32) ModeError!u32 {
 /// mkdir(2) on `path`; returns 0 on success or the captured errno.
 fn mkdirOne(path: []const u8, mode: u32) c_int {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch
         return @intFromEnum(std.c.E.NAMETOOLONG);
     if (mkdir(path_z, @intCast(mode & 0o777)) != 0) {
         // Capture errno immediately, before any write() can clobber it.
@@ -219,7 +219,7 @@ fn mkdirOne(path: []const u8, mode: u32) c_int {
 /// in make_dir_parents) to a directory?
 fn isDirectory(path: []const u8) bool {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return false;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return false;
     var st: std.c.Stat = undefined;
     if (stat(path_z, &st) != 0) return false;
     return st.mode & std.c.S.IFMT == std.c.S.IFDIR;
@@ -275,7 +275,7 @@ fn makeDir(path: []const u8, final_mode: u32, inter_mode: u32, parents: bool, ve
     // are applied exactly, GNU-style, with a follow-up chmod.
     if (final_mode & ~@as(u32, 0o777) != 0) {
         var path_buf: [4096]u8 = undefined;
-        if (std.fmt.bufPrintZ(&path_buf, "{s}", .{path})) |path_z| {
+        if (std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0)) |path_z| {
             if (chmod(path_z, @intCast(final_mode & all_mode_bits)) != 0) {
                 const cerr = std.c._errno().*;
                 writeStderr("zmkdir: cannot set permissions '{s}': {s}\n", .{

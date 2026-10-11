@@ -38,7 +38,7 @@ fn fileExists(path: []const u8) bool {
 
 fn zpathchkBin() []const u8 {
     if (getenv("ZPATHCHK_BIN")) |v| return std.mem.span(v);
-    return "zig-out/bin/zpathchk";
+    return @import("build_options").zpathchk_bin;
 }
 
 fn gnuBin() ?[]const u8 {

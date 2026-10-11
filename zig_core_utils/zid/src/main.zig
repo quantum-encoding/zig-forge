@@ -362,7 +362,7 @@ fn emitFor(allocator: std.mem.Allocator, config: *const Config, username: ?[]con
     var name_buf: [256]u8 = undefined;
 
     if (username) |name| {
-        const name_z = std.fmt.bufPrintZ(&name_buf, "{s}", .{name}) catch {
+        const name_z = std.fmt.bufPrintSentinel(&name_buf, "{s}", .{name}, 0) catch {
             writeStderr("zid: username too long\n");
             return false;
         };

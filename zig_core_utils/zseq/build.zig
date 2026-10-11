@@ -19,9 +19,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zseq");
     run_step.dependOn(&run_cmd.step);
@@ -31,7 +29,7 @@ pub fn build(b: *std.Build) void {
     // coreutils `seq` binary. The test needs the built zseq path and a GNU
     // reference path; both are injected via a generated options module.
     const options = b.addOptions();
-    options.addOption([]const u8, "zseq_path", b.getInstallPath(.bin, "zseq"));
+    if (@hasDecl(std.Build, "getInstallPath")) options.addOption([]const u8, "zseq_path", b.getInstallPath(.bin, "zseq")) else options.addOptionPath("zseq_path", exe.getEmittedBin());
     const gnu_path = b.option([]const u8, "gnu_seq", "Path to a GNU coreutils seq binary for parity tests") orelse "";
     options.addOption([]const u8, "gnu_path", gnu_path);
 
