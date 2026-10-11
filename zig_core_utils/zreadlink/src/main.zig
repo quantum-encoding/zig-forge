@@ -201,7 +201,7 @@ fn canonicalize(a: std.mem.Allocator, name: []const u8, mode: Mode) ?[]u8 {
 
         if (missing) continue; // parent already absent -> pure lexical build
 
-        const rz = a.dupeZ(u8, rname.items) catch {
+        const rz = a.dupeSentinel(u8, rname.items, 0) catch {
             setErrno(E_NOMEM);
             return null;
         };
@@ -287,7 +287,7 @@ fn canonicalize(a: std.mem.Allocator, name: []const u8, mode: Mode) ?[]u8 {
 fn processFile(a: std.mem.Allocator, path: []const u8, cfg: *const Config) bool {
     const result: ?[]u8 = switch (cfg.mode) {
         .raw => blk: {
-            const path_z = a.dupeZ(u8, path) catch {
+            const path_z = a.dupeSentinel(u8, path, 0) catch {
                 setErrno(E_NOMEM);
                 break :blk null;
             };
