@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zpaste");
     run_step.dependOn(&run_cmd.step);
@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     // plus literal GNU-captured expected bytes. Inject the absolute install
     // path so the test is cwd-independent, and depend on the install step.
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "zpaste_bin", b.getInstallPath(.bin, "zpaste"));
+    if (@hasDecl(std.Build, "getInstallPath")) test_opts.addOption([]const u8, "zpaste_bin", b.getInstallPath(.bin, "zpaste")) else test_opts.addOptionPath("zpaste_bin", exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{
