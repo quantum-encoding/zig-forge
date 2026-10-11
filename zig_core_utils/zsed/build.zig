@@ -29,9 +29,15 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // Zig 0.17 cannot spell the install path at configure time, so the binary path is
+    // also baked in via build_options (the test falls back to it when ZSED_BIN is unset).
+    const test_opts = b.addOptions();
+    test_opts.addOptionPath("zsed_bin", exe.getEmittedBin());
+    parity_tests.root_module.addOptions("build_options", test_opts);
+
     const run_tests = b.addRunArtifact(parity_tests);
     // Point the tests at the freshly-built binary.
-    run_tests.setEnvironmentVariable("ZSED_BIN", b.getInstallPath(.bin, "zsed"));
+    if (@hasDecl(std.Build, "getInstallPath")) run_tests.setEnvironmentVariable("ZSED_BIN", b.getInstallPath(.bin, "zsed"));
     // The tests spawn the installed zsed binary, so install it first.
     run_tests.step.dependOn(b.getInstallStep());
 
