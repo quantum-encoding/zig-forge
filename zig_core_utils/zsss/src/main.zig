@@ -696,7 +696,7 @@ fn parseArgs(allocator: Allocator, init: std.process.Init) !Config {
 // =============================================================================
 
 fn readFileAlloc(allocator: Allocator, path: []const u8, max_size: usize) ![]u8 {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0); // dupeZ is gone in Zig 0.17; dupeSentinel exists on 0.16 too
     defer allocator.free(path_z);
 
     // NOFOLLOW: refuse to read through a symlink planted at the input path.
@@ -720,7 +720,7 @@ fn readFileAlloc(allocator: Allocator, path: []const u8, max_size: usize) ![]u8 
 }
 
 fn writeFileAlloc(allocator: Allocator, path: []const u8, data: []const u8) !void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0); // dupeZ is gone in Zig 0.17; dupeSentinel exists on 0.16 too
     defer allocator.free(path_z);
 
     // NOFOLLOW: if the output path is a pre-planted symlink, fail rather
@@ -740,7 +740,7 @@ fn writeFileAlloc(allocator: Allocator, path: []const u8, data: []const u8) !voi
 extern "c" fn mkdir(path: [*:0]const u8, mode: std.c.mode_t) c_int;
 
 fn makeDirectory(allocator: Allocator, path: []const u8) !void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0); // dupeZ is gone in Zig 0.17; dupeSentinel exists on 0.16 too
     defer allocator.free(path_z);
 
     const result = mkdir(path_z.ptr, 0o755);
@@ -2008,7 +2008,7 @@ test "SLIP-39 split into an output path too long for a share file name is an err
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const config = Config{ .threshold = 2, .num_shares = 3, .iteration_exponent = 0 };
-    const long_dir = "/zsss-no-such-dir/" ++ "d" ** 300;
+    const long_dir = "/zsss-no-such-dir/" ++ @as([300]u8, @splat('d'));
     try std.testing.expectError(
         error.NameTooLong,
         doSplitSlip39(allocator, &config, "0123456789abcdef", long_dir),
@@ -2020,7 +2020,7 @@ test "SLIP-39 split into an output path too long for a share file name is an err
 test "Share.deserialize refuses a data length near 2^32 instead of wrapping the bound" {
     const allocator = std.testing.allocator;
     for ([_]u32{ 0xFFFFFFFF, 0xFFFFFFFD, 0xFFFFFFF0, 0x7FFFFFFF }) |len| {
-        var bytes: [20]u8 = .{0} ** 20;
+        var bytes: [20]u8 = @splat(0);
         bytes[0] = 1; // version
         bytes[1] = 2; // threshold
         bytes[2] = 3; // total shares

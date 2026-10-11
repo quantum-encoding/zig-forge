@@ -17,7 +17,13 @@ const std = @import("std");
 fn ffiPanic(msg: []const u8, ret_addr: ?usize) noreturn {
     @branchHint(.cold);
     _ = ret_addr;
-    std.debug.print("FATAL ZSSS FFI PANIC: {s}\n", .{msg});
+    // Raw write(2): on Zig 0.17 std.debug.print reaches std.Io.Threaded, whose iOS/tvOS/
+    // watchOS NullFile has no `fd`, so every iOS build of this library fails to compile
+    // (std bug in 0.17.0); the panic path must not depend on that machinery anyway.
+    const prefix = "FATAL ZSSS FFI PANIC: ";
+    _ = std.c.write(2, prefix, prefix.len);
+    _ = std.c.write(2, msg.ptr, msg.len);
+    _ = std.c.write(2, "\n", 1);
     std.process.abort();
 }
 
@@ -947,7 +953,7 @@ test "FFI SLIP-39 generate rejects a too-short secret and a bad group spec" {
     defer zsss_free(too_short);
     try std.testing.expectEqual(ZSSS_ERR_SLIP39_INVALID_CONFIG, too_short.error_code);
 
-    const secret = [_]u8{0x42} ** 16;
+    const secret: [16]u8 = @splat(0x42);
     // Group threshold above the number of groups.
     const bad_gt = zsss_slip39_generate(&secret, secret.len, 3, &specs, 1, null, 0, 1, true);
     defer zsss_free(bad_gt);
@@ -960,7 +966,7 @@ test "FFI SLIP-39 generate rejects a too-short secret and a bad group spec" {
 }
 
 test "FFI SLIP-39 multi-group round-trip" {
-    const master_secret = [_]u8{0x5A} ** 32;
+    const master_secret: [32]u8 = @splat(0x5A);
     // Three groups: 1of1, 2of3, 2of2; two groups required.
     const specs = [_]u8{ 1, 1, 2, 3, 2, 2 };
 
@@ -1014,7 +1020,7 @@ test "FFI combine cross-secret shares with colliding indices returns error" {
 test "FFI combine: a frame length near 2^32 is dropped, never read, on every target" {
     zsss_init();
     for ([_]u32{ 0xFFFFFFFD, 0xFFFFFFFF, 0xFFFFFFF0 }) |len| {
-        var buf: [8]u8 = .{0} ** 8;
+        var buf: [8]u8 = @splat(0);
         std.mem.writeInt(u32, buf[0..4], len, .little);
         const r = zsss_combine(&buf, buf.len);
         defer zsss_free(r);
