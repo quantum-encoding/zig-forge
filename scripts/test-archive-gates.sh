@@ -22,6 +22,9 @@
 #   - this repo's .gitignore refuses the programs/ios-libs stamps and every .a.sha256,
 #     and nothing of the kind is tracked.
 #
+# FC6894C5 — terminal_mux's ensure-fresh-lib.sh judges an archive by its stamps' sha256,
+#   not by file times: one rewritten after stamping but older than its stamp is rebuilt.
+#
 # Needs the forge's Zig (scripts/zig-toolchain.sh), git and Xcode's SDKs (DEVELOPER_DIR, if xcode-select points at the
 # Command Line Tools). Exit status: 0 when every case passes.
 set -euo pipefail
@@ -202,6 +205,51 @@ elif out="$("$S/check-archive-stamp.sh" "$android" "$ROOT/programs/simd_crypto_f
   ok "build-android-libs.sh stamps the Android quantum_crypto archive (source-id + sha256)"
 else
   bad "the Android archive is not verifiable: $out"
+fi
+
+# FC6894C5: terminal_mux's ensure-fresh-lib.sh (aiconductor's Xcode Run Script) decided
+# "current" from the source-id plus file times, so an archive rewritten after stamping but
+# left older than its stamp (a copy, a restore, `touch`) passed. It must judge by the
+# stamps' sha256 and toolchain as check-archive-stamp.sh does. Replayed in a scratch forge:
+# the real scripts, and a one-function program named terminal_mux with a `lib` step.
+efl="$tmp/efl"
+mkdir -p "$efl/programs/terminal_mux/src" "$efl/programs/terminal_mux/scripts"
+ln -s "$S" "$efl/scripts"
+cp "$ROOT/programs/terminal_mux/scripts/ensure-fresh-lib.sh" "$efl/programs/terminal_mux/scripts/"
+printf 'export fn tm_probe() u32 {\n    return 1;\n}\n' > "$efl/programs/terminal_mux/src/lib.zig"
+cat > "$efl/programs/terminal_mux/build.zig" <<'ZIG'
+const std = @import("std");
+pub fn build(b: *std.Build) void {
+    const lib = b.addLibrary(.{ .linkage = .static, .name = "terminal_mux", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = b.standardTargetOptions(.{}),
+        .optimize = b.standardOptimizeOption(.{}),
+    }) });
+    b.step("lib", "consumed archive").dependOn(&b.addInstallArtifact(lib, .{}).step);
+}
+ZIG
+efl_run() { ZIG_GLOBAL_CACHE_DIR="$tmp/efl-gcache" "$efl/programs/terminal_mux/scripts/ensure-fresh-lib.sh" 2>&1; }
+efl_lib="$efl/programs/terminal_mux/zig-out/lib/libterminal_mux.a"
+if ! out="$(efl_run)" || ! grep -q 'rebuilt' <<<"$out"; then
+  bad "ensure-fresh-lib.sh did not build a missing archive: $out"
+elif ! out="$(efl_run)" || ! grep -q 'is current' <<<"$out"; then
+  bad "ensure-fresh-lib.sh rebuilt an archive it had just stamped: $out"
+else
+  ok "ensure-fresh-lib.sh builds a missing archive, then calls it current"
+  printf 'not the stamped archive\n' > "$efl_lib"
+  touch -r "$efl/programs/terminal_mux/zig-out/lib/libterminal_mux-source-id.txt" -A -000100 "$efl_lib"
+  if ! [ "$efl_lib" -ot "$efl/programs/terminal_mux/zig-out/lib/libterminal_mux-source-id.txt" ]; then
+    bad "setup: the rewritten archive is not older than its stamp"
+  elif ! out="$(efl_run)"; then
+    bad "ensure-fresh-lib.sh failed to rebuild a rewritten archive: $out"
+  elif grep -q 'is current' <<<"$out"; then
+    bad "ensure-fresh-lib.sh called an archive rewritten after stamping current (FC6894C5)"
+  elif grep -q 'sha256 mismatch' <<<"$out" &&
+       "$S/check-archive-stamp.sh" "$efl_lib" "$efl/programs/terminal_mux" 2>/dev/null; then
+    ok "ensure-fresh-lib.sh rebuilds an archive rewritten after stamping, whatever its mtime (sha256)"
+  else
+    bad "ensure-fresh-lib.sh handled a rewritten archive wrongly: $out"
+  fi
 fi
 
 ignored=(programs/ios-libs/ios-arm64/libquantum_crypto-source-id.txt

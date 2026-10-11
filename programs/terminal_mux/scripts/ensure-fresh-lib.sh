@@ -8,15 +8,16 @@
 # core links against yesterday's archive and the change silently does not exist
 # at runtime. This script closes that gap.
 #
-# The archive is current when ALL of these hold:
+# The archive is current when scripts/check-archive-stamp.sh accepts it:
 #   - libterminal_mux-source-id.txt beside it equals scripts/zig-source-id.sh for
 #     the program now (same sources, by content — not by mtime);
-#   - the archive is not newer than that stamp. scripts/build-macos-lib.sh writes the
-#     stamp after the archive, so an archive newer than its stamp was written by
-#     something else — a hand-run `zig build lib -Doptimize=…`, which is
-#     unrepacked for ld-prime and built for the host's macOS floor. (Plain
-#     `zig build` writes zig-out/lib/dev/ and never this archive.)
-# Otherwise it is rebuilt with scripts/build-macos-lib.sh (ReleaseSmall, repacked,
+#   - libterminal_mux-toolchain.txt names the Zig consumed archives are built with;
+#   - libterminal_mux.a.sha256 matches the archive's bytes, so the stamps describe
+#     THIS archive. Anything that rewrote it after build-macos-lib.sh stamped it — a
+#     hand-run `zig build lib -Doptimize=…` (host macOS floor, no link proof), a copy
+#     or a restore — fails here whatever the file times say. (Plain `zig build` writes
+#     zig-out/lib/dev/ and never this archive.)
+# Otherwise it is rebuilt with scripts/build-macos-lib.sh (ReleaseSmall, link-checked,
 # stamped), the same command consumers' release.toml files declare.
 #
 # Wire it as a Run Script build phase placed BEFORE "Compile Sources", or run it
@@ -33,9 +34,10 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 program="$(dirname "$here")"
 repo="$(cd "$program/../.." && pwd)"
 archive="$program/zig-out/lib/libterminal_mux.a"
-stamp="$program/zig-out/lib/libterminal_mux-source-id.txt"
 
-# Xcode's Run Script phases run with a minimal PATH that usually lacks zig.
+# Xcode's Run Script phases run with a minimal PATH that usually lacks zig. The
+# forge's patched install is found off PATH (scripts/zig-toolchain.sh); PATH `zig` is
+# only its fallback, and build-macos-lib.sh refuses a Zig that may not stamp.
 if ! command -v zig >/dev/null 2>&1; then
     for candidate in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin" "$HOME/bin"; do
         if [[ -x "$candidate/zig" ]]; then
@@ -44,24 +46,12 @@ if ! command -v zig >/dev/null 2>&1; then
         fi
     done
 fi
-if ! command -v zig >/dev/null 2>&1; then
-    echo "error: zig not found on PATH — cannot verify libterminal_mux.a is current" >&2
-    exit 1
-fi
 
 reason=""
 if [[ ! -f "$archive" ]]; then
     reason="archive missing"
-elif [[ ! -f "$stamp" ]]; then
-    reason="archive has no source-identity stamp"
-elif [[ "$archive" -nt "$stamp" ]]; then
-    reason="archive was written after its stamp, not by build-macos-lib.sh"
-else
-    expected="$("$repo/scripts/zig-source-id.sh" "$program")"
-    actual="$(tr -d '[:space:]' < "$stamp")"
-    if [[ "$actual" != "$expected" ]]; then
-        reason="sources changed since the archive was built"
-    fi
+elif ! why="$("$repo/scripts/check-archive-stamp.sh" "$archive" "$program" 2>&1)"; then
+    reason="$(printf '%s' "$why" | tr '\n' ' ')"
 fi
 
 if [[ -z "$reason" ]]; then
