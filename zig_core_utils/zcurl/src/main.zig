@@ -346,7 +346,7 @@ fn fetchOne(
     // Write output — verbatim, no injected trailing newline (GNU curl does not add one).
     if (cfg.output_file) |path| {
         var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch {
+        const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch {
             if (!cfg.silent) writeStderr("zcurl: path too long\n");
             return EXIT_COULDNT_CONNECT;
         };
