@@ -50,9 +50,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(server_exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run the KV server");
     run_step.dependOn(&run_cmd.step);
@@ -75,9 +73,7 @@ pub fn build(b: *std.Build) void {
     const client_run = b.addRunArtifact(client_exe);
     client_run.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        client_run.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) client_run.addPassthruArgs() else if (b.args) |args| client_run.addArgs(args);
 
     const client_step = b.step("client", "Run the KV client CLI");
     client_step.dependOn(&client_run.step);
