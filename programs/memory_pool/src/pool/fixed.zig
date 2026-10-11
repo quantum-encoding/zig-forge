@@ -343,3 +343,127 @@ test "fixed pool - stress test" {
 
     try std.testing.expectEqual(@as(usize, 0), pool_inst.allocated);
 }
+
+// ============================================================================
+// Address-alignment property tests (misaligned backing buffers)
+//
+// FixedPool's contract is that every slot address is a multiple of
+// `slot_align` (16, malloc parity) whatever its backing allocator hands back
+// for an unaligned request. The backing here is a FixedBufferAllocator whose
+// buffer starts 1, 3, 7, 9 or 15 bytes past an 8192-byte boundary, so an
+// implementation that took the base pointer's alignment for granted would
+// fail. Every object size 1..4096 is checked.
+// ============================================================================
+
+const misaligned_offsets = [_]usize{ 1, 3, 7, 9, 15 };
+const backing_align = 8192;
+
+fn expectSlotsSound(p: *const FixedPool, region: []const u8, requested: usize, slots: []const usize) !void {
+    const base = @intFromPtr(p.memory.ptr);
+    const end = base + p.memory.len;
+    // Pool memory lies inside the backing region.
+    try std.testing.expect(base >= @intFromPtr(region.ptr));
+    try std.testing.expect(end <= @intFromPtr(region.ptr) + region.len);
+    for (slots, 0..) |addr, i| {
+        // Every alignment the pool promises (1, 2, 4, 8, 16).
+        var a: usize = 1;
+        while (a <= FixedPool.slot_align) : (a *= 2) {
+            try std.testing.expectEqual(@as(usize, 0), addr % a);
+        }
+        // In bounds for the requested size and for the full slot.
+        try std.testing.expect(addr >= base);
+        try std.testing.expect(addr + @max(requested, p.object_size) <= end);
+        // Disjoint from every other live slot.
+        for (slots[0..i]) |other| {
+            const lo = @min(addr, other);
+            const hi = @max(addr, other);
+            try std.testing.expect(hi - lo >= p.object_size);
+        }
+    }
+}
+
+test "fixed pool - slot alignment on misaligned backing, every object size 1..4096" {
+    const backing = try std.testing.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(backing_align), 32 * 1024);
+    defer std.testing.allocator.free(backing);
+
+    const cap = 3;
+    for (misaligned_offsets) |k| {
+        const region = backing[k..];
+        try std.testing.expectEqual(k, @intFromPtr(region.ptr) % backing_align);
+        var size: usize = 1;
+        while (size <= 4096) : (size += 1) {
+            var fba = std.heap.FixedBufferAllocator.init(region);
+            var p = try FixedPool.init(fba.allocator(), size, cap);
+            defer p.deinit();
+
+            var slots: [cap]usize = undefined;
+            for (&slots) |*s| s.* = @intFromPtr(try p.alloc());
+            try expectSlotsSound(&p, region, size, &slots);
+            try std.testing.expectError(error.OutOfMemory, p.alloc());
+        }
+    }
+}
+
+test "fixed pool - backing that exactly fits is accepted, one byte less refused" {
+    const backing = try std.testing.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(backing_align), 4096);
+    defer std.testing.allocator.free(backing);
+
+    const cap = 5;
+    for (misaligned_offsets) |k| {
+        for ([_]usize{ 1, 12, 16, 33, 100 }) |size| {
+            const slot = std.mem.alignForward(usize, @max(size, @sizeOf(*FixedPool.Node)), FixedPool.slot_align);
+            const start = @intFromPtr(backing.ptr) + k;
+            const pad = std.mem.alignForward(usize, start, FixedPool.slot_align) - start;
+            const need = pad + slot * cap;
+
+            var short = std.heap.FixedBufferAllocator.init(backing[k .. k + need - 1]);
+            try std.testing.expectError(error.OutOfMemory, FixedPool.init(short.allocator(), size, cap));
+
+            var exact = std.heap.FixedBufferAllocator.init(backing[k .. k + need]);
+            var p = try FixedPool.init(exact.allocator(), size, cap);
+            defer p.deinit();
+            var slots: [cap]usize = undefined;
+            for (&slots) |*s| s.* = @intFromPtr(try p.alloc());
+            try expectSlotsSound(&p, backing[k .. k + need], size, &slots);
+            // The last slot ends exactly at the end of the backing region.
+            try std.testing.expectEqual(start + need, @intFromPtr(p.memory.ptr) + p.memory.len);
+            try std.testing.expectError(error.OutOfMemory, p.alloc());
+        }
+    }
+}
+
+test "fixed pool - free and reset keep slots aligned on misaligned backing" {
+    const backing = try std.testing.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(backing_align), 8192);
+    defer std.testing.allocator.free(backing);
+
+    const cap = 8;
+    for (misaligned_offsets) |k| {
+        var fba = std.heap.FixedBufferAllocator.init(backing[k..]);
+        var p = try FixedPool.initSecure(fba.allocator(), 24, cap);
+        defer p.deinit();
+
+        var slots: [cap]usize = undefined;
+        for (&slots) |*s| s.* = @intFromPtr(try p.alloc());
+        try expectSlotsSound(&p, backing[k..], 24, &slots);
+
+        // Free every other slot, re-allocate: the same aligned slots return.
+        var i: usize = 0;
+        while (i < cap) : (i += 2) p.free(@ptrFromInt(slots[i]));
+        i = 0;
+        while (i < cap) : (i += 2) {
+            const again = @intFromPtr(try p.alloc());
+            try std.testing.expectEqual(@as(usize, 0), again % FixedPool.slot_align);
+            var found = false;
+            for (slots) |s| found = found or s == again;
+            try std.testing.expect(found);
+        }
+        try std.testing.expectError(error.OutOfMemory, p.alloc());
+
+        // Reset: the full capacity is available again, all aligned and sound.
+        p.reset();
+        try std.testing.expectEqual(@as(usize, 0), p.allocated);
+        for (&slots) |*s| s.* = @intFromPtr(try p.alloc());
+        try expectSlotsSound(&p, backing[k..], 24, &slots);
+        try std.testing.expectError(error.OutOfMemory, p.alloc());
+    }
+}
