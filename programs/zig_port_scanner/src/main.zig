@@ -212,7 +212,7 @@ fn printResults(config: *ScanConfig) !void {
     std.debug.print("Scan Results for {s}:\n", .{config.host});
     std.debug.print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n", .{});
     std.debug.print("{s:<10} {s:<10} {s}\n", .{ "PORT", "STATE", "SERVICE" });
-    std.debug.print("{s}\n", .{"─" ** 40});
+    std.debug.print("{s}\n", .{"────────────────────────────────────────"});
 
     for (config.results.items) |result| {
         std.debug.print("{d:<10} {s:<10} {s}\n", .{ result.port, result.status.toString(), result.service });
