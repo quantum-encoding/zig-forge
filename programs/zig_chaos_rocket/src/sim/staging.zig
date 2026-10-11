@@ -18,7 +18,7 @@ pub const StagingEvent = struct {
 };
 
 pub const StagingSequencer = struct {
-    events: [16]?StagingEvent = [_]?StagingEvent{null} ** 16,
+    events: [16]?StagingEvent = @splat(null),
     event_count: u8 = 0,
     stage1_prop_mass: f64 = 395_700, // kg propellant in stage 1
     stage2_prop_mass: f64 = 15_300, // kg propellant in stage 2

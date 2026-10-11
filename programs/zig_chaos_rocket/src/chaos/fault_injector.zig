@@ -21,7 +21,7 @@ pub const InjectionResult = struct {
 };
 
 pub const FaultInjector = struct {
-    results: [32]?InjectionResult = [_]?InjectionResult{null} ** 32,
+    results: [32]?InjectionResult = @splat(null),
     result_count: u8 = 0,
     rng: std.Random.Xoshiro256,
 
@@ -145,8 +145,8 @@ pub const FaultInjector = struct {
         // A live variant would have a matching tag value; the retired flag has none,
         // so the checked mapping refuses it rather than dispatching dead code.
         var maps_to_live_variant = false;
-        inline for (@typeInfo(OrderMode).@"enum".fields) |field| {
-            if (field.value == retired_flag) maps_to_live_variant = true;
+        inline for (std.enums.values(OrderMode)) |tag| {
+            if (@intFromEnum(tag) == retired_flag) maps_to_live_variant = true;
         }
         const caught = !maps_to_live_variant;
         const result = InjectionResult{
@@ -223,7 +223,7 @@ pub const FaultInjector = struct {
         // QF72's ADIRU emitted a spike that indexed an AoA lookup table out of range.
         // Observe the bounds check: a corrupted index past the table length is caught
         // before it can read adjacent memory.
-        var aoa_table = [_]f64{0.0} ** 8;
+        var aoa_table: [8]f64 = @splat(0.0);
         const corrupted_index: usize = 12; // spike drove the index past the table
         const caught = corrupted_index >= aoa_table.len;
         _ = &aoa_table;
@@ -285,7 +285,7 @@ pub const FaultInjector = struct {
     // ====================================================================
     pub fn injectCrowdStrikeOOB(self: *FaultInjector) InjectionResult {
         // Channel File 291: index 20 on array of length 20
-        var config_values = [_]u64{0} ** 20;
+        var config_values: [20]u64 = @splat(0);
         const index: usize = 20; // One past the end
         // In C: config_values[20] reads garbage → BSOD
         // In Zig: bounds check catches it

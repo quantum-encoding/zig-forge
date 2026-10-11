@@ -33,8 +33,19 @@ const CLEAR_SCREEN = ESC ++ "[2J" ++ ESC ++ "[H";
 const HIDE_CURSOR = ESC ++ "[?25l";
 const SHOW_CURSOR = ESC ++ "[?25h";
 
+/// `s` repeated `n` times at comptime. Zig 0.17 removed the `"ab" ** n` array-multiplication
+/// syntax, and `@splat` repeats a single byte only.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    const frozen = comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        break :blk out;
+    };
+    return &frozen;
+}
+
 // Separator line constants (Zig 0.16 does not support fill patterns)
-const SEPARATOR_DASH_72 = "─" ** 72;
+const SEPARATOR_DASH_72 = repeat("─", 72);
 
 pub const Dashboard = struct {
     writer: *std.Io.Writer,

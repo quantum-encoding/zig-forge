@@ -5,9 +5,20 @@ const scenarios = @import("scenarios.zig");
 const fault_injector = @import("fault_injector.zig");
 const fuzzer_mod = @import("fuzzer.zig");
 
+/// `s` repeated `n` times at comptime. Zig 0.17 removed the `"ab" ** n` array-multiplication
+/// syntax, and `@splat` repeats a single byte only.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    const frozen = comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        break :blk out;
+    };
+    return &frozen;
+}
+
 // Separator line constants (Zig 0.16 does not support fill patterns)
-const SEPARATOR_EQ_72 = "=" ** 72;
-const SEPARATOR_DASH_68 = "─" ** 68;
+const SEPARATOR_EQ_72 = &@as([72]u8, @splat('='));
+const SEPARATOR_DASH_68 = repeat("─", 68);
 
 pub const ChaosReport = struct {
     total_injected: u32 = 0,
@@ -24,7 +35,7 @@ pub const ChaosReport = struct {
     fuzz_crashes: u64 = 0,
     fuzz_errors_handled: u64 = 0,
     fuzz_safety_catches: u64 = 0,
-    scenario_results: [32]?fault_injector.InjectionResult = [_]?fault_injector.InjectionResult{null} ** 32,
+    scenario_results: [32]?fault_injector.InjectionResult = @splat(null),
     scenario_count: u8 = 0,
 
     pub fn addResult(self: *ChaosReport, result: fault_injector.InjectionResult) void {
