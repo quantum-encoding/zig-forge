@@ -228,6 +228,11 @@ pub const SlabAllocator = struct {
         for (&self.slabs) |*maybe_slab| {
             if (maybe_slab.*) |*slab| {
                 if (addr >= slab.base_addr and addr < slab.end_addr) {
+                    // An interior / misaligned pointer is not a slot: refuse it
+                    // here, because FixedPool.free only asserts slot ownership
+                    // (compiled out in ReleaseFast) before @alignCast-ing the
+                    // pointer to a free-list node and writing through it.
+                    if ((addr - slab.base_addr) % slab.pool.object_size != 0) return false;
                     slab.pool.free(ptr);
                     self.total_freed += 1;
                     return true;
@@ -977,4 +982,21 @@ test "slab - reset after aligned allocations on misaligned backing" {
         const big = try slab.alloc(6000);
         try expectAligned(@intFromPtr(big));
     }
+}
+
+test "slab - tryFree refuses interior and misaligned pointers without touching state" {
+    var slab = try SlabAllocator.init(testing.allocator, 4);
+    defer slab.deinit();
+
+    const p = try slab.alloc(64);
+    const before = slab.getStats();
+    for ([_]usize{ 1, 8, 16, 63 }) |delta| {
+        const interior: *anyopaque = @ptrFromInt(@intFromPtr(p) + delta);
+        try testing.expect(!slab.tryFree(interior));
+    }
+    const after = slab.getStats();
+    try testing.expectEqual(before.in_use, after.in_use);
+    try testing.expectEqual(before.class_allocated, after.class_allocated);
+    try testing.expect(slab.tryFree(p));
+    try testing.expectEqual(@as(usize, 0), slab.getStats().in_use);
 }
