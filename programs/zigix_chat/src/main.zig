@@ -8,14 +8,7 @@
 const std = @import("std");
 const tls_client = @import("tls_client.zig");
 
-const posix = @cImport({
-    @cInclude("sys/socket.h");
-    @cInclude("netinet/in.h");
-    @cInclude("arpa/inet.h");
-    @cInclude("unistd.h");
-    @cInclude("stdlib.h");
-    @cInclude("string.h");
-});
+const posix = @import("posix_c.zig");
 
 // ---- Configuration ----
 
