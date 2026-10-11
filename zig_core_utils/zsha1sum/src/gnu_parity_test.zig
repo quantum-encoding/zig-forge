@@ -59,7 +59,7 @@ fn uniqueId() u64 {
 
 /// Create a file with the given bytes; returns its absolute path.
 fn writeTempFile(buf: []u8, data: []const u8) ![:0]const u8 {
-    const path = try std.fmt.bufPrintZ(buf, "/tmp/zsha1_{x}_{x}", .{ uniqueId(), temp_counter });
+    const path = try std.fmt.bufPrintSentinel(buf, "/tmp/zsha1_{x}_{x}", .{ uniqueId(), temp_counter }, 0);
     const fd = try std.posix.openatZ(
         std.posix.AT.FDCWD,
         path,
@@ -129,7 +129,7 @@ fn runBin(allocator: std.mem.Allocator, bin: []const u8, args: []const []const u
 fn findGnu() ?[]const u8 {
     for (GNU_CANDIDATES) |cand| {
         var path_buf: [256]u8 = undefined;
-        const cand_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{cand}) catch continue;
+        const cand_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{cand}, 0) catch continue;
         const fd = std.posix.openatZ(std.posix.AT.FDCWD, cand_z, .{ .ACCMODE = .RDONLY }, 0) catch continue;
         _ = close(fd);
         return cand;
@@ -239,7 +239,7 @@ test "--tag output matches GNU" {
 test "directory arg errors like GNU (exit 1, Is a directory)" {
     const allocator = std.testing.allocator;
     var namebuf: [64]u8 = undefined;
-    const dir = try std.fmt.bufPrintZ(&namebuf, "/tmp/zsha1_dir_{x}", .{uniqueId()});
+    const dir = try std.fmt.bufPrintSentinel(&namebuf, "/tmp/zsha1_dir_{x}", .{uniqueId()}, 0);
     if (mkdir(dir, 0o755) != 0) return error.SkipZigTest;
     defer _ = rmdir(dir);
 
@@ -445,7 +445,7 @@ test "check: --tag combined with -c is rejected like GNU" {
 test "check: backslash-escaped filename verifies like GNU" {
     const allocator = std.testing.allocator;
     var namebuf: [64]u8 = undefined;
-    const name = try std.fmt.bufPrintZ(&namebuf, "/tmp/zsha1_esc_{x}\\z", .{uniqueId()});
+    const name = try std.fmt.bufPrintSentinel(&namebuf, "/tmp/zsha1_esc_{x}\\z", .{uniqueId()}, 0);
     writeNamedFile(name, "escaped name body\n") catch return error.SkipZigTest;
     defer _ = unlink(name);
 
@@ -487,7 +487,7 @@ test "check: many lines spanning read buffers, last line unterminated" {
         const b = try std.fmt.bufPrint(&body, "content-{d}\n", .{idx});
         var pb: [80]u8 = undefined;
         const tmp = try writeTempFile(&pb, b);
-        try files.append(allocator, try allocator.dupeZ(u8, tmp));
+        try files.append(allocator, try allocator.dupeSentinel(u8, tmp, 0));
 
         var g = try runBin(allocator, gnu, &.{tmp});
         defer g.deinit();
