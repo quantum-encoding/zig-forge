@@ -22,7 +22,12 @@ pub fn build(b: *std.Build) void {
     // needs to know where the built zuniq lives, so we hand it the artifact's
     // output path via the ZUNIQ_BIN env var.
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "zuniq_bin", b.getInstallPath(.bin, "zuniq"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        test_opts.addOption([]const u8, "zuniq_bin", b.getInstallPath(.bin, "zuniq"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time, so the path is resolved lazily.
+        test_opts.addOptionPathUntracked("zuniq_bin", .{ .relative = .{ .base = .install_bin, .sub_path = "zuniq" } });
+    }
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/gnu_parity_test.zig"),
