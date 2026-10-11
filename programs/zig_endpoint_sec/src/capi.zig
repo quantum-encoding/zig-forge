@@ -4,7 +4,8 @@
 //! (or C, or Rust) host can link `libes_core_zig.a` and drive EndpointSecurity
 //! through the same shape the Rust-backed `res_*` set implements. `EscEvent`
 //! mirrors `esc_event` in the header; the layout test below imports the header
-//! through `@cImport` and checks every offset, so the two cannot drift apart.
+//! (translated by build.zig's translate-c step) and checks every offset, so the
+//! two cannot drift apart.
 //!
 //! Handles: `esc_client` is a heap `CapiClient`; `esc_message` is the
 //! `es_message_t` pointer itself, so retain/release and the exec accessors
@@ -14,6 +15,7 @@ const std = @import("std");
 const es = @import("lib.zig");
 const sys = es.sys;
 const darwin = es.darwin;
+const reflect = @import("reflect.zig");
 
 pub const abi_version: u32 = 1;
 
@@ -62,7 +64,7 @@ pub const EscEvent = extern struct {
     seq_num: u64 = 0,
     global_seq_num: u64 = 0,
 
-    audit_token: EscAuditToken = .{ .val = .{0} ** 8 },
+    audit_token: EscAuditToken = .{ .val = @splat(0) },
 
     process_path: EscStr = .{},
     signing_id: EscStr = .{},
@@ -451,7 +453,7 @@ export fn zes_ticks_to_ns(ticks: u64) u64 {
 
 // ───────────────────────────── tests ─────────────────────────────
 
-const c_header = @cImport(@cInclude("es_core.h"));
+const c_header = @import("es_core_h");
 const testing_support = @import("testing_support.zig");
 
 test "anchor: EscEvent matches esc_event in es_core.h field for field" {
@@ -459,11 +461,11 @@ test "anchor: EscEvent matches esc_event in es_core.h field for field" {
     try std.testing.expectEqual(@sizeOf(c_header.esc_str), @sizeOf(EscStr));
     try std.testing.expectEqual(@sizeOf(c_header.esc_audit_token), @sizeOf(EscAuditToken));
     try std.testing.expectEqual(@as(u32, c_header.ESC_ABI_VERSION), abi_version);
-    inline for (std.meta.fields(EscEvent)) |f| {
+    inline for (reflect.fields(EscEvent)) |f| {
         try std.testing.expectEqual(@offsetOf(c_header.esc_event, f.name), @offsetOf(EscEvent, f.name));
         try std.testing.expectEqual(@sizeOf(@FieldType(c_header.esc_event, f.name)), @sizeOf(f.type));
     }
-    try std.testing.expectEqual(std.meta.fields(c_header.esc_event).len, std.meta.fields(EscEvent).len);
+    try std.testing.expectEqual(reflect.fields(c_header.esc_event).len, reflect.fields(EscEvent).len);
     try std.testing.expectEqual(@as(c_int, c_header.ESC_ERR_API_UNAVAILABLE), err_api_unavailable);
     try std.testing.expectEqual(@as(c_int, c_header.ESC_ERR_UNKNOWN_EVENT), err_unknown_event);
 }

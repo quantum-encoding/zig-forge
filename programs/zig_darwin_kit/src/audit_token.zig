@@ -10,7 +10,7 @@ const std = @import("std");
 pub const AuditToken = extern struct {
     val: [8]u32,
 
-    pub const zero = AuditToken{ .val = .{0} ** 8 };
+    pub const zero = AuditToken{ .val = @splat(0) };
 
     /// Audit user id.
     pub fn auid(self: AuditToken) std.c.uid_t {
