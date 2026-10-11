@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Run ztruncate");
     run_step.dependOn(&run_cmd.step);
 
@@ -37,7 +37,12 @@ pub fn build(b: *std.Build) void {
     // its exit code + resulting file sizes against the real GNU coreutils
     // `truncate` binary.
     const test_options = b.addOptions();
-    test_options.addOption([]const u8, "ztruncate_bin", b.getInstallPath(.bin, "ztruncate"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        test_options.addOption([]const u8, "ztruncate_bin", b.getInstallPath(.bin, "ztruncate"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time, so the path is resolved lazily.
+        test_options.addOptionPathUntracked("ztruncate_bin", .{ .relative = .{ .base = .install_bin, .sub_path = "ztruncate" } });
+    }
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{
