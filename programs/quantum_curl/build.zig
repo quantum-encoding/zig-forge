@@ -1,4 +1,5 @@
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -58,9 +59,7 @@ pub fn build(b: *std.Build) void {
 
     // Run step
     const run_cmd = b.addRunArtifact(exe);
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Run quantum-curl HTTP engine");
     run_step.dependOn(&run_cmd.step);
 
@@ -103,7 +102,7 @@ pub fn build(b: *std.Build) void {
     const echo_server_module = b.createModule(.{
         .root_source_file = b.path("bench/echo_server.zig"),
         .target = target,
-        .optimize = .ReleaseFast, // Always optimize benchmarks
+        .optimize = Optimize.ReleaseFast, // Always optimize benchmarks
         .link_libc = true,
     });
     const echo_server = b.addExecutable(.{
@@ -113,9 +112,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(echo_server);
 
     const run_echo = b.addRunArtifact(echo_server);
-    if (b.args) |args| {
-        run_echo.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_echo.addPassthruArgs() else if (b.args) |args| run_echo.addArgs(args);
     const echo_step = b.step("echo-server", "Run benchmark echo server");
     echo_step.dependOn(&run_echo.step);
 
@@ -123,7 +120,7 @@ pub fn build(b: *std.Build) void {
     const bench_runner_module = b.createModule(.{
         .root_source_file = b.path("bench/bench_runner.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
         .link_libc = true,
     });
     const bench_runner = b.addExecutable(.{
@@ -133,9 +130,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(bench_runner);
 
     const run_bench = b.addRunArtifact(bench_runner);
-    if (b.args) |args| {
-        run_bench.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_bench.addPassthruArgs() else if (b.args) |args| run_bench.addArgs(args);
     const bench_step = b.step("bench", "Run performance benchmarks");
     bench_step.dependOn(&run_bench.step);
 
@@ -143,7 +138,7 @@ pub fn build(b: *std.Build) void {
     const sustained_bench_module = b.createModule(.{
         .root_source_file = b.path("bench/sustained_bench.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
         .link_libc = true,
     });
     const sustained_bench = b.addExecutable(.{
@@ -153,9 +148,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(sustained_bench);
 
     const run_sustained = b.addRunArtifact(sustained_bench);
-    if (b.args) |args| {
-        run_sustained.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_sustained.addPassthruArgs() else if (b.args) |args| run_sustained.addArgs(args);
     const sustained_step = b.step("sustained", "Run sustained performance benchmark");
     sustained_step.dependOn(&run_sustained.step);
 }

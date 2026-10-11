@@ -179,9 +179,8 @@ test "RFC 9110 §9.1: method names are case-sensitive uppercase tokens" {
     try testing.expect(manifest.Method.fromString("Get") == null);
     try testing.expect(manifest.Method.fromString("TRACE") == null);
     // toString round-trips the wire spelling for every variant.
-    inline for (@typeInfo(manifest.Method).@"enum".fields) |f| {
-        const m: manifest.Method = @enumFromInt(f.value);
-        try testing.expectEqualStrings(f.name, m.toString());
+    inline for (comptime std.meta.tags(manifest.Method)) |m| {
+        try testing.expectEqualStrings(@tagName(m), m.toString());
     }
 }
 
