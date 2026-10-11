@@ -12,6 +12,17 @@ const IoUring = @import("io_uring/ring.zig").IoUring;
 const TcpServer = @import("tcp/server.zig").TcpServer;
 const UdpSocket = @import("udp/socket.zig").UdpSocket;
 
+/// `s` repeated `n` times at comptime. Zig 0.17 removed the `"ab" ** n` array-multiplication
+/// syntax, and `@splat` repeats a single byte only.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    const frozen = comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        break :blk out;
+    };
+    return &frozen;
+}
+
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
 
@@ -78,7 +89,7 @@ fn benchTcpEcho(allocator: std.mem.Allocator) !void {
     // Wait for connection
     time.sleep(10_000_000);
 
-    const payload = "PING" ** 16; // 64 bytes
+    const payload = repeat("PING", 16); // 64 bytes
 
     var latencies = std.ArrayList(u64).init(allocator);
     defer latencies.deinit();
@@ -128,7 +139,7 @@ fn benchUdpLoop(allocator: std.mem.Allocator) !void {
     defer os.closeSocket(client_sock);
     const dest = try net.Address.parseIp4("127.0.0.1", 1338);
 
-    const payload = "Z" ** 128;
+    const payload = &@as([128]u8, @splat('Z'));
 
     const duration_ns = 10 * time.ns_per_s;
     const start = time.nanoTimestamp();

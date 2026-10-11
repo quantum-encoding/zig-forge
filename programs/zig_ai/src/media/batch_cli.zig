@@ -178,7 +178,7 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
     // Create output directory if needed
     if (!std.mem.eql(u8, config.output_dir, ".")) {
         var dir_buf: [4096]u8 = undefined;
-        const dir_z = std.fmt.bufPrintZ(&dir_buf, "{s}", .{config.output_dir}) catch {
+        const dir_z = std.fmt.bufPrintSentinel(&dir_buf, "{s}", .{config.output_dir}, 0) catch {
             std.debug.print("Error: Output directory path too long\n", .{});
             return;
         };

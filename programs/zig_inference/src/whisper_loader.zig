@@ -64,7 +64,7 @@ pub const WhisperFile = struct {
     aligned_bufs: std.ArrayListUnmanaged([]align(4) u8),
 
     pub fn open(allocator: Allocator, path: []const u8) !WhisperFile {
-        const c_path = try allocator.dupeZ(u8, path);
+        const c_path = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(c_path);
 
         const fd = std.c.open(c_path.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));

@@ -28,7 +28,7 @@ pub const DemoHeader = extern struct {
     version: u16 = FORMAT_VERSION,
     field_count: u16 = FIELD_COUNT,
     frame_count: u64 = 0,
-    _reserved: [16]u8 = [_]u8{0} ** 16,
+    _reserved: [16]u8 = @splat(0),
 };
 
 /// Packed frame data: timestamp + all FlightData numeric fields.

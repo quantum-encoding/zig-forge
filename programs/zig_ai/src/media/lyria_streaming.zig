@@ -109,7 +109,7 @@ pub const LyriaStream = struct {
         self.* = .{
             .allocator = allocator,
             .io_threaded = io_threaded,
-            .current_prompts = .{ .items = &.{}, .capacity = 0 },
+            .current_prompts = .empty,
         };
 
         return self;

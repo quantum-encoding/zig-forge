@@ -208,14 +208,14 @@ test "FixedStr64: apple sub fits (50 chars)" {
 }
 
 test "FixedStr64: exactly 64 chars" {
-    const s = "a" ** 64;
+    const s = &@as([64]u8, @splat('a'));
     const fs = types.FixedStr64.fromSlice(s);
     try testing.expectEqual(@as(u16, 64), fs.len);
     try testing.expectEqualStrings(s, fs.slice());
 }
 
 test "FixedStr64: 65 chars truncates" {
-    const s = "a" ** 65;
+    const s = &@as([65]u8, @splat('a'));
     const fs = types.FixedStr64.fromSlice(s);
     try testing.expectEqual(@as(u16, 64), fs.len);
     // The 65th char is lost

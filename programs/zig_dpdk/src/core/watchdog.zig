@@ -119,7 +119,7 @@ pub const MemoryMonitor = struct {
 /// Combined watchdog that monitors all subsystems.
 pub const Watchdog = struct {
     tx_detectors: [config.max_queues_per_port]TxHangDetector =
-        [_]TxHangDetector{.{}} ** config.max_queues_per_port,
+        @splat(.{}),
     link: LinkMonitor = .{},
     memory: MemoryMonitor = .{},
     tick_count: u64 = 0,

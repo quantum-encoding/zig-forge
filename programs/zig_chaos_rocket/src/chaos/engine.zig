@@ -30,7 +30,7 @@ pub const ChaosEngine = struct {
     injector: fault_injector.FaultInjector,
     fuzzer: fuzzer_mod.Fuzzer,
     report: report_mod.ChaosReport = .{},
-    scenarios_triggered: [scenarios.ALL_SCENARIOS.len]bool = [_]bool{false} ** scenarios.ALL_SCENARIOS.len,
+    scenarios_triggered: [scenarios.ALL_SCENARIOS.len]bool = @splat(false),
     specific_scenario: ?[]const u8 = null,
     seed: u64,
 

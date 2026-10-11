@@ -65,8 +65,19 @@ const BRIGHT_RED = ESC ++ "[91m";
 const BRIGHT_CYAN = ESC ++ "[96m";
 const BRIGHT_WHITE = ESC ++ "[97m";
 
+/// `s` repeated `n` times at comptime. Zig 0.17 removed the `"ab" ** n` array-multiplication
+/// syntax, and `@splat` repeats a single byte only.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    const frozen = comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        break :blk out;
+    };
+    return &frozen;
+}
+
 // Separator line constants (Zig 0.16 does not support fill patterns)
-const SEPARATOR_DASH_40 = "─" ** 40;
+const SEPARATOR_DASH_40 = repeat("─", 40);
 
 const Config = struct {
     mode: chaos_engine.ChaosMode = .scripted,

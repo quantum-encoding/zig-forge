@@ -85,9 +85,9 @@ pub const VringUsed = extern struct {
 /// Simulated virtqueue for testing (in-memory, no real PCI/MMIO).
 pub const Virtqueue = struct {
     /// Descriptor table
-    descs: [256]VringDesc = [_]VringDesc{.{}} ** 256,
+    descs: [256]VringDesc = @splat(.{}),
     /// Shadow array: which mbuf is in which descriptor slot
-    shadow: [256]?*MBuf = [_]?*MBuf{null} ** 256,
+    shadow: [256]?*MBuf = @splat(null),
     /// Available ring indices
     avail_idx: u16 = 0,
     /// Last seen used index (our consumer pointer)
@@ -95,7 +95,7 @@ pub const Virtqueue = struct {
     /// Used ring index (incremented by "device" when it completes)
     used_idx: u16 = 0,
     /// Used ring elements
-    used_elems: [256]VringUsedElem = [_]VringUsedElem{.{}} ** 256,
+    used_elems: [256]VringUsedElem = @splat(.{}),
     /// Queue size
     size: u16 = 256,
     /// Queue stats

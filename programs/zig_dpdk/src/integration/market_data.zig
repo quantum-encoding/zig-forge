@@ -35,7 +35,7 @@ const Decimal = decimal_mod.Decimal;
 /// Market tick event — the output of parsing, input to trading strategy.
 /// Compatible with financial_engine's MarketTick.
 pub const MarketTick = struct {
-    symbol: [16]u8 = [_]u8{0} ** 16,
+    symbol: [16]u8 = @splat(0),
     bid: Decimal = Decimal.ZERO,
     ask: Decimal = Decimal.ZERO,
     bid_size: Decimal = Decimal.ZERO,

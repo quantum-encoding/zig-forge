@@ -169,7 +169,7 @@ fn linuxReadlink(path: [*:0]const u8, buf: []u8) VfioError!usize {
 /// VFIO container — holds IOMMU domain for DMA mappings.
 pub const VfioContainer = struct {
     fd: i32 = -1,
-    dma_mappings: [max_dma_mappings]DmaMapping = [_]DmaMapping{.{}} ** max_dma_mappings,
+    dma_mappings: [max_dma_mappings]DmaMapping = @splat(.{}),
     mapping_count: u32 = 0,
 
     /// Open the VFIO container (/dev/vfio/vfio).
@@ -362,7 +362,7 @@ pub const VfioDevice = struct {
         if (comptime builtin.os.tag != .linux) return error.NotSupported;
 
         // The PCI address string must be null-terminated for the ioctl
-        var addr_buf: [16]u8 = [_]u8{0} ** 16;
+        var addr_buf: [16]u8 = @splat(0);
         if (pci_addr.len > 15) return error.DeviceOpenFailed;
         @memcpy(addr_buf[0..pci_addr.len], pci_addr);
         addr_buf[pci_addr.len] = 0;

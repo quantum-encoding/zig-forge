@@ -29,8 +29,8 @@ pub fn Mmio(comptime T: type, comptime addr: usize) type {
         /// Read-modify-write: update specific fields while preserving others
         pub inline fn modify(fields: anytype) void {
             var value = ptr.*;
-            inline for (@typeInfo(@TypeOf(fields)).@"struct".fields) |field| {
-                @field(value, field.name) = @field(fields, field.name);
+            inline for (comptime std.meta.fieldNames(@TypeOf(fields))) |name| {
+                @field(value, name) = @field(fields, name);
             }
             ptr.* = value;
         }
@@ -93,8 +93,8 @@ pub inline fn read(comptime T: type, addr: usize) T {
 pub inline fn modify(comptime T: type, addr: usize, fields: anytype) void {
     const ptr: *volatile T = @ptrFromInt(addr);
     var value = ptr.*;
-    inline for (@typeInfo(@TypeOf(fields)).@"struct".fields) |field| {
-        @field(value, field.name) = @field(fields, field.name);
+    inline for (comptime std.meta.fieldNames(@TypeOf(fields))) |name| {
+        @field(value, name) = @field(fields, name);
     }
     ptr.* = value;
 }

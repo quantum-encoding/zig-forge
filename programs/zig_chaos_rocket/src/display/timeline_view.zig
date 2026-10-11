@@ -13,8 +13,19 @@ const CYAN = ESC ++ "[36m";
 const BRIGHT_GREEN = ESC ++ "[92m";
 const BRIGHT_CYAN = ESC ++ "[96m";
 
+/// `s` repeated `n` times at comptime. Zig 0.17 removed the `"ab" ** n` array-multiplication
+/// syntax, and `@splat` repeats a single byte only.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    const frozen = comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        break :blk out;
+    };
+    return &frozen;
+}
+
 // Separator line constants (Zig 0.16 does not support fill patterns)
-const SEPARATOR_DASH_68 = "─" ** 68;
+const SEPARATOR_DASH_68 = repeat("─", 68);
 
 pub fn renderTimeline(tl: *const timeline_mod.Timeline, writer: anytype) void {
     writer.print("\n{s}{s}  MISSION TIMELINE{s}\n", .{ BOLD, BRIGHT_CYAN, RESET }) catch {};

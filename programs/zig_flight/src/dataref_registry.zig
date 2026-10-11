@@ -134,7 +134,7 @@ pub const ResolvedDataref = struct {
 };
 
 pub const DatarefRegistry = struct {
-    entries: [MAX_DATAREFS]ResolvedDataref = [_]ResolvedDataref{.{}} ** MAX_DATAREFS,
+    entries: [MAX_DATAREFS]ResolvedDataref = @splat(.{}),
     count: usize = 0,
 
     pub fn init() DatarefRegistry {

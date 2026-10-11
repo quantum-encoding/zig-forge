@@ -1,4 +1,5 @@
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -21,7 +22,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zig-infer");
     run_step.dependOn(&run_cmd.step);
@@ -45,7 +46,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/ffi.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = Optimize.ReleaseFast,
         }),
         .linkage = .dynamic,
     });
@@ -66,7 +67,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/ffi.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = Optimize.ReleaseFast,
         }),
         .linkage = .static,
     });
@@ -88,7 +89,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/ffi_embed.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = Optimize.ReleaseFast,
         }),
         .linkage = .static,
     });

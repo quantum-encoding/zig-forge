@@ -19,8 +19,8 @@ const BRIGHT_CYAN = ESC ++ "[96m";
 const BRIGHT_WHITE = ESC ++ "[97m";
 const BRIGHT_YELLOW = ESC ++ "[93m";
 
-const SEPARATOR_EQ_72 = "=" ** 72;
-const SEPARATOR_DASH_68 = "-" ** 68;
+const SEPARATOR_EQ_72 = &@as([72]u8, @splat('='));
+const SEPARATOR_DASH_68 = &@as([68]u8, @splat('-'));
 
 // C FFI — functions from c_bugs.c
 extern fn run_all_demos() void;

@@ -583,20 +583,20 @@ fn ensureDir(path: []const u8) !void {
     // Find each path separator and create intermediate directories
     while (i < path.len) : (i += 1) {
         if (path[i] == '/' and i > 0) {
-            const partial = std.fmt.bufPrintZ(&buf, "{s}", .{path[0..i]}) catch return error.PathTooLong;
+            const partial = std.fmt.bufPrintSentinel(&buf, "{s}", .{path[0..i]}, 0) catch return error.PathTooLong;
             _ = std.c.mkdir(partial, 0o755);
         }
     }
 
     // Create final directory
-    const full = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return error.PathTooLong;
+    const full = std.fmt.bufPrintSentinel(&buf, "{s}", .{path}, 0) catch return error.PathTooLong;
     _ = std.c.mkdir(full, 0o755);
 }
 
 /// Write data to a file using C stdio
 fn writeFile(path: []const u8, data: []const u8) !void {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return error.PathTooLong;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return error.PathTooLong;
 
     const file = std.c.fopen(path_z, "wb") orelse return error.FileOpenFailed;
     defer _ = std.c.fclose(file);
@@ -608,7 +608,7 @@ fn writeFile(path: []const u8, data: []const u8) !void {
 /// Read data from a file
 pub fn readFile(allocator: Allocator, path: []const u8) ![]u8 {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return error.PathTooLong;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return error.PathTooLong;
 
     const file = std.c.fopen(path_z, "rb") orelse return error.FileOpenFailed;
     defer _ = std.c.fclose(file);
