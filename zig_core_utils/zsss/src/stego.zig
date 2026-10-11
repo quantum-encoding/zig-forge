@@ -87,6 +87,8 @@ pub const StegoError = error{
     PngCompressError,
     InvalidPassword,
     CorruptedData,
+    /// The IHDR declares more pixels than the decode budget admits (MAX_PIXELS / MAX_DIM).
+    ImageTooLarge,
 };
 
 /// Derive encryption key from password using HKDF-SHA256
@@ -519,14 +521,7 @@ pub const PngImage = struct {
 
     /// Get bytes per pixel based on color type
     pub fn bytesPerPixel(self: *const PngImage) usize {
-        return switch (self.color_type) {
-            0 => 1, // Grayscale
-            2 => 3, // RGB
-            3 => 1, // Indexed
-            4 => 2, // Grayscale + Alpha
-            6 => 4, // RGBA
-            else => 3,
-        };
+        return bytesPerPixelForColorType(self.color_type);
     }
 };
 
@@ -599,20 +594,65 @@ fn paethPredictor(a: i16, b: i16, c: i16) u8 {
     return @intCast(@as(u16, @bitCast(c)) & 0xFF);
 }
 
+/// Decode budget for a carrier image.
+///
+/// Every byte the decoder allocates is derived from the IHDR *before* any IDAT byte is
+/// inflated, so a file can cost at most what its header declares, and the header may
+/// declare at most this much:
+///
+///   - `MAX_DIM`    65536 px per side (an IHDR field is a u32; this keeps the size
+///                  arithmetic far from overflow on every target);
+///   - `MAX_PIXELS` 16,777,216 px (4096 x 4096). The filtered stream is then at most
+///                  MAX_PIXELS * 4 (RGBA) + MAX_DIM filter bytes = 67,174,400 bytes, and
+///                  the decoder's peak is that stream plus the unfiltered pixels: ~128 MiB,
+///                  which a phone survives and a 17 GiB declaration does not.
+///
+/// Why 16 Mpx: the stego embedder re-encodes the carrier at the same size with STORED
+/// deflate blocks (`encodePng`), so an image this library produced is at least as large on
+/// disk as its decoded pixels, and the CLI refuses to read a carrier above 100 MiB
+/// (`main.zig`, `readFileAlloc`). 16 Mpx x RGBA = 64 MiB is the largest carrier that can
+/// come back through that path; EVENT_TICKETS.md's capacity table tops out at 2048 x 2048.
+/// A legitimate 4-gigapixel carrier does not exist for this use case; a 65 KB file whose
+/// IHDR claims one is a zlib bomb (crypto test campaign 2026-10-11, finding #8 / E-2:
+/// 65 KB in, 131 MB peak, with a 17 GiB declaration still admitted).
+pub const MAX_DIM: usize = 1 << 16;
+pub const MAX_PIXELS: usize = 1 << 24;
+
+/// The IHDR fields the decoder consults (PNG 1.2 §4.1.1).
+const PngHeader = struct {
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    color_type: u8,
+    compression: u8,
+    filter: u8,
+    interlace: u8,
+};
+
+/// Bytes per pixel for a colour type at bit depth 8.
+fn bytesPerPixelForColorType(color_type: u8) usize {
+    return switch (color_type) {
+        0 => 1, // Grayscale
+        2 => 3, // RGB
+        3 => 1, // Indexed
+        4 => 2, // Grayscale + Alpha
+        6 => 4, // RGBA
+        else => 3,
+    };
+}
+
 /// Decode PNG image
 pub fn decodePng(allocator: Allocator, data: []const u8) !PngImage {
     if (data.len < 8 or !mem.eql(u8, data[0..8], &PNG_SIGNATURE)) {
         return StegoError.InvalidPng;
     }
 
-    var width: u32 = 0;
-    var height: u32 = 0;
-    var bit_depth: u8 = 0;
-    var color_type: u8 = 0;
-
-    // Collect all IDAT chunks
-    var idat_data: std.ArrayList(u8) = .empty;
-    defer idat_data.deinit(allocator);
+    // Pass 1: walk the chunk list without copying anything. Read the IHDR and add up
+    // the IDAT lengths, so the budget check below runs before a single IDAT byte is
+    // inflated or buffered.
+    var header: ?PngHeader = null;
+    var idat_total: usize = 0;
+    var saw_iend = false;
 
     var pos: usize = 8;
     while (pos + 12 <= data.len) {
@@ -624,19 +664,34 @@ pub fn decodePng(allocator: Allocator, data: []const u8) !PngImage {
         const chunk_data = data[pos + 8 ..][0..chunk_len];
 
         if (mem.eql(u8, chunk_type, "IHDR")) {
-            if (chunk_len < 10) return StegoError.InvalidPng;
-            width = readU32BE(chunk_data[0..4]);
-            height = readU32BE(chunk_data[4..8]);
-            bit_depth = chunk_data[8];
-            color_type = chunk_data[9];
+            // Exactly one IHDR, first, 13 bytes (PNG 1.2 §4.1.1).
+            if (header != null or chunk_len != 13) return StegoError.InvalidPng;
+            header = .{
+                .width = readU32BE(chunk_data[0..4]),
+                .height = readU32BE(chunk_data[4..8]),
+                .bit_depth = chunk_data[8],
+                .color_type = chunk_data[9],
+                .compression = chunk_data[10],
+                .filter = chunk_data[11],
+                .interlace = chunk_data[12],
+            };
+        } else if (header == null) {
+            return StegoError.InvalidPng;
         } else if (mem.eql(u8, chunk_type, "IDAT")) {
-            try idat_data.appendSlice(allocator, chunk_data);
+            idat_total = std.math.add(usize, idat_total, chunk_len) catch return StegoError.InvalidPng;
         } else if (mem.eql(u8, chunk_type, "IEND")) {
+            saw_iend = true;
             break;
         }
 
         pos += 12 + @as(usize, chunk_len);
     }
+
+    // A file that ends before IEND is truncated (PNG 1.2 §4.1.4), whatever it holds so far.
+    if (!saw_iend) return StegoError.InvalidPng;
+    const ihdr = header orelse return StegoError.InvalidPng;
+    const width = ihdr.width;
+    const height = ihdr.height;
 
     if (width == 0 or height == 0) return StegoError.InvalidPng;
 
@@ -644,65 +699,65 @@ pub fn decodePng(allocator: Allocator, data: []const u8) !PngImage {
     // absurd dimensions up front — before any decompression or allocation —
     // so a crafted IHDR can't integer-overflow the later size math or force
     // an enormous allocation.
-    const MAX_DIM: usize = 1 << 16; // 65536 px per side is generous for stego
     if (width > MAX_DIM or height > MAX_DIM) return StegoError.InvalidPng;
+    const pixel_total = std.math.mul(usize, width, height) catch return StegoError.ImageTooLarge;
+    if (pixel_total > MAX_PIXELS) return StegoError.ImageTooLarge;
 
-    // Decompress IDAT data using flate decompressor
-    var decompressed: std.ArrayList(u8) = .empty;
-    defer decompressed.deinit(allocator);
-
-    const zlib_data = idat_data.items;
-    if (zlib_data.len < 6) return StegoError.PngDecompressError;
-
-    // Check zlib header (CMF, FLG)
-    const cmf: u16 = zlib_data[0];
-    const flg: u16 = zlib_data[1];
-    if ((cmf & 0x0F) != 8) return StegoError.PngDecompressError; // Must be deflate
-    if (((cmf * 256 + flg) % 31) != 0) return StegoError.PngDecompressError; // Header checksum
-
-    // Use the flate decompressor with proper streaming
-    var input_reader = std.Io.Reader.fixed(idat_data.items);
-    var decomp_buffer: [flate.max_window_len]u8 = undefined;
-    var decompress_state: flate.Decompress = .init(&input_reader, .zlib, &decomp_buffer);
-
-    // Read decompressed data by peeking and consuming from the decompressor's reader
-    while (true) {
-        // Try to get buffered data first
-        const buffered = decompress_state.reader.buffered();
-        if (buffered.len > 0) {
-            try decompressed.appendSlice(allocator, buffered);
-            decompress_state.reader.seek += buffered.len;
-            continue;
-        }
-
-        // Try to decompress more data
-        const peek_result = decompress_state.reader.peekGreedy(1);
-        if (peek_result) |bytes| {
-            if (bytes.len == 0) break;
-            try decompressed.appendSlice(allocator, bytes);
-            decompress_state.reader.seek += bytes.len;
-        } else |err| {
-            if (err == error.EndOfStream) break;
-            return StegoError.PngDecompressError;
-        }
-    }
-
-    // Calculate bytes per pixel and scanline
-    const bpp: usize = switch (color_type) {
-        0 => 1,
-        2 => 3,
-        3 => 1,
-        4 => 2,
-        6 => 4,
-        else => 3,
-    };
-    // Dimensions were already bounded above; use checked multiplication for
-    // the size math so nothing can overflow usize even within those bounds.
+    // The filtered stream the IHDR declares: one filter byte per row plus the pixels.
+    // This is the only size the decoder will inflate; it is bounded by MAX_PIXELS above.
+    const bpp = bytesPerPixelForColorType(ihdr.color_type);
     const scanline_len = std.math.mul(usize, width, bpp) catch return StegoError.InvalidPng;
     const row_stride = std.math.add(usize, 1, scanline_len) catch return StegoError.InvalidPng;
     const expected_len = std.math.mul(usize, height, row_stride) catch return StegoError.InvalidPng;
 
-    if (decompressed.items.len < expected_len) return StegoError.InvalidPng;
+    // Pass 2: the IDAT chunks, concatenated into exactly the space they need (no
+    // growth doubling), which is at most the input itself.
+    const idat = try allocator.alloc(u8, idat_total);
+    defer allocator.free(idat);
+    {
+        var filled: usize = 0;
+        pos = 8;
+        while (pos + 12 <= data.len) {
+            const chunk_len = readU32BE(data[pos..][0..4]);
+            const chunk_type = data[pos + 4 ..][0..4];
+            if (mem.eql(u8, chunk_type, "IDAT")) {
+                @memcpy(idat[filled..][0..chunk_len], data[pos + 8 ..][0..chunk_len]);
+                filled += chunk_len;
+            } else if (mem.eql(u8, chunk_type, "IEND")) {
+                break;
+            }
+            pos += 12 + @as(usize, chunk_len);
+        }
+        std.debug.assert(filled == idat_total);
+    }
+
+    if (idat.len < 6) return StegoError.PngDecompressError;
+
+    // Check zlib header (CMF, FLG)
+    const cmf: u16 = idat[0];
+    const flg: u16 = idat[1];
+    if ((cmf & 0x0F) != 8) return StegoError.PngDecompressError; // Must be deflate
+    if (((cmf * 256 + flg) % 31) != 0) return StegoError.PngDecompressError; // Header checksum
+
+    // Inflate into a buffer of exactly the declared size. A stream that is shorter is
+    // truncated or lying; one that has more is refused on the first surplus byte,
+    // without inflating the rest. The decompressor's window lives on the stack, so a
+    // crafted file costs `idat.len + expected_len` and nothing it chooses.
+    var input_reader = std.Io.Reader.fixed(idat);
+    var decomp_buffer: [flate.max_window_len]u8 = undefined;
+    var decompress_state: flate.Decompress = .init(&input_reader, .zlib, &decomp_buffer);
+
+    const filtered = try allocator.alloc(u8, expected_len);
+    defer allocator.free(filtered);
+
+    const got = decompress_state.reader.readSliceShort(filtered) catch return StegoError.PngDecompressError;
+    if (got < expected_len) return StegoError.PngDecompressError;
+    if (decompress_state.reader.peek(1)) |_| {
+        return StegoError.InvalidPng;
+    } else |err| switch (err) {
+        error.EndOfStream => {},
+        else => return StegoError.PngDecompressError,
+    }
 
     // Allocate pixel buffer
     const pixel_count = std.math.mul(usize, scanline_len, height) catch return StegoError.InvalidPng;
@@ -713,9 +768,9 @@ pub fn decodePng(allocator: Allocator, data: []const u8) !PngImage {
     var prev_scanline: ?[]const u8 = null;
     var y: usize = 0;
     while (y < height) : (y += 1) {
-        const scanline_start = y * (1 + scanline_len);
-        const filter_type = decompressed.items[scanline_start];
-        const raw_scanline = decompressed.items[scanline_start + 1 ..][0..scanline_len];
+        const scanline_start = y * row_stride;
+        const filter_type = filtered[scanline_start];
+        const raw_scanline = filtered[scanline_start + 1 ..][0..scanline_len];
         const pixel_row = pixels[y * scanline_len ..][0..scanline_len];
 
         for (0..scanline_len) |x| {
@@ -743,8 +798,8 @@ pub fn decodePng(allocator: Allocator, data: []const u8) !PngImage {
     return PngImage{
         .width = width,
         .height = height,
-        .bit_depth = bit_depth,
-        .color_type = color_type,
+        .bit_depth = ihdr.bit_depth,
+        .color_type = ihdr.color_type,
         .pixels = pixels,
         .allocator = allocator,
     };

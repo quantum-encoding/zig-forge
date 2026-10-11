@@ -352,6 +352,26 @@ pub fn build(b: *std.Build) void {
     const slip39_vector_tests = b.addTest(.{ .root_module = slip39_vectors_module });
     const run_slip39_vector_tests = b.addRunArtifact(slip39_vector_tests);
     test_step.dependOn(&run_slip39_vector_tests.step);
+
+    // Hostile-input tests for the PNG decoder (crypto test campaign 2026-10-11, track E).
+    // The fixtures are produced by CPython's zlib (tests/make_png_fixtures.py) and handed
+    // to the module as anonymous imports, the same way as the SLIP-0039 vectors.
+    const stego_hostile_module = b.createModule(.{
+        .root_source_file = b.path("src/stego_hostile_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    stego_hostile_module.addAnonymousImport("zlib_bomb", .{
+        .root_source_file = b.path("tests/zlib-bomb-64mib.zlib"),
+    });
+    stego_hostile_module.addAnonymousImport("png_gradient", .{
+        .root_source_file = b.path("tests/png-gradient-64x64-filtered.png"),
+    });
+
+    const stego_hostile_tests = b.addTest(.{ .root_module = stego_hostile_module });
+    const run_stego_hostile_tests = b.addRunArtifact(stego_hostile_tests);
+    test_step.dependOn(&run_stego_hostile_tests.step);
 }
 
 /// The step that leaves an installed Apple static archive linkable, to depend on in place
