@@ -33,7 +33,8 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
-    if (b.args) |args| run_cmd.addArgs(args);
+    // Zig 0.17 removed `b.args`; `addPassthruArgs` does not exist on 0.16.
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run the zig_legend CLI").dependOn(&run_cmd.step);
 
     // Tests: unit tests in the library plus golden renders of the examples.

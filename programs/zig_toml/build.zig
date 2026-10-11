@@ -36,9 +36,8 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(demo);
 
     const run_demo = b.addRunArtifact(demo);
-    if (b.args) |args| {
-        run_demo.addArgs(args);
-    }
+    // Zig 0.17 removed `b.args`; `addPassthruArgs` does not exist on 0.16.
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_demo.addPassthruArgs() else if (b.args) |args| run_demo.addArgs(args);
 
     const demo_step = b.step("demo", "Run the TOML parser demo");
     demo_step.dependOn(&run_demo.step);

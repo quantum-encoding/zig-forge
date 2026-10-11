@@ -16,6 +16,11 @@
 //!   zig-out/lib/zigpdf.wasm - WebAssembly module for Cloudflare Workers, Deno, etc.
 
 const std = @import("std");
+// Zig 0.17 renames the OptimizeMode tags (.fast/.small/...); the old names survive only
+// as decls, so spell them through the type to compile on 0.16 and 0.17.
+const Optimize = std.builtin.OptimizeMode;
+// Un-versioned iOS floors at 15.0 on Zig 0.16 and 18.0 on 0.17; the fleet floor is 26.0.
+const apple_floor: std.Target.Query.OsVersion = .{ .semver = .{ .major = 26, .minor = 0, .patch = 0 } };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -96,8 +101,8 @@ pub fn build(b: *std.Build) void {
     // replaces the stamped release archive.
     const lib_step = b.step("lib", "Build the consumed archive zig-out/lib/libzigpdf.a (release modes only; use scripts/build-macos-lib.sh)");
     switch (optimize) {
-        .ReleaseSmall, .ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step),
-        .Debug, .ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
+        Optimize.ReleaseSmall, Optimize.ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step),
+        Optimize.Debug, Optimize.ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
             "zig build lib writes zig-out/lib/libzigpdf.a, the archive consumers link; " ++
                 "a {t} build keeps Zig's panic machinery and is never that archive. " ++
                 "Run scripts/build-macos-lib.sh programs/zig_pdf_generator from the repo root " ++
@@ -158,7 +163,7 @@ pub fn build(b: *std.Build) void {
     const android_module = b.createModule(.{
         .root_source_file = b.path("src/ffi.zig"),
         .target = android_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const android_lib = b.addLibrary(.{
@@ -191,7 +196,7 @@ pub fn build(b: *std.Build) void {
     const android_shared_module = b.createModule(.{
         .root_source_file = b.path("src/ffi.zig"),
         .target = android_shared_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const android_shared_lib = b.addLibrary(.{
@@ -225,7 +230,7 @@ pub fn build(b: *std.Build) void {
     const android_exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = android_exe_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const android_exe = b.addExecutable(.{
@@ -251,13 +256,14 @@ pub fn build(b: *std.Build) void {
     const ios_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
         .os_tag = .ios,
+        .os_version_min = apple_floor,
         .abi = .none,
     });
 
     const ios_module = b.createModule(.{
         .root_source_file = b.path("src/ffi.zig"),
         .target = ios_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const ios_lib = b.addLibrary(.{
@@ -284,13 +290,14 @@ pub fn build(b: *std.Build) void {
     const ios_sim_arm_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
         .os_tag = .ios,
+        .os_version_min = apple_floor,
         .abi = .simulator,
     });
 
     const ios_sim_arm_module = b.createModule(.{
         .root_source_file = b.path("src/ffi.zig"),
         .target = ios_sim_arm_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const ios_sim_arm_lib = b.addLibrary(.{
@@ -326,7 +333,7 @@ pub fn build(b: *std.Build) void {
     const wasm_module = b.createModule(.{
         .root_source_file = b.path("src/wasm.zig"),
         .target = wasm_target,
-        .optimize = .ReleaseSmall,
+        .optimize = Optimize.ReleaseSmall,
     });
 
     const wasm_lib = b.addExecutable(.{
@@ -376,7 +383,7 @@ pub fn build(b: *std.Build) void {
     const web_wasm_module = b.createModule(.{
         .root_source_file = b.path("src/wasm_web.zig"),
         .target = web_wasm_target,
-        .optimize = .ReleaseSmall,
+        .optimize = Optimize.ReleaseSmall,
     });
     const web_wasm = b.addExecutable(.{
         .name = "zigpdf_web",
@@ -427,9 +434,9 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    // Zig 0.17 removed `b.args`; `addPassthruArgs` does not exist on 0.16.
+
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run the PDF generator CLI");
     run_step.dependOn(&run_cmd.step);

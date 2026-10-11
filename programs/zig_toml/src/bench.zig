@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
 
     try stdout.print("=== TOML Parser Benchmarks ===\n\n", .{});
 
-    var results: [10]?BenchResult = [_]?BenchResult{null} ** 10;
+    var results: [10]?BenchResult = @splat(null);
     var result_count: usize = 0;
 
     // Benchmark 1: Simple key-value parsing

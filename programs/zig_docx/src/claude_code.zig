@@ -49,10 +49,16 @@ fn realpathInto(allocator: std.mem.Allocator, path: []const u8, buf: *[std.fs.ma
     return std.mem.span(res);
 }
 
-const cdir = @cImport({
-    @cInclude("dirent.h");
-    @cInclude("sys/stat.h");
-});
+// Zig 0.17 removed `@cImport`; std.c carries the same dirent.h prototypes on both
+// 0.16 and 0.17 (readdir resolves to `readdir$INODE64` on x86_64 Darwin as dirent.h
+// does). std.c.dirent names the fields `type`/`name` (C's `d_type`/`d_name`).
+const cdir = struct {
+    const opendir = std.c.opendir;
+    const closedir = std.c.closedir;
+    const readdir = std.c.readdir;
+    const DT_DIR = std.c.DT.DIR;
+    const DT_UNKNOWN = std.c.DT.UNKNOWN;
+};
 
 /// Extract all Claude Code sessions from projects_dir into output_dir.
 /// projects_dir should be ~/.claude/projects or a single project subdirectory.
@@ -98,14 +104,14 @@ pub fn extractAll(
     defer _ = cdir.closedir(dir);
 
     while (cdir.readdir(dir)) |entry| {
-        const d_name: [*]const u8 = @ptrCast(&entry.*.d_name);
+        const d_name: [*]const u8 = @ptrCast(&entry.*.name);
         const name_len = std.mem.indexOfScalar(u8, d_name[0..256], 0) orelse 256;
         const name = d_name[0..name_len];
 
         if (name.len == 0 or name[0] == '.') continue;
 
         // Only directories
-        if (entry.*.d_type != cdir.DT_DIR and entry.*.d_type != cdir.DT_UNKNOWN) continue;
+        if (entry.*.type != cdir.DT_DIR and entry.*.type != cdir.DT_UNKNOWN) continue;
 
         if (options.only_project) |filter| {
             if (!std.mem.eql(u8, name, filter)) continue;
@@ -148,7 +154,7 @@ fn extractProject(
     defer _ = cdir.closedir(dir);
 
     while (cdir.readdir(dir)) |entry| {
-        const d_name: [*]const u8 = @ptrCast(&entry.*.d_name);
+        const d_name: [*]const u8 = @ptrCast(&entry.*.name);
         const name_len = std.mem.indexOfScalar(u8, d_name[0..256], 0) orelse 256;
         const name = d_name[0..name_len];
 
@@ -520,7 +526,7 @@ fn loadSubagents(
     defer _ = cdir.closedir(dir);
 
     while (cdir.readdir(dir)) |entry| {
-        const d_name: [*]const u8 = @ptrCast(&entry.*.d_name);
+        const d_name: [*]const u8 = @ptrCast(&entry.*.name);
         const name_len = std.mem.indexOfScalar(u8, d_name[0..256], 0) orelse 256;
         const name = d_name[0..name_len];
 
@@ -599,7 +605,7 @@ fn containsJsonlFiles(allocator: std.mem.Allocator, path: []const u8) bool {
     defer _ = cdir.closedir(dir);
 
     while (cdir.readdir(dir)) |entry| {
-        const d_name: [*]const u8 = @ptrCast(&entry.*.d_name);
+        const d_name: [*]const u8 = @ptrCast(&entry.*.name);
         const name_len = std.mem.indexOfScalar(u8, d_name[0..256], 0) orelse 256;
         const name = d_name[0..name_len];
         if (std.mem.endsWith(u8, name, ".jsonl")) return true;

@@ -3056,7 +3056,7 @@ test "encrypted invoice: password + fixed seed produces an /Encrypt-protected PD
         .subtotal = 1000,
         .total = 1000,
         .password = "open-sesame",
-        .seed = [_]u8{0x11} ** 32, // fixed (non-zero) seed => reproducible file
+        .seed = @as([32]u8, @splat(0x11)), // fixed (non-zero) seed => reproducible file
     };
 
     const pdf_bytes = try generateInvoice(allocator, data);
@@ -3083,7 +3083,7 @@ test "encrypted invoice: an all-zero seed is refused" {
         .subtotal = 1,
         .total = 1,
         .password = "pw",
-        .seed = [_]u8{0} ** 32, // all-zero => predictable key => must be rejected
+        .seed = @as([32]u8, @splat(0)), // all-zero => predictable key => must be rejected
     };
     try std.testing.expectError(error.InsecureSeed, generateInvoice(allocator, data));
 }

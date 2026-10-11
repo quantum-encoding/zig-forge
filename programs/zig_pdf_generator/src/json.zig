@@ -229,10 +229,10 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
             (if (lv == .object) lv.object else null)
         else
             null;
-        inline for (@typeInfo(invoice.Labels).@"struct".fields) |f| {
-            const default_val = @field(data.labels, f.name);
-            @field(data.labels, f.name) = if (labels_obj) |lo|
-                try dupeJsonString(allocator, lo, f.name) orelse try allocator.dupe(u8, default_val)
+        inline for (comptime fieldNamesOf(invoice.Labels)) |f_name| {
+            const default_val = @field(data.labels, f_name);
+            @field(data.labels, f_name) = if (labels_obj) |lo|
+                try dupeJsonString(allocator, lo, f_name) orelse try allocator.dupe(u8, default_val)
             else
                 try allocator.dupe(u8, default_val);
         }
@@ -514,8 +514,8 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
             (if (bv == .object) bv.object else null)
         else
             null;
-        inline for (@typeInfo(invoice.BankDetails).@"struct".fields) |f| {
-            const key = f.name;
+        inline for (comptime fieldNamesOf(invoice.BankDetails)) |f_name| {
+            const key = f_name;
             @field(data.bank_details, key) = if (bd_obj) |bo|
                 try dupeJsonString(allocator, bo, key) orelse
                     (if (comptime std.mem.eql(u8, key, "bic")) try dupeJsonString(allocator, bo, "swift") else null) orelse
@@ -538,8 +538,8 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
 }
 
 fn parseTheme(name: []const u8) invoice.Theme {
-    inline for (@typeInfo(invoice.Theme).@"enum".fields) |f| {
-        if (std.mem.eql(u8, name, f.name)) return @enumFromInt(f.value);
+    inline for (comptime fieldNamesOf(invoice.Theme)) |f_name| {
+        if (std.mem.eql(u8, name, f_name)) return @field(invoice.Theme, f_name);
     }
     return .classic;
 }
@@ -638,8 +638,8 @@ pub fn freeInvoiceData(allocator: std.mem.Allocator, data: *const invoice.Invoic
     if (data.currency_symbol.len > 0) allocator.free(data.currency_symbol);
     allocator.free(data.number_format.thousands);
     allocator.free(data.number_format.decimal);
-    inline for (@typeInfo(invoice.Labels).@"struct".fields) |f| {
-        const s = @field(data.labels, f.name);
+    inline for (comptime fieldNamesOf(invoice.Labels)) |f_name| {
+        const s = @field(data.labels, f_name);
         if (s.len > 0) allocator.free(s);
     }
     if (data.password.len > 0) allocator.free(data.password);
@@ -660,8 +660,8 @@ pub fn freeInvoiceData(allocator: std.mem.Allocator, data: *const invoice.Invoic
     allocator.free(data.subject);
     allocator.free(data.payment_date);
     allocator.free(data.payment_method);
-    inline for (@typeInfo(invoice.BankDetails).@"struct".fields) |f| {
-        allocator.free(@field(data.bank_details, f.name));
+    inline for (comptime fieldNamesOf(invoice.BankDetails)) |f_name| {
+        allocator.free(@field(data.bank_details, f_name));
     }
     allocator.free(data.signature_name);
     allocator.free(data.signature_title);
@@ -1321,4 +1321,18 @@ test "pay_now fields parse, default the label and free cleanly" {
     try std.testing.expect(without.pay_now_url == null);
     try std.testing.expectEqualStrings("Pagar", without.pay_now_label);
     try std.testing.expectEqualStrings("", without.pay_now_note);
+}
+
+/// Field names of a struct or enum type. Zig 0.17 replaced `@typeInfo(T).@"struct".fields`
+/// with `field_names`; this spelling compiles on 0.16 and 0.17.
+fn fieldNamesOf(comptime T: type) []const [:0]const u8 {
+    return comptime switch (@typeInfo(T)) {
+        inline .@"struct", .@"enum" => |info| if (@hasField(@TypeOf(info), "field_names")) info.field_names else blk: {
+            var names: [info.fields.len][:0]const u8 = undefined;
+            for (&names, info.fields) |*n, f| n.* = f.name;
+            const final = names;
+            break :blk &final;
+        },
+        else => unreachable,
+    };
 }

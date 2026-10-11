@@ -676,13 +676,13 @@ pub fn legendLetterToDocx(allocator: std.mem.Allocator, json_str: []const u8, di
     var host: std.ArrayList(zdocx.ffi.ZigDocxInputImage) = .empty;
     for (L.images) |img| {
         const raw = if (img.bytes.len > 0) img.bytes else image_lib.decodeBase64(arena, img.base64) catch continue;
-        try host.append(arena, .{ .name = try arena.dupeZ(u8, img.name), .data = raw.ptr, .len = raw.len });
+        try host.append(arena, .{ .name = try arena.dupeSentinel(u8, img.name, 0), .data = raw.ptr, .len = raw.len });
     }
 
     const opts = zdocx.ffi.ZigDocxOptions{
-        .title = try arena.dupeZ(u8, L.subject),
-        .author = try arena.dupeZ(u8, L.company_name),
-        .date = try arena.dupeZ(u8, L.date),
+        .title = try arena.dupeSentinel(u8, L.subject, 0),
+        .author = try arena.dupeSentinel(u8, L.company_name, 0),
+        .date = try arena.dupeSentinel(u8, L.date, 0),
         .letterhead_data = if (letterhead) |lh| lh.ptr else null,
         .letterhead_len = if (letterhead) |lh| lh.len else 0,
         .letterhead_ext = letterhead_ext.ptr,

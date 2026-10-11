@@ -262,14 +262,14 @@ test "legend letter: C exports return the PDF, or NULL with the reason" {
     defer arena.deinit();
     const a = arena.allocator();
     const good = try packInput(a, "debt-recovery.toml", "reminder", "individual-unpaid", "reminder", &.{});
-    const good_z = try a.dupeZ(u8, good);
+    const good_z = try a.dupeSentinel(u8, good, 0);
     var len: usize = 0;
     const pdf = ffi.zigpdf_generate_legend_letter(good_z, &len) orelse return error.TestUnexpectedNull;
     defer ffi.zigpdf_free(pdf, len);
     try testing.expect(std.mem.startsWith(u8, pdf[0..len], "%PDF-"));
 
     const bad = try packInput(a, "debt-recovery.toml", "reminder", "individual-unpaid", "reminder", &.{.{ "DEBTOR_TYPE", "trust" }});
-    const bad_z = try a.dupeZ(u8, bad);
+    const bad_z = try a.dupeSentinel(u8, bad, 0);
     try testing.expect(ffi.zigpdf_generate_legend_letter(bad_z, &len) == null);
     const msg = std.mem.span(ffi.zigpdf_get_error());
     try testing.expect(std.mem.startsWith(u8, msg, "Legend letter: bindings: 'trust' is not a value of enum 'DEBTOR_TYPE'"));

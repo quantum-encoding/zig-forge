@@ -248,7 +248,7 @@ test "docx bridge: a legend letter becomes an editable Word document" {
         \\   "closing": "Yours sincerely,", "signature_name": "Sam Hollis", "signature_title": "Director",
         \\   "letterhead_image": "data:image/png;base64,{s}"}}}}
     , .{b64});
-    const z = try a.dupeZ(u8, input);
+    const z = try a.dupeSentinel(u8, input, 0);
     var len: usize = 0;
     const docx_ptr = ffi.zigpdf_legend_letter_to_docx(z, &len) orelse {
         std.debug.print("{s}\n", .{std.mem.span(ffi.zigpdf_get_error())});
@@ -270,7 +270,7 @@ test "docx bridge: a legend letter becomes an editable Word document" {
     }
     // A bad binding is refused before any .docx is written.
     const bad = try std.mem.replaceOwned(u8, a, z, "\"960\"", "\"9,60\"");
-    const bad_z = try a.dupeZ(u8, bad);
+    const bad_z = try a.dupeSentinel(u8, bad, 0);
     try testing.expect(ffi.zigpdf_legend_letter_to_docx(bad_z, &len) == null);
     try testing.expect(has(std.mem.span(ffi.zigpdf_get_error()), "not an amount"));
 }
