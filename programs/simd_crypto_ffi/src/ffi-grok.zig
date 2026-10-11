@@ -3577,6 +3577,36 @@ test "quantum_bitcoin_parse_tx — SegWit coinbase golden decode (block 500000)"
     try std.testing.expect(parsed.inputs[0].has_witness);
 }
 
+test "quantum_spv_verify_pow refuses a target above powLimit at the FFI boundary (finding #12 / A-1)" {
+    // walletcore's zig_parse_regressions.rs replays exactly this header through the archive:
+    // all zero but nBits 0x2100ffff. Before 2026-10-11 it verified.
+    var header = CBlockHeader{
+        .version = 0,
+        .prev_block_hash = [_]u8{0} ** 32,
+        .merkle_root = [_]u8{0} ** 32,
+        .timestamp = 0,
+        .bits = 0x2100ffff,
+        .nonce = 0,
+    };
+    try std.testing.expectEqual(@intFromEnum(SpvResult.insufficient_work), quantum_spv_verify_pow(&header));
+    // nBits 0 (zero target) with the all-zero hash: refused too.
+    header.bits = 0;
+    try std.testing.expectEqual(@intFromEnum(SpvResult.insufficient_work), quantum_spv_verify_pow(&header));
+    // The genesis header, through the same entry point, still verifies.
+    var genesis = CBlockHeader{
+        .version = 1,
+        .prev_block_hash = [_]u8{0} ** 32,
+        .merkle_root = undefined,
+        .timestamp = 1231006505,
+        .bits = 0x1d00ffff,
+        .nonce = 2083236893,
+    };
+    var merkle_be: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&merkle_be, "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b");
+    for (0..32) |i| genesis.merkle_root[i] = merkle_be[31 - i];
+    try std.testing.expectEqual(@intFromEnum(SpvResult.success), quantum_spv_verify_pow(&genesis));
+}
+
 test "quantum_spv_verify_merkle_proof honors caller tx_count (CVE-2012-2459 pin at the FFI boundary)" {
     // 4-tx tree, our tx at index 0 (see spv.zig "Merkle Proof Verification - Valid").
     const tx_hash = spv.hashDoubleSha256("Transaction Data");
@@ -3629,4 +3659,3 @@ fn ffiPanic(msg: []const u8, ret_addr: ?usize) noreturn {
 /// check (outOfBounds, unwrapNull, integerOverflow, …) into it. The previous
 /// 3-arg `pub fn panic` form only worked via a deprecated 0.16 compat shim.
 pub const panic = std.debug.FullPanic(ffiPanic);
-

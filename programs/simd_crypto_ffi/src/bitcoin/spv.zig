@@ -221,14 +221,39 @@ pub fn compareHash(a: Hash, b: Hash) i32 {
     return 0;
 }
 
-/// Verify that a block hash meets the difficulty target
-/// Returns true if hash <= target (valid proof of work)
-pub fn verifyProofOfWork(header: BlockHeader) bool {
-    const hash = header.getHash();
-    const target = decodeCompactTarget(header.bits);
+/// Bitcoin mainnet `powLimit` (Bitcoin Core src/kernel/chainparams.cpp, CMainParams):
+/// 0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff, the easiest target
+/// the chain ever allows (difficulty 1 is its compact form 0x1d00ffff). Stored little-endian
+/// like every `Hash` here: the 28 low bytes are 0xff, the 4 high bytes 0.
+pub const POW_LIMIT: Hash = [_]u8{0xff} ** 28 ++ [_]u8{0} ** 4;
+
+/// Bitcoin Core's CheckProofOfWork (src/pow.cpp), for a hash already computed.
+///
+/// The target is invalid when its compact encoding is negative, zero or overflows 256
+/// bits (decodeCompactTarget returns the zero target for all three), and when it is
+/// easier than powLimit: a header whose nBits names a target above the chain's minimum
+/// difficulty used to verify with any hash, including the all-zero one (crypto test
+/// campaign 2026-10-11, finding #12 / track A A-1, nBits 0x2100ffff). A consumer that
+/// trusts verify_pow without checking nBits against the expected retarget would have
+/// accepted a trivially mined header chain.
+pub fn checkProofOfWork(hash: Hash, bits: u32) bool {
+    const target = decodeCompactTarget(bits);
+
+    // Zero target: negative, zero-mantissa or overflowing nBits (and nBits 0 itself).
+    // Checked explicitly so an all-zero hash cannot satisfy `hash <= 0`.
+    if (std.mem.allEqual(u8, &target, 0)) return false;
+
+    // Target above powLimit: easier than the chain allows.
+    if (compareHash(target, POW_LIMIT) > 0) return false;
 
     // Hash must be <= target for valid PoW
     return compareHash(hash, target) <= 0;
+}
+
+/// Verify that a block header's hash meets its own difficulty target and that the
+/// target is one Bitcoin mainnet allows (see checkProofOfWork).
+pub fn verifyProofOfWork(header: BlockHeader) bool {
+    return checkProofOfWork(header.getHash(), header.bits);
 }
 
 /// Calculate the difficulty from compact bits
@@ -756,6 +781,94 @@ test "SPV Full Verification" {
 
     // Verify without PoW check (our test header won't have valid PoW)
     try verifyPayment(tx_hash, proof, header, prev_hash, false);
+}
+
+// ---------------------------------------------------------------------------
+// Proof of work: anchored to Bitcoin Core src/test/pow_tests.cpp and the genesis block
+// ---------------------------------------------------------------------------
+
+/// A 256-bit value from its big-endian hex (how Bitcoin Core's SetHex reads it),
+/// into this module's little-endian Hash. Decoded at compile time, so a typo in a
+/// vector is a compile error, not a runtime one.
+fn hashFromBigEndianHex(comptime hex: []const u8) Hash {
+    return comptime blk: {
+        @setEvalBranchQuota(10_000);
+        if (hex.len != 64) @compileError("a 256-bit hex vector has 64 digits");
+        var le: Hash = undefined;
+        for (0..32) |i| {
+            le[i] = std.fmt.parseInt(u8, hex[(31 - i) * 2 ..][0..2], 16) catch @compileError("not a hex vector: " ++ hex);
+        }
+        break :blk le;
+    };
+}
+
+test "PoW anchor: the genesis block header hashes to its known id and satisfies its own nBits" {
+    // Bitcoin block 0 (Bitcoin Core chainparams.cpp CreateGenesisBlock; any explorer):
+    // version 1, no previous block, merkle root 4a5e1e4b..., time 1231006505, nBits
+    // 0x1d00ffff, nonce 2083236893, hash 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f.
+    const header = BlockHeader{
+        .version = 1,
+        .prev_block_hash = [_]u8{0} ** 32,
+        .merkle_root = hashFromBigEndianHex("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"),
+        .timestamp = 1231006505,
+        .bits = 0x1d00ffff,
+        .nonce = 2083236893,
+    };
+    const expected = hashFromBigEndianHex("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f");
+    try std.testing.expectEqualSlices(u8, &expected, &header.getHash());
+    try std.testing.expect(verifyProofOfWork(header));
+    try std.testing.expect(checkProofOfWork(expected, 0x1d00ffff));
+}
+
+test "PoW anchor: Bitcoin Core pow_tests CheckProofOfWork_test_* cases refuse as Core does" {
+    const one = hashFromBigEndianHex("0000000000000000000000000000000000000000000000000000000000000001");
+
+    // CheckProofOfWork_test_negative_target: nBits = powLimit.GetCompact(true) = 0x1d80ffff, hash 1.
+    try std.testing.expect(!checkProofOfWork(one, 0x1d80ffff));
+
+    // CheckProofOfWork_test_overflow_target: nBits = ~0x00800000 = 0xff7fffff, hash 1.
+    try std.testing.expect(!checkProofOfWork(one, 0xff7fffff));
+
+    // CheckProofOfWork_test_too_easy_target: nBits = (powLimit * 2).GetCompact() = 0x2101ffff, hash 1.
+    try std.testing.expect(!checkProofOfWork(one, 0x2101ffff));
+
+    // CheckProofOfWork_test_biger_hash_than_target: nBits = powLimit.GetCompact() = 0x1d00ffff,
+    // hash = powLimit * 2 (mod 2^256) = ff..fe.
+    const bigger = hashFromBigEndianHex("fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe");
+    try std.testing.expect(!checkProofOfWork(bigger, 0x1d00ffff));
+
+    // CheckProofOfWork_test_zero_target: nBits = arith_uint256(0).GetCompact() = 0, hash 0.
+    const zero = [_]u8{0} ** 32;
+    try std.testing.expect(!checkProofOfWork(zero, 0));
+}
+
+test "PoW: a target above powLimit is refused whatever the hash (finding #12 / A-1, nBits 0x2100ffff)" {
+    const zero = [_]u8{0} ** 32;
+    // Track A's case: a legal compact encoding (exponent 33, mantissa 0x00ffff) whose target
+    // is 0xffff << 240, far above powLimit; the all-zero header hash used to pass.
+    try std.testing.expect(!checkProofOfWork(zero, 0x2100ffff));
+    const header = BlockHeader{
+        .version = 0,
+        .prev_block_hash = zero,
+        .merkle_root = zero,
+        .timestamp = 0,
+        .bits = 0x2100ffff,
+        .nonce = 0,
+    };
+    try std.testing.expect(!verifyProofOfWork(header));
+
+    // The edge, both sides, as Core compares `target > powLimit` (a mantissa with bit 23
+    // set, e.g. 0x1cffffff, is a negative encoding and already refused above):
+    //   0x1d00ffff -> 0x00000000ffff0000..  <= powLimit  accepted (hash == target passes)
+    //   0x1c7fffff -> 0x000000007fffff00..  <= powLimit  accepted
+    //   0x1d010000 -> 0x0000000100000000..  >  powLimit  refused
+    //   0x1e00ffff -> 0x000000ffff000000..  >  powLimit  refused
+    try std.testing.expect(checkProofOfWork(decodeCompactTarget(0x1d00ffff), 0x1d00ffff));
+    try std.testing.expect(checkProofOfWork(zero, 0x1c7fffff));
+    try std.testing.expect(!checkProofOfWork(zero, 0x1d010000));
+    try std.testing.expect(!checkProofOfWork(zero, 0x1e00ffff));
+    // powLimit itself, little-endian, is exactly what the comment on POW_LIMIT says.
+    try std.testing.expectEqualSlices(u8, &hashFromBigEndianHex("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"), &POW_LIMIT);
 }
 
 test "Hash Comparison" {
