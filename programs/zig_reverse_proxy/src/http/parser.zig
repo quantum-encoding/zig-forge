@@ -254,7 +254,7 @@ pub const Parser = struct {
         }
 
         if (request.getHeader("Transfer-Encoding")) |te| {
-            request.is_chunked = std.ascii.indexOfIgnoreCase(te, "chunked") != null;
+            request.is_chunked = std.ascii.findIgnoreCase(te, "chunked") != null;
         }
 
         // Content-Length + Transfer-Encoding on the same message is ambiguous
