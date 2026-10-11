@@ -142,7 +142,7 @@ fn promptOnce(n: usize, recursive: bool) bool {
 }
 
 fn removeFile(allocator: std.mem.Allocator, path: []const u8, config: *const Config) !void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     // Check preserve-root safety
@@ -163,7 +163,7 @@ fn removeFile(allocator: std.mem.Allocator, path: []const u8, config: *const Con
                 while (stripped.len > 1 and stripped[stripped.len - 1] == '/') {
                     stripped = stripped[0 .. stripped.len - 1];
                 }
-                const sz = try allocator.dupeZ(u8, stripped);
+                const sz = try allocator.dupeSentinel(u8, stripped, 0);
                 defer allocator.free(sz);
                 const st = getFileType(sz);
                 if (st != null and st.? != .directory) {
@@ -248,7 +248,7 @@ fn removeDirectoryRecursive(allocator: std.mem.Allocator, path: []const u8, conf
     try clearDirContents(allocator, io, dir, path, config);
 
     // Now remove the empty directory itself.
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     try removeEmptyDir(path, path_z, config);
 }
@@ -301,7 +301,7 @@ fn clearDirContents(allocator: std.mem.Allocator, io: Io, dir: Dir, disp_path: [
 // Classify a directory entry by name relative to an open dir fd, without following a
 // symlink. Only used when readdir did not report a d_type (kind == .unknown).
 fn kindAt(allocator: std.mem.Allocator, fd: std.posix.fd_t, name: []const u8) Io.File.Kind {
-    const name_z = allocator.dupeZ(u8, name) catch return .unknown;
+    const name_z = allocator.dupeSentinel(u8, name, 0) catch return .unknown;
     defer allocator.free(name_z);
     var st: Stat = undefined;
     if (fstatat(fd, name_z.ptr, &st, AT_SYMLINK_NOFOLLOW) != 0) return .unknown;

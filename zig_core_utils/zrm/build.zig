@@ -18,9 +18,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zrm");
     run_step.dependOn(&run_cmd.step);
@@ -44,7 +42,7 @@ pub fn build(b: *std.Build) void {
     // Use the ABSOLUTE installed path: the parity tests spawn `zrm` from scratch
     // working directories, so a build-root-relative path would not resolve.
     const parity_opts = b.addOptions();
-    parity_opts.addOption([]const u8, "zrm_exe", b.getInstallPath(.bin, "zrm"));
+    if (@hasDecl(std.Build, "getInstallPath")) parity_opts.addOption([]const u8, "zrm_exe", b.getInstallPath(.bin, "zrm")) else parity_opts.addOptionPath("zrm_exe", exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{
