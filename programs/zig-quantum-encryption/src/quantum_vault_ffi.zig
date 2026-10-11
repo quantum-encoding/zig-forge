@@ -1004,7 +1004,7 @@ test "FFI: ML-DSA-65 v2 (standard interface) round trip, context binding and lim
     try std.testing.expectEqual(QvError.success, qv_mldsa65_verify_v2(&kp.pk, msg.ptr, msg.len, null, 0, &sig));
     try std.testing.expectEqual(QvError.invalid_parameter, qv_mldsa65_sign_v2(&kp.sk, msg.ptr, msg.len, null, 4, &sig, false));
 
-    const long = "c" ** 256;
+    const long = &@as([256]u8, @splat('c'));
     try std.testing.expectEqual(QvError.success, qv_mldsa65_sign_v2(&kp.sk, msg.ptr, msg.len, long.ptr, 255, &sig, false));
     try std.testing.expectEqual(QvError.invalid_parameter, qv_mldsa65_sign_v2(&kp.sk, msg.ptr, msg.len, long.ptr, 256, &sig, false));
     try std.testing.expectEqual(QvError.mldsa_verification_failed, qv_mldsa65_verify_v2(&kp.pk, msg.ptr, msg.len, long.ptr, 256, &sig));

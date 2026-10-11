@@ -83,6 +83,17 @@ fn refEval(coeffs: []const u8, x: u8) u8 {
 // 1. GF(2^8) field multiplication — anchored to FIPS-197
 // ---------------------------------------------------------------------------
 
+/// `s` repeated `n` times at comptime. Zig 0.17 removed the `"ab" ** 64` array-multiplication
+/// syntax, and `@splat` repeats a single byte only.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    const frozen = comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        break :blk out;
+    };
+    return &frozen;
+}
+
 test "FIPS-197: reference GF multiply matches AES spec worked examples" {
     // FIPS-197 §4.2: {57}·{83} = {c1}; §4.2.1 xtime ladder for {57}.
     try testing.expectEqual(@as(u8, 0xc1), refGfMul(0x57, 0x83));
@@ -288,7 +299,7 @@ test "Ticket: fromBytes parses the documented ZSSS_TICKET_V1 key=value format" {
         "seat=A12\n" ++
         "tier=VIP\n" ++
         "expires_at=1800000000\n" ++
-        "signature=" ++ ("ab" ** 64) ++ "\n";
+        "signature=" ++ repeat("ab", 64) ++ "\n";
 
     var td = try ticket.TicketData.fromBytes(allocator, wire);
     defer td.deinit(allocator);
@@ -307,10 +318,10 @@ test "Ticket: control-character field is rejected on serialization (injection gu
     // An event_id carrying a newline would, pre-fix, inject a second
     // key=value line (e.g. override expires_at or signature) on the next parse.
     const td = ticket.TicketData{
-        .event_id = "evil\nexpires_at=0\nsignature=" ++ ("00" ** 64),
+        .event_id = "evil\nexpires_at=0\nsignature=" ++ repeat("00", 64),
         .ticket_id = "id",
         .issued_at = 1,
-        .signature = "ab" ** 64,
+        .signature = repeat("ab", 64),
     };
 
     try testing.expectError(error.InvalidTicketField, td.toBytes(allocator));

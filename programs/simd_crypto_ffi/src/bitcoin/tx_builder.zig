@@ -493,7 +493,7 @@ pub fn computeSighashBip143(
 /// Compute hashPrevouts per BIP143: 32 zero bytes if ANYONECANPAY is set,
 /// otherwise SHA256d(concat of all input outpoints).
 fn computeHashPrevouts(builder: *const TxBuilder, sighash_type: u32) [32]u8 {
-    if (isAnyoneCanPay(sighash_type)) return [_]u8{0} ** 32;
+    if (isAnyoneCanPay(sighash_type)) return @splat(0);
 
     var hasher = Sha256.init(.{});
 
@@ -518,7 +518,7 @@ fn computeHashPrevouts(builder: *const TxBuilder, sighash_type: u32) [32]u8 {
 fn computeHashSequence(builder: *const TxBuilder, sighash_type: u32) [32]u8 {
     const base = baseSighash(sighash_type);
     if (isAnyoneCanPay(sighash_type) or base == SIGHASH_SINGLE or base == SIGHASH_NONE) {
-        return [_]u8{0} ** 32;
+        return @splat(0);
     }
 
     var hasher = Sha256.init(.{});
@@ -546,10 +546,10 @@ fn computeHashSequence(builder: *const TxBuilder, sighash_type: u32) [32]u8 {
 fn computeHashOutputs(builder: *const TxBuilder, sighash_type: u32, input_index: usize) [32]u8 {
     const base = baseSighash(sighash_type);
 
-    if (base == SIGHASH_NONE) return [_]u8{0} ** 32;
+    if (base == SIGHASH_NONE) return @splat(0);
 
     if (base == SIGHASH_SINGLE) {
-        if (input_index >= builder.output_count) return [_]u8{0} ** 32;
+        if (input_index >= builder.output_count) return @splat(0);
         var hasher = Sha256.init(.{});
         feedOutputToHasher(&hasher, &builder.outputs[input_index]);
 
@@ -610,7 +610,7 @@ fn feedOutputToHasher(hasher: *Sha256, output: *const TxDestination) void {
 /// would produce signatures every node rejects).
 pub fn signHash(hash: *const [32]u8, private_key: *const [32]u8) TxBuilderError![64]u8 {
     const Scalar = Secp256k1.scalar.Scalar;
-    const zero16 = [_]u8{0} ** 16;
+    const zero16: [16]u8 = @splat(0);
 
     var d = Scalar.fromBytes(private_key.*, .big) catch return TxBuilderError.InvalidPrivateKey;
     defer crypto.secureZero(u8, std.mem.asBytes(&d));
@@ -654,7 +654,7 @@ const Rfc6979 = struct {
 
     /// Steps b-g: x = int2octets(private key), h = bits2octets(digest).
     fn init(x: *const [32]u8, h: *const [32]u8) Rfc6979 {
-        var self = Rfc6979{ .v = [_]u8{0x01} ** 32, .k = [_]u8{0x00} ** 32 };
+        var self = Rfc6979{ .v = @splat(0x01), .k = @splat(0x00) };
         for ([_]u8{ 0x00, 0x01 }) |sep| {
             var mac = Hmac.init(&self.k);
             mac.update(&self.v);
@@ -1022,16 +1022,16 @@ test "tx builder basic" {
     var builder = TxBuilder.init();
 
     const utxo = SpendableUtxo{
-        .txid = [_]u8{0x01} ** 32,
+        .txid = @splat(0x01),
         .vout = 0,
         .value = 100000,
-        .pubkey_hash = [_]u8{0x02} ** 20,
+        .pubkey_hash = @splat(0x02),
         .derivation_index = 0,
     };
 
     try builder.addInput(utxo);
 
-    const dest_hash = [_]u8{0x03} ** 20;
+    const dest_hash: [20]u8 = @splat(0x03);
     try builder.addP2wpkhOutput(90000, &dest_hash);
 
     try std.testing.expectEqual(@as(usize, 1), builder.input_count);
@@ -1070,17 +1070,17 @@ test "estimate vsize" {
     // Add 2 inputs
     for (0..2) |i| {
         const utxo = SpendableUtxo{
-            .txid = [_]u8{@intCast(i)} ** 32,
+            .txid = @splat(@intCast(i)),
             .vout = 0,
             .value = 50000,
-            .pubkey_hash = [_]u8{0x02} ** 20,
+            .pubkey_hash = @splat(0x02),
             .derivation_index = @intCast(i),
         };
         try builder.addInput(utxo);
     }
 
     // Add 2 outputs
-    const dest_hash = [_]u8{0x03} ** 20;
+    const dest_hash: [20]u8 = @splat(0x03);
     try builder.addP2wpkhOutput(40000, &dest_hash);
     try builder.addP2wpkhOutput(50000, &dest_hash);
 
@@ -1109,7 +1109,7 @@ test "varint encoding" {
 // =============================================================================
 
 const TEST_PRIVKEY: [32]u8 = blk: {
-    var k: [32]u8 = [_]u8{0} ** 32;
+    var k: [32]u8 = @splat(0);
     k[31] = 0x01; // smallest valid scalar
     break :blk k;
 };
@@ -1121,24 +1121,24 @@ fn buildVariantBuilder() !TxBuilder {
     // Two inputs, two outputs, distinct sequences so the prevouts/sequence
     // commitments differ between variants in observable ways.
     try builder.addInput(.{
-        .txid = [_]u8{0xa1} ** 32,
+        .txid = @splat(0xa1),
         .vout = 0,
         .value = 100000,
-        .pubkey_hash = [_]u8{0xaa} ** 20,
+        .pubkey_hash = @splat(0xaa),
         .derivation_index = 0,
         .sequence = 0xfffffffe, // RBF-disabled
     });
     try builder.addInput(.{
-        .txid = [_]u8{0xb2} ** 32,
+        .txid = @splat(0xb2),
         .vout = 1,
         .value = 50000,
-        .pubkey_hash = [_]u8{0xbb} ** 20,
+        .pubkey_hash = @splat(0xbb),
         .derivation_index = 1,
         .sequence = DEFAULT_SEQUENCE,
     });
 
-    const dest_a = [_]u8{0xc3} ** 20;
-    const dest_b = [_]u8{0xd4} ** 20;
+    const dest_a: [20]u8 = @splat(0xc3);
+    const dest_b: [20]u8 = @splat(0xd4);
     try builder.addP2wpkhOutput(80000, &dest_a);
     try builder.addP2wpkhOutput(60000, &dest_b);
 
@@ -1175,7 +1175,7 @@ test "BIP143 sighash ANYONECANPAY zeros hashPrevouts" {
     // With ANYONECANPAY set, hashPrevouts must be 32 zero bytes regardless of
     // how many inputs the builder has.
     const prevouts = computeHashPrevouts(&builder, SIGHASH_ALL | SIGHASH_ANYONECANPAY);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &prevouts);
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &prevouts);
 
     // Without ANYONECANPAY, hashPrevouts is the real commitment and must NOT
     // be all-zero for our non-empty input set.
@@ -1195,31 +1195,31 @@ test "BIP143 sighash SINGLE and NONE zero hashSequence" {
     try std.testing.expect(!seq_all_zero);
 
     // SINGLE / NONE / ANYONECANPAY → all-zero sequence commitment.
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &computeHashSequence(&builder, SIGHASH_SINGLE));
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &computeHashSequence(&builder, SIGHASH_NONE));
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &computeHashSequence(&builder, SIGHASH_ALL | SIGHASH_ANYONECANPAY));
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &computeHashSequence(&builder, SIGHASH_SINGLE));
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &computeHashSequence(&builder, SIGHASH_NONE));
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &computeHashSequence(&builder, SIGHASH_ALL | SIGHASH_ANYONECANPAY));
 }
 
 test "BIP143 sighash hashOutputs - ALL vs SINGLE vs NONE" {
     const builder = try buildVariantBuilder();
 
     // SIGHASH_NONE → all zeros.
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &computeHashOutputs(&builder, SIGHASH_NONE, 0));
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &computeHashOutputs(&builder, SIGHASH_NONE, 0));
 
     // SIGHASH_SINGLE with input_index < output_count → just that output.
     const single_0 = computeHashOutputs(&builder, SIGHASH_SINGLE, 0);
     const single_1 = computeHashOutputs(&builder, SIGHASH_SINGLE, 1);
     try std.testing.expect(!std.mem.eql(u8, &single_0, &single_1));
-    try std.testing.expect(!std.mem.eql(u8, &single_0, &([_]u8{0} ** 32)));
+    try std.testing.expect(!std.mem.eql(u8, &single_0, &(@as([32]u8, @splat(0)))));
 
     // SIGHASH_SINGLE with input_index >= output_count → zeros (BIP143 fallback).
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &computeHashOutputs(&builder, SIGHASH_SINGLE, 2));
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &computeHashOutputs(&builder, SIGHASH_SINGLE, 2));
 
     // SIGHASH_ALL → all outputs, different from any single-output commitment.
     const all_out = computeHashOutputs(&builder, SIGHASH_ALL, 0);
     try std.testing.expect(!std.mem.eql(u8, &all_out, &single_0));
     try std.testing.expect(!std.mem.eql(u8, &all_out, &single_1));
-    try std.testing.expect(!std.mem.eql(u8, &all_out, &([_]u8{0} ** 32)));
+    try std.testing.expect(!std.mem.eql(u8, &all_out, &(@as([32]u8, @splat(0)))));
 }
 
 test "BIP143 sighash uses per-input sequence" {
@@ -1266,7 +1266,7 @@ test "BIP-143 native P2WPKH published vector: intermediate hashes, sighash, pubk
         .txid = txid0,
         .vout = 0,
         .value = 0,
-        .pubkey_hash = [_]u8{0} ** 20,
+        .pubkey_hash = @splat(0),
         .derivation_index = 0,
         .sequence = 0xffffffee,
     });
@@ -1335,10 +1335,10 @@ test "SpendableUtxo default sequence is DEFAULT_SEQUENCE" {
     // explicit `sequence` field must get the BIP125-RBF default. This preserves
     // existing behavior for the unchanged FFI surface.
     const u = SpendableUtxo{
-        .txid = [_]u8{0} ** 32,
+        .txid = @splat(0),
         .vout = 0,
         .value = 0,
-        .pubkey_hash = [_]u8{0} ** 20,
+        .pubkey_hash = @splat(0),
         .derivation_index = 0,
     };
     try std.testing.expectEqual(DEFAULT_SEQUENCE, u.sequence);

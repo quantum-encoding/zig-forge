@@ -167,7 +167,7 @@ pub fn requiredMerkleDepth(tx_count: u32) u32 {
 /// for invalid encodings: the "negative" bit set, exponent out of range, or a
 /// zero mantissa.
 pub fn decodeCompactTarget(bits: u32) Hash {
-    var target: Hash = [_]u8{0} ** 32;
+    var target: Hash = @splat(0);
 
     const exponent = @as(u8, @truncate(bits >> 24));
     const mantissa = bits & 0x007fffff;
@@ -225,7 +225,7 @@ pub fn compareHash(a: Hash, b: Hash) i32 {
 /// 0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff, the easiest target
 /// the chain ever allows (difficulty 1 is its compact form 0x1d00ffff). Stored little-endian
 /// like every `Hash` here: the 28 low bytes are 0xff, the 4 high bytes 0.
-pub const POW_LIMIT: Hash = [_]u8{0xff} ** 28 ++ [_]u8{0} ** 4;
+pub const POW_LIMIT: Hash = @as([28]u8, @splat(0xff)) ++ @as([4]u8, @splat(0));
 
 /// Bitcoin Core's CheckProofOfWork (src/pow.cpp), for a hash already computed.
 ///
@@ -452,8 +452,8 @@ test "Double SHA-256" {
 }
 
 test "Hash Pair" {
-    const left = [_]u8{0xAA} ** 32;
-    const right = [_]u8{0xBB} ** 32;
+    const left: [32]u8 = @splat(0xAA);
+    const right: [32]u8 = @splat(0xBB);
 
     const result = hashPair(left, right);
 
@@ -465,8 +465,8 @@ test "Hash Pair" {
 test "Block Header Serialization Roundtrip" {
     const header = BlockHeader{
         .version = 0x20000000,
-        .prev_block_hash = [_]u8{0x11} ** 32,
-        .merkle_root = [_]u8{0x22} ** 32,
+        .prev_block_hash = @splat(0x11),
+        .merkle_root = @splat(0x22),
         .timestamp = 1600000000,
         .bits = 0x1d00ffff,
         .nonce = 12345,
@@ -509,9 +509,9 @@ test "Merkle Proof Verification - Valid" {
 }
 
 test "Merkle Proof Verification - Invalid" {
-    const tx_hash = [_]u8{1} ** 32;
-    const root = [_]u8{2} ** 32;
-    const fake_hashes = [_]Hash{[_]u8{3} ** 32};
+    const tx_hash: [32]u8 = @splat(1);
+    const root: [32]u8 = @splat(2);
+    const fake_hashes = [_]Hash{@as([32]u8, @splat(3))};
 
     const proof = MerkleProof{
         .hashes = &fake_hashes,
@@ -555,7 +555,7 @@ test "Merkle Proof - single-tx block" {
     try std.testing.expect(verifyMerkleProof(tx_hash, tx_hash, proof));
 
     // A non-empty proof for a single-tx block must be rejected.
-    const stray = [_]Hash{[_]u8{0xff} ** 32};
+    const stray = [_]Hash{@as([32]u8, @splat(0xff))};
     const bogus = MerkleProof{
         .hashes = &stray,
         .index = 0,
@@ -581,7 +581,7 @@ test "Merkle Proof - reject index >= tx_count" {
 }
 
 test "Merkle Proof - reject zero tx_count" {
-    const tx_hash = [_]u8{0x42} ** 32;
+    const tx_hash: [32]u8 = @splat(0x42);
     const proof_hashes = [_]Hash{};
     const proof = MerkleProof{
         .hashes = &proof_hashes,
@@ -640,11 +640,11 @@ test "requiredMerkleDepth" {
 }
 
 test "Header Linkage - Valid" {
-    const prev_hash = [_]u8{0xAA} ** 32;
+    const prev_hash: [32]u8 = @splat(0xAA);
     const header = BlockHeader{
         .version = 1,
         .prev_block_hash = prev_hash,
-        .merkle_root = [_]u8{0} ** 32,
+        .merkle_root = @splat(0),
         .timestamp = 0,
         .bits = 0x1d00ffff,
         .nonce = 0,
@@ -654,12 +654,12 @@ test "Header Linkage - Valid" {
 }
 
 test "Header Linkage - Broken Chain" {
-    const prev_hash = [_]u8{0xAA} ** 32;
-    const wrong_hash = [_]u8{0xBB} ** 32;
+    const prev_hash: [32]u8 = @splat(0xAA);
+    const wrong_hash: [32]u8 = @splat(0xBB);
     const header = BlockHeader{
         .version = 1,
         .prev_block_hash = wrong_hash,
-        .merkle_root = [_]u8{0} ** 32,
+        .merkle_root = @splat(0),
         .timestamp = 0,
         .bits = 0x1d00ffff,
         .nonce = 0,
@@ -761,7 +761,7 @@ test "SPV Full Verification" {
     const tx_hash = hashDoubleSha256("Payment: 1 BTC");
     const sibling = hashDoubleSha256("Other TX");
     const merkle_root = hashPair(tx_hash, sibling);
-    const prev_hash = [_]u8{0x00} ** 32;
+    const prev_hash: [32]u8 = @splat(0x00);
 
     const header = BlockHeader{
         .version = 1,
@@ -808,7 +808,7 @@ test "PoW anchor: the genesis block header hashes to its known id and satisfies 
     // 0x1d00ffff, nonce 2083236893, hash 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f.
     const header = BlockHeader{
         .version = 1,
-        .prev_block_hash = [_]u8{0} ** 32,
+        .prev_block_hash = @splat(0),
         .merkle_root = hashFromBigEndianHex("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"),
         .timestamp = 1231006505,
         .bits = 0x1d00ffff,
@@ -838,12 +838,12 @@ test "PoW anchor: Bitcoin Core pow_tests CheckProofOfWork_test_* cases refuse as
     try std.testing.expect(!checkProofOfWork(bigger, 0x1d00ffff));
 
     // CheckProofOfWork_test_zero_target: nBits = arith_uint256(0).GetCompact() = 0, hash 0.
-    const zero = [_]u8{0} ** 32;
+    const zero: [32]u8 = @splat(0);
     try std.testing.expect(!checkProofOfWork(zero, 0));
 }
 
 test "PoW: a target above powLimit is refused whatever the hash (finding #12 / A-1, nBits 0x2100ffff)" {
-    const zero = [_]u8{0} ** 32;
+    const zero: [32]u8 = @splat(0);
     // Track A's case: a legal compact encoding (exponent 33, mantissa 0x00ffff) whose target
     // is 0xffff << 240, far above powLimit; the all-zero header hash used to pass.
     try std.testing.expect(!checkProofOfWork(zero, 0x2100ffff));
@@ -872,9 +872,9 @@ test "PoW: a target above powLimit is refused whatever the hash (finding #12 / A
 }
 
 test "Hash Comparison" {
-    const smaller = [_]u8{0x00} ** 31 ++ [_]u8{0x01};
-    const larger = [_]u8{0x00} ** 31 ++ [_]u8{0x02};
-    const equal = [_]u8{0x00} ** 31 ++ [_]u8{0x01};
+    const smaller = @as([31]u8, @splat(0x00)) ++ [_]u8{0x01};
+    const larger = @as([31]u8, @splat(0x00)) ++ [_]u8{0x02};
+    const equal = @as([31]u8, @splat(0x00)) ++ [_]u8{0x01};
 
     try std.testing.expectEqual(@as(i32, -1), compareHash(smaller, larger));
     try std.testing.expectEqual(@as(i32, 1), compareHash(larger, smaller));

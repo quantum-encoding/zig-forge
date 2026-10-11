@@ -115,7 +115,7 @@ pub const Poly = struct {
     coeffs: [N]i32,
 
     pub fn init() Poly {
-        return .{ .coeffs = [_]i32{0} ** N };
+        return .{ .coeffs = @splat(0) };
     }
 
     /// Add two polynomials
@@ -921,7 +921,7 @@ pub fn signWithContextRnd(sk: *const SecretKey, msg: []const u8, ctx: []const u8
 /// ML-DSA.Sign_internal with mu = H(tr ‖ framing ‖ msg); `rnd` from the system RNG when
 /// `randomized`, all-zero otherwise.
 fn signFramed(sk: *const SecretKey, framing: []const u8, msg: []const u8, randomized: bool) DsaError!Signature {
-    var rnd: [32]u8 = [_]u8{0} ** 32;
+    var rnd: [32]u8 = @splat(0);
     defer scrubValue(&rnd);
     if (randomized) rng.fillSecureRandomSafe(&rnd) catch return error.RandomnessFailure;
     return signFramedRnd(sk, framing, msg, &rnd);
@@ -1425,14 +1425,14 @@ fn unpackHints(hints: *[K][N]u1, count: *usize, input: []const u8) bool {
 // ============================================================================
 
 test "ML-DSA-65 key generation" {
-    const seed = [_]u8{0x42} ** 32;
+    const seed: [32]u8 = @splat(0x42);
     const keypair = try keyGen(&seed);
     _ = keypair;
 }
 
 test "ML-DSA-65 sign and verify" {
     // Use deterministic seed for reproducible testing
-    const seed = [_]u8{0x42} ** 32;
+    const seed: [32]u8 = @splat(0x42);
     const keypair = try keyGen(&seed);
 
     const msg = "Test message for ML-DSA-65 signature";
@@ -1480,7 +1480,7 @@ test "ML-DSA-65 decompose properties" {
 
 test "ML-DSA-65 sampleInBall" {
     var c: Poly = undefined;
-    const seed = [_]u8{0x55} ** CTILDE_BYTES;
+    const seed: [CTILDE_BYTES]u8 = @splat(0x55);
     sampleInBall(&c, &seed);
 
     // Count non-zero coefficients

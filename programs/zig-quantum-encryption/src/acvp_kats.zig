@@ -89,7 +89,7 @@ test "ACVP ML-KEM-768 encapsulationKeyCheck: all 10 VAL cases" {
         if (!r.flag("passed")) {
             failing += 1;
             // A key that fails the check must also be refused by encapsulation.
-            try testing.expectError(error.InvalidEncapsulationKey, mlkem.encapsInternal768(&ek, &([_]u8{0} ** 32)));
+            try testing.expectError(error.InvalidEncapsulationKey, mlkem.encapsInternal768(&ek, &(@as([32]u8, @splat(0)))));
         }
     }
     try testing.expect(failing > 0);
@@ -109,14 +109,14 @@ test "ACVP ML-DSA-65 sigGen: pure external and internal, deterministic and hedge
     const a = testing.allocator;
     try testing.expectEqual(@as(usize, 60), records.count(dsa_siggen));
     var it = records.iterate(dsa_siggen);
-    var seen = [_]usize{0} ** 4; // [external det, external hedged, internal det, internal hedged]
+    var seen: [4]usize = @splat(0); // [external det, external hedged, internal det, internal hedged]
     while (it.next()) |r| {
         const sk = ml_dsa.SecretKey{ .data = try r.fixed(ml_dsa.SECRET_KEY_SIZE, "sk") };
         const msg = try r.bytes(a, "message");
         defer a.free(msg);
         const rnd = try r.fixed(32, "rnd");
         const det = r.flag("deterministic");
-        if (det) try testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &rnd);
+        if (det) try testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &rnd);
         const external = std.mem.eql(u8, r.str("interface"), "external");
 
         const sig = if (external) blk: {

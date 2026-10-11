@@ -118,7 +118,7 @@ pub fn ihdr(w: u32, h: u32, depth: u8, color: u8) [13]u8 {
 }
 
 pub fn ihdrFull(w: u32, h: u32, depth: u8, color: u8, interlace: u8) [13]u8 {
-    var out: [13]u8 = .{0} ** 13;
+    var out: [13]u8 = @splat(0);
     std.mem.writeInt(u32, out[0..4], w, .big);
     std.mem.writeInt(u32, out[4..8], h, .big);
     out[8] = depth;
@@ -470,7 +470,7 @@ test "E-3: a stego header claiming a payload near 2^32 bytes is refused as corru
     const pixels = try a.alloc(u8, 4096);
     defer a.free(pixels);
     @memset(pixels, 0x80);
-    var hdr: [stego.HEADER_SIZE]u8 = .{0} ** stego.HEADER_SIZE;
+    var hdr: [stego.HEADER_SIZE]u8 = @splat(0);
     @memcpy(hdr[0..4], "ZSSS");
     hdr[4] = 1; // version
     std.mem.writeInt(u32, hdr[5..9], 0xFFFFFFFF, .little);
@@ -621,7 +621,7 @@ test "E-4: each distinct stego failure has its own code at the C ABI" {
     // -> STEGO_CORRUPTED, not "no hidden data".
     const header_variants = [_]struct { version: u8, len: u32 }{ .{ .version = 1, .len = 0xFFFFFFFF }, .{ .version = 2, .len = 1 } };
     for (header_variants) |hv| {
-        var hdr: [stego.HEADER_SIZE]u8 = .{0} ** stego.HEADER_SIZE;
+        var hdr: [stego.HEADER_SIZE]u8 = @splat(0);
         @memcpy(hdr[0..4], "ZSSS");
         hdr[4] = hv.version;
         std.mem.writeInt(u32, hdr[5..9], hv.len, .little);

@@ -54,7 +54,7 @@ pub const Alphabet = struct {
     decode_table: [256]u8,
 
     pub fn fromChars(chars: *const [58]u8) Alphabet {
-        var table: [256]u8 = [_]u8{255} ** 256;
+        var table: [256]u8 = @splat(255);
         for (chars, 0..) |c, i| {
             table[c] = @intCast(i);
         }

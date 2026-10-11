@@ -316,9 +316,9 @@ test "RFC 8439 ChaCha20: 2.4.2, A.1 #1-#5 (keystreams), A.2 #1-#3, encrypt and d
 }
 
 test "ChaCha20 counter limit (RFC 8439 2.4): the last block is allowed, wrapping past 2^32 is refused" {
-    const key = [_]u8{7} ** 32;
-    const nonce = [_]u8{3} ** 12;
-    var buf = [_]u8{0} ** 129;
+    const key: [32]u8 = @splat(7);
+    const nonce: [12]u8 = @splat(3);
+    var buf: [129]u8 = @splat(0);
     var out: [129]u8 = undefined;
     // Exactly the last block of the counter space, and a partial last block.
     try testing.expectEqual(@as(c_int, 0), c.quantum_chacha20_encrypt(&key, &nonce, 0xffffffff, &buf, 64, &out));
@@ -427,7 +427,7 @@ const half_n = [32]u8{
 /// Parse a strict DER ECDSA signature into r || s (32 bytes each).
 fn derToCompact(der: []const u8) ![64]u8 {
     if (der.len < 8 or der[0] != 0x30 or der[1] != der.len - 2) return error.BadDer;
-    var out = [_]u8{0} ** 64;
+    var out: [64]u8 = @splat(0);
     var p: usize = 2;
     for (0..2) |i| {
         if (der[p] != 0x02) return error.BadDer;
@@ -463,7 +463,7 @@ fn verifyEcdsa(digest: *const [32]u8, sig: *const [64]u8, pubkey: *const [33]u8)
     const r = try Scalar.fromBytes(sig[0..32].*, .big);
     const s = try Scalar.fromBytes(sig[32..64].*, .big);
     if (r.isZero() or s.isZero()) return error.SignatureVerificationFailed;
-    const z = Scalar.fromBytes48([_]u8{0} ** 16 ++ digest.*, .big); // bits2int, then mod n
+    const z = Scalar.fromBytes48(@as([16]u8, @splat(0)) ++ digest.*, .big); // bits2int, then mod n
     const w = s.invert();
     const k1 = z.mul(w);
     const k2 = r.mul(w);
@@ -472,7 +472,7 @@ fn verifyEcdsa(digest: *const [32]u8, sig: *const [64]u8, pubkey: *const [33]u8)
         try q.mulPublic(k2.toBytes(.big), .big)
     else
         try Curve.mulDoubleBasePublic(Curve.basePoint, k1.toBytes(.big), q, k2.toBytes(.big), .big);
-    const x = Scalar.fromBytes48([_]u8{0} ** 16 ++ p.affineCoordinates().x.toBytes(.big), .big);
+    const x = Scalar.fromBytes48(@as([16]u8, @splat(0)) ++ p.affineCoordinates().x.toBytes(.big), .big);
     if (!x.equivalent(r)) return error.SignatureVerificationFailed;
 }
 
@@ -504,7 +504,7 @@ fn seeded(r: records.Record, seed_key: []const u8, len_key: []const u8) ![]u8 {
 
 test "differential: SHA-256, SHA-256d (single and batched), SHA-512, RIPEMD-160, BLAKE3 XOF vs sha2/ripemd/blake3" {
     var it = records.iterate(corpus);
-    var counts = [_]usize{0} ** 5;
+    var counts: [5]usize = @splat(0);
     while (it.next()) |r| {
         const kind = r.str("kind");
         const which: usize = if (std.mem.eql(u8, kind, "sha256")) 0 else if (std.mem.eql(u8, kind, "sha256d")) 1 else if (std.mem.eql(u8, kind, "sha512")) 2 else if (std.mem.eql(u8, kind, "ripemd160")) 3 else if (std.mem.eql(u8, kind, "blake3")) 4 else continue;

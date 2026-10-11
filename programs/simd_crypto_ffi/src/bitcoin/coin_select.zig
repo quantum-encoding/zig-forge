@@ -225,12 +225,12 @@ fn branchAndBound(
     const change_cost = CHANGE_OUTPUT_COST * params.fee_rate;
 
     // Search state
-    var current_selection: [SelectionResult.MAX_SELECTION]bool = [_]bool{false} ** SelectionResult.MAX_SELECTION;
+    var current_selection: [SelectionResult.MAX_SELECTION]bool = @splat(false);
     var current_value: u64 = 0;
     var current_input_count: usize = 0;
 
     // Best solution found
-    var best_selection: [SelectionResult.MAX_SELECTION]bool = [_]bool{false} ** SelectionResult.MAX_SELECTION;
+    var best_selection: [SelectionResult.MAX_SELECTION]bool = @splat(false);
     var best_value: u64 = 0;
     var best_waste: i64 = std.math.maxInt(i64);
     var found_solution = false;

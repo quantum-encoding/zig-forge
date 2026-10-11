@@ -65,7 +65,7 @@ test "ML-KEM-768: both reject a non-canonical encapsulation key" {
 test "ML-DSA-65 keys agree with std; signWithContext IS the standard ML-DSA.Sign" {
     var prng = std.Random.DefaultPrng.init(0xd5a);
     const r = prng.random();
-    const contexts = [_][]const u8{ "", "quantum-vault/v2", "x" ** 255 };
+    const contexts = [_][]const u8{ "", "quantum-vault/v2", &@as([255]u8, @splat('x')) };
     for (0..24) |i| {
         var xi: [32]u8 = undefined;
         r.bytes(&xi);
@@ -139,7 +139,7 @@ test "ML-DSA-65: both verifiers reach the same verdict on 2000 mutated signature
 test "context longer than 255 bytes is refused, not truncated" {
     const xi: [32]u8 = @splat(5);
     const kp = try dsa.keyGen(&xi);
-    const long = "c" ** 256;
+    const long = &@as([256]u8, @splat('c'));
     try std.testing.expectError(error.ContextTooLong, dsa.signWithContext(&kp.sk, "m", long, false));
     const sig = try dsa.signWithContext(&kp.sk, "m", long[0..255], false);
     try std.testing.expect(!dsa.verifyWithContext(&kp.pk, "m", long, &sig));
