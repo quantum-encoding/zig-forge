@@ -32,12 +32,21 @@ pub const ArenaAllocator = struct {
             return error.InvalidAlignment;
         }
 
-        // self.offset is always <= buffer.len (a real heap allocation), so
-        // alignForward cannot overflow here. The bump, however, can: with
-        // size == SIZE_MAX, aligned_offset + size wraps below buffer.len and
-        // would pass the bounds check, yielding a reversed-bounds slice (UB in
-        // ReleaseFast). Use checked addition.
-        const aligned_offset = std.mem.alignForward(usize, self.offset, alignment);
+        // Align the ADDRESS that is handed out, not the cursor. The backing
+        // buffer is only as aligned as its allocator made it (malloc: 16;
+        // a u8 slice from an arbitrary Allocator or an FFI buffer: 1), so
+        // aligning `offset` alone yields `buffer.ptr + offset`, which is
+        // misaligned whenever `alignment` exceeds the base pointer's alignment.
+        //
+        // `padding` is computed from the current address and is < alignment,
+        // so nothing is formed past the buffer and no address arithmetic can
+        // wrap. The bump uses checked addition: with size == SIZE_MAX,
+        // aligned_offset + size would wrap below buffer.len and pass the
+        // bounds check, yielding a reversed-bounds slice (UB in ReleaseFast).
+        // The end-of-buffer check is made against the aligned start.
+        const cursor = @intFromPtr(self.buffer.ptr) + self.offset;
+        const padding = (alignment - (cursor & (alignment - 1))) & (alignment - 1);
+        const aligned_offset = std.math.add(usize, self.offset, padding) catch return error.OutOfMemory;
         const new_offset = std.math.add(usize, aligned_offset, size) catch return error.OutOfMemory;
 
         if (new_offset > self.buffer.len) {
@@ -180,5 +189,131 @@ test "arena - stress test" {
     i = 0;
     while (i < 100) : (i += 1) {
         _ = try arena.alloc(64, 16);
+    }
+}
+
+// ============================================================================
+// Address-alignment property tests (misaligned backing buffers)
+//
+// The arena's base pointer is only as aligned as its backing allocator made
+// it. These tests hand the arena a backing buffer that starts 1, 3, 7, 9 or 15
+// bytes past an 8192-byte boundary (through a FixedBufferAllocator, so the
+// real `init` path is used) and check the ADDRESS of every allocation, not the
+// offset. Inputs are independent of the allocator under test: the expected
+// property is the definition of alignment (`addr % a == 0`) and of a bump
+// allocator (in bounds, disjoint, monotone).
+// ============================================================================
+
+const misaligned_offsets = [_]usize{ 1, 3, 7, 9, 15 };
+const backing_align = 8192;
+
+fn expectInside(arena: *const ArenaAllocator, s: []const u8) !void {
+    const base = @intFromPtr(arena.buffer.ptr);
+    const start = @intFromPtr(s.ptr);
+    try std.testing.expect(start >= base);
+    try std.testing.expect(start + s.len <= base + arena.buffer.len);
+}
+
+test "arena - address alignment on misaligned backing, every alignment 1..4096" {
+    const backing = try std.testing.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(backing_align), 48 * 1024);
+    defer std.testing.allocator.free(backing);
+
+    for (misaligned_offsets) |k| {
+        var fba = std.heap.FixedBufferAllocator.init(backing[k..]);
+        var arena = try ArenaAllocator.init(fba.allocator(), 32 * 1024);
+        defer arena.deinit();
+
+        // The test is only meaningful if the base really is misaligned.
+        try std.testing.expectEqual(k, @intFromPtr(arena.buffer.ptr) % backing_align);
+
+        var a: usize = 1;
+        while (a <= 4096) : (a += 1) {
+            arena.reset();
+            if (!std.math.isPowerOfTwo(a)) {
+                try std.testing.expectError(error.InvalidAlignment, arena.alloc(8, a));
+                try std.testing.expectEqual(@as(usize, 0), arena.offset);
+                continue;
+            }
+            const sizes = [_]usize{ 1, 7, a, 3 };
+            var prev_end: usize = @intFromPtr(arena.buffer.ptr);
+            for (sizes) |size| {
+                const s = try arena.alloc(size, a);
+                const addr = @intFromPtr(s.ptr);
+                try std.testing.expectEqual(@as(usize, 0), addr % a);
+                try std.testing.expectEqual(size, s.len);
+                try expectInside(&arena, s);
+                // Disjoint from (and after) everything handed out before.
+                try std.testing.expect(addr >= prev_end);
+                // Minimal padding: the arena skips fewer than `a` bytes.
+                try std.testing.expect(addr - prev_end < a);
+                prev_end = addr + s.len;
+                try std.testing.expectEqual(prev_end - @intFromPtr(arena.buffer.ptr), arena.offset);
+            }
+        }
+    }
+}
+
+test "arena - last fitting aligned allocation accepted, next refused" {
+    const backing = try std.testing.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(backing_align), 4096);
+    defer std.testing.allocator.free(backing);
+
+    const n = 256;
+    for (misaligned_offsets) |k| {
+        var fba = std.heap.FixedBufferAllocator.init(backing[k..]);
+        var arena = try ArenaAllocator.init(fba.allocator(), n);
+        defer arena.deinit();
+
+        _ = try arena.alloc(1, 1);
+        // Padding the arena must insert to reach the next 64-aligned ADDRESS.
+        const cursor = @intFromPtr(arena.buffer.ptr) + 1;
+        const pad = std.mem.alignForward(usize, cursor, 64) - cursor;
+        const fits = n - 1 - pad;
+
+        // One byte too many: refused, and the cursor does not move.
+        try std.testing.expectError(error.OutOfMemory, arena.alloc(fits + 1, 64));
+        try std.testing.expectEqual(@as(usize, 1), arena.offset);
+
+        // Exactly what fits from the aligned start: accepted, ends at the end.
+        const s = try arena.alloc(fits, 64);
+        try std.testing.expectEqual(@as(usize, 0), @intFromPtr(s.ptr) % 64);
+        try std.testing.expectEqual(@intFromPtr(arena.buffer.ptr) + n, @intFromPtr(s.ptr) + s.len);
+        try std.testing.expectEqual(@as(usize, n), arena.offset);
+
+        // Full: even one byte at alignment 1 is refused.
+        try std.testing.expectError(error.OutOfMemory, arena.alloc(1, 1));
+    }
+}
+
+test "arena - reset after aligned allocations" {
+    const backing = try std.testing.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(backing_align), 16 * 1024);
+    defer std.testing.allocator.free(backing);
+
+    for (misaligned_offsets) |k| {
+        var fba = std.heap.FixedBufferAllocator.init(backing[k..]);
+        var arena = try ArenaAllocator.init(fba.allocator(), 8192);
+        defer arena.deinit();
+
+        const first = try arena.alloc(100, 512);
+        @memset(first, 0x11);
+        const second = try arena.alloc(200, 4096);
+        @memset(second, 0x22);
+        // No overlap: writing the second left the first intact.
+        for (first) |b| try std.testing.expectEqual(@as(u8, 0x11), b);
+
+        arena.reset();
+        try std.testing.expectEqual(@as(usize, 0), arena.offset);
+
+        // The same request after reset lands at the same aligned address.
+        const again = try arena.alloc(100, 512);
+        try std.testing.expectEqual(@intFromPtr(first.ptr), @intFromPtr(again.ptr));
+
+        // After reset the whole buffer minus the alignment padding is usable.
+        arena.reset();
+        const base = @intFromPtr(arena.buffer.ptr);
+        const pad = std.mem.alignForward(usize, base, 4096) - base;
+        const whole = try arena.alloc(arena.buffer.len - pad, 4096);
+        try std.testing.expectEqual(@as(usize, 0), @intFromPtr(whole.ptr) % 4096);
+        try expectInside(&arena, whole);
+        try std.testing.expectError(error.OutOfMemory, arena.alloc(1, 1));
     }
 }

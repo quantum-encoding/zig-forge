@@ -670,6 +670,48 @@ test "memory_pool_core - arena alloc rejects overflow and bad alignment" {
     try std.testing.expectEqual(@as(usize, 0), @intFromPtr(ok) % 8);
 }
 
+test "memory_pool_core - arena alloc aligns the address for every alignment up to 4096" {
+    // The C ABI's arena buffer comes from malloc, whose alignment depends on
+    // the platform and the block size (glibc / bionic: 16; macOS: 16 for tiny
+    // blocks, up to a page for larger ones). Before the address-alignment
+    // fix, the arena aligned its offset, so after a 1-byte bump any alignment
+    // above the buffer's own came back misaligned. Check the returned ADDRESS.
+    const arena = mp_arena_create(12_400) orelse return error.OutOfMemory;
+    defer mp_arena_destroy(arena);
+
+    var a: usize = 1;
+    while (a <= 4096) : (a *= 2) {
+        mp_arena_reset(arena);
+        try std.testing.expect(mp_arena_alloc(arena, 1, 1) != null);
+        const p = mp_arena_alloc(arena, 3, a) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(usize, 0), @intFromPtr(p) % a);
+        const q = mp_arena_alloc(arena, a, a) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(usize, 0), @intFromPtr(q) % a);
+        try std.testing.expect(@intFromPtr(q) >= @intFromPtr(p) + 3);
+    }
+}
+
+test "memory_pool_core - arena alloc aligns the address on 16-aligned malloc blocks" {
+    // Tiny malloc blocks are 16-aligned (not 32) on every platform the vault
+    // ships; across 32 arenas at least one base is 16 mod 32 in practice, so
+    // an offset-aligning arena returns a misaligned 32/64 address here.
+    var arenas: [32]*MP_Arena = undefined;
+    var made: usize = 0;
+    defer for (arenas[0..made]) |ar| mp_arena_destroy(ar);
+    while (made < arenas.len) : (made += 1) {
+        arenas[made] = mp_arena_create(96) orelse return error.OutOfMemory;
+    }
+    for (arenas) |ar| {
+        for ([_]usize{ 32, 64 }) |a| {
+            mp_arena_reset(ar);
+            const base = mp_arena_alloc(ar, 1, 1) orelse return error.TestUnexpectedResult;
+            const p = mp_arena_alloc(ar, 3, a) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(usize, 0), @intFromPtr(p) % a);
+            try std.testing.expect(@intFromPtr(p) - @intFromPtr(base) <= a);
+        }
+    }
+}
+
 test "memory_pool_core - fixed pool tolerates odd object size (slot alignment)" {
     // object_size 12 is not a multiple of the slot alignment; without the
     // alignForward-to-16 fix, slot 1 landed at byte offset 12 and the internal

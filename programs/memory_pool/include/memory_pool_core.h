@@ -332,10 +332,13 @@ void mp_arena_destroy(MP_Arena* arena);
  * Parameters:
  *   arena     - Arena handle (must not be NULL)
  *   size      - Allocation size in bytes
- *   alignment - Alignment requirement (must be power of 2)
+ *   alignment - Alignment requirement (must be a non-zero power of 2)
  *
  * Returns:
- *   Pointer to allocated memory, or NULL if arena is full
+ *   Pointer to allocated memory whose ADDRESS is a multiple of `alignment`
+ *   (any power of 2, independent of the arena buffer's own alignment), or
+ *   NULL if the aligned request does not fit, or `alignment` is 0 or not a
+ *   power of 2. Padding consumes arena space.
  *
  * Performance:
  *   <3ns per allocation
