@@ -54,7 +54,7 @@ const DocumentHandle = struct {
     // NUL-terminated copy of the PDF version string. The version slice returned
     // by the parser points into the raw file buffer and is NOT NUL-terminated,
     // so we copy it here once at open time and hand out this buffer to C callers.
-    version_buf: [16]u8 = [_]u8{0} ** 16,
+    version_buf: [16]u8 = @splat(0),
 };
 
 // =============================================================================

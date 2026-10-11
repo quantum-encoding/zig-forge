@@ -578,10 +578,10 @@ test "array nesting is bounded" {
     const dog = Watchdog.arm(10);
     defer dog.disarm();
 
-    const content = "[" ** 100_000;
+    const content: [100_000]u8 = @splat('[');
     var extractor = TextExtractor.init(std.testing.allocator);
     defer extractor.deinit();
-    try std.testing.expectError(error.NestingTooDeep, extractor.extract(content));
+    try std.testing.expectError(error.NestingTooDeep, extractor.extract(&content));
 }
 
 test "extract terminates on arbitrary bytes" {
