@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zfold");
     run_step.dependOn(&run_cmd.step);
@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
     // binary and diff its output against the real GNU `fold`. The absolute path
     // of the installed zfold is threaded in as a build option.
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "zfold_bin", b.getInstallPath(.bin, "zfold"));
+    test_opts.addOptionPath("zfold_bin", exe.getEmittedBin());
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/gnu_parity_test.zig"),
