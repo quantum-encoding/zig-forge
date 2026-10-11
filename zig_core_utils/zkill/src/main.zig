@@ -30,13 +30,15 @@ const MAX_SIGNAL: u8 = 64;
 // SIG.DFL/IGN/BLOCK/... helpers are pub-const decls, not enum fields).
 const signals = blk: {
     @setEvalBranchQuota(10_000);
-    const fields = @typeInfo(std.c.SIG).@"enum".fields;
-    var arr: [fields.len]Signal = undefined;
-    for (fields, 0..) |f, idx| {
+    // std.meta.tags (not @typeInfo(..).@"enum".fields, which Zig 0.17 reshaped) keeps
+    // this compiling on both 0.16 and 0.17.
+    const tags = std.meta.tags(std.c.SIG);
+    var arr: [tags.len]Signal = undefined;
+    for (tags, 0..) |t, idx| {
         arr[idx] = .{
-            .num = @intCast(f.value),
-            .name = f.name,
-            .desc = signalDesc(f.name),
+            .num = @intCast(@intFromEnum(t)),
+            .name = @tagName(t),
+            .desc = signalDesc(@tagName(t)),
         };
     }
     const frozen = arr;
