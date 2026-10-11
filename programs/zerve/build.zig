@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run.addPassthruArgs() else if (b.args) |args| run.addArgs(args);
     const run_step = b.step("run", "Run the zerve benchmark server");
     run_step.dependOn(&run.step);
 
