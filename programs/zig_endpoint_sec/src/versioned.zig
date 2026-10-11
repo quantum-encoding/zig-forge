@@ -9,6 +9,7 @@
 const std = @import("std");
 const sys = @import("sys.zig");
 const anchors = @import("layout_anchors.zig");
+const reflect = @import("reflect.zig");
 
 fn baseName(comptime T: type) []const u8 {
     const full = @typeName(T);
@@ -53,7 +54,7 @@ test "every generated gate names a real field (directly or through an anonymous 
 
 fn hasFieldDeep(comptime T: type, comptime name: []const u8) bool {
     if (@hasField(T, name)) return true;
-    inline for (std.meta.fields(T)) |f| {
+    inline for (reflect.fields(T)) |f| {
         switch (@typeInfo(f.type)) {
             .@"struct", .@"union" => if (hasFieldDeep(f.type, name)) return true,
             else => {},

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -35,6 +36,14 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.linkSystemLibrary("EndpointSecurity", .{});
     test_mod.addIncludePath(b.path("include"));
+    // es_core.h translated to Zig for capi.zig's layout anchor (was @cImport,
+    // which 0.17 removed; the build system's translate-c exists on both).
+    const es_core_h = b.addTranslateC(.{
+        .root_source_file = b.path("include/es_core.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_mod.addImport("es_core_h", es_core_h.createModule());
     const tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests and layout anchors (macOS only)");
@@ -65,11 +74,11 @@ pub fn build(b: *std.Build) void {
     // stamped release archives.
     const lib_step = b.step("lib", "Build the archives libs.toml stamps into zig-out/lib/ (release modes only; use scripts/build-macos-lib.sh)");
     switch (optimize) {
-        .ReleaseSmall, .ReleaseFast => {
+        Optimize.ReleaseSmall, Optimize.ReleaseFast => {
             lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step);
             lib_step.dependOn(&b.addInstallArtifact(capi, .{}).step);
         },
-        .Debug, .ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
+        Optimize.Debug, Optimize.ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
             "zig build lib writes zig-out/lib/libes_core_zig.a and libendpoint_sec.a, the archives libs.toml stamps; " ++
                 "a {t} build keeps Zig's panic machinery and is never those archives. " ++
                 "Run scripts/build-macos-lib.sh programs/zig_endpoint_sec ReleaseFast from the repo root " ++
@@ -85,11 +94,15 @@ pub fn build(b: *std.Build) void {
     // install both archives under zig-out/lib/xcode/, then repack them so
     // Apple's ld accepts them.
     const xcode_dir: std.Build.InstallDir = .{ .custom = "lib/xcode" };
-    const repack = b.addSystemCommand(&.{
-        "../../scripts/repack-for-xcode.sh",
-        b.getInstallPath(xcode_dir, "libes_core_zig.a"),
-        b.getInstallPath(xcode_dir, "libendpoint_sec.a"),
-    });
+    const repack = b.addSystemCommand(&.{"../../scripts/repack-for-xcode.sh"});
+    for ([_][]const u8{ "libes_core_zig.a", "libendpoint_sec.a" }) |archive| {
+        if (@hasDecl(std.Build, "getInstallPath")) {
+            repack.addArg(b.getInstallPath(xcode_dir, archive));
+        } else {
+            // Zig 0.17: the install prefix is known only when the step runs.
+            repack.addFileArg(.{ .relative = .{ .base = .install_prefix, .sub_path = b.fmt("lib/xcode/{s}", .{archive}) } });
+        }
+    }
     repack.step.dependOn(&b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = xcode_dir } }).step);
     repack.step.dependOn(&b.addInstallArtifact(capi, .{ .dest_dir = .{ .override = xcode_dir } }).step);
     const xcode_step = b.step("xcode", "Build and repack the static libraries into zig-out/lib/xcode/ for linking from Xcode");
