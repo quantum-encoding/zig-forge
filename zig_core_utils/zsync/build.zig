@@ -28,7 +28,12 @@ pub fn build(b: *std.Build) void {
         "/usr/bin/sync"; // Linux: system sync is GNU coreutils
 
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "zsync_path", b.getInstallPath(.bin, "zsync"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        test_opts.addOption([]const u8, "zsync_path", b.getInstallPath(.bin, "zsync"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time, so the path is resolved lazily.
+        test_opts.addOptionPathUntracked("zsync_path", .{ .relative = .{ .base = .install_bin, .sub_path = "zsync" } });
+    }
     test_opts.addOption([]const u8, "gnu_sync_candidates", gnu_candidates);
 
     const parity_test = b.addTest(.{
