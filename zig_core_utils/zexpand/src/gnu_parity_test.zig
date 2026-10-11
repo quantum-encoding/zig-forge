@@ -57,7 +57,7 @@ fn runCapture(alloc: std.mem.Allocator, argv: []const []const u8) !CaptureResult
         for (argv_z[0..argv.len]) |p| if (p) |pp| alloc.free(std.mem.span(pp));
         alloc.free(argv_z);
     }
-    for (argv, 0..) |a, i| argv_z[i] = (try alloc.dupeZ(u8, a)).ptr;
+    for (argv, 0..) |a, i| argv_z[i] = (try alloc.dupeSentinel(u8, a, 0)).ptr;
     argv_z[argv.len] = null;
 
     const pid = fork();

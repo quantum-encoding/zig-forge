@@ -21,8 +21,8 @@ pub fn build(b: *std.Build) void {
     // real GNU `expand` (resolved at runtime inside the test; SkipZigTest if
     // absent). Only the installed-binary path is injected here.
     const opts = b.addOptions();
-    // getInstallPath returns a configure-time string path to the installed exe.
-    opts.addOption([]const u8, "zexpand_bin", b.getInstallPath(.bin, "zexpand"));
+    // The built exe path, as a lazy path (b.getInstallPath is gone in Zig 0.17).
+    opts.addOptionPath("zexpand_bin", exe.getEmittedBin());
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
