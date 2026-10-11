@@ -13,6 +13,7 @@
 //!   zig-out/bin/chart-demo      - Demo CLI
 
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -62,9 +63,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run demo chart generation");
     run_step.dependOn(&run_cmd.step);
@@ -79,7 +78,7 @@ pub fn build(b: *std.Build) void {
             .os_tag = .freestanding,
             .abi = .none,
         }),
-        .optimize = .ReleaseSmall,
+        .optimize = Optimize.ReleaseSmall,
     });
 
     const wasm = b.addExecutable(.{
