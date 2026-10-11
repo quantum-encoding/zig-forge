@@ -24,6 +24,16 @@ const zgunzip_bin: []const u8 = build_options.zgunzip_bin;
 const system_gzip = "/usr/bin/gzip";
 const system_gunzip = "/usr/bin/gunzip";
 
+/// Comptime string repeat (the `**` operator is gone in Zig 0.17).
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    comptime {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        return &final;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Embedded external vectors (offline output of `gzip -n`, mtime zeroed).
 // ---------------------------------------------------------------------------
@@ -197,7 +207,7 @@ fn le32(b: []const u8) u32 {
 test "zgzip output decodes under system gunzip (external decoder)" {
     if (!haveSystemGzip()) return error.SkipZigTest;
 
-    const payload = "hello world hello world\n" ** 40; // compressible, multi-block-ish
+    const payload = repeat("hello world hello world\n", 40); // compressible, multi-block-ish
 
     const dir = try makeTmpDir();
     defer {
@@ -436,7 +446,7 @@ test "failed compress leaves the source file intact" {
 test "system gzip -t validates zgzip output (CRC-verified)" {
     if (!haveSystemGzip()) return error.SkipZigTest;
 
-    const payload = "conformance payload \x00\x01\x02 with NULs and \xff bytes\n" ** 8;
+    const payload = repeat("conformance payload \x00\x01\x02 with NULs and \xff bytes\n", 8);
 
     const dir = try makeTmpDir();
     defer {
