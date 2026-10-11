@@ -26,12 +26,12 @@ const system_gunzip = "/usr/bin/gunzip";
 
 /// Comptime string repeat (the `**` operator is gone in Zig 0.17).
 fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
-    comptime {
+    return comptime blk: {
         var out: [s.len * n]u8 = undefined;
         for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
         const final = out;
-        return &final;
-    }
+        break :blk &final;
+    };
 }
 
 // ---------------------------------------------------------------------------
