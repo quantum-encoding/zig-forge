@@ -301,7 +301,7 @@ test "parity: unreadable subdirectory annotated and exits 2" {
     try b.writeFile(io(), .{ .sub_path = "perm/readable/f.txt", .data = "x\n" });
     // chmod via libc since Io.Dir has no direct mode setter here.
     var pathbuf: [4096]u8 = undefined;
-    const noread_abs = std.fmt.bufPrintZ(&pathbuf, "{s}/perm/noread", .{base}) catch return error.SkipZigTest;
+    const noread_abs = std.fmt.bufPrintSentinel(&pathbuf, "{s}/perm/noread", .{base}, 0) catch return error.SkipZigTest;
     if (std.c.chmod(noread_abs, 0) != 0) return error.SkipZigTest;
     defer _ = std.c.chmod(noread_abs, 0o755);
 

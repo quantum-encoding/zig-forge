@@ -19,9 +19,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run ztree");
     run_step.dependOn(&run_cmd.step);
@@ -35,7 +33,12 @@ pub fn build(b: *std.Build) void {
 
     const test_opts = b.addOptions();
     // Absolute path to the freshly-installed ztree binary under test.
-    test_opts.addOption([]const u8, "ztree_exe", b.getInstallPath(.bin, "ztree"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        test_opts.addOption([]const u8, "ztree_exe", b.getInstallPath(.bin, "ztree"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time, so the path is resolved lazily.
+        test_opts.addOptionPathUntracked("ztree_exe", .{ .relative = .{ .base = .install_bin, .sub_path = "ztree" } });
+    }
     test_opts.addOption([]const u8, "gnu_tree", gnu_tree_path);
 
     const test_exe = b.addTest(.{
