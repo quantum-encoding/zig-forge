@@ -137,7 +137,7 @@ fn hashFile(allocator: std.mem.Allocator, path: []const u8, is_stdin: bool) ![HE
             hash.update(buffer[0..@intCast(n)]);
         }
     } else {
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
 
         const fd = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
@@ -274,7 +274,7 @@ fn checkFile(allocator: std.mem.Allocator, checksum_file: []const u8, config: *c
         if (is_stdin) {
             break :blk try readAllFd(allocator, libc.STDIN_FILENO);
         } else {
-            const path_z = try allocator.dupeZ(u8, checksum_file);
+            const path_z = try allocator.dupeSentinel(u8, checksum_file, 0);
             defer allocator.free(path_z);
             const fd = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
             if (fd < 0) {
@@ -327,7 +327,7 @@ fn checkFile(allocator: std.mem.Allocator, checksum_file: []const u8, config: *c
 
         // --ignore-missing: silently skip files that do not exist.
         if (config.ignore_missing) {
-            const fz = try allocator.dupeZ(u8, filename);
+            const fz = try allocator.dupeSentinel(u8, filename, 0);
             defer allocator.free(fz);
             if (libc.access(fz.ptr, libc.F_OK) != 0) continue;
         }
