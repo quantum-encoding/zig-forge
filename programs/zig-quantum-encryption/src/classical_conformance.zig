@@ -27,7 +27,7 @@ test "RFC 7748 X25519: 5.2 vectors, 1 and 1000 iterations, 6.1 Diffie-Hellman" {
         if (std.mem.eql(u8, kind, "vector")) {
             try testing.expectEqualSlices(u8, &try r.fixed(32, "out"), &try X25519.scalarmult(try r.fixed(32, "scalar"), try r.fixed(32, "u")));
         } else if (std.mem.eql(u8, kind, "iterate")) {
-            var k = [_]u8{9} ++ [_]u8{0} ** 31;
+            var k = [_]u8{9} ++ @as([31]u8, @splat(0));
             var u = k;
             for (0..try std.fmt.parseInt(usize, r.str("iterations"), 10)) |_| {
                 const next = try X25519.scalarmult(k, u);
@@ -38,8 +38,8 @@ test "RFC 7748 X25519: 5.2 vectors, 1 and 1000 iterations, 6.1 Diffie-Hellman" {
         } else {
             const ask = try r.fixed(32, "alice_sk");
             const bsk = try r.fixed(32, "bob_sk");
-            try testing.expectEqualSlices(u8, &try r.fixed(32, "alice_pk"), &try X25519.recoverPublicKey(ask));
-            try testing.expectEqualSlices(u8, &try r.fixed(32, "bob_pk"), &try X25519.recoverPublicKey(bsk));
+            try testing.expectEqualSlices(u8, &try r.fixed(32, "alice_pk"), &try hybrid.recoverPublicKey(ask));
+            try testing.expectEqualSlices(u8, &try r.fixed(32, "bob_pk"), &try hybrid.recoverPublicKey(bsk));
             try testing.expectEqualSlices(u8, &try r.fixed(32, "shared"), &try X25519.scalarmult(ask, try r.fixed(32, "bob_pk")));
             try testing.expectEqualSlices(u8, &try r.fixed(32, "shared"), &try X25519.scalarmult(bsk, try r.fixed(32, "alice_pk")));
         }
@@ -129,7 +129,7 @@ test "differential: X25519 (100 random scalars and u-coordinates) vs x25519-dale
         if (!std.mem.eql(u8, r.str("kind"), "x25519")) continue;
         const scalar = try r.fixed(32, "scalar");
         try testing.expectEqualSlices(u8, &try r.fixed(32, "shared"), &try X25519.scalarmult(scalar, try r.fixed(32, "u")));
-        try testing.expectEqualSlices(u8, &try r.fixed(32, "public"), &try X25519.recoverPublicKey(scalar));
+        try testing.expectEqualSlices(u8, &try r.fixed(32, "public"), &try hybrid.recoverPublicKey(scalar));
         n += 1;
     }
     try testing.expectEqual(@as(usize, 100), n);

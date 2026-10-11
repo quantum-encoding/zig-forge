@@ -37,6 +37,14 @@ const mlkem = @import("ml_kem_api.zig");
 // X25519 types
 const X25519 = crypto.dh.X25519;
 
+/// std's `X25519.recoverPublicKey` returns an error union on Zig 0.16 and a plain key on 0.17
+/// (a clamped scalar cannot land on the identity, so 0.17 dropped the error). One call shape
+/// for both; the error set is what 0.16 can return.
+pub fn recoverPublicKey(secret_key: [X25519.secret_length]u8) error{IdentityElement}![X25519.public_length]u8 {
+    const r = X25519.recoverPublicKey(secret_key);
+    return if (@typeInfo(@TypeOf(r)) == .error_union) try r else r;
+}
+
 // HKDF-SHA3-256: RFC 5869 instantiated with HMAC over SHA3-256.
 const HmacSha3_256 = crypto.auth.hmac.Hmac(crypto.hash.sha3.Sha3_256);
 const HkdfSha3_256 = crypto.kdf.hkdf.Hkdf(HmacSha3_256);
@@ -144,7 +152,7 @@ pub fn keyGenDeterministic(
     var result: HybridKeyPair = undefined;
 
     const mlkem_kp = mlkem.keyGenInternal768(d, z) catch return HybridError.KeyGenFailed;
-    const x25519_pk = X25519.recoverPublicKey(x25519_sk.*) catch return HybridError.KeyGenFailed;
+    const x25519_pk = recoverPublicKey(x25519_sk.*) catch return HybridError.KeyGenFailed;
 
     // Encapsulation key: [ML-KEM ek (1184)] ‖ [X25519 pk (32)]
     @memcpy(result.ek[0..MLKEM_EK_SIZE], &mlkem_kp.ek.data);
@@ -209,7 +217,7 @@ pub fn encapsDeterministic(
     defer scrub(&mlkem_result.K);
 
     // X25519 (RFC 7748) with the ephemeral scalar
-    const ct_x = X25519.recoverPublicKey(eph_sk.*) catch return HybridError.EncapsFailed;
+    const ct_x = recoverPublicKey(eph_sk.*) catch return HybridError.EncapsFailed;
     var ss_x = X25519.scalarmult(eph_sk.*, pk_x.*) catch return HybridError.InvalidPublicKey;
     defer scrub(&ss_x);
 
@@ -269,7 +277,7 @@ pub fn decapsVersioned(dk: *const HybridDecapsulationKey, ct: *const HybridCiphe
     var ss_m = mlkem.decaps768(&mlkem_dk, &mlkem_ct);
     defer scrub(&ss_m);
 
-    var ss_x: [X25519_KEY_SIZE]u8 = X25519.scalarmult(x25519_sk.*, ct_x.*) catch [_]u8{0} ** X25519_KEY_SIZE;
+    var ss_x: [X25519_KEY_SIZE]u8 = X25519.scalarmult(x25519_sk.*, ct_x.*) catch @as([X25519_KEY_SIZE]u8, @splat(0));
     defer scrub(&ss_x);
 
     switch (version) {
@@ -278,7 +286,7 @@ pub fn decapsVersioned(dk: *const HybridDecapsulationKey, ct: *const HybridCiphe
             // The decapsulation key stores only the X25519 scalar (the layout
             // predates v2), so the recipient public key the combiner binds is
             // recomputed here. A clamped scalar cannot produce the identity.
-            const pk_x = X25519.recoverPublicKey(x25519_sk.*) catch [_]u8{0} ** X25519_KEY_SIZE;
+            const pk_x = recoverPublicKey(x25519_sk.*) catch @as([X25519_KEY_SIZE]u8, @splat(0));
             return combineSecretsV2(&ss_m, &ss_x, ct_x, &pk_x);
         },
     }
@@ -346,11 +354,11 @@ pub const kat_ct_x = hexToArray(32, "404142434445464748494a4b4c4d4e4f50515253545
 pub const kat_pk_x = hexToArray(32, "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f");
 
 /// Fixed seeds for the full-path vector (keyGen -> encaps -> decaps).
-pub const kat_seed_d = [_]u8{0xa1} ** 32;
-pub const kat_seed_z = [_]u8{0xa2} ** 32;
-pub const kat_seed_x25519_sk = [_]u8{0xa3} ** 32;
-pub const kat_seed_m = [_]u8{0xa4} ** 32;
-pub const kat_seed_eph_sk = [_]u8{0xa5} ** 32;
+pub const kat_seed_d: [32]u8 = @splat(0xa1);
+pub const kat_seed_z: [32]u8 = @splat(0xa2);
+pub const kat_seed_x25519_sk: [32]u8 = @splat(0xa3);
+pub const kat_seed_m: [32]u8 = @splat(0xa4);
+pub const kat_seed_eph_sk: [32]u8 = @splat(0xa5);
 
 /// Decode a hex literal at compile time (KAT constants); a malformed literal is a compile error.
 pub fn hexToArray(comptime n: usize, comptime hex: *const [2 * n]u8) [n]u8 {
@@ -444,7 +452,7 @@ test "hybrid combiner v2 KAT" {
 
 test "hybrid combiner v2 KAT with all-zero ss_X (low-order X25519 point path)" {
     const expected = hexToArray(32, "3047921a56cb394acade1101753eb5ba5843f1ac8d6108eba9be2432f6b947be");
-    const zero = [_]u8{0} ** 32;
+    const zero: [32]u8 = @splat(0);
     const got = combineSecretsV2(&kat_ss_m, &zero, &kat_ct_x, &kat_pk_x);
     try testing.expectEqualSlices(u8, &expected, &got);
 }
