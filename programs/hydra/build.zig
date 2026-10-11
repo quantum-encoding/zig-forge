@@ -1,4 +1,5 @@
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -63,9 +64,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(hydra_exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run the Hydra GPU variable tester");
     run_step.dependOn(&run_cmd.step);
@@ -75,7 +74,7 @@ pub fn build(b: *std.Build) void {
     const bench_module = b.addModule("bench", .{
         .root_source_file = b.path("src/bench.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     bench_module.addImport("queen", queen_module);
     bench_module.addImport("work_unit", work_unit_module);
@@ -97,9 +96,7 @@ pub fn build(b: *std.Build) void {
 
     const bench_cmd = b.addRunArtifact(bench_exe);
     bench_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        bench_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) bench_cmd.addPassthruArgs() else if (b.args) |args| bench_cmd.addArgs(args);
 
     const bench_step = b.step("bench", "Run GPU performance benchmark");
     bench_step.dependOn(&bench_cmd.step);

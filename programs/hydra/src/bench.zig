@@ -40,7 +40,7 @@ pub fn main() !void {
 
     // Run benchmark with increasing search space
     const test_sizes = [_]u64{ 1_000_000, 10_000_000, 100_000_000 };
-    const target = [_]u8{0xFF} ** 32; // Impossible target = no early exit
+    const target = @as([32]u8, @splat(0xFF)); // Impossible target = no early exit
 
     for (test_sizes) |size| {
         std.debug.print("Benchmark: {} candidates\n", .{size});

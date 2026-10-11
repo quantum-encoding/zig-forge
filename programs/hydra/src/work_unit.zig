@@ -41,7 +41,7 @@ pub const WorkUnitHeader = extern struct {
     /// Target hash to find (what we're looking for)
     target_hash: [Config.max_hash_size]u8 align(8),
     /// Reserved for future use / alignment padding
-    _reserved: [16]u8 = .{0} ** 16,
+    _reserved: [16]u8 = @splat(0),
 
     comptime {
         // Ensure exactly 64 bytes for cache-line alignment
@@ -84,7 +84,7 @@ pub const WorkUnitResult = extern struct {
             .found = 0,
             .match_index = 0,
             .match_value = 0,
-            .match_hash = .{0} ** (Config.max_hash_size / 2),
+            .match_hash = @splat(0),
         };
     }
 };
@@ -171,7 +171,7 @@ pub const WorkGenerator = struct {
     batch_counter: u64,
 
     pub fn init(start: u64, end: u64, search_type: SearchType, target_hash: []const u8) WorkGenerator {
-        var hash_buf: [Config.max_hash_size]u8 = .{0} ** Config.max_hash_size;
+        var hash_buf: [Config.max_hash_size]u8 = @splat(0);
         const copy_len = @min(target_hash.len, Config.max_hash_size);
         @memcpy(hash_buf[0..copy_len], target_hash[0..copy_len]);
 
@@ -245,7 +245,7 @@ test "WorkUnitResult size" {
 test "WorkGenerator produces correct batches" {
     const allocator = std.heap.c_allocator;
 
-    const target = [_]u8{0xDE, 0xAD, 0xBE, 0xEF} ++ ([_]u8{0} ** 28);
+    const target = [_]u8{0xDE, 0xAD, 0xBE, 0xEF} ++ (@as([28]u8, @splat(0)));
     var gen = WorkGenerator.init(0, 10000, .numeric_hash, &target);
 
     var total_candidates: u64 = 0;
