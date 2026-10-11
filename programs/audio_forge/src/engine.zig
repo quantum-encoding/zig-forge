@@ -423,5 +423,5 @@ test "engine config defaults" {
 }
 
 test "state enum" {
-    try std.testing.expectEqual(@as(usize, 3), @typeInfo(State).@"enum".fields.len);
+    try std.testing.expectEqual(@as(usize, 3), std.meta.tags(State).len);
 }

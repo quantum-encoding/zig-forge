@@ -6,10 +6,42 @@
 const std = @import("std");
 const posix = std.posix;
 
-/// ALSA C API bindings
-const c = @cImport({
-    @cInclude("alsa/asoundlib.h");
-});
+/// ALSA C API bindings. Zig 0.17 removed @cImport, so the handful of
+/// alsa/asoundlib.h declarations this backend uses are bound by hand
+/// (prototypes and enum values from alsa-lib's pcm.h).
+const c = struct {
+    const snd_pcm_t = opaque {};
+    const snd_pcm_hw_params_t = opaque {};
+    const snd_pcm_uframes_t = c_ulong;
+    const snd_pcm_sframes_t = c_long;
+    const snd_pcm_stream_t = c_uint;
+    const snd_pcm_access_t = c_uint;
+    const snd_pcm_format_t = c_int;
+
+    const SND_PCM_STREAM_PLAYBACK: snd_pcm_stream_t = 0;
+    const SND_PCM_ACCESS_RW_INTERLEAVED: snd_pcm_access_t = 3;
+    const SND_PCM_FORMAT_S16_LE: snd_pcm_format_t = 2;
+    const SND_PCM_FORMAT_S24_LE: snd_pcm_format_t = 6;
+    const SND_PCM_FORMAT_S32_LE: snd_pcm_format_t = 10;
+    const SND_PCM_FORMAT_FLOAT_LE: snd_pcm_format_t = 14;
+
+    extern "c" fn snd_strerror(errnum: c_int) [*:0]const u8;
+    extern "c" fn snd_pcm_open(pcm: *?*snd_pcm_t, name: [*:0]const u8, stream: snd_pcm_stream_t, mode: c_int) c_int;
+    extern "c" fn snd_pcm_close(pcm: ?*snd_pcm_t) c_int;
+    extern "c" fn snd_pcm_prepare(pcm: ?*snd_pcm_t) c_int;
+    extern "c" fn snd_pcm_drain(pcm: ?*snd_pcm_t) c_int;
+    extern "c" fn snd_pcm_writei(pcm: ?*snd_pcm_t, buffer: ?*const anyopaque, size: snd_pcm_uframes_t) snd_pcm_sframes_t;
+    extern "c" fn snd_pcm_hw_params_malloc(ptr: *?*snd_pcm_hw_params_t) c_int;
+    extern "c" fn snd_pcm_hw_params_free(obj: ?*snd_pcm_hw_params_t) void;
+    extern "c" fn snd_pcm_hw_params_any(pcm: ?*snd_pcm_t, params: ?*snd_pcm_hw_params_t) c_int;
+    extern "c" fn snd_pcm_hw_params(pcm: ?*snd_pcm_t, params: ?*snd_pcm_hw_params_t) c_int;
+    extern "c" fn snd_pcm_hw_params_set_access(pcm: ?*snd_pcm_t, params: ?*snd_pcm_hw_params_t, access: snd_pcm_access_t) c_int;
+    extern "c" fn snd_pcm_hw_params_set_format(pcm: ?*snd_pcm_t, params: ?*snd_pcm_hw_params_t, val: snd_pcm_format_t) c_int;
+    extern "c" fn snd_pcm_hw_params_set_channels(pcm: ?*snd_pcm_t, params: ?*snd_pcm_hw_params_t, val: c_uint) c_int;
+    extern "c" fn snd_pcm_hw_params_set_rate_near(pcm: ?*snd_pcm_t, params: ?*snd_pcm_hw_params_t, val: *c_uint, dir: ?*c_int) c_int;
+    extern "c" fn snd_pcm_hw_params_set_period_size_near(pcm: ?*snd_pcm_t, params: ?*snd_pcm_hw_params_t, val: *snd_pcm_uframes_t, dir: ?*c_int) c_int;
+    extern "c" fn snd_pcm_hw_params_set_periods(pcm: ?*snd_pcm_t, params: ?*snd_pcm_hw_params_t, val: c_uint, dir: c_int) c_int;
+};
 
 /// ALSA error to Zig error
 fn checkAlsa(result: c_int) !void {
@@ -122,7 +154,7 @@ pub const AlsaBackend = struct {
 
         // Create null-terminated device name
         var device_buf: [256]u8 = undefined;
-        const device_z = std.fmt.bufPrintZ(&device_buf, "{s}", .{self.config.device}) catch {
+        const device_z = std.fmt.bufPrintSentinel(&device_buf, "{s}", .{self.config.device}, 0) catch {
             return error.DeviceNameTooLong;
         };
 
