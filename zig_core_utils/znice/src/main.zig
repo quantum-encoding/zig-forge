@@ -202,13 +202,13 @@ pub fn main(init: std.process.Init) !void {
     defer argv_buf.deinit(allocator);
 
     for (cmd_args.items) |arg| {
-        const z = try allocator.dupeZ(u8, arg);
+        const z = try allocator.dupeSentinel(u8, arg, 0);
         try argv_buf.append(allocator, z.ptr);
     }
     try argv_buf.append(allocator, null);
 
     const argv: [*:null]const ?[*:0]const u8 = @ptrCast(argv_buf.items.ptr);
-    const cmd_z = try allocator.dupeZ(u8, cmd_args.items[0]);
+    const cmd_z = try allocator.dupeSentinel(u8, cmd_args.items[0], 0);
 
     _ = execvp(cmd_z.ptr, argv);
 
