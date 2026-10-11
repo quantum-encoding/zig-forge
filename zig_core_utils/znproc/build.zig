@@ -20,10 +20,8 @@ pub fn build(b: *std.Build) void {
     // The gnu_parity_test suite shells out to the freshly-built znproc binary
     // and diffs it against the system GNU nproc. Inject the absolute path to the
     // installed binary so the test can exec it.
-    const bin_path = b.getInstallPath(.bin, "znproc");
-
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "znproc_bin", bin_path);
+    if (@hasDecl(std.Build, "getInstallPath")) test_opts.addOption([]const u8, "znproc_bin", b.getInstallPath(.bin, "znproc")) else test_opts.addOptionPath("znproc_bin", exe.getEmittedBin());
 
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
