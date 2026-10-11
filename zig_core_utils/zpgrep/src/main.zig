@@ -243,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Compile the pattern as an extended regular expression (procps parity).
-    const pattern_z = try allocator.dupeZ(u8, pattern.?);
+    const pattern_z = try allocator.dupeSentinel(u8, pattern.?, 0);
     defer allocator.free(pattern_z);
     var matcher = Matcher.init(pattern_z.ptr, exact_match) catch {
         // procps exits EXIT_USAGE (2) on an invalid regular expression.
@@ -364,7 +364,7 @@ fn readProcessInfo(allocator: std.mem.Allocator, pid: i32) !ProcessInfo {
         if (len <= 0) return error.EmptyName;
         const ulen: usize = @intCast(len);
         const end = if (ulen > 0 and buf[ulen - 1] == '\n') ulen - 1 else ulen;
-        break :blk try allocator.dupeZ(u8, buf[0..end]);
+        break :blk try allocator.dupeSentinel(u8, buf[0..end], 0);
     };
     errdefer allocator.free(name);
 
@@ -375,7 +375,7 @@ fn readProcessInfo(allocator: std.mem.Allocator, pid: i32) !ProcessInfo {
     path_buf[cmdline_len.len] = 0;
     const cmdline = blk: {
         const fd = open(@ptrCast(&path_buf), O_RDONLY);
-        if (fd < 0) break :blk try allocator.dupeZ(u8, name);
+        if (fd < 0) break :blk try allocator.dupeSentinel(u8, name, 0);
         defer _ = close(fd);
         var list: std.ArrayListUnmanaged(u8) = .empty;
         errdefer list.deinit(allocator);
@@ -387,14 +387,14 @@ fn readProcessInfo(allocator: std.mem.Allocator, pid: i32) !ProcessInfo {
         }
         if (list.items.len == 0) {
             list.deinit(allocator);
-            break :blk try allocator.dupeZ(u8, name);
+            break :blk try allocator.dupeSentinel(u8, name, 0);
         }
         for (list.items) |*ch| {
             if (ch.* == 0) ch.* = ' ';
         }
         var end = list.items.len;
         while (end > 0 and list.items[end - 1] == ' ') end -= 1;
-        const out = try allocator.dupeZ(u8, list.items[0..end]);
+        const out = try allocator.dupeSentinel(u8, list.items[0..end], 0);
         list.deinit(allocator);
         break :blk out;
     };
