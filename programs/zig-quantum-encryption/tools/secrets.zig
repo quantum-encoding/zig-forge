@@ -25,15 +25,25 @@ const argon2 = crypto.pwhash.argon2;
 const mem = std.mem;
 const fs = std.fs;
 
-const c = @cImport({
-    @cInclude("unistd.h");
-    @cInclude("termios.h");
-    @cInclude("stdlib.h");
-    @cInclude("string.h");
-    @cInclude("sys/stat.h");
-    @cInclude("errno.h");
-    @cInclude("fcntl.h");
-});
+// Zig 0.17 removed @cImport (C translation moved to an external package). Everything this CLI
+// takes from libc is declared by std.c with the same prototypes on 0.16 and 0.17, so the
+// namespace keeps the C spelling of the call sites; strlen is the one symbol std.c lacks.
+const c = struct {
+    pub const exit = std.c.exit;
+    pub const write = std.c.write;
+    pub const read = std.c.read;
+    pub const malloc = std.c.malloc;
+    pub const free = std.c.free;
+    pub const getenv = std.c.getenv;
+    pub const isatty = std.c.isatty;
+    pub const close = std.c.close;
+    pub const open = std.c.open;
+    pub const mkdir = std.c.mkdir;
+    pub const struct_termios = std.c.termios;
+    pub const tcgetattr = std.c.tcgetattr;
+    pub const tcsetattr = std.c.tcsetattr;
+    pub extern "c" fn strlen(s: [*:0]const u8) usize;
+};
 
 /// Cross-platform secure random bytes. Fails closed: a short/failed read of the
 /// kernel CSPRNG aborts the process rather than leaving the AES-GCM salt/nonce
@@ -402,7 +412,7 @@ fn ensureDir(path: []const u8) void {
     var dir_buf: [1024]u8 = undefined;
     @memcpy(dir_buf[0..last_slash], path[0..last_slash]);
     dir_buf[last_slash] = 0;
-    _ = c.mkdir(&dir_buf, 0o700);
+    _ = c.mkdir(@ptrCast(&dir_buf), 0o700);
 }
 
 var file_buf: [MAX_VAULT_SIZE]u8 = undefined;
@@ -412,13 +422,13 @@ fn readFile(path: []const u8) ?[]u8 {
     @memcpy(path_z[0..path.len], path);
     path_z[path.len] = 0;
 
-    const fd = c.open(&path_z, c.O_RDONLY, @as(c_uint, 0));
+    const fd = c.open(@ptrCast(&path_z), .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
     if (fd < 0) return null;
     defer _ = c.close(fd);
 
     var total: usize = 0;
     while (total < MAX_VAULT_SIZE) {
-        const n = c.read(fd, &file_buf[total], MAX_VAULT_SIZE - total);
+        const n = c.read(fd, file_buf[total..].ptr, MAX_VAULT_SIZE - total);
         if (n <= 0) break;
         total += @intCast(n);
     }
@@ -431,7 +441,7 @@ fn writeFile(path: []const u8, data: []const u8) bool {
     @memcpy(path_z[0..path.len], path);
     path_z[path.len] = 0;
 
-    const fd = c.open(&path_z, c.O_WRONLY | c.O_CREAT | c.O_TRUNC, @as(c_uint, 0o600));
+    const fd = c.open(@ptrCast(&path_z), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c_uint, 0o600));
     if (fd < 0) return false;
     defer _ = c.close(fd);
 
@@ -462,14 +472,14 @@ fn getPassphrase() []const u8 {
     const have_tty = c.tcgetattr(0, &old_termios) == 0;
     if (have_tty) {
         var new_termios = old_termios;
-        new_termios.c_lflag &= ~@as(c_uint, c.ECHO);
-        _ = c.tcsetattr(0, 0, &new_termios);
+        new_termios.lflag.ECHO = false;
+        _ = c.tcsetattr(0, .NOW, &new_termios);
     }
 
     const line = read_line_stdin(&pp_buf);
 
     if (have_tty) {
-        _ = c.tcsetattr(0, 0, &old_termios);
+        _ = c.tcsetattr(0, .NOW, &old_termios);
         write_stderr("\n");
     }
 
@@ -543,15 +553,15 @@ fn cmdSet(args: []const [*:0]const u8) void {
         const have_tty = c.tcgetattr(0, &old) == 0;
         if (have_tty) {
             var new = old;
-            new.c_lflag &= ~@as(c_uint, c.ECHO);
-            _ = c.tcsetattr(0, 0, &new);
+            new.lflag.ECHO = false;
+            _ = c.tcsetattr(0, .NOW, &new);
         }
         value = read_line_stdin(&value_buf) orelse {
             write_stderr("\nError: empty value\n");
             c.exit(1);
         };
         if (have_tty) {
-            _ = c.tcsetattr(0, 0, &old);
+            _ = c.tcsetattr(0, .NOW, &old);
             write_stderr("\n");
         }
     }
@@ -952,7 +962,7 @@ test "decryptVault rejects bad magic / unknown version / truncation" {
     // Too short for a header.
     try testing.expect(decryptVault("QVLT", "p", &out) == null);
     // Valid length, wrong magic.
-    var bad = [_]u8{0} ** HEADER_LEN;
+    var bad: [HEADER_LEN]u8 = @splat(0);
     try testing.expect(decryptVault(&bad, "p", &out) == null);
     // Right magic, unknown version byte.
     @memcpy(bad[0..4], &MAGIC);
@@ -963,10 +973,10 @@ test "decryptVault rejects bad magic / unknown version / truncation" {
 // External anchor: RFC 9106 §5.3 Argon2id test vector. Pins the KDF this vault
 // depends on to an output produced by neither this repo nor its author.
 test "argon2id RFC 9106 known-answer (external anchor)" {
-    const password = [_]u8{0x01} ** 32;
-    const salt = [_]u8{0x02} ** 16;
-    const secret = [_]u8{0x03} ** 8;
-    const ad = [_]u8{0x04} ** 12;
+    const password: [32]u8 = @splat(0x01);
+    const salt: [16]u8 = @splat(0x02);
+    const secret: [8]u8 = @splat(0x03);
+    const ad: [12]u8 = @splat(0x04);
 
     var dk: [32]u8 = undefined;
     try argon2.kdf(
