@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     // and the real GNU `dir`, so the test module needs to know where the
     // installed zdir lives.
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "zdir_exe", b.getInstallPath(.bin, "zdir"));
+    test_opts.addOptionPath("zdir_exe", exe.getEmittedBin());
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/gnu_parity_test.zig"),
