@@ -62,10 +62,10 @@ notes     = "build.zig imports ML-DSA, zig_docx, zig_legend and zig_toml from si
 name      = "zsss"
 dir       = "zig_core_utils/zsss"
 build     = "scripts/build-zsss.sh"
-artifacts = ["zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-macos.a", "zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-ios.a", "zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-ios-simulator.a"]
+artifacts = ["zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-macos.a", "zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-ios.a", "zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-ios-simulator.a", "zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-android.a", "zig_core_utils/zsss/zig-out/lib/libzsss-arm-android.a", "zig_core_utils/zsss/zig-out/lib/libzsss-x86_64-android.a", "zig_core_utils/zsss/zig-out/lib/libzsss-x86-android.a", "zig_core_utils/zsss/zig-out/lib/zsss-x86_64-windows.lib"]
 sources   = ["zig_core_utils/zsss", "scripts/build-zsss.sh", "scripts/repack-for-xcode.sh"]
 consumers = ["cosmic-duck-os"]
-notes     = "ReleaseFast (fixed in zsss's build.zig per target). The same build writes the iOS, simulator and Linux archives Cifra and Tessera link; the iOS and simulator ones Cifra links are artifacts here so their stamps and links are checked too (437F922C). Cifra's check-zig-slices.sh compares their stamps and links each."
+notes     = "ReleaseFast (fixed in zsss's build.zig per target). The same build writes the iOS, simulator and Linux archives Cifra and Tessera link; the iOS and simulator ones Cifra links are artifacts here so their stamps and links are checked too (437F922C), as are the four Android static archives and the Windows MSVC .lib quantum_vault vendors under src-tauri/libs/ (the Android .so files need an NDK and are not built). Cifra's check-zig-slices.sh compares their stamps and links each."
 
 [[lib]]
 name      = "chronos_ledger"

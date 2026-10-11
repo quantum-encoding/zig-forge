@@ -220,13 +220,13 @@ native_android_step "financial_engine" && count 0 || count $?
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 native_android_step "mempool_sniffer" && count 0 || count $?
 
-# zsss lives under zig_core_utils/, not programs/. The iOS build
-# skips it with a "directory not found" warning because of the same
-# path mismatch — Android src-tauri/libs/android-arm64/libzsss.a is
-# already present in the repo so we don't need to rebuild it here.
-# If/when zsss is rebuilt for Android, copy the resulting .a into
-# `src-tauri/libs/android-arm64/` (the path src-tauri/build.rs uses
-# for zsss specifically, separate from the other Zig FFI libs).
+# zsss lives under zig_core_utils/, not programs/, and is not built here:
+# scripts/build-zsss.sh builds and stamps its Android static archives
+# (all four ABIs, with Zig alone) next to its Apple, Linux and Windows
+# ones, in zig_core_utils/zsss/zig-out/lib/libzsss-<abi>-android.a.
+# quantum_vault vendors each as src-tauri/libs/android-<abi>/libzsss.a
+# with its stamp (the path src-tauri/build.rs uses for zsss
+# specifically, separate from the other Zig FFI libs).
 #
 # signal_broadcast is gated on the `zig-ffi` Cargo feature which
 # isn't in the default feature set — not built here. Enable that
