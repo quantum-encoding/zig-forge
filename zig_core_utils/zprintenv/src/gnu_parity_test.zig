@@ -21,6 +21,17 @@
 //! than silently passing.
 
 const std = @import("std");
+
+/// Comptime string repeat; Zig 0.17 removed the `**` operator.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n:0]u8 {
+    const final = comptime blk: {
+        var out: [s.len * n:0]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        out[s.len * n] = 0;
+        break :blk out;
+    };
+    return &final;
+}
 const build_options = @import("build_options");
 
 const ZPRINTENV: []const u8 = build_options.zprintenv_exe;
@@ -31,7 +42,7 @@ extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int
 
 // A NAME longer than 255 bytes: the pre-fix code capped name copies at a 256-byte
 // buffer and silently skipped anything larger (audit finding #5).
-const LONG_NAME = "ZPTEST_LONG_" ++ ("x" ** 300);
+const LONG_NAME = "ZPTEST_LONG_" ++ repeat("x", 300);
 
 /// Populate a known, deterministic set of environment variables in THIS process
 /// so that both spawned children inherit identical state. Idempotent.
