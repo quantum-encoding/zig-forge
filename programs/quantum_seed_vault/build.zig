@@ -1,4 +1,5 @@
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     // Default to native target for development/testing
@@ -21,9 +22,7 @@ pub fn build(b: *std.Build) void {
     // Run command for testing on host
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Run the application");
     run_step.dependOn(&run_cmd.step);
 
@@ -40,7 +39,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = pi_target,
-            .optimize = .ReleaseSafe,
+            .optimize = Optimize.ReleaseSafe,
             .link_libc = true,
         }),
     });
