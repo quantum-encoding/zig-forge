@@ -86,7 +86,7 @@ target_link_libraries(your_jni zig_docx)
 
 `zig build android-so` instead emits ready-to-ship shared `libzig_docx.so` per ABI for `System.loadLibrary`, but linking Bionic at build time needs the Android NDK available to Zig — so it is kept out of the default `android` step.
 
-> **macOS/iOS note:** Zig 0.16 emits 2-byte-aligned Mach-O archive members; Apple's linker needs 8-byte. After building the `.a` for an Xcode/Swift target, realign it with `zig-forge/scripts/repack-for-xcode.sh libzig_docx.a` or you'll hit "not 8-byte aligned" link errors.
+> **macOS/iOS note:** Zig 0.17 writes 8-byte-aligned Mach-O members, so no repack is needed (the 0.16-era `repack-for-xcode.sh` is retired); build consumed archives with `scripts/build-macos-lib.sh`, which proves the link with `scripts/check-apple-archive.sh`.
 
 ### WASM library
 

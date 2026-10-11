@@ -224,7 +224,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const macos_static_install = b.addInstallArtifact(macos_static, .{});
-        macos_step.dependOn(repackForXcode(b, macos_static, macos_static_install));
+        macos_step.dependOn(&macos_static_install.step);
 
         const macos_shared = b.addLibrary(.{
             .linkage = .dynamic,
@@ -257,7 +257,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const ios_static_install = b.addInstallArtifact(ios_static, .{});
-        ios_step.dependOn(repackForXcode(b, ios_static, ios_static_install));
+        ios_step.dependOn(&ios_static_install.step);
 
         // Note: iOS doesn't support dynamic libraries for apps, only static
     }
@@ -277,7 +277,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const ios_sim_install = b.addInstallArtifact(ios_sim_static, .{});
-        ios_step.dependOn(repackForXcode(b, ios_sim_static, ios_sim_install));
+        ios_step.dependOn(&ios_sim_install.step);
     }
 
     // Windows (MSVC ABI, what Rust's x86_64-pc-windows-msvc links). Zig ships no
@@ -386,36 +386,4 @@ pub fn build(b: *std.Build) void {
     const stego_hostile_tests = b.addTest(.{ .root_module = stego_hostile_module });
     const run_stego_hostile_tests = b.addRunArtifact(stego_hostile_tests);
     test_step.dependOn(&run_stego_hostile_tests.step);
-}
-
-/// The step that leaves an installed Apple static archive linkable, to depend on in place
-/// of `install` itself.
-///
-/// Zig 0.16's archive writer pads Mach-O members to 2-byte alignment, and ld64 IGNORES a
-/// 64-bit member that is not 8-byte aligned ("ignoring archive member ... not 8-byte
-/// aligned") instead of refusing the archive, so every `_zsss_*` symbol comes out
-/// undefined in the consumer's link (Cifra's simulator build, work item 437F922C). The
-/// archive is repacked with libtool after every install: the install step copies Zig's
-/// cached output over the repacked one whenever they differ, so this always runs. libtool
-/// exists only on macOS; elsewhere the archive is left as Zig wrote it.
-fn repackForXcode(
-    b: *std.Build,
-    lib: *std.Build.Step.Compile,
-    install: *std.Build.Step.InstallArtifact,
-) *std.Build.Step {
-    if (b.graph.host.result.os.tag != .macos) return &install.step;
-    const repack = b.addSystemCommand(&.{"bash"});
-    repack.addFileArg(b.path("../../scripts/repack-for-xcode.sh"));
-    // For a static archive out_filename is the installed basename (0.16 also has
-    // out_lib_filename, which 0.17 dropped; they agree for a static library).
-    if (@hasDecl(std.Build, "getInstallPath")) {
-        repack.addArg(b.getInstallPath(.lib, lib.out_filename));
-    } else {
-        // Zig 0.17: the install prefix is known only to the maker process, so the configure
-        // phase can no longer spell the path; it is resolved lazily when the step runs.
-        repack.addFileArg(.{ .relative = .{ .base = .install_lib, .sub_path = lib.out_filename } });
-    }
-    repack.has_side_effects = true;
-    repack.step.dependOn(&install.step);
-    return &repack.step;
 }

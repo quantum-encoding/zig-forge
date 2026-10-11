@@ -20,19 +20,12 @@ cd programs/terminal_mux
 zig build -Doptimize=ReleaseFast          # → zig-out/lib/libterminal_mux.a + zig-out/include/terminal_mux.h
 ```
 
-### macOS ONLY: repack the archive before linking from Xcode/clang
+### macOS: no repack
 
-Zig 0.16 emits Mach-O archive members with 2-byte alignment; Apple's `ld`
-requires 8-byte and otherwise fails with *"not 8-byte aligned"*. After every
-rebuild, repack:
-
-```sh
-../../scripts/repack-for-xcode.sh zig-out/lib/libterminal_mux.a
-```
-
-(`repack-for-xcode.sh` runs `libtool -static` to realign the members. This is a
-repo-wide requirement for all native Zig static libs consumed by Xcode — see the
-root `CLAUDE.md`.)
+Zig 0.16 emitted Mach-O archive members with 2-byte alignment, which Apple's `ld`
+skips ("not 8-byte aligned"), so every archive used to be repacked. Zig 0.17 writes
+8-byte-aligned members; `scripts/build-macos-lib.sh` builds the consumed archive and
+proves the link with `scripts/check-apple-archive.sh`.
 
 **Linux needs no repack.** The alignment constraint is specific to Apple's
 Mach-O `ld`; on Linux the archive is plain ELF `ar` and links as emitted —

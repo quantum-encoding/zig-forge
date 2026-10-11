@@ -112,9 +112,7 @@ picked, `build.rs` scans it for the `qv_version()` string declared in
 `src/quantum_vault_ffi.zig` (`VERSION_STRING`) and fails the build if it is
 missing, so a library built from older source cannot be linked by mistake.
 
-Archives destined for Xcode must be repacked with the repo-root
-`scripts/repack-for-xcode.sh` (Zig 0.16 writes 2-byte-aligned Mach-O archive
-members; Apple's ld-prime requires 8).
+Archives destined for Xcode: Zig 0.17 writes 8-byte-aligned Mach-O members, so no repack is needed (the 0.16-era `repack-for-xcode.sh` is retired); build consumed archives with `scripts/build-macos-lib.sh`, which proves the link with `scripts/check-apple-archive.sh`.
 
 ## Rust Integration
 

@@ -82,7 +82,7 @@ pub fn build(b: *std.Build) void {
             "zig build lib writes zig-out/lib/libes_core_zig.a and libendpoint_sec.a, the archives libs.toml stamps; " ++
                 "a {t} build keeps Zig's panic machinery and is never those archives. " ++
                 "Run scripts/build-macos-lib.sh programs/zig_endpoint_sec ReleaseFast from the repo root " ++
-                "(repacked, stamped), plain `zig build` for zig-out/lib/dev/, or `zig build xcode` for zig-out/lib/xcode/",
+                "(stamped), plain `zig build` for zig-out/lib/dev/, or `zig build xcode` for zig-out/lib/xcode/",
             .{optimize},
         )).step),
     }
@@ -91,22 +91,12 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&b.addInstallArtifact(capi, dev_dir).step);
 
     // `zig build xcode` (MetatronSecurity's es-core/build.sh, any -Doptimize):
-    // install both archives under zig-out/lib/xcode/, then repack them so
-    // Apple's ld accepts them.
+    // install both archives under zig-out/lib/xcode/. Zig 0.17 writes the 8-byte
+    // aligned Mach-O members Apple's ld needs (0.16 did not, and this step repacked them).
     const xcode_dir: std.Build.InstallDir = .{ .custom = "lib/xcode" };
-    const repack = b.addSystemCommand(&.{"../../scripts/repack-for-xcode.sh"});
-    for ([_][]const u8{ "libes_core_zig.a", "libendpoint_sec.a" }) |archive| {
-        if (@hasDecl(std.Build, "getInstallPath")) {
-            repack.addArg(b.getInstallPath(xcode_dir, archive));
-        } else {
-            // Zig 0.17: the install prefix is known only when the step runs.
-            repack.addFileArg(.{ .relative = .{ .base = .install_prefix, .sub_path = b.fmt("lib/xcode/{s}", .{archive}) } });
-        }
-    }
-    repack.step.dependOn(&b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = xcode_dir } }).step);
-    repack.step.dependOn(&b.addInstallArtifact(capi, .{ .dest_dir = .{ .override = xcode_dir } }).step);
-    const xcode_step = b.step("xcode", "Build and repack the static libraries into zig-out/lib/xcode/ for linking from Xcode");
-    xcode_step.dependOn(&repack.step);
+    const xcode_step = b.step("xcode", "Build the static libraries into zig-out/lib/xcode/ for linking from Xcode");
+    xcode_step.dependOn(&b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = xcode_dir } }).step);
+    xcode_step.dependOn(&b.addInstallArtifact(capi, .{ .dest_dir = .{ .override = xcode_dir } }).step);
 
     // Example: subscribe to a few NOTIFY events and print them. Needs the ES
     // entitlement, Developer ID signing and root to actually receive events.

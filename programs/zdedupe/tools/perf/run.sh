@@ -21,7 +21,6 @@ case "${1:-}" in
     out="$(mktemp -d)"
     cp "$root/zig-out/lib/libzdedupe.a" "$out/"
     if [ "$(uname)" = Darwin ]; then
-      "$root/../../scripts/repack-for-xcode.sh" "$out/libzdedupe.a" >/dev/null
       cc -O2 -o "$out/phasebench" "$here/phasebench.c" "$out/libzdedupe.a" -framework Security -framework CoreFoundation
     else
       cc -O2 -o "$out/phasebench" "$here/phasebench.c" "$out/libzdedupe.a" -lpthread

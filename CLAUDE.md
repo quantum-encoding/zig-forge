@@ -45,7 +45,7 @@ instead of extending them.
 
 - `libs.toml` lists every archive another repo links; `scripts/build-consumed-libs.sh [name…]`
   builds, checks and stamps them. Never hand a consumer a plain `zig build` archive (Debug,
-  unrepacked, unstamped). A new consumer or archive is a new `libs.toml` row.
+  unstamped). A new consumer or archive is a new `libs.toml` row.
 - A row's `build` and `sources` are part of the consumer's `baton release` identity: change
   one and every consumer's `release.toml` must change with it, or the script refuses to stamp.
 - A new `b.path("../…")` or `.path = "../…"` in a consumed program's build makes the script
@@ -98,8 +98,54 @@ instead of extending them.
    tree (`zdedupe/src/pstat.zig`); `dev` as `u64` `(major << 32) | minor`.
    `grep -nE 'extern "c" fn (l?stat|fstat)|extern struct Stat'`.
 
-## Zig 0.16 gotchas agents keep rediscovering
+## Zig 0.17 gotchas agents keep rediscovering
 
+The forge's Zig is 0.17.0 + `scripts/zig-0.17.0-ios-nullfile.patch` (see "Libraries other repos
+link"). Until every machine retires 0.16, code stays dual-compatible: the spellings below compile
+on both, and nothing 0.17-only lands.
+
+- Official 0.17.0 cannot compile an iOS/visionOS target that reaches `std.debug.print`
+  (`std/Io/Threaded.zig: no field named 'fd' in Io.Threaded.NullFile`). The patched toolchain
+  fixes it; do not sweep `std.debug.print` out of libraries. Drop the patch when a 0.17.x ships
+  the fix (master has it).
+- Un-versioned Apple targets floor at macOS 15 / iOS 18 (0.16: 13 / 15). Always version them:
+  `aarch64-macos.26.0`, `aarch64-ios.26.0`, `aarch64-ios.26.0-simulator`
+  (`aarch64-ios-simulator.26.0` is refused); in build.zig `.os_version_min = .{ .semver = .{ .major = 26, .minor = 0, .patch = 0 } }`.
+  26.0 is the fleet floor; an object newer than the app linking it makes ld warn "built for newer".
+- `a ** b` array multiplication is removed: `const x: [N]T = @splat(v);` / `@as([N]T, @splat(v))`;
+  string repeats via a comptime `repeat()` helper or a literal.
+- `@cImport` is removed. Bind libc by hand over `std.c` (`std.c.open(p, .{ .ACCMODE = .WRONLY, .CREAT = true }, mode)`,
+  `termios.lflag.ECHO = false`, `tcsetattr(fd, .NOW, &t)`, `std.c.opendir/readdir`), or small
+  `extern "c"` decl files (`cognitive_telemetry_kit/cognitive-tools/src/sqlite3.zig`). No
+  translate-c package dependency for libc. A header that is itself an anchor may go through
+  `b.addTranslateC` in a test module (`zig_endpoint_sec`), which 0.17 deprecates but keeps.
+- `std.builtin.OptimizeMode` tags became `.debug/.safe/.fast/.small`; the old names are decls only,
+  so `==`, `!=` and switch prongs on `.ReleaseFast` fail. `const Optimize = std.builtin.OptimizeMode;`
+  then `Optimize.ReleaseFast`.
+- `b.args` is gone (removed outright in 0.17.0, not deprecated):
+  `if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run.addPassthruArgs() else if (b.args) |a| run.addArgs(a);`
+- `b.getInstallPath`, `b.lib_dir`, `b.install_path` are gone (configure/build split): lazy paths
+  `.{ .relative = .{ .base = .install_lib, .sub_path = lib.out_filename } }` behind `@hasDecl`.
+  `Step.Fmt` `.paths` takes LazyPaths (`zdedupe/build.zig`).
+- Gone from std: `std.meta.Int` (spell the type; `@Int` is an AstGen error on 0.16),
+  `Allocator.dupeZ` (`dupeSentinel(u8, s, 0)`), `std.fmt.bufPrintZ` (`bufPrintSentinel(.., 0)`),
+  `std.meta.fields` and `@typeInfo(T).@"struct".fields` (0.17 has `field_names`/`field_types`/
+  `field_values`; shims in `zig_endpoint_sec/src/reflect.zig`, `zig_pdf_generator/src/json.zig`),
+  `std.ascii.indexOfIgnoreCase` (`findIgnoreCase`), `std.hash.crc.Crc32` (use `std.hash.Crc32`).
+  `Type.Fn.params` became `param_types` (`zig_darwin_kit/src/block.zig`). `X25519.recoverPublicKey`
+  is infallible (shim in `zig-quantum-encryption/src/hybrid.zig`); `std.zig.Ast.parse` takes
+  `ParseOptions` (`zig_lens/src/parser.zig`).
+- `zig build --global-cache-dir` is gone (`ZIG_GLOBAL_CACHE_DIR`); `--cache-dir` still works. Cache
+  manifests are binary (`zig cache-cat`), and 0.17 caches test results: a second
+  `zig build test` in the same cache reports fewer tests. Count tests from a fresh `--cache-dir`.
+  Never share a `.zig-cache` between 0.16 and 0.17.
+- A `--libc` file needs `darwin_sdk_dir=` and, for Linux-OS targets (Android included), a
+  non-empty `gcc_dir`/`cc_dir` (`scripts/build-zsss.sh`).
+- Host CPU detection names newer cores (`apple_m5`); consumed archives use the baseline CPU via
+  `-Dtarget`, so pin `-Dcpu` wherever native tuning matters.
+- Bundled compiler-rt renamed its f128 routines (`ceilq` → `ceilf128`) and dropped `__memset`;
+  the forge's own C ABIs are unchanged, but a consumer resolving those names from an archive is not.
+- `std.builtin` and `@import("builtin").cpu/os/abi` are deprecated for 0.18 (warnings only).
 - `std.time.Instant` / `std.time.Timer` do not exist; `std/time.zig` is constants. Use
   `std.c.clock_gettime(.MONOTONIC, &ts)` behind an injected `Clock`
   (`zig_ratelimit/src/compat.zig`, `zig_watch/src/watcher.zig`).
@@ -108,21 +154,20 @@ instead of extending them.
 - `std.testing.tmpDir` roots under `.zig-cache/tmp` inside the tree, and the chronos tick hook
   runs `git add .`, so hostile fixtures get committed. Use `$TMPDIR` and assert the path is outside
   the repo (`zdedupe/src/testing_scratch.zig`).
-- Zig 0.16 emits 2-byte-aligned Mach-O members; ld-prime needs 8. After rebuilding any lib
-  consumed by Xcode, run `scripts/repack-for-xcode.sh <lib.a …>`, then
-  `scripts/check-apple-archive.sh` (zsss: build.zig repacks, `scripts/build-zsss.sh` checks).
-- `@cImport` of `EndpointSecurity/EndpointSecurity.h` fails on the macOS 27 SDK (Zig's clang
-  rejects a nullability attribute in `xpc/xpc.h`); bind by hand and anchor with
-  `zig_endpoint_sec/tools/gen_layout_anchors.py`. `@Type` reification and `std.once` are gone.
+- Mach-O archive members are 8-byte aligned now; the repack step is gone. Still prove every Apple
+  archive with `scripts/check-apple-archive.sh` (ld64 skips a misaligned member with only a warning).
+- `@cImport` of `EndpointSecurity/EndpointSecurity.h` never worked on the macOS 27 SDK; it is bound
+  by hand and anchored with `zig_endpoint_sec/tools/gen_layout_anchors.py`. `@Type` reification
+  and `std.once` are gone.
 - On glibc >= 2.44 / binutils >= 2.47 (current Arch), `crt1.o` carries `.sframe` relocations
-  (`R_X86_64_PC64`) that Zig 0.16's self-hosted ELF linker rejects, so every **Debug** artifact
-  that links libc — including `zig build test` — dies with `fatal linker error: unhandled
-  relocation type`. Release modes use LLD and are fine. Set `.use_llvm = true, .use_lld = true`
-  on `addExecutable`/`addTest`/dynamic `addLibrary` (`zdedupe/build.zig`); ad hoc: `-fllvm -flld`.
+  (`R_X86_64_PC64`) that Zig's legacy self-hosted ELF linker rejects (0.17's new ELF linker is
+  still off by default, ziglang/zig#31272 open), so every **Debug** artifact that links libc —
+  including `zig build test` — dies with `fatal linker error: unhandled relocation type`. Release
+  modes use LLD and are fine. Keep `.use_llvm = true, .use_lld = true` on
+  `addExecutable`/`addTest`/dynamic `addLibrary` (`zdedupe/build.zig`); ad hoc: `-fllvm -flld`.
 - Guardian Shield blocks Zig replacing an existing `.zig-cache/o/<hash>` entry, so rebuilding
-  byte-identical sources (e.g. re-running after reverting a mutation) fails with `failed to
-  rename compilation results … PermissionDenied`. It is the environment, not your code: pass a
-  fresh `--cache-dir` outside the repo for that run.
+  byte-identical sources fails with `failed to rename compilation results … PermissionDenied`.
+  It is the environment, not your code: pass a fresh `--cache-dir` outside the repo for that run.
 - Apple APIs taking `^` blocks (`es_new_client`, libdispatch, XPC) need a real `Block_literal`:
   use `zig_darwin_kit.Block`. A bare `fn` pointer is dereferenced as a block header and
   crashes or misbehaves.

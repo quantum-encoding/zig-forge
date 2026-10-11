@@ -42,11 +42,10 @@ FORGE_ZIG_THREADED_VANILLA="1a770001e309f24c8c58a9fdb3c095994c454cbfa9dba9d4f1de
 FORGE_ZIG_THREADED_PATCHED="7d658d672ce56d1523c5c02696098aea4bdb5ecc003aff1d182e24a56000c781"
 FORGE_ZIG_ID="zig $FORGE_ZIG_VERSION + $FORGE_ZIG_PATCH_NAME sha256:$FORGE_ZIG_PATCH_SHA256"
 FORGE_ZIG_INSTALLS=("$HOME/.local/zig-0.17.0-p1/zig" "/opt/zig-0.17.0-p1/zig")
-# The identities allowed to stamp a consumed archive. Until the flip to 0.17 the
-# forge's 0.16.0 stamps stay valid beside patched-0.17.0 ones; the flip narrows this
-# to the patched 0.17.0 alone and makes the patched install the default Zig.
-FORGE_ZIG_ACCEPT=("zig 0.16.0" "$FORGE_ZIG_ID")
-FORGE_ZIG_PREFER_INSTALL=0
+# The identities allowed to stamp a consumed archive: the patched 0.17.0 alone (since the
+# 0.17 flip; a 0.16.0 or vanilla-0.17.0 stamp is refused), and it is the default Zig.
+FORGE_ZIG_ACCEPT=("$FORGE_ZIG_ID")
+FORGE_ZIG_PREFER_INSTALL=1
 
 forge_zig_sha256() { "$FORGE_ZIG_SCRIPTS/sha256.sh" "$1" | cut -d' ' -f1; }
 

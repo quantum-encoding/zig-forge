@@ -25,9 +25,8 @@
 #     (Could be moved to a central `programs/android-libs/android-arm64/`
 #     to mirror the iOS central layout — see commit-message TODO.)
 #
-#   * NO libtool repack step: Android uses lld, which accepts Zig's
-#     2-byte archive member alignment. The repack-for-xcode.sh dance
-#     is an Apple ld-prime quirk only.
+#   * NO Apple link check: Android uses lld, which never had ld64's
+#     archive member alignment requirement.
 
 set -e
 

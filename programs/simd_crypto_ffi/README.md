@@ -41,4 +41,4 @@ zig build test     # FFI + Zig-module unit tests
 
 The macOS archive other repos link is `scripts/build-macos-lib.sh programs/simd_crypto_ffi` from the repo root: `zig build lib` in ReleaseSmall for a macOS 14.0 floor, repacked for ld-prime and stamped with its source identity. Only `zig build lib` writes `zig-out/lib/libquantum_crypto.a`, so a local build never replaces it.
 
-> macOS consumers: after rebuilding, repack the `.a` for Xcode via `zig-forge/scripts/repack-for-xcode.sh` (Zig 0.16 emits 2-byte-aligned Mach-O members; Apple's ld-prime needs 8-byte).
+> macOS consumers: Zig 0.17 writes 8-byte-aligned Mach-O members, so no repack is needed (the 0.16-era `repack-for-xcode.sh` is retired); build consumed archives with `scripts/build-macos-lib.sh`, which proves the link with `scripts/check-apple-archive.sh`.

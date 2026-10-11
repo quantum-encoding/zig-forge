@@ -21,9 +21,6 @@ case "${1:-release}" in
   debug)
     LIB="$HERE/zig-out/lib/dev/libzigpdf.a"
     (cd "$HERE" && zig build)
-    if [ "$(uname -s)" = Darwin ]; then
-      "$ROOT/scripts/repack-for-xcode.sh" "$LIB" >/dev/null
-    fi
     echo "built $LIB (Debug, unstamped)" ;;
   *)
     echo "usage: $0 [release|debug]" >&2

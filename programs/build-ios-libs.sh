@@ -67,20 +67,19 @@ FAILED=0
 
 # Make one emitted archive linkable and record what it is, in this order:
 #
-#   1. repack it with libtool. Zig 0.16 pads Mach-O members to 2-byte alignment, and
-#      ld64 IGNORES a 64-bit member that is not 8-byte aligned ("ignoring archive member
-#      ... not 8-byte aligned"), so every symbol in it comes out undefined in the app's
-#      link, far from the cause;
-#   2. prove the repack took, with a link that must load every member;
-#   3. stamp it (scripts/stamp-archive.sh): `-source-id.txt`, so a consumer can tell it
+#   1. prove it links, with a link that must load every member: ld64 IGNORES a 64-bit
+#      member that is not 8-byte aligned ("ignoring archive member ... not 8-byte
+#      aligned"), so every symbol in it would come out undefined in the app's link, far
+#      from the cause. Zig 0.16 wrote such members and every archive was repacked with
+#      libtool here; 0.17 writes aligned ones, so the repack is gone and the proof stays;
+#   2. stamp it (scripts/stamp-archive.sh): `-source-id.txt`, so a consumer can tell it
 #      from one built months ago, and `.a.sha256`, so the stamp cannot vouch for any
 #      other archive. Last, because the sha256 is of the final bytes.
 finish_archive() {
     local archive="$1" id="$2"
-    "$SCRIPT_DIR/../scripts/repack-for-xcode.sh" "$archive" >/dev/null &&
-        "$SCRIPT_DIR/../scripts/check-apple-archive.sh" "$archive" &&
+    "$SCRIPT_DIR/../scripts/check-apple-archive.sh" "$archive" &&
         "$SCRIPT_DIR/../scripts/stamp-archive.sh" "$archive" "$id" "$ZIG_TOOLCHAIN_ID" || {
-        echo -e "${RED}  ✗ $archive: repack, link check or stamp failed${NC}"
+        echo -e "${RED}  ✗ $archive: link check or stamp failed${NC}"
         return 1
     }
 }
@@ -156,6 +155,32 @@ build_lib() {
     return 0
 }
 
+# zigpdf's root imports zig_docx, zig_legend and ml_dsa as modules only its build.zig wires
+# up, so the bare `zig build-lib` line in build_lib cannot build it ("no module named
+# 'zig_docx'"), and the iOS slices quantum_vault links under pdf_generation went unbuilt.
+# Its own `zig build ios ios-sim` steps (ReleaseFast, stripped, compiler-rt bundled,
+# minos 26.0) build both into a scratch prefix; they are copied in and finished (link
+# check, stamp) like every other slice.
+build_zigpdf() {
+    local full_dir="$SCRIPT_DIR/zig_pdf_generator" id prefix
+    echo -e "${CYAN}Building zigpdf (zig build ios ios-sim)...${NC}"
+    id="$("$SCRIPT_DIR/../scripts/zig-source-id.sh" "$full_dir")"
+    prefix="$(mktemp -d "${TMPDIR:-/tmp}/build-ios-zigpdf.XXXXXX")"
+    if ! (cd "$full_dir" && "$ZIG" build ios ios-sim --prefix "$prefix") 2>&1; then
+        echo -e "${RED}  ✗ zigpdf: zig build ios ios-sim failed${NC}"
+        rm -rf "$prefix"
+        return 1
+    fi
+    cp "$prefix/lib/ios-arm64/libzigpdf.a" "$OUTPUT_DIR/ios-arm64/libzigpdf.a" &&
+        cp "$prefix/lib/ios-sim-arm64/libzigpdf.a" "$OUTPUT_DIR/ios-sim-arm64/libzigpdf.a" || {
+        rm -rf "$prefix"
+        return 1
+    }
+    rm -rf "$prefix"
+    finish_archive "$OUTPUT_DIR/ios-arm64/libzigpdf.a" "$id" &&
+        finish_archive "$OUTPUT_DIR/ios-sim-arm64/libzigpdf.a" "$id"
+}
+
 # Build each library.
 # Format: "lib_name|directory|source_file"
 LIBS=(
@@ -167,10 +192,13 @@ LIBS=(
     "async_core|async_scheduler|src/async_core.zig"
     "memory_pool_core|memory_pool|src/memory_pool_core.zig"
     "financial_core|financial_engine|src/financial_core.zig"
-    "zsss|zig_core_utils/zsss|src/lib.zig"
     "zigpdf|zig_pdf_generator|src/ffi.zig"
     "zig_docx|zig_docx|src/ffi.zig"
 )
+# zsss is not here: its iOS and simulator slices are built, link-checked and stamped by
+# scripts/build-zsss.sh (zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-ios*.a). The entry
+# that used to be here named a path under programs/ that does not exist, so it was always
+# skipped and counted as a failure.
 
 SKIPPED=0
 for entry in "${LIBS[@]}"; do
@@ -180,7 +208,9 @@ for entry in "${LIBS[@]}"; do
         continue
     fi
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    if build_lib "$name" "$dir" "$source"; then SUCCESS=$((SUCCESS + 1)); else FAILED=$((FAILED + 1)); fi
+    builder=build_lib
+    [ "$name" = zigpdf ] && builder=build_zigpdf
+    if $builder "$name" "$dir" "$source"; then SUCCESS=$((SUCCESS + 1)); else FAILED=$((FAILED + 1)); fi
 done
 
 echo ""
@@ -201,6 +231,6 @@ echo ""
 echo -e "${CYAN}Built libraries (iOS Simulator):${NC}"
 ls -lh "$OUTPUT_DIR/ios-sim-arm64/"*.a 2>/dev/null || echo "  (none)"
 
-# A library that failed to build, repack, link-check or stamp fails the script, so a
+# A library that failed to build, link-check or stamp fails the script, so a
 # caller (an Xcode Run Script phase) cannot carry on against the archive it left behind.
 [ "$FAILED" -eq 0 ] || exit 1

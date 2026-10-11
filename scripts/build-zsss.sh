@@ -132,11 +132,11 @@ for i in "${!android_targets[@]}"; do
 done
 
 # Every Apple archive (macOS, iOS, simulator) is linked by Xcode's ld64, which needs
-# 8-byte Mach-O member alignment that Zig 0.16 does not write. build.zig's apple steps
-# repack each one after installing it; this proves it, with a link per archive, before
-# anything is stamped. Until 2026-10-10 only the macOS archive was repacked here, and
-# the iOS and simulator archives Cifra links came out with every _zsss_* undefined
-# (work item 437F922C). The Linux, Android and Windows archives are consumed by their
+# 8-byte Mach-O member alignment. Zig 0.16 did not write it (build.zig repacked each
+# archive until the 0.17 flip; 0.17 writes aligned members); this proves it, with a link
+# per archive, before anything is stamped. In 2026-10 the iOS and simulator archives
+# Cifra links came out with every _zsss_* undefined because only the macOS archive was
+# repacked (work item 437F922C). The Linux, Android and Windows archives are consumed by their
 # own toolchains (lld, link.exe), which accept Zig's member alignment.
 apple=(zig-out/lib/libzsss-*-macos.a zig-out/lib/libzsss-*-ios.a zig-out/lib/libzsss-*-ios-simulator.a)
 for archive in "${apple[@]}"; do
@@ -146,7 +146,7 @@ if [ "$(uname -s)" = Darwin ]; then
   "$ROOT/scripts/check-apple-archive.sh" "${apple[@]}" >/dev/null ||
     { echo "error: an Apple archive above does not link; nothing was stamped" >&2; exit 1; }
 else
-  echo "warning: not on macOS: the Apple archives were neither repacked nor link-checked," >&2
+  echo "warning: not on macOS: the Apple archives were not link-checked," >&2
   echo "  and are stamped as built; build them on a Mac before an app links them" >&2
 fi
 

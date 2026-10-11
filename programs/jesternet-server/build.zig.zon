@@ -2,7 +2,7 @@
     .name = .jesternet_server,
     .version = "0.0.1",
     .fingerprint = 0x65fe7579ee47db8c,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
 
     // zigit is the git-correctness foundation: pack handling, byte-exact
     // object encoder (anchored against `git mktree`), 3-way merge with

@@ -4,14 +4,13 @@
 #   scripts/test-archive-gates.sh
 #
 # 437F922C — an Apple archive must LINK, and zsss's build must make it so:
-#   - an archive as Zig 0.16 writes it (2-byte member alignment) fails
-#     check-apple-archive.sh, and the same archive repacked with repack-for-xcode.sh
-#     passes. The fixture is built with `zig build-lib`; its precondition (ld reports the
-#     member "not 8-byte aligned") is asserted, so a Zig that stops writing misaligned
-#     members makes the test say so rather than pass vacuously;
+#   - an archive as the forge's Zig (0.17) writes it passes check-apple-archive.sh with no
+#     repack; an archive as Zig 0.16 wrote it (a 2-byte-aligned member) still fails it,
+#     with ld's "not 8-byte aligned" asserted, when a 0.16 is available to write one
+#     (ZIG16 or PATH zig), so the gate is shown to catch what it exists for;
 #   - zsss's `zig build ios macos` (into a scratch prefix) produces macOS, iOS and simulator
-#     archives that all pass check-apple-archive.sh. Before build.zig repacked them,
-#     the iOS and simulator ones failed.
+#     archives that all pass check-apple-archive.sh. In 2026-10, with Zig 0.16 and only the
+#     macOS archive repacked, the iOS and simulator ones failed.
 #
 # FB672FF4 — a stamp must not vouch for an archive it was not written for:
 #   - a stamp pulled through git onto a clone holding an older archive (the 338c9594
@@ -46,23 +45,33 @@ bad() { fail=$((fail + 1)); echo "  ✘ $1"; }
 
 echo "437F922C: Apple archives must link"
 
-# A symbol name of this length leaves Zig's single member at an offset that is 2 mod 8.
+# A symbol name of this length left Zig 0.16's single member at an offset that is 2 mod 8.
 mkdir -p "$tmp/fx"
 printf 'export fn fx_abcd() u32 {\n    return 7;\n}\n' > "$tmp/fx/fx.zig"
-(cd "$tmp/fx" && zig_ build-lib -static -target aarch64-ios-simulator -OReleaseFast \
-  --name fx fx.zig --cache-dir "$tmp/fx/cache" --global-cache-dir "$tmp/fx/gcache")
+(cd "$tmp/fx" && ZIG_GLOBAL_CACHE_DIR="$tmp/fx/gcache" zig_ build-lib -static -target aarch64-ios.26.0-simulator \
+  -OReleaseFast --name fx fx.zig --cache-dir "$tmp/fx/cache")
 if out="$("$S/check-apple-archive.sh" "$tmp/fx/libfx.a" 2>&1)"; then
-  bad "an archive as Zig writes it passed the link check"
-elif grep -q 'not 8-byte aligned' <<<"$out"; then
-  ok "an archive as Zig writes it (ld: member not 8-byte aligned) fails the link check"
+  ok "an archive as the forge's Zig writes it links with no repack (8-byte aligned members)"
 else
-  bad "fixture precondition: expected ld's 'not 8-byte aligned', got: $out"
+  bad "an archive as the forge's Zig writes it fails the link check: $out"
 fi
-"$S/repack-for-xcode.sh" "$tmp/fx/libfx.a" >/dev/null
-if "$S/check-apple-archive.sh" "$tmp/fx/libfx.a" >/dev/null 2>&1; then
-  ok "the same archive repacked with repack-for-xcode.sh links"
+# The gate itself must still catch a misaligned member. Zig 0.16 writes one for this
+# fixture, so when a 0.16 is at hand (ZIG16, or PATH `zig` reporting 0.16.x) its archive
+# must fail with ld's "not 8-byte aligned"; without one the case says it was skipped.
+zig16="${ZIG16:-zig}"
+if command -v "$zig16" >/dev/null 2>&1 && [[ "$("$zig16" version 2>/dev/null)" == 0.16.* ]]; then
+  mkdir -p "$tmp/fx16"
+  (cd "$tmp/fx16" && "$zig16" build-lib -static -target aarch64-ios.26.0-simulator -OReleaseFast \
+    --name fx "$tmp/fx/fx.zig" --cache-dir "$tmp/fx16/cache" --global-cache-dir "$tmp/fx16/gcache")
+  if out="$("$S/check-apple-archive.sh" "$tmp/fx16/libfx.a" 2>&1)"; then
+    bad "a Zig 0.16 archive with a 2-byte-aligned member passed the link check"
+  elif grep -q 'not 8-byte aligned' <<<"$out"; then
+    ok "a misaligned member (Zig 0.16's archive) still fails the link check (ld: not 8-byte aligned)"
+  else
+    bad "fixture precondition: expected ld's 'not 8-byte aligned' from the 0.16 archive, got: $out"
+  fi
 else
-  bad "the repacked archive still fails the link check"
+  echo "  - skipped: no Zig 0.16 (ZIG16) to write a misaligned fixture for the negative case"
 fi
 
 zsss_out="$tmp/zsss-out"

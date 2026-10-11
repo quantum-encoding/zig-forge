@@ -327,7 +327,7 @@ scripts/build-consumed-libs.sh                # every library in libs.toml
 scripts/build-consumed-libs.sh terminal_mux   # just the named ones
 ```
 
-[`libs.toml`](libs.toml) lists each library with its exact build command, its artifacts, and the `sources` a consumer's `release.toml` must declare. Each build is a release mode, repacked for Apple's ld-prime (Zig 0.16 writes 2-byte-aligned archive members; ld-prime needs 8), and stamped with `<lib>-source-id.txt` from `scripts/zig-source-id.sh`, which hashes every file the build reads, including the sibling directories `build.zig` imports. In a git checkout that `baton release` products point at, the command also writes `<archive>.release-stamp.json` for each consuming product. That stamp is what makes the input read `fresh` in `baton release plan`, and it is refused when the product's `release.toml` declares the input differently from `libs.toml`. The command exits non-zero if any library fails to build, comes out as a Debug or ReleaseSafe build, carries a stale stamp, or cannot be stamped.
+[`libs.toml`](libs.toml) lists each library with its exact build command, its artifacts, and the `sources` a consumer's `release.toml` must declare. Each build is a release mode, link-checked on a Mac (`scripts/check-apple-archive.sh`: ld64 skips a Mach-O member that is not 8-byte aligned with only a warning; Zig 0.17 writes aligned members, so the 0.16-era repack is gone), and stamped with `<lib>-source-id.txt`, `<lib>-toolchain.txt` from `scripts/zig-source-id.sh`, which hashes every file the build reads, including the sibling directories `build.zig` imports. In a git checkout that `baton release` products point at, the command also writes `<archive>.release-stamp.json` for each consuming product. That stamp is what makes the input read `fresh` in `baton release plan`, and it is refused when the product's `release.toml` declares the input differently from `libs.toml`. The command exits non-zero if any library fails to build, comes out as a Debug or ReleaseSafe build, carries a stale stamp, or cannot be stamped.
 
 | Library | Archive | Mode | Linked by |
 |---|---|---|---|
@@ -350,7 +350,7 @@ scripts/patch-zig-0.17.sh --tarball zig-aarch64-macos-0.17.0.tar.xz --prefix /op
 
 It writes `TOOLCHAIN-ID` beside the `zig` binary (`zig 0.17.0 + zig-0.17.0-ios-nullfile.patch sha256:<patch sha256>`). Every build script selects its Zig through [`scripts/zig-toolchain.sh`](scripts/zig-toolchain.sh): `$ZIG` if set, else that install, else `zig` on PATH, and refuses any Zig that is not the patched 0.17.0 (a vanilla 0.17.0 has the same `zig version`; the patched std file's hash and `TOOLCHAIN-ID` tell them apart). PATH and Homebrew are left alone. Each archive gets `<lib>-toolchain.txt` beside its `-source-id.txt` and `.sha256`, and `scripts/check-archive-stamp.sh` refuses an archive stamped by any other toolchain.
 
-Rebuilding one by hand: `scripts/build-macos-lib.sh <program-dir> [ReleaseSmall|ReleaseFast]`. A plain `zig build` in a program directory is Debug and unrepacked; nothing should link it.
+Rebuilding one by hand: `scripts/build-macos-lib.sh <program-dir> [ReleaseSmall|ReleaseFast]`. A plain `zig build` in a program directory is Debug and unstamped; nothing should link it.
 
 ### Build Specific Programs
 
@@ -446,7 +446,7 @@ zig build test
 
 ## Requirements
 
-- **Zig:** 0.16.0-dev.3013+ (required)
+- **Zig:** 0.17.0 (every `build.zig.zon` pins it; consumed archives need the patched 0.17.0 from `scripts/patch-zig-0.17.sh`). The sources stay 0.16.0-compatible until 0.16 is retired on every machine.
 - **OS:** Linux (required for guardian_shield, chronos_engine, zig_jail, io_uring programs), macOS/Windows (http_sentinel, most libraries)
 - **Optional dependencies:**
   - `libbpf` — guardian_shield eBPF components

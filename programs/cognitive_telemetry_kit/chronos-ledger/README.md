@@ -46,9 +46,7 @@ zig build test     # canonical + ledger + C-ABI suites (external RFC 8785 anchor
 zig build          # → zig-out/lib/libchronos_ledger.a + zig-out/include/chronos_ledger.h
 ```
 
-> macOS consumers (Swift/Xcode): repack the static lib with
-> `../../scripts/repack-for-xcode.sh zig-out/lib/libchronos_ledger.a` — Zig 0.16
-> emits 2-byte-aligned Mach-O members and Apple's ld-prime needs 8-byte.
+> macOS consumers (Swift/Xcode): Zig 0.17 writes 8-byte-aligned Mach-O members, so no repack is needed (the 0.16-era `repack-for-xcode.sh` is retired); build consumed archives with `scripts/build-macos-lib.sh`, which proves the link with `scripts/check-apple-archive.sh`.
 
 ## Status
 

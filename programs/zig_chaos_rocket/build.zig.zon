@@ -1,6 +1,7 @@
 .{
     .name = .zig_chaos_rocket,
     .version = "0.1.0",
+    .minimum_zig_version = "0.17.0",
     .fingerprint = 0xb4d52a6f3fadd205,
     .paths = .{""},
 }

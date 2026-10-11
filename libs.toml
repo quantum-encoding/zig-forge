@@ -27,7 +27,7 @@ name      = "quantum_crypto"
 dir       = "programs/simd_crypto_ffi"
 build     = "scripts/build-macos-lib.sh programs/simd_crypto_ffi"
 artifacts = ["programs/simd_crypto_ffi/zig-out/lib/libquantum_crypto.a"]
-sources   = ["programs/simd_crypto_ffi", "scripts/build-macos-lib.sh", "scripts/repack-for-xcode.sh"]
+sources   = ["programs/simd_crypto_ffi", "scripts/build-macos-lib.sh", "scripts/zig-toolchain.sh"]
 consumers = ["cosmic-duck-os"]
 notes     = "Also CryptoWalletKit and Cifra (scripts/check-zig-slices.sh compares the -source-id.txt stamp); iOS slices come from programs/build-ios-libs.sh."
 
@@ -36,7 +36,7 @@ name      = "terminal_mux"
 dir       = "programs/terminal_mux"
 build     = "scripts/build-macos-lib.sh programs/terminal_mux"
 artifacts = ["programs/terminal_mux/zig-out/lib/libterminal_mux.a"]
-sources   = ["programs/terminal_mux", "scripts/build-macos-lib.sh", "scripts/repack-for-xcode.sh"]
+sources   = ["programs/terminal_mux", "scripts/build-macos-lib.sh", "scripts/zig-toolchain.sh"]
 consumers = ["cosmic-duck-os", "aiconductor"]
 notes     = "aiconductor's Xcode Run Script runs programs/terminal_mux/scripts/ensure-fresh-lib.sh, which rebuilds with this command when the stamp does not match. rust_agent's agent-ffi/ensure-fresh-lib.sh calls that script too."
 
@@ -45,7 +45,7 @@ name      = "zig_docx"
 dir       = "programs/zig_docx"
 build     = "scripts/build-macos-lib.sh programs/zig_docx"
 artifacts = ["programs/zig_docx/zig-out/lib/libzig_docx.a"]
-sources   = ["programs/zig_docx", "scripts/build-macos-lib.sh", "scripts/repack-for-xcode.sh"]
+sources   = ["programs/zig_docx", "scripts/build-macos-lib.sh", "scripts/zig-toolchain.sh"]
 consumers = ["cosmic-duck-os"]
 notes     = "programs/zig_docx/build-libs.sh release runs the same command."
 
@@ -54,7 +54,7 @@ name      = "zigpdf"
 dir       = "programs/zig_pdf_generator"
 build     = "scripts/build-macos-lib.sh programs/zig_pdf_generator"
 artifacts = ["programs/zig_pdf_generator/zig-out/lib/libzigpdf.a"]
-sources   = ["programs/zig_pdf_generator", "programs/zig-quantum-encryption/src", "programs/zig_docx/src", "programs/zig_legend/src", "programs/zig_toml/src", "scripts/build-macos-lib.sh", "scripts/repack-for-xcode.sh"]
+sources   = ["programs/zig_pdf_generator", "programs/zig-quantum-encryption/src", "programs/zig_docx/src", "programs/zig_legend/src", "programs/zig_toml/src", "scripts/build-macos-lib.sh", "scripts/zig-toolchain.sh"]
 consumers = ["cosmic-duck-os"]
 notes     = "build.zig imports ML-DSA, zig_docx, zig_legend and zig_toml from sibling programs. programs/zig_pdf_generator/build-libs.sh release runs the same command."
 
@@ -63,7 +63,7 @@ name      = "zsss"
 dir       = "zig_core_utils/zsss"
 build     = "scripts/build-zsss.sh"
 artifacts = ["zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-macos.a", "zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-ios.a", "zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-ios-simulator.a", "zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-android.a", "zig_core_utils/zsss/zig-out/lib/libzsss-arm-android.a", "zig_core_utils/zsss/zig-out/lib/libzsss-x86_64-android.a", "zig_core_utils/zsss/zig-out/lib/libzsss-x86-android.a", "zig_core_utils/zsss/zig-out/lib/zsss-x86_64-windows.lib", "zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-android.so", "zig_core_utils/zsss/zig-out/lib/libzsss-arm-android.so", "zig_core_utils/zsss/zig-out/lib/libzsss-x86_64-android.so", "zig_core_utils/zsss/zig-out/lib/libzsss-x86-android.so"]
-sources   = ["zig_core_utils/zsss", "scripts/build-zsss.sh", "scripts/repack-for-xcode.sh"]
+sources   = ["zig_core_utils/zsss", "scripts/build-zsss.sh", "scripts/zig-toolchain.sh"]
 consumers = ["cosmic-duck-os"]
 notes     = "ReleaseFast (fixed in zsss's build.zig per target). The same build writes the iOS, simulator and Linux archives Cifra and Tessera link; the iOS and simulator ones Cifra links are artifacts here so their stamps and links are checked too (437F922C), as are the four Android static archives, the Windows MSVC .lib and the four Android shared libraries quantum_vault vendors under src-tauri/libs/ (the .so files need an Android NDK: build-zsss.sh finds it through ANDROID_NDK_HOME and fails without one). Cifra's check-zig-slices.sh compares their stamps and links each."
 
@@ -72,7 +72,7 @@ name      = "chronos_ledger"
 dir       = "programs/cognitive_telemetry_kit/chronos-ledger"
 build     = "programs/cognitive_telemetry_kit/chronos-ledger/swift/build-apple-lib.sh"
 artifacts = ["programs/cognitive_telemetry_kit/chronos-ledger/swift/Vendor/libchronos_ledger.a"]
-sources   = ["programs/cognitive_telemetry_kit/chronos-ledger", "programs/zig-quantum-encryption/src", "scripts/build-macos-lib.sh", "scripts/repack-for-xcode.sh"]
+sources   = ["programs/cognitive_telemetry_kit/chronos-ledger", "programs/zig-quantum-encryption/src", "scripts/build-macos-lib.sh", "scripts/zig-toolchain.sh"]
 consumers = ["cosmic-duck-os", "aiconductor"]
 notes     = "Signs with ML-DSA from programs/zig-quantum-encryption/src (build.zig imports it), so a change there stales this archive."
 
@@ -81,7 +81,7 @@ name      = "zdedupe"
 dir       = "programs/zdedupe"
 build     = "scripts/build-macos-lib.sh programs/zdedupe ReleaseFast"
 artifacts = ["programs/zdedupe/zig-out/lib/libzdedupe.a"]
-sources   = ["programs/zdedupe", "scripts/build-macos-lib.sh", "scripts/repack-for-xcode.sh"]
+sources   = ["programs/zdedupe", "scripts/build-macos-lib.sh", "scripts/zig-toolchain.sh"]
 consumers = ["zdedupe"]
 notes     = "tauri_apps/zdedupe links vendored copies its scripts/vendor-core.sh builds from one zig-forge commit (ReleaseFast); this row proves the program builds from a clean checkout in that mode, and its stamp is what zdedupe's inputs-fresh gate reads."
 
@@ -90,6 +90,6 @@ name      = "endpoint_sec"
 dir       = "programs/zig_endpoint_sec"
 build     = "scripts/build-macos-lib.sh programs/zig_endpoint_sec ReleaseFast"
 artifacts = ["programs/zig_endpoint_sec/zig-out/lib/libes_core_zig.a", "programs/zig_endpoint_sec/zig-out/lib/libendpoint_sec.a"]
-sources   = ["programs/zig_endpoint_sec", "programs/zig_darwin_kit", "scripts/build-macos-lib.sh", "scripts/repack-for-xcode.sh"]
+sources   = ["programs/zig_endpoint_sec", "programs/zig_darwin_kit", "scripts/build-macos-lib.sh", "scripts/zig-toolchain.sh"]
 consumers = []
 notes     = "MetatronSecurity's es-core/build.sh builds and copies libes_core_zig.a itself (`zig build -Doptimize=ReleaseFast xcode`, which writes zig-out/lib/xcode/); this row proves the program builds from a clean checkout in that mode."

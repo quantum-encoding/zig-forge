@@ -136,8 +136,7 @@ zig build -Doptimize=ReleaseSafe
 zig build wasm
 ```
 
-On macOS, repack any `.a` you hand to Xcode with `scripts/repack-for-xcode.sh`
-(repo root): Zig 0.16 emits 2-byte-aligned archive members and ld-prime wants 8.
+On macOS: Zig 0.17 writes 8-byte-aligned Mach-O members, so no repack is needed (the 0.16-era `repack-for-xcode.sh` is retired); build consumed archives with `scripts/build-macos-lib.sh`, which proves the link with `scripts/check-apple-archive.sh`.
 
 ## Integration with Quantum Vault
 

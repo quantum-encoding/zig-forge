@@ -2,7 +2,7 @@
     .name = .zig_port_scanner,
     .version = "2.0.0",
     .fingerprint = 0xc8d8120a53534a9b,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
