@@ -45,11 +45,11 @@ pub fn build(b: *std.Build) void {
     // Run commands
     const run_zcopy = b.addRunArtifact(zcopy_exe);
     run_zcopy.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_zcopy.addArgs(args);
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_zcopy.addPassthruArgs() else if (b.args) |args| run_zcopy.addArgs(args);
 
     const run_zpaste = b.addRunArtifact(zpaste_exe);
     run_zpaste.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_zpaste.addArgs(args);
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_zpaste.addPassthruArgs() else if (b.args) |args| run_zpaste.addArgs(args);
 
     const copy_step = b.step("copy", "Run zcopy");
     copy_step.dependOn(&run_zcopy.step);
@@ -68,9 +68,10 @@ pub fn build(b: *std.Build) void {
     });
 
     // Externally-anchored parity tests. They shell out to the built zcopy/zpaste
-    // binaries, so expose the install bin dir and make the tests depend on install.
+    // binaries, so expose their paths (lazy: b.getInstallPath is gone in Zig 0.17).
     const test_options = b.addOptions();
-    test_options.addOption([]const u8, "bin_dir", b.getInstallPath(.bin, ""));
+    test_options.addOptionPath("zcopy_bin", zcopy_exe.getEmittedBin());
+    test_options.addOptionPath("zpaste_bin", zpaste_exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{

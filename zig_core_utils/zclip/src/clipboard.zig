@@ -71,7 +71,7 @@ fn commandExists(allocator: std.mem.Allocator, cmd: []const u8) bool {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     var it = std.mem.tokenizeScalar(u8, path, ':');
     while (it.next()) |dir| {
-        const full = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, cmd }) catch continue;
+        const full = std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ dir, cmd }, 0) catch continue;
         if (libc.access(full.ptr, posix.X_OK) == 0) return true;
     }
     return false;
