@@ -268,7 +268,7 @@ fn isRootPath(path: []const u8) bool {
 }
 
 fn chmodFile(allocator: std.mem.Allocator, path: []const u8, config: *const Config, had_error: *bool) ChmodError!void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     // Preserve-root check: refuse to operate recursively on '/'
@@ -297,7 +297,7 @@ fn chmodFile(allocator: std.mem.Allocator, path: []const u8, config: *const Conf
     // Calculate new mode
     const new_mode = if (config.reference_file) |ref_file| blk: {
         // Use mode from reference file
-        const ref_z = allocator.dupeZ(u8, ref_file) catch return error.OutOfMemory;
+        const ref_z = allocator.dupeSentinel(u8, ref_file, 0) catch return error.OutOfMemory;
         defer allocator.free(ref_z);
         var ref_stat: Stat = undefined;
         const ref_result = stat(ref_z.ptr, &ref_stat);
@@ -362,7 +362,7 @@ fn chmodFile(allocator: std.mem.Allocator, path: []const u8, config: *const Conf
 }
 
 fn chmodRecursive(allocator: std.mem.Allocator, dir_path: []const u8, config: *const Config, had_error: *bool) ChmodError!void {
-    const dir_path_z = try allocator.dupeZ(u8, dir_path);
+    const dir_path_z = try allocator.dupeSentinel(u8, dir_path, 0);
     defer allocator.free(dir_path_z);
 
     const dir = libc.opendir(dir_path_z.ptr) orelse {
@@ -391,7 +391,7 @@ fn chmodRecursive(allocator: std.mem.Allocator, dir_path: []const u8, config: *c
         // found while walking the tree; doing so would let an attacker who
         // controls a directory redirect our (possibly root) mode changes onto
         // arbitrary files outside it. Classify with lstat and skip symlinks.
-        const full_path_z = allocator.dupeZ(u8, full_path) catch return error.OutOfMemory;
+        const full_path_z = allocator.dupeSentinel(u8, full_path, 0) catch return error.OutOfMemory;
         defer allocator.free(full_path_z);
         var lst: Stat = undefined;
         if (lstat(full_path_z.ptr, &lst) == 0 and (@as(u32, lst.mode) & S_IFMT) == S_IFLNK) {
