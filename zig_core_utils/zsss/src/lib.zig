@@ -17,13 +17,11 @@ const std = @import("std");
 fn ffiPanic(msg: []const u8, ret_addr: ?usize) noreturn {
     @branchHint(.cold);
     _ = ret_addr;
-    // Raw write(2): on Zig 0.17 std.debug.print reaches std.Io.Threaded, whose iOS/tvOS/
-    // watchOS NullFile has no `fd`, so every iOS build of this library fails to compile
-    // (std bug in 0.17.0); the panic path must not depend on that machinery anyway.
-    const prefix = "FATAL ZSSS FFI PANIC: ";
-    _ = std.c.write(2, prefix, prefix.len);
-    _ = std.c.write(2, msg.ptr, msg.len);
-    _ = std.c.write(2, "\n", 1);
+    // std.debug.print, not std.c.write: the Linux archives link no libc and the Windows
+    // fd type is a HANDLE, so a raw write(2) does not build there. The 0.17.0 iOS failure
+    // (std.Io.Threaded NullFile has no `fd`) is fixed by the forge's patched toolchain
+    // (scripts/patch-zig-0.17.sh), not here.
+    std.debug.print("FATAL ZSSS FFI PANIC: {s}\n", .{msg});
     std.process.abort();
 }
 
