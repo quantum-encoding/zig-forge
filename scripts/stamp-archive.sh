@@ -3,11 +3,12 @@
 #
 #   scripts/stamp-archive.sh <archive> <source-id>
 #
-# The archive is a `lib<name>.a`, or a `<name>.lib` (what Zig writes for a Windows MSVC
-# target). Writes, beside it:
+# The archive is a `lib<name>.a`, a `<name>.lib` (what Zig writes for a Windows MSVC
+# target) or a `lib<name>.so` (an Android shared library). Writes, beside it:
 #
 #   <lib>-source-id.txt   the source identity (scripts/zig-source-id.sh), one line. The
-#                         format every existing reader parses; unchanged.
+#                         format every existing reader parses; unchanged. A .a and a .so
+#                         of the same stem share it, so stamp both from one build.
 #   <archive>.sha256      the archive's sha256, in `shasum -a 256` format with the bare
 #                         file name, so `cd <dir> && shasum -a 256 -c <archive>.sha256`
 #                         (or scripts/sha256.sh -c, on a host without shasum) verifies it.
@@ -27,7 +28,7 @@ SHA256="$(cd "$(dirname "$0")" && pwd -P)/sha256.sh"
 archive="${1:?usage: stamp-archive.sh <archive> <source-id>}"
 id="${2:?usage: stamp-archive.sh <archive> <source-id>}"
 [ -f "$archive" ] || { echo "error: no archive at $archive" >&2; exit 1; }
-case "$archive" in *.a | *.lib) ;; *) echo "error: $archive is not a .a or .lib" >&2; exit 1 ;; esac
+case "$archive" in *.a | *.lib | *.so) ;; *) echo "error: $archive is not a .a, .lib or .so" >&2; exit 1 ;; esac
 
 stamp="${archive%.*}-source-id.txt"
 printf '%s\n' "$id" > "$stamp.tmp"

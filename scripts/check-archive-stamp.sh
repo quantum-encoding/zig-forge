@@ -3,7 +3,8 @@
 #
 #   scripts/check-archive-stamp.sh <archive> <program-dir>
 #
-# The archive is a `lib<name>.a` or a Windows `<name>.lib`. Fails, naming the reason, when
+# The archive is a `lib<name>.a`, a Windows `<name>.lib` or an Android `lib<name>.so`.
+# Fails, naming the reason, when
 #   - the archive, its <lib>-source-id.txt or its <archive>.sha256 is missing;
 #   - the source-id differs from scripts/zig-source-id.sh <program-dir> (stale archive);
 #   - the sha256 differs from the archive's bytes (the stamp was written for another
@@ -14,7 +15,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 archive="${1:?usage: check-archive-stamp.sh <archive> <program-dir>}"
 dir="${2:?usage: check-archive-stamp.sh <archive> <program-dir>}"
-case "$archive" in *.a | *.lib) ;; *) echo "$archive is not a .a or .lib" >&2; exit 1 ;; esac
+case "$archive" in *.a | *.lib | *.so) ;; *) echo "$archive is not a .a, .lib or .so" >&2; exit 1 ;; esac
 
 stamp="${archive%.*}-source-id.txt"
 sum="$archive.sha256"

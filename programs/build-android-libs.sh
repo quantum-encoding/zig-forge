@@ -222,9 +222,10 @@ native_android_step "mempool_sniffer" && count 0 || count $?
 
 # zsss lives under zig_core_utils/, not programs/, and is not built here:
 # scripts/build-zsss.sh builds and stamps its Android static archives
-# (all four ABIs, with Zig alone) next to its Apple, Linux and Windows
-# ones, in zig_core_utils/zsss/zig-out/lib/libzsss-<abi>-android.a.
-# quantum_vault vendors each as src-tauri/libs/android-<abi>/libzsss.a
+# (all four ABIs, with Zig alone) and shared libraries (with the NDK's
+# Bionic libc, found through ANDROID_NDK_HOME) next to its Apple, Linux
+# and Windows ones, in zig_core_utils/zsss/zig-out/lib/libzsss-<abi>-android.{a,so}.
+# quantum_vault vendors each as src-tauri/libs/android-<abi>/libzsss.{a,so}
 # with its stamp (the path src-tauri/build.rs uses for zsss
 # specifically, separate from the other Zig FFI libs).
 #
