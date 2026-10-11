@@ -1,4 +1,9 @@
 const std = @import("std");
+// Zig 0.17 renames the OptimizeMode tags (.fast/.small/...); the old names survive only
+// as decls, so spell them through the type to compile on 0.16 and 0.17.
+const Optimize = std.builtin.OptimizeMode;
+// Un-versioned iOS floors at 15.0 on Zig 0.16 and 18.0 on 0.17; the fleet floor is 26.0.
+const apple_floor: std.Target.Query.OsVersion = .{ .semver = .{ .major = 26, .minor = 0, .patch = 0 } };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -33,9 +38,8 @@ pub fn build(b: *std.Build) void {
     // Run step
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    // Zig 0.17 removed `b.args`; `addPassthruArgs` does not exist on 0.16.
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Run zig-docx");
     run_step.dependOn(&run_cmd.step);
 
@@ -65,8 +69,8 @@ pub fn build(b: *std.Build) void {
     // stamped release archive.
     const lib_step = b.step("lib", "Build the consumed archive zig-out/lib/libzig_docx.a (release modes only; use scripts/build-macos-lib.sh)");
     switch (optimize) {
-        .ReleaseSmall, .ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(static_lib, .{}).step),
-        .Debug, .ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
+        Optimize.ReleaseSmall, Optimize.ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(static_lib, .{}).step),
+        Optimize.Debug, Optimize.ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
             "zig build lib writes zig-out/lib/libzig_docx.a, the archive consumers link; " ++
                 "a {t} build keeps Zig's panic machinery and is never that archive. " ++
                 "Run scripts/build-macos-lib.sh programs/zig_docx from the repo root " ++
@@ -177,7 +181,7 @@ pub fn build(b: *std.Build) void {
     const web_wasm_module = b.createModule(.{
         .root_source_file = b.path("src/wasm.zig"),
         .target = web_wasm_target,
-        .optimize = .ReleaseSmall,
+        .optimize = Optimize.ReleaseSmall,
     });
     const web_wasm = b.addExecutable(.{
         .name = "zig_docx_web",
@@ -200,12 +204,13 @@ pub fn build(b: *std.Build) void {
     const ios_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
         .os_tag = .ios,
+        .os_version_min = apple_floor,
         .abi = .none,
     });
     const ios_module = b.createModule(.{
         .root_source_file = b.path("src/ffi.zig"),
         .target = ios_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     ios_module.link_libc = true;
     ios_module.strip = true;
@@ -225,12 +230,13 @@ pub fn build(b: *std.Build) void {
     const ios_sim_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
         .os_tag = .ios,
+        .os_version_min = apple_floor,
         .abi = .simulator,
     });
     const ios_sim_module = b.createModule(.{
         .root_source_file = b.path("src/ffi.zig"),
         .target = ios_sim_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     ios_sim_module.link_libc = true;
     ios_sim_module.strip = true;
@@ -304,7 +310,7 @@ pub fn build(b: *std.Build) void {
         const a_module = b.createModule(.{
             .root_source_file = b.path("src/ffi.zig"),
             .target = android_target,
-            .optimize = .ReleaseFast,
+            .optimize = Optimize.ReleaseFast,
         });
         a_module.link_libc = true;
         a_module.strip = true;
@@ -325,7 +331,7 @@ pub fn build(b: *std.Build) void {
         const so_module = b.createModule(.{
             .root_source_file = b.path("src/ffi.zig"),
             .target = android_target,
-            .optimize = .ReleaseFast,
+            .optimize = Optimize.ReleaseFast,
         });
         so_module.link_libc = true; // links Bionic libc (malloc/fopen used by the FFI)
         so_module.strip = true;

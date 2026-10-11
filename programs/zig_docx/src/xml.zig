@@ -473,7 +473,14 @@ test "M4: malformed or illegal character references stay literal" {
 test "M1: oversized entity text is chunked, not truncated" {
     // 300 '&amp;' entities decoded through a 16-byte buffer: every chunk must
     // be whole and the concatenation must equal the full decoded text.
-    const input = "&amp;" ** 300;
+    // Zig 0.17 removed `**`; build the 300-fold repeat at comptime instead.
+    const input = comptime blk: {
+        const unit = "&amp;";
+        var bytes: [unit.len * 300]u8 = undefined;
+        for (0..300) |k| @memcpy(bytes[k * unit.len ..][0..unit.len], unit);
+        const final = bytes;
+        break :blk &final;
+    };
     var buf: [16]u8 = undefined;
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(std.testing.allocator);
