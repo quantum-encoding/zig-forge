@@ -40,6 +40,10 @@ fi
 DIR="${1:?usage: zig-source-id.sh [--deps] <program-dir>}"
 [ -d "$DIR" ] || { echo "error: no such directory: $DIR" >&2; exit 1; }
 
+# shasum where the host has it, GNU sha256sum (Git for Windows) otherwise, both printing
+# the same lines; the identity below hashes those lines.
+SHA256="$(cd "$(dirname "$0")" && pwd -P)/sha256.sh"
+
 BASE="$(cd "$DIR" && pwd -P)"
 
 # Relative path from $2 to $1; both absolute, physical, no trailing slash.
@@ -168,6 +172,6 @@ $covered
 EOF
 } | keep_sources \
   | LC_ALL=C sort -zu \
-  | xargs -0 shasum -a 256 \
-  | shasum -a 256 \
+  | xargs -0 "$SHA256" \
+  | "$SHA256" \
   | cut -d' ' -f1

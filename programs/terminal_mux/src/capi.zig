@@ -28,13 +28,17 @@ const config = @import("config.zig");
 const url = @import("url.zig");
 const pty = @import("pty.zig");
 const gfx = @import("graphics.zig");
+const sys = @import("sys.zig");
+
+const is_windows = builtin.os.tag == .windows;
 
 /// libc malloc-backed allocator — the standard choice for a C-linked library.
 const alloc = std.heap.c_allocator;
 
 /// Zig 0.16-compatible mutex backed by pthread (this toolchain's std has no
-/// std.Thread.Mutex; the repo convention is to wrap pthread directly).
-const Mutex = struct {
+/// std.Thread.Mutex; the repo convention is to wrap pthread directly). An
+/// SRWLOCK on Windows (pty.Mutex there).
+const Mutex = if (is_windows) pty.Mutex else struct {
     inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
 
     pub fn lock(self: *Mutex) void {
@@ -74,6 +78,8 @@ var registry_mutex: Mutex = .{};
 var next_id: u64 = 1;
 
 fn defaultShell() []const u8 {
+    // Windows: the command interpreter, as every console host starts one.
+    if (is_windows) return sys.getenv("COMSPEC") orelse "C:\\Windows\\System32\\cmd.exe";
     if (std.c.getenv("SHELL")) |s| {
         const slice = std.mem.sliceTo(s, 0);
         if (slice.len > 0) return slice;
@@ -89,6 +95,18 @@ fn defaultShell() []const u8 {
     }
     // Sensible fallbacks: zsh is the macOS default login shell since 10.15.
     return if (builtin.os.tag.isDarwin()) "/bin/zsh" else "/bin/bash";
+}
+
+/// This process's environment, "NAME=value" entries. Windows keeps its
+/// environment as UTF-16; it is converted once (pty_windows.environ).
+fn processEnviron() [*:null]const ?[*:0]const u8 {
+    if (is_windows) {
+        const empty = struct {
+            const list = [_:null]?[*:0]const u8{};
+        };
+        return @import("pty_windows.zig").environ() catch &empty.list;
+    }
+    return std.c.environ;
 }
 
 fn activePane(h: *ZtermSession) *session.Pane {
@@ -108,12 +126,12 @@ fn childEnviron() [*:null]const ?[*:0]const u8 {
     defer child_env_mutex.unlock();
     if (child_env) |e| return e;
 
-    const src = std.c.environ;
+    const src = processEnviron();
     var n: usize = 0;
     while (src[n] != null) : (n += 1) {}
 
     // Worst case: every host entry kept + 2 forced vars + NULL terminator.
-    const buf = alloc.alloc(?[*:0]const u8, n + 3) catch return std.c.environ;
+    const buf = alloc.alloc(?[*:0]const u8, n + 3) catch return src;
     var i: usize = 0;
     for (0..n) |j| {
         const entry = std.mem.sliceTo(src[j].?, 0);
@@ -526,9 +544,9 @@ pub export fn zterm_pump(handle: ?*ZtermSession, timeout_ms: c_int) c_long {
     const pane = activePane(h);
     const fd = pane.getFd() orelse return -1;
 
-    var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
-    const n = posix.poll(&fds, timeout_ms) catch return -1;
-    if (n == 0 or (fds[0].revents & posix.POLL.IN) == 0) return 0;
+    var fds = [_]sys.pollfd{.{ .fd = fd, .events = sys.POLL.IN, .revents = 0 }};
+    const n = sys.poll(&fds, timeout_ms) catch return -1;
+    if (n == 0 or (fds[0].revents & sys.POLL.IN) == 0) return 0;
 
     var buf: [READ_CHUNK]u8 = undefined;
     // The master is non-blocking, so a spurious wakeup after poll reports
@@ -556,15 +574,15 @@ pub export fn zterm_drain(handle: ?*ZtermSession) c_long {
     for (w.panes.items) |pane| {
         const fd = pane.getFd() orelse continue;
         while (true) {
-            var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
-            const n = posix.poll(&fds, 0) catch break;
+            var fds = [_]sys.pollfd{.{ .fd = fd, .events = sys.POLL.IN, .revents = 0 }};
+            const n = sys.poll(&fds, 0) catch break;
             if (n == 0) break;
             // HUP arrives unrequested. It and a 0-byte read are both EOF on
             // the master: the slave side has no writer left, i.e. the child is
             // gone. Confirm with waitpid before latching, because a
             // still-running child that merely closed stdout is not an exit.
-            const hup = (fds[0].revents & (posix.POLL.HUP | posix.POLL.ERR)) != 0;
-            if ((fds[0].revents & posix.POLL.IN) == 0) {
+            const hup = (fds[0].revents & (sys.POLL.HUP | sys.POLL.ERR)) != 0;
+            if ((fds[0].revents & sys.POLL.IN) == 0) {
                 if (hup) noteIfExited(h, pane);
                 break;
             }
@@ -1527,11 +1545,17 @@ test "graphics ABI struct layouts are stable for the C header" {
     try std.testing.expectEqual(@as(usize, 12), @sizeOf(CImageInfo));
 }
 
+/// A "shell" that starts, prints nothing it is asked about, and sits on its
+/// terminal until closed: /bin/cat (no rc files, no prompt noise), cmd.exe on
+/// Windows (its banner and prompt are the only output).
+fn testSitter() [*:0]const u8 {
+    return if (is_windows) "C:\\Windows\\System32\\cmd.exe" else "/bin/cat";
+}
+
 test "pane-aware surface: split, rects tile with a border gap, focus, close" {
     try pty.skipIfUnavailable();
     var id: u64 = 0;
-    // /bin/cat as the "shell": no rc files, no prompt noise, sits on the pty.
-    const h = zterm_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
+    const h = zterm_create(24, 80, testSitter(), &id) orelse return error.CreateFailed;
     defer zterm_destroy(h);
 
     try std.testing.expectEqual(@as(usize, 1), zterm_pane_count(h));
@@ -1585,13 +1609,14 @@ fn paneShows(h: *ZtermSession, idx: usize, needle: []const u8) !bool {
             }
         }
         if (std.mem.indexOf(u8, text[0..len], needle) != null) return true;
-        var no_fds = [_]posix.pollfd{};
-        _ = posix.poll(&no_fds, 10) catch {};
+        var no_fds = [_]sys.pollfd{};
+        _ = sys.poll(&no_fds, 10) catch {};
     }
     return false;
 }
 
 test "split and new window run the session's shell, not $SHELL" {
+    if (is_windows) return error.SkipZigTest; // no /usr/bin/env; the Windows variant follows
     try pty.skipIfUnavailable();
     var id: u64 = 0;
     // /usr/bin/env as the session's "shell": it prints the environment and
@@ -1609,7 +1634,7 @@ test "split and new window run the session's shell, not $SHELL" {
 test "zterm_take_responses drains the emulator's device replies, never splitting one" {
     try pty.skipIfUnavailable();
     var id: u64 = 0;
-    const h = zterm_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
+    const h = zterm_create(24, 80, testSitter(), &id) orelse return error.CreateFailed;
     defer zterm_destroy(h);
 
     var out: [64]u8 = undefined;
@@ -1632,6 +1657,7 @@ test "zterm_take_responses drains the emulator's device replies, never splitting
 }
 
 test "zterm_take_exit reports a child that exited, once, with its code" {
+    if (is_windows) return error.SkipZigTest; // no /usr/bin/false; the Windows variant follows
     try pty.skipIfUnavailable();
     var id: u64 = 0;
     // `false` exits immediately with status 1 — a deterministic dead child.
@@ -1650,8 +1676,8 @@ test "zterm_take_exit reports a child that exited, once, with its code" {
             seen = true;
             break;
         }
-        var no_fds = [_]posix.pollfd{};
-        _ = posix.poll(&no_fds, 5) catch {};
+        var no_fds = [_]sys.pollfd{};
+        _ = sys.poll(&no_fds, 5) catch {};
     }
     try std.testing.expect(seen);
     try std.testing.expectEqual(@as(c_int, 1), code); // /usr/bin/false
@@ -1666,19 +1692,20 @@ test "zterm_take_exit reports a child that exited, once, with its code" {
 test "zterm_take_exit stays false while the shell is alive" {
     try pty.skipIfUnavailable();
     var id: u64 = 0;
-    const h = zterm_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
+    const h = zterm_create(24, 80, testSitter(), &id) orelse return error.CreateFailed;
     defer zterm_destroy(h);
     var i: usize = 0;
     while (i < 20) : (i += 1) {
         _ = zterm_drain(h);
         try std.testing.expect(!zterm_take_exit(h, null, null));
-        var no_fds = [_]posix.pollfd{};
-        _ = posix.poll(&no_fds, 5) catch {};
+        var no_fds = [_]sys.pollfd{};
+        _ = sys.poll(&no_fds, 5) catch {};
     }
     try std.testing.expect(zterm_is_alive(h));
 }
 
 test "zterm_create_argv runs the program itself, with its arguments, and reports its exit" {
+    if (is_windows) return error.SkipZigTest; // no /bin/sh; the Windows variant follows
     try pty.skipIfUnavailable();
     var id: u64 = 0;
     // `sh -c 'exit 7' ignored` — the status proves argv[2] reached the program.
@@ -1695,11 +1722,62 @@ test "zterm_create_argv runs the program itself, with its arguments, and reports
             seen = true;
             break;
         }
-        var no_fds = [_]posix.pollfd{};
-        _ = posix.poll(&no_fds, 5) catch {};
+        var no_fds = [_]sys.pollfd{};
+        _ = sys.poll(&no_fds, 5) catch {};
     }
     try std.testing.expect(seen);
     try std.testing.expectEqual(@as(c_int, 7), code);
+}
+
+/// Drain until the session reports its child's exit (up to ~5 s).
+fn awaitExit(h: *ZtermSession, code: *c_int, sig: *c_int) bool {
+    var i: usize = 0;
+    while (i < 1000) : (i += 1) {
+        _ = zterm_drain(h);
+        if (zterm_take_exit(h, code, sig)) return true;
+        var no_fds = [_]sys.pollfd{};
+        _ = sys.poll(&no_fds, 5) catch {};
+    }
+    return false;
+}
+
+test "windows: split and new window run the session's shell" {
+    if (!is_windows) return error.SkipZigTest;
+    var id: u64 = 0;
+    // cmd.exe's banner proves each new pane started the session's shell.
+    const h = zterm_create(24, 80, testSitter(), &id) orelse return error.CreateFailed;
+    defer zterm_destroy(h);
+    try std.testing.expect(try paneShows(h, 0, "Microsoft Windows"));
+    try std.testing.expectEqual(@as(c_int, 0), zterm_split(h, 1));
+    try std.testing.expect(try paneShows(h, 1, "Microsoft Windows"));
+    try std.testing.expectEqual(@as(c_int, 0), zterm_new_window(h));
+    try std.testing.expect(try paneShows(h, 0, "Microsoft Windows"));
+}
+
+test "windows: zterm_create_argv runs the program with its arguments and reports its exit, once" {
+    if (!is_windows) return error.SkipZigTest;
+    var id: u64 = 0;
+    // The exit code 7 can only come from the third argument reaching cmd.exe.
+    const argv = [_]?[*:0]const u8{ "C:\\Windows\\System32\\cmd.exe", "/d", "/c", "exit 7" };
+    const h = zterm_create_argv(24, 80, &argv, argv.len, &id) orelse return error.CreateFailed;
+    defer zterm_destroy(h);
+    var code: c_int = -1;
+    var sig: c_int = -1;
+    try std.testing.expect(awaitExit(h, &code, &sig));
+    try std.testing.expectEqual(@as(c_int, 7), code);
+    try std.testing.expectEqual(@as(c_int, 0), sig);
+    try std.testing.expect(!zterm_take_exit(h, &code, &sig));
+    _ = zterm_drain(h);
+    try std.testing.expect(!zterm_take_exit(h, &code, &sig));
+}
+
+test "windows: a pane's environment carries TERM, COLORTERM and its pane id" {
+    if (!is_windows) return error.SkipZigTest;
+    var id: u64 = 0;
+    const argv = [_]?[*:0]const u8{ "C:\\Windows\\System32\\cmd.exe", "/d", "/c", "echo T=%TERM% C=%COLORTERM% & ping -n 3 127.0.0.1 >nul" };
+    const h = zterm_create_argv(24, 80, &argv, argv.len, &id) orelse return error.CreateFailed;
+    defer zterm_destroy(h);
+    try std.testing.expect(try paneShows(h, 0, "T=xterm-256color C=truecolor"));
 }
 
 test "zterm_create_argv refuses an empty or relative argv" {

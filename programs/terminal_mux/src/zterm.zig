@@ -99,6 +99,8 @@ const session = @import("session.zig");
 const visible = @import("main.zig");
 const view = @import("view.zig");
 const config = @import("config.zig");
+const sys = @import("sys.zig");
+const winpty = if (sys.is_windows) @import("pty_windows.zig") else struct {};
 
 pub const VERSION = "0.3.0";
 
@@ -108,7 +110,7 @@ const is_darwin = builtin.os.tag.isDarwin();
 /// The foreground process group of the terminal behind `fd`. On a PTY master
 /// this is the slave's foreground job — the program the user would be typing
 /// into — on both Linux and Darwin.
-extern "c" fn tcgetpgrp(fd: c_int) c.pid_t;
+extern "c" fn tcgetpgrp(fd: c_int) sys.pid_t;
 /// libproc (Darwin): a process's short name. Only referenced on Darwin.
 extern "c" fn proc_name(pid: c_int, buffer: [*]u8, buffersize: u32) c_int;
 /// libproc (Darwin): a process's executable path. Only referenced on Darwin.
@@ -137,24 +139,37 @@ const DEFAULT_AGENT_EXES = [_][]const u8{
 // ══ small I/O helpers ═════════════════════════════════════════════════════════════════════════════════
 
 // std.posix (zig 0.16) only exposes read/poll for these; accept/write/close live in std.c.
-fn pwrite(fd: c.fd_t, bytes: []const u8) !usize {
-    const r = c.write(fd, bytes.ptr, bytes.len);
+fn pwrite(fd: sys.fd_t, bytes: []const u8) !usize {
+    const r = sys.write(fd, bytes.ptr, bytes.len);
     if (r < 0) return error.WriteFailed;
     return @intCast(r);
 }
 
+/// Standard input as the descriptor the attach client passes to the terminal
+/// calls (the Windows versions ignore it and use the console).
+const STDIN: sys.fd_t = if (sys.is_windows) 0 else posix.STDIN_FILENO;
+
+/// Everything to standard output.
+fn outWrite(bytes: []const u8) void {
+    if (sys.is_windows) return winpty.writeStdout(bytes);
+    cwrite(posix.STDOUT_FILENO, bytes);
+}
+
 /// Write everything or give up. Request connections carry a send timeout, so
 /// a client that stops reading cannot hold the loop longer than that.
-fn cwrite(fd: c.fd_t, bytes: []const u8) void {
+fn cwrite(fd: sys.fd_t, bytes: []const u8) void {
     var off: usize = 0;
     while (off < bytes.len) {
-        const r = c.write(fd, bytes.ptr + off, bytes.len - off);
+        const r = sys.write(fd, bytes.ptr + off, bytes.len - off);
         if (r <= 0) return;
         off += @intCast(r);
     }
 }
 
-fn paccept(lfd: c.fd_t) !c.fd_t {
+fn paccept(lfd: sys.fd_t) !sys.fd_t {
+    // Windows: no process inherits a socket (panes start with bInheritHandles
+    // FALSE), so there is no close-on-exec race to guard.
+    if (sys.is_windows) return sys.acceptConn(lfd);
     const f = pty.cloexecUnderLock(c.accept, .{ lfd, null, null });
     if (f < 0) return error.AcceptFailed;
     return f;
@@ -165,23 +180,34 @@ fn paccept(lfd: c.fd_t) !c.fd_t {
 // frames the response by EOF — hangs until that shell exits. macOS has no
 // accept4/SOCK_CLOEXEC, so every socket is created through
 // `pty.cloexecUnderLock`, which holds the lock `Pty.spawnIn` forks under.
-fn pclose(fd: c.fd_t) void {
-    _ = c.close(fd);
+fn pclose(fd: sys.fd_t) void {
+    _ = sys.close(fd);
 }
 
 fn nowNs() u64 {
+    if (sys.is_windows) return @as(u64, @intCast(sys.monotonicMs())) * std.time.ns_per_ms;
     var ts: c.timespec = undefined;
     _ = c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 
-fn envSlice(name: [*:0]const u8) ?[]const u8 {
-    const v = c.getenv(name) orelse return null;
-    const s = std.mem.sliceTo(v, 0);
-    return if (s.len == 0) null else s;
+fn envSlice(name: [:0]const u8) ?[]const u8 {
+    return sys.getenv(name);
 }
 
+/// The user's home directory: `$HOME`, and on Windows, where only Git bash
+/// invents one, `%USERPROFILE%` (a logon task has no HOME at all).
+fn homeDir() ?[]const u8 {
+    if (envSlice("HOME")) |h| return h;
+    if (sys.is_windows) return envSlice("USERPROFILE");
+    return null;
+}
+
+/// The platform's path separator, for paths this file assembles.
+const SEP = std.fs.path.sep_str;
+
 fn isDirectory(path: []const u8) bool {
+    if (sys.is_windows) return sys.isDirectoryW(path);
     var buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     if (path.len == 0 or path.len > std.fs.max_path_bytes) return false;
     @memcpy(buf[0..path.len], path);
@@ -206,9 +232,9 @@ pub fn runnerSocketPathFrom(
     baton_dir_present: bool,
 ) !?[:0]u8 {
     if (override) |o| return try alloc.dupeZ(u8, o);
-    if (baton_home) |b| return try std.fmt.allocPrintSentinel(alloc, "{s}/var/{s}.sock", .{ b, RUNNER_NAME }, 0);
+    if (baton_home) |b| return try std.fmt.allocPrintSentinel(alloc, "{s}" ++ SEP ++ "var" ++ SEP ++ "{s}.sock", .{ b, RUNNER_NAME }, 0);
     if (baton_dir_present) {
-        if (home) |h| return try std.fmt.allocPrintSentinel(alloc, "{s}/.baton/var/{s}.sock", .{ h, RUNNER_NAME }, 0);
+        if (home) |h| return try std.fmt.allocPrintSentinel(alloc, "{s}" ++ SEP ++ ".baton" ++ SEP ++ "var" ++ SEP ++ "{s}.sock", .{ h, RUNNER_NAME }, 0);
     }
     return null;
 }
@@ -519,7 +545,7 @@ pub fn isVersionedClaude(path: []const u8) bool {
 /// version: there the executable's path is checked with [`isVersionedClaude`],
 /// and it counts only while `claude` itself is allowed. An unreadable path is
 /// not an agent (fail closed).
-pub fn isAgentProc(pid: c.pid_t, comm: []const u8, env_list: ?[]const u8) bool {
+pub fn isAgentProc(pid: sys.pid_t, comm: []const u8, env_list: ?[]const u8) bool {
     if (isAgentComm(comm, env_list)) return true;
     if (!isAgentComm("claude", env_list) and !isAgentComm("claude.exe", env_list)) return false;
     var pb: [4096]u8 = undefined;
@@ -531,7 +557,7 @@ pub fn isAgentProc(pid: c.pid_t, comm: []const u8, env_list: ?[]const u8) bool {
 
 /// A process's short name (Linux /proc/<pid>/comm, Darwin proc_name). Null
 /// when unreadable — callers treat that as "not an agent" (fail closed).
-fn procComm(pid: c.pid_t, buf: []u8) ?[]const u8 {
+fn procComm(pid: sys.pid_t, buf: []u8) ?[]const u8 {
     if (pid <= 0) return null;
     if (comptime is_linux) {
         var pb: [48]u8 = undefined;
@@ -546,6 +572,13 @@ fn procComm(pid: c.pid_t, buf: []u8) ?[]const u8 {
         const n = proc_name(pid, buf.ptr, @intCast(buf.len));
         if (n <= 0) return null;
         return buf[0..@intCast(n)];
+    } else if (comptime sys.is_windows) {
+        // The image file name ("claude.exe"), which is what Windows calls a
+        // process by.
+        const path = winpty.processImagePath(pid, buf) orelse return null;
+        const base = std.fs.path.basename(path);
+        std.mem.copyForwards(u8, buf[0..base.len], base);
+        return buf[0..base.len];
     } else {
         return null;
     }
@@ -553,7 +586,7 @@ fn procComm(pid: c.pid_t, buf: []u8) ?[]const u8 {
 
 /// A process's executable path (Linux /proc/<pid>/exe, Darwin proc_pidpath).
 /// Null when unreadable.
-fn procPath(pid: c.pid_t, buf: []u8) ?[]const u8 {
+fn procPath(pid: sys.pid_t, buf: []u8) ?[]const u8 {
     if (pid <= 0) return null;
     if (comptime is_linux) {
         var pb: [48]u8 = undefined;
@@ -565,6 +598,8 @@ fn procPath(pid: c.pid_t, buf: []u8) ?[]const u8 {
         const n = proc_pidpath(pid, buf.ptr, @intCast(buf.len));
         if (n <= 0) return null;
         return buf[0..@intCast(n)];
+    } else if (comptime sys.is_windows) {
+        return winpty.processImagePath(pid, buf);
     } else {
         return null;
     }
@@ -572,7 +607,7 @@ fn procPath(pid: c.pid_t, buf: []u8) ?[]const u8 {
 
 /// A process's live working directory. Linux only (/proc); elsewhere the
 /// caller falls back to the directory the pane was spawned in.
-fn procCwd(pid: c.pid_t, buf: []u8) ?[]const u8 {
+fn procCwd(pid: sys.pid_t, buf: []u8) ?[]const u8 {
     if (comptime !is_linux) return null;
     if (pid <= 0) return null;
     var pb: [48]u8 = undefined;
@@ -582,12 +617,27 @@ fn procCwd(pid: c.pid_t, buf: []u8) ?[]const u8 {
     return buf[0..@intCast(n)];
 }
 
+/// Windows has no foreground process group. Its nearest equivalent: on the
+/// chain from the pane's own process through each newest child (the program
+/// the user last started), the first agent; with no agent on the chain, its
+/// end — what a keystroke would reach. 0 when the pane's process is gone.
+fn windowsForeground(root: sys.pid_t) sys.pid_t {
+    var chain_buf: [16]winpty.ProcEntry = undefined;
+    const chain = winpty.processChain(root, &chain_buf);
+    if (chain.len == 0) return 0;
+    const env_list = envSlice("BATON_AGENT_EXES");
+    for (chain) |*e| {
+        if (isAgentProc(e.pid, e.name(), env_list)) return e.pid;
+    }
+    return chain[chain.len - 1].pid;
+}
+
 // ══ SERVER ════════════════════════════════════════════════════════════════════════════════════════════
 
 const Pane = struct {
     id: u64,
     handle: *capi.ZtermSession,
-    fd: c.fd_t,
+    fd: sys.fd_t,
     /// The designation, when one was given (spawn `name`, or `title`). Owned.
     name: ?[]u8 = null,
     /// The master reported EOF/HUP: stop polling it (it would report HUP on
@@ -609,7 +659,7 @@ const Pane = struct {
         return self.handle.sess.getActiveWindow().getActivePane();
     }
 
-    fn childPid(self: *const Pane) c.pid_t {
+    fn childPid(self: *const Pane) sys.pid_t {
         const p = self.spane();
         if (p.pty) |pt| if (pt.child_pid) |cp| return cp;
         return 0;
@@ -619,7 +669,8 @@ const Pane = struct {
         return self.spane().isAlive();
     }
 
-    fn foregroundPgid(self: *const Pane) c.pid_t {
+    fn foregroundPgid(self: *const Pane) sys.pid_t {
+        if (sys.is_windows) return windowsForeground(self.childPid());
         const pg = tcgetpgrp(self.fd);
         return if (pg > 0) pg else 0;
     }
@@ -633,7 +684,7 @@ const Pane = struct {
 /// A live `zterm attach` connection: raw PTY passthrough for one pane. The
 /// pane's output broadcasts to every attach; attach input writes to the pane.
 /// conn == -1 marks a dead entry awaiting the sweep.
-const Attach = struct { conn: c.fd_t, pane_id: u64 };
+const Attach = struct { conn: sys.fd_t, pane_id: u64 };
 
 /// A `view` connection (docs/VIEW-PROTOCOL.md): frames out, input in, on one
 /// non-blocking socket. STATE-SYNCED: a frame is built only when the previous
@@ -641,7 +692,7 @@ const Attach = struct { conn: c.fd_t, pane_id: u64 };
 /// a slow client never blocks the server, is never dropped, and converges on
 /// the latest state. conn == -1 marks a dead entry awaiting the sweep.
 const Viewer = struct {
-    conn: c.fd_t,
+    conn: sys.fd_t,
     pane_id: u64,
     /// Opened with `"watch":true`: frames out, nothing in. A watcher never
     /// resizes the pane, its input/focus/resize messages are ignored (it may
@@ -708,7 +759,7 @@ const VIEW_IN_CAP: usize = 8 << 20;
 /// about something that has not happened yet.
 const Submit = struct {
     pane_id: u64,
-    conn: c.fd_t,
+    conn: sys.fd_t,
     proto: enum { runner, cmd },
     /// What to type. Owned.
     payload: []u8,
@@ -729,11 +780,16 @@ const Submit = struct {
 /// newest-binder-wins by design, and an older server exiting must not unlink
 /// the socket a newer one has since bound there — that leaves the newer
 /// server running and unreachable.
-const Listener = struct { fd: c.fd_t, path: [:0]u8, kind: enum { control, runner }, ident: ?PathIdent };
+const Listener = struct { fd: sys.fd_t, path: [:0]u8, kind: enum { control, runner }, ident: ?PathIdent };
 
 const PathIdent = struct { dev: u64, ino: u64 };
 
 fn pathIdent(path: [*:0]const u8) ?PathIdent {
+    // Windows: no identity is taken, so shutdown leaves its socket files in
+    // place (`unlinkIfOurs` needs one). The next server replaces a stale file
+    // before it binds, and a connect — what baton and clients test — fails on
+    // one, so a leftover file is never mistaken for a live door.
+    if (sys.is_windows) return null;
     // Zig 0.16 declares no std.c.fstatat for Linux (it routes through
     // statx); Darwin and the BSDs get the right $INODE64 symbol from std.c.
     if (comptime is_linux) {
@@ -753,6 +809,7 @@ fn pathIdent(path: [*:0]const u8) ?PathIdent {
 /// lose its path; that window is microseconds wide, where the old behaviour
 /// lost it every time an older server exited.
 fn unlinkIfOurs(l: Listener) void {
+    if (sys.is_windows) return; // see pathIdent
     const mine = l.ident orelse return;
     const now = pathIdent(l.path.ptr) orelse return;
     if (now.dev != mine.dev or now.ino != mine.ino) return;
@@ -783,9 +840,33 @@ fn onStopSignal(_: c_int) callconv(.c) void {
     stop_requested.store(true, .monotonic);
 }
 
+/// Set once the server has closed its doors and hung up its panes.
+var server_stopped = std.atomic.Value(bool).init(false);
+
+/// Windows' console control handler. It runs on its own thread; for the
+/// close, logoff and shutdown events the process ends as soon as it returns,
+/// so it waits (up to ~2 s) for the loop to finish its teardown first.
+fn onConsoleCtrl(event: sys.win.DWORD) callconv(.winapi) sys.win.BOOL {
+    stop_requested.store(true, .monotonic);
+    if (event >= sys.win.CTRL_CLOSE_EVENT) {
+        var waited: u32 = 0;
+        while (!server_stopped.load(.acquire) and waited < 2000) : (waited += 50) sys.win.Sleep(50);
+    }
+    return sys.win.TRUE;
+}
+
+/// The process's current directory as UTF-8 into `buf`; its length, 0 when
+/// unavailable.
+fn currentDirWindows(buf: []u8) usize {
+    var wbuf: [1024]u16 = undefined;
+    const n = sys.win.GetCurrentDirectoryW(wbuf.len, &wbuf);
+    if (n == 0 or n >= wbuf.len) return 0;
+    return std.unicode.utf16LeToUtf8(buf, wbuf[0..n]) catch 0;
+}
+
 const Server = struct {
     alloc: std.mem.Allocator,
-    pid: c.pid_t,
+    pid: sys.pid_t,
     panes: std.ArrayList(Pane) = .empty,
     attaches: std.ArrayList(Attach) = .empty,
     submits: std.ArrayList(Submit) = .empty,
@@ -824,6 +905,16 @@ const Server = struct {
     // ── listeners ────────────────────────────────────────────────────────────────────────────────────
 
     fn listenOn(self: *Server, path: [:0]u8, kind: @FieldType(Listener, "kind")) !void {
+        if (sys.is_windows) {
+            // Winsock AF_UNIX. The socket file takes its directory's ACL, and
+            // every path zterm binds (%TEMP%, the fleet home) is the user's own.
+            const lfd = sys.unixListen(path) catch |e| {
+                std.debug.print("zterm server: cannot bind {s} ({s})\n", .{ path, @errorName(e) });
+                return e;
+            };
+            try self.listeners.append(self.alloc, .{ .fd = lfd, .path = path, .kind = kind, .ident = null });
+            return;
+        }
         var addr = ctl.fillAddr(path) catch |e| {
             std.debug.print("zterm server: socket path is {d} bytes, longer than sun_path allows: {s}\n", .{ path.len, path });
             return e;
@@ -855,6 +946,11 @@ const Server = struct {
     /// Is a server already answering at `path`? A connect is the whole test —
     /// the listener dies with its process, so this cannot be stale.
     fn socketIsLive(path: []const u8) bool {
+        if (sys.is_windows) {
+            const fd = sys.unixConnect(path) catch return false;
+            pclose(fd);
+            return true;
+        }
         var addr = ctl.fillAddr(path) catch return false;
         const fd = pty.cloexecUnderLock(c.socket, .{ c.AF.UNIX, c.SOCK.STREAM, @as(c_uint, 0) });
         if (fd < 0) return false;
@@ -868,11 +964,11 @@ const Server = struct {
     /// while it keeps running them — a silent loss of addressability.
     fn bindRunnerDoor(self: *Server, opts: ServerOptions) !void {
         if (!opts.runner) return;
-        const home = envSlice("HOME");
+        const home = homeDir();
         const baton_home = envSlice("BATON_HOME");
         const present = if (home) |h| blk: {
             var pb: [std.fs.max_path_bytes]u8 = undefined;
-            const d = std.fmt.bufPrint(&pb, "{s}/.baton", .{h}) catch break :blk false;
+            const d = std.fmt.bufPrint(&pb, "{s}" ++ SEP ++ ".baton", .{h}) catch break :blk false;
             break :blk isDirectory(d);
         } else false;
         const override = opts.runner_path orelse envSlice("ZTERM_RUNNER_SOCKET");
@@ -884,7 +980,9 @@ const Server = struct {
         // baton creates var/ on init; make sure it exists before binding into it.
         if (std.fs.path.dirname(path)) |dir| {
             var db: [std.fs.max_path_bytes + 1]u8 = undefined;
-            if (dir.len <= std.fs.max_path_bytes) {
+            if (sys.is_windows) {
+                sys.makeDir(dir);
+            } else if (dir.len <= std.fs.max_path_bytes) {
                 @memcpy(db[0..dir.len], dir);
                 db[dir.len] = 0;
                 _ = c.mkdir(@ptrCast(&db), 0o700);
@@ -985,7 +1083,9 @@ const Server = struct {
             // Inherited: record where the shell actually started, so `list`
             // has an answer where the live cwd cannot be read (no /proc on
             // Darwin; /proc/<pid>/cwd can be denied by policy on Linux).
-            if (c.getcwd(&sp.cwd, sp.cwd.len)) |_| {
+            if (sys.is_windows) {
+                sp.cwd_len = currentDirWindows(&sp.cwd);
+            } else if (c.getcwd(&sp.cwd, sp.cwd.len)) |_| {
                 sp.cwd_len = std.mem.indexOfScalar(u8, &sp.cwd, 0) orelse 0;
             }
         }
@@ -1016,7 +1116,7 @@ const Server = struct {
     // ── the loop ─────────────────────────────────────────────────────────────────────────────────────
 
     fn run(self: *Server) !void {
-        var pfds: std.ArrayList(posix.pollfd) = .empty;
+        var pfds: std.ArrayList(sys.pollfd) = .empty;
         defer pfds.deinit(self.alloc);
         var polled_panes: std.ArrayList(u64) = .empty;
         defer polled_panes.deinit(self.alloc);
@@ -1043,16 +1143,16 @@ const Server = struct {
 
             pfds.clearRetainingCapacity();
             polled_panes.clearRetainingCapacity();
-            for (self.listeners.items) |l| try pfds.append(self.alloc, .{ .fd = l.fd, .events = posix.POLL.IN, .revents = 0 });
+            for (self.listeners.items) |l| try pfds.append(self.alloc, .{ .fd = l.fd, .events = sys.POLL.IN, .revents = 0 });
             for (self.panes.items) |p| {
                 if (p.hup) continue;
-                try pfds.append(self.alloc, .{ .fd = p.fd, .events = posix.POLL.IN, .revents = 0 });
+                try pfds.append(self.alloc, .{ .fd = p.fd, .events = sys.POLL.IN, .revents = 0 });
                 try polled_panes.append(self.alloc, p.id);
             }
-            for (self.attaches.items) |a| try pfds.append(self.alloc, .{ .fd = a.conn, .events = posix.POLL.IN, .revents = 0 });
+            for (self.attaches.items) |a| try pfds.append(self.alloc, .{ .fd = a.conn, .events = sys.POLL.IN, .revents = 0 });
             for (self.viewers.items) |v| {
-                const want_out: i16 = if (v.pending()) posix.POLL.OUT else 0;
-                try pfds.append(self.alloc, .{ .fd = v.conn, .events = posix.POLL.IN | want_out, .revents = 0 });
+                const want_out: i16 = if (v.pending()) sys.POLL.OUT else 0;
+                try pfds.append(self.alloc, .{ .fd = v.conn, .events = sys.POLL.IN | want_out, .revents = 0 });
             }
             const nl = self.listeners.items.len;
             const np = polled_panes.items.len;
@@ -1065,7 +1165,7 @@ const Server = struct {
             // a second so a stop signal is noticed.
             var timeout: i32 = if (self.submits.items.len > 0) 50 else 1000;
             if (view_wake) |ms| timeout = @min(timeout, @as(i32, @intCast(std.math.clamp(ms, 1, 1000))));
-            _ = posix.poll(pfds.items, timeout) catch continue;
+            _ = sys.poll(pfds.items, timeout) catch continue;
 
             // Pane output: read the raw bytes ONCE — feed the VT grid (so capture/
             // list stay live) and mirror them to every attached client.
@@ -1073,14 +1173,14 @@ const Server = struct {
                 const rev = pfds.items[nl + k].revents;
                 if (rev == 0) continue;
                 const p = self.findPane(pid) orelse continue;
-                if (rev & posix.POLL.IN == 0) {
+                if (rev & sys.POLL.IN == 0) {
                     // HUP/ERR with nothing to read: the slave side is closed.
-                    if (rev & (posix.POLL.HUP | posix.POLL.ERR) != 0) self.paneHungUp(p);
+                    if (rev & (sys.POLL.HUP | sys.POLL.ERR) != 0) self.paneHungUp(p);
                     continue;
                 }
                 // Linux reports a dead child as EIO on the master, macOS as 0
                 // bytes; both mean "stop polling this pane".
-                const r = posix.read(p.fd, &io_buf) catch |err| {
+                const r = sys.read(p.fd, &io_buf) catch |err| {
                     if (err != error.WouldBlock) self.paneHungUp(p);
                     continue;
                 };
@@ -1117,8 +1217,8 @@ const Server = struct {
             for (self.attaches.items[0..attach_count], 0..) |*a, k| {
                 if (a.conn < 0) continue;
                 const pf = pfds.items[nl + np + k];
-                if (pf.revents & (posix.POLL.IN | posix.POLL.HUP) == 0) continue;
-                const r = posix.read(a.conn, &io_buf) catch |err| {
+                if (pf.revents & (sys.POLL.IN | sys.POLL.HUP) == 0) continue;
+                const r = sys.read(a.conn, &io_buf) catch |err| {
                     if (err == error.WouldBlock) continue; // spurious wakeup on a non-blocking conn
                     pclose(a.conn);
                     a.conn = -1;
@@ -1142,8 +1242,8 @@ const Server = struct {
             for (self.viewers.items[0..viewer_count], 0..) |*v, k| {
                 if (v.conn < 0) continue;
                 const pf = pfds.items[nl + np + attach_count + k];
-                if (pf.revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) == 0) continue;
-                const r = posix.read(v.conn, &io_buf) catch |err| {
+                if (pf.revents & (sys.POLL.IN | sys.POLL.HUP | sys.POLL.ERR) == 0) continue;
+                const r = sys.read(v.conn, &io_buf) catch |err| {
                     if (err == error.WouldBlock) continue;
                     v.deinit(self.alloc);
                     continue;
@@ -1157,17 +1257,14 @@ const Server = struct {
 
             // Clients with a request (or an attach).
             for (self.listeners.items[0..nl], 0..) |l, k| {
-                if ((pfds.items[k].revents & posix.POLL.IN) == 0) continue;
+                if ((pfds.items[k].revents & sys.POLL.IN) == 0) continue;
                 const conn = paccept(l.fd) catch continue;
                 // Without a receive timeout, a client that connects and sends
                 // nothing (nc -U) blocks this single-threaded loop forever —
                 // every pane stops draining. Same 500ms guard ctl.zig has
                 // always had; the send timeout bounds a client that stops
                 // reading its answer.
-                const rtv = c.timeval{ .sec = 0, .usec = 500_000 };
-                _ = c.setsockopt(conn, c.SOL.SOCKET, c.SO.RCVTIMEO, @ptrCast(&rtv), @sizeOf(c.timeval));
-                const stv = c.timeval{ .sec = 2, .usec = 0 };
-                _ = c.setsockopt(conn, c.SOL.SOCKET, c.SO.SNDTIMEO, @ptrCast(&stv), @sizeOf(c.timeval));
+                sys.setSockTimeouts(conn, 500, 2000);
                 const keep = self.handleConn(conn) catch .close;
                 if (keep == .close) pclose(conn);
             }
@@ -1180,7 +1277,7 @@ const Server = struct {
 
     /// Read one request line (up to MAX_REQUEST). Returns the line without its
     /// terminator; `rest` receives any bytes that followed the newline.
-    fn readRequest(self: *Server, conn: c.fd_t, buf: *std.ArrayList(u8)) ![]const u8 {
+    fn readRequest(self: *Server, conn: sys.fd_t, buf: *std.ArrayList(u8)) ![]const u8 {
         while (true) {
             if (std.mem.indexOfScalar(u8, buf.items, '\n')) |nl| {
                 var end = nl;
@@ -1191,7 +1288,7 @@ const Server = struct {
             try buf.ensureUnusedCapacity(self.alloc, 65536);
             const room = buf.unusedCapacitySlice();
             const want = @min(room.len, MAX_REQUEST - buf.items.len);
-            const n = posix.read(conn, room[0..want]) catch |err| {
+            const n = sys.read(conn, room[0..want]) catch |err| {
                 // RCVTIMEO expired: a partial line without its newline is
                 // still a request (hand-typed `nc -U` often omits it).
                 if (err == error.WouldBlock and buf.items.len > 0) return buf.items;
@@ -1202,7 +1299,7 @@ const Server = struct {
         }
     }
 
-    fn handleConn(self: *Server, conn: c.fd_t) !Disposition {
+    fn handleConn(self: *Server, conn: sys.fd_t) !Disposition {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(self.alloc);
         const line = self.readRequest(conn, &buf) catch |err| {
@@ -1218,7 +1315,7 @@ const Server = struct {
 
     /// The hand-typed line protocol. Answers are unchanged from before the
     /// JSON protocol existed, so existing scripts keep working.
-    fn handleLine(self: *Server, conn: c.fd_t, line: []const u8, trailing: []const u8) !Disposition {
+    fn handleLine(self: *Server, conn: sys.fd_t, line: []const u8, trailing: []const u8) !Disposition {
         var it = std.mem.tokenizeScalar(u8, line, ' ');
         const cmd = it.next() orelse return .close;
 
@@ -1282,8 +1379,7 @@ const Server = struct {
             if (trailing.len > 0) _ = capi.zterm_send(p.handle, trailing.ptr, trailing.len);
             // Relay writes are bounded (relayWrite); the conn must be non-blocking
             // so a stalled reader surfaces as EAGAIN instead of wedging the loop.
-            const fl = c.fcntl(conn, c.F.GETFL, @as(c_int, 0));
-            _ = c.fcntl(conn, c.F.SETFL, fl | @as(c_int, @bitCast(c.O{ .NONBLOCK = true })));
+            sys.setNonblock(conn);
             try self.attaches.append(self.alloc, .{ .conn = conn, .pane_id = id });
             return .keep;
         } else {
@@ -1292,7 +1388,7 @@ const Server = struct {
         return .close;
     }
 
-    fn handleJson(self: *Server, conn: c.fd_t, line: []const u8) !Disposition {
+    fn handleJson(self: *Server, conn: sys.fd_t, line: []const u8) !Disposition {
         const parsed = std.json.parseFromSlice(std.json.Value, self.alloc, line, .{}) catch {
             cwrite(conn, "{\"ok\":false,\"error\":\"bad json\"}\n");
             return .close;
@@ -1310,7 +1406,7 @@ const Server = struct {
     }
 
     /// The JSON control protocol (shared vocabulary with ctl.zig).
-    fn handleCmd(self: *Server, conn: c.fd_t, v: std.json.Value, cmd: []const u8) !Disposition {
+    fn handleCmd(self: *Server, conn: sys.fd_t, v: std.json.Value, cmd: []const u8) !Disposition {
         // A pane is addressed by id, or — for every command but spawn, where
         // `name` names the NEW pane — by its designation in `name`. A name
         // survives a server restart renumbering the panes; an id does not.
@@ -1443,7 +1539,7 @@ const Server = struct {
     }
 
     /// baton's runner contract (src/runner/contract.rs).
-    fn handleRunner(self: *Server, conn: c.fd_t, v: std.json.Value, verb_raw: []const u8) !Disposition {
+    fn handleRunner(self: *Server, conn: sys.fd_t, v: std.json.Value, verb_raw: []const u8) !Disposition {
         var vb: [32]u8 = undefined;
         const verb = std.ascii.lowerString(vb[0..@min(verb_raw.len, vb.len)], verb_raw[0..@min(verb_raw.len, vb.len)]);
 
@@ -1551,7 +1647,7 @@ const Server = struct {
         return std.fmt.bufPrint(buf, "zterm pane {d} ({s})", .{ p.id, tty }) catch "zterm";
     }
 
-    fn reply(self: *Server, conn: c.fd_t, value: anytype) void {
+    fn reply(self: *Server, conn: sys.fd_t, value: anytype) void {
         const j = std.json.Stringify.valueAlloc(self.alloc, value, .{}) catch {
             cwrite(conn, "{\"ok\":false,\"error\":\"out of memory\"}\n");
             return;
@@ -1579,7 +1675,7 @@ const Server = struct {
         return false;
     }
 
-    fn openViewer(self: *Server, conn: c.fd_t, v: std.json.Value, pane_id: u64) !Disposition {
+    fn openViewer(self: *Server, conn: sys.fd_t, v: std.json.Value, pane_id: u64) !Disposition {
         const p = self.findPane(pane_id) orelse {
             cwrite(conn, "{\"t\":\"error\",\"error\":\"no such pane\"}\n");
             return .close;
@@ -1588,8 +1684,7 @@ const Server = struct {
         const rows = clampDim(jsonInt(v, "rows"), 0);
         const cols = clampDim(jsonInt(v, "cols"), 0);
         if (!watch and rows >= 2 and cols >= 2) self.resizePane(p, rows, cols);
-        const fl = c.fcntl(conn, c.F.GETFL, @as(c_int, 0));
-        _ = c.fcntl(conn, c.F.SETFL, fl | @as(c_int, @bitCast(c.O{ .NONBLOCK = true })));
+        sys.setNonblock(conn);
         try self.viewers.append(self.alloc, .{ .conn = conn, .pane_id = p.id, .watch = watch });
         const vw = &self.viewers.items[self.viewers.items.len - 1];
         // hello carries the theme: the colours every palette index and
@@ -1704,13 +1799,13 @@ const Server = struct {
     fn flushViewer(v: *Viewer) bool {
         while (v.pending()) {
             const rest = v.out.items[v.out_off..];
-            const n = c.write(v.conn, rest.ptr, rest.len);
+            const n = sys.write(v.conn, rest.ptr, rest.len);
             if (n > 0) {
                 v.out_off += @intCast(n);
                 continue;
             }
-            if (n < 0 and posix.errno(n) == .INTR) continue;
-            if (n < 0 and posix.errno(n) == .AGAIN) return true;
+            if (n < 0 and sys.errno(n) == .INTR) continue;
+            if (n < 0 and sys.errno(n) == .AGAIN) return true;
             return false;
         }
         v.out.clearRetainingCapacity();
@@ -1909,7 +2004,7 @@ const Server = struct {
 
     /// The pane list for the control protocol: ctl.zig's fields plus what a
     /// headless pool knows and a driver needs (name, tty, liveness, exit).
-    fn writeList(self: *Server, conn: c.fd_t) !void {
+    fn writeList(self: *Server, conn: sys.fd_t) !void {
         const PaneInfo = struct {
             pane: u64,
             window: u64,
@@ -1975,7 +2070,7 @@ const Server = struct {
     /// The runner contract's `list`: one session per pane, identified by its
     /// process GENERATION, never by pane number alone (pane numbers are
     /// reused; a designation can outlive a process).
-    fn writeSessions(self: *Server, conn: c.fd_t) !void {
+    fn writeSessions(self: *Server, conn: sys.fd_t) !void {
         const Row = struct {
             designation: []const u8,
             generation: []const u8,
@@ -2193,23 +2288,23 @@ fn jsonBool(v: std.json.Value, key: []const u8) ?bool {
 
 /// Write all of `data` to an attach conn, waiting at most ~200ms total for a
 /// full socket buffer. Errors (incl. timeout) mean the caller drops the client.
-fn relayWrite(fd: c.fd_t, data: []const u8) !void {
+fn relayWrite(fd: sys.fd_t, data: []const u8) !void {
     var off: usize = 0;
     var waits: u8 = 0;
     while (off < data.len) {
-        const r = c.write(fd, data.ptr + off, data.len - off);
+        const r = sys.write(fd, data.ptr + off, data.len - off);
         if (r > 0) {
             off += @intCast(r);
             continue;
         }
         if (r == 0) return error.WriteFailed;
-        switch (posix.errno(r)) {
+        switch (sys.errno(r)) {
             .INTR => continue,
             .AGAIN => {
                 if (waits >= 2) return error.ClientStalled; // ~200ms budget spent
                 waits += 1;
-                var pfd = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 }};
-                _ = posix.poll(&pfd, 100) catch return error.WriteFailed;
+                var pfd = [_]sys.pollfd{.{ .fd = fd, .events = sys.POLL.OUT, .revents = 0 }};
+                _ = sys.poll(&pfd, 100) catch return error.WriteFailed;
             },
             else => return error.WriteFailed,
         }
@@ -2219,7 +2314,7 @@ fn relayWrite(fd: c.fd_t, data: []const u8) !void {
 /// Redraw a pane's current screen onto a freshly-attached client: clear, home,
 /// then the grid rows joined with CRLF (the client tty is raw — bare LF would
 /// staircase). Colors return as the app repaints; this restores the text.
-fn writeSnapshot(conn: i32, h: *capi.ZtermSession, alloc: std.mem.Allocator) !void {
+fn writeSnapshot(conn: sys.fd_t, h: *capi.ZtermSession, alloc: std.mem.Allocator) !void {
     var rows: u16 = 0;
     var cols: u16 = 0;
     capi.zterm_grid_size(h, &rows, &cols);
@@ -2260,7 +2355,7 @@ fn writeSnapshot(conn: i32, h: *capi.ZtermSession, alloc: std.mem.Allocator) !vo
 fn runServer(alloc: std.mem.Allocator, opts: ServerOptions) !void {
     var srv = Server{
         .alloc = alloc,
-        .pid = c.getpid(),
+        .pid = sys.selfPid(),
         .agent_env = envSlice("BATON_AGENT_EXES"),
         .frame_ms = opts.frame_ms,
     };
@@ -2281,8 +2376,15 @@ fn runServer(alloc: std.mem.Allocator, opts: ServerOptions) !void {
 
     // SIGINT/SIGTERM end the loop so both sockets are unlinked and the panes'
     // shells are hung up, instead of leaving a dead door for baton to probe.
-    _ = signal(@intFromEnum(c.SIG.INT), onStopSignal);
-    _ = signal(@intFromEnum(c.SIG.TERM), onStopSignal);
+    // Windows: Ctrl-C/Ctrl-Break and the console closing, logoff and
+    // shutdown, through the console control handler.
+    if (sys.is_windows) {
+        _ = sys.win.SetConsoleCtrlHandler(onConsoleCtrl, sys.win.TRUE);
+    } else {
+        _ = signal(@intFromEnum(c.SIG.INT), onStopSignal);
+        _ = signal(@intFromEnum(c.SIG.TERM), onStopSignal);
+    }
+    defer server_stopped.store(true, .release);
 
     var why: []const u8 = "";
     const first = srv.spawn(.{}, &why) orelse {
@@ -2323,24 +2425,35 @@ pub fn clientSocketCandidates(
     if (try runnerSocketPathFrom(alloc, runner_override, baton_home, home, baton_dir_present)) |door| {
         try out.append(alloc, door);
     }
-    try out.append(alloc, try std.fmt.allocPrintSentinel(alloc, "/tmp/zterm-{d}.sock", .{uid}, 0));
+    if (sys.is_windows) {
+        try out.append(alloc, try ctl.defaultSocketPath(alloc));
+    } else try out.append(alloc, try std.fmt.allocPrintSentinel(alloc, "/tmp/zterm-{d}.sock", .{uid}, 0));
     return out.toOwnedSlice(alloc);
 }
 
-fn connectServer(alloc: std.mem.Allocator) !c.fd_t {
-    const home = envSlice("HOME");
+fn connectServer(alloc: std.mem.Allocator) !sys.fd_t {
+    const home = homeDir();
     const present = if (home) |h| blk: {
         var pb: [std.fs.max_path_bytes]u8 = undefined;
-        const d = std.fmt.bufPrint(&pb, "{s}/.baton", .{h}) catch break :blk false;
+        const d = std.fmt.bufPrint(&pb, "{s}" ++ SEP ++ ".baton", .{h}) catch break :blk false;
         break :blk isDirectory(d);
     } else false;
     const candidates = try clientSocketCandidates(alloc, envSlice("ZTERM_SOCKET"), envSlice("ZTERM_RUNNER_SOCKET"),
-        envSlice("BATON_HOME"), home, present, c.getuid());
+        envSlice("BATON_HOME"), home, present, if (sys.is_windows) 0 else c.getuid());
     defer {
         for (candidates) |p| alloc.free(p);
         alloc.free(candidates);
     }
     for (candidates) |path| {
+        if (sys.is_windows) {
+            if (sys.unixConnect(path)) |fd| return fd else |e| switch (e) {
+                error.SocketPathTooLong => {
+                    std.debug.print("zterm: socket path is {d} bytes, longer than sun_path allows: {s}\n", .{ path.len, path });
+                    return e;
+                },
+                else => continue,
+            }
+        }
         var addr = ctl.fillAddr(path) catch {
             std.debug.print("zterm: socket path is {d} bytes, longer than sun_path allows: {s}\n", .{ path.len, path });
             return error.SocketPathTooLong;
@@ -2384,7 +2497,9 @@ fn runClient(alloc: std.mem.Allocator, args: []const []const u8) !void {
             if (i != 0) try payload.append(alloc, ' ');
             try payload.appendSlice(alloc, a);
         }
-        try payload.append(alloc, '\n'); // typed input: submit it
+        // Typed input: submit it. A POSIX tty takes LF as end-of-line; a
+        // Windows console's Enter is CR.
+        try payload.append(alloc, if (sys.is_windows) '\r' else '\n');
 
         const verb = args[0];
         if (std.mem.eql(u8, verb, "split")) {
@@ -2425,9 +2540,13 @@ fn runClient(alloc: std.mem.Allocator, args: []const []const u8) !void {
     // Stream the response to stdout until EOF.
     var buf: [8192]u8 = undefined;
     while (true) {
-        const n = posix.read(fd, &buf) catch break;
+        const n = sys.read(fd, &buf) catch break;
         if (n == 0) break;
-        _ = pwrite(1, buf[0..n]) catch break;
+        if (sys.is_windows) {
+            winpty.writeStdout(buf[0..n]);
+        } else {
+            _ = pwrite(1, buf[0..n]) catch break;
+        }
     }
 }
 
@@ -2642,17 +2761,17 @@ fn drawFrame(alloc: std.mem.Allocator, frame: std.json.Value, have: *HostModes, 
         if (jsonBool(cur, "visible") orelse true) try out.appendSlice(alloc, "\x1b[?25h");
     };
     try out.appendSlice(alloc, "\x1b[?2026l");
-    cwrite(posix.STDOUT_FILENO, out.items);
+    outWrite(out.items);
 }
 
-fn sendView(fd: c.fd_t, alloc: std.mem.Allocator, value: anytype) void {
+fn sendView(fd: sys.fd_t, alloc: std.mem.Allocator, value: anytype) void {
     const j = std.json.Stringify.valueAlloc(alloc, value, .{}) catch return;
     defer alloc.free(j);
     cwrite(fd, j);
     cwrite(fd, "\n");
 }
 
-fn sendKeys(fd: c.fd_t, alloc: std.mem.Allocator, bytes: []const u8) void {
+fn sendKeys(fd: sys.fd_t, alloc: std.mem.Allocator, bytes: []const u8) void {
     if (bytes.len == 0) return;
     const enc = std.base64.standard.Encoder;
     const b64 = alloc.alloc(u8, enc.calcSize(bytes.len)) catch return;
@@ -2673,17 +2792,20 @@ fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
     defer pclose(fd);
 
     // Attach at OUR terminal's size so the pane matches this window.
-    var ws = pty.getTerminalSize(posix.STDIN_FILENO) catch pty.Winsize{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 };
+    var ws = pty.getTerminalSize(STDIN) catch pty.Winsize{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 };
     if (pane_id) |id| {
         sendView(fd, alloc, .{ .cmd = "view", .pane = id, .rows = ws.ws_row, .cols = ws.ws_col });
     } else {
         sendView(fd, alloc, .{ .cmd = "view", .name = id_str, .rows = ws.ws_row, .cols = ws.ws_col });
     }
 
-    var raw = try pty.RawMode.enter(posix.STDIN_FILENO);
+    var raw = try pty.RawMode.enter(STDIN);
     defer raw.exit();
-    _ = signal(@intFromEnum(c.SIG.WINCH), onWinch);
-    cwrite(posix.STDOUT_FILENO, "\x1b[?1049h\x1b[H\x1b[2J");
+    // Windows: no SIGWINCH; the console's size is read on every pass.
+    if (!sys.is_windows) _ = signal(@intFromEnum(c.SIG.WINCH), onWinch);
+    // Windows: the console cannot join a socket poll set; a thread forwards it.
+    const stdin_fd: sys.fd_t = if (sys.is_windows) try winpty.stdinSocket() else STDIN;
+    outWrite("\x1b[?1049h\x1b[H\x1b[2J");
 
     var have: HostModes = .{};
     var theme = ViewTheme.fromConfig(&config.Theme{});
@@ -2697,22 +2819,23 @@ fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
     var exit_code: ?i64 = null;
 
     outer: while (true) {
+        if (sys.is_windows) winch_seen.store(true, .monotonic);
         if (winch_seen.swap(false, .monotonic)) {
-            if (pty.getTerminalSize(posix.STDIN_FILENO)) |now| {
+            if (pty.getTerminalSize(STDIN)) |now| {
                 if (now.ws_row != ws.ws_row or now.ws_col != ws.ws_col) {
                     ws = now;
                     sendView(fd, alloc, .{ .resize = .{ .rows = ws.ws_row, .cols = ws.ws_col } });
                 }
             } else |_| {}
         }
-        var pfds = [_]posix.pollfd{
-            .{ .fd = posix.STDIN_FILENO, .events = posix.POLL.IN, .revents = 0 },
-            .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 },
+        var pfds = [_]sys.pollfd{
+            .{ .fd = stdin_fd, .events = sys.POLL.IN, .revents = 0 },
+            .{ .fd = fd, .events = sys.POLL.IN, .revents = 0 },
         };
-        _ = posix.poll(&pfds, 250) catch continue;
+        _ = sys.poll(&pfds, 250) catch continue;
 
-        if (pfds[1].revents & (posix.POLL.IN | posix.POLL.HUP) != 0) {
-            const r = posix.read(fd, &buf) catch {
+        if (pfds[1].revents & (sys.POLL.IN | sys.POLL.HUP) != 0) {
+            const r = sys.read(fd, &buf) catch {
                 ending = .lost;
                 break;
             };
@@ -2739,14 +2862,14 @@ fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
                 } else if (std.mem.eql(u8, t, "frame")) {
                     try drawFrame(alloc, m, &have, &title, &theme);
                 } else if (std.mem.eql(u8, t, "bell")) {
-                    cwrite(posix.STDOUT_FILENO, "\x07");
+                    outWrite("\x07");
                 } else if (std.mem.eql(u8, t, "clipboard")) {
                     // Hand the application's OSC 52 write to this terminal,
                     // which applies its own policy. Base64 is OSC-safe.
                     if (jsonStr(m, "b64")) |b64| {
-                        cwrite(posix.STDOUT_FILENO, "\x1b]52;c;");
-                        cwrite(posix.STDOUT_FILENO, b64);
-                        cwrite(posix.STDOUT_FILENO, "\x07");
+                        outWrite("\x1b]52;c;");
+                        outWrite(b64);
+                        outWrite("\x07");
                     }
                 } else if (std.mem.eql(u8, t, "exit")) {
                     exit_code = jsonInt(m, "code");
@@ -2759,8 +2882,8 @@ fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
             }
         }
 
-        if (pfds[0].revents & posix.POLL.IN != 0) {
-            const r = posix.read(posix.STDIN_FILENO, &buf) catch break;
+        if (pfds[0].revents & sys.POLL.IN != 0) {
+            const r = sys.read(stdin_fd, &buf) catch break;
             if (r == 0) break;
             // Everything but the detach chord goes to the pane as typed:
             // the host already encodes it per the mirrored modes.
@@ -2791,8 +2914,16 @@ fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // Leave the host terminal as we found it.
-    cwrite(posix.STDOUT_FILENO, "\x1b[?1l\x1b[?2004l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[0m\x1b[0 q\x1b[?25h\x1b[?1049l");
+    outWrite("\x1b[?1l\x1b[?2004l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[0m\x1b[0 q\x1b[?25h\x1b[?1049l");
     raw.exit();
+    // Windows: the messages are UTF-8, and `exit` put back the console's own
+    // code page (437 and friends render them as mojibake) — UTF-8 while they
+    // print, then the console's page again.
+    const saved_cp = if (sys.is_windows) sys.win.GetConsoleOutputCP() else 0;
+    if (sys.is_windows) _ = sys.win.SetConsoleOutputCP(sys.win.CP_UTF8);
+    defer if (sys.is_windows) {
+        _ = sys.win.SetConsoleOutputCP(saved_cp);
+    };
     // The pane as the operator named it: its id, or its designation.
     switch (ending) {
         .detached => std.debug.print("[zterm: detached — pane {s} keeps running; `zterm attach {s}` to return]\n", .{ id_str, id_str }),
@@ -2827,16 +2958,17 @@ fn usage() void {
         \\
         \\Sessions that outlive the terminal: run `zterm server` (as a service) and
         \\`zterm attach <pane>`. `zterm cli` drives whichever of the two owns the socket
-        \\($ZTERM_SOCKET, default /tmp/zterm-<uid>.sock).
+        \\($ZTERM_SOCKET, default {s}).
         \\
-    , .{VERSION});
+    , .{ VERSION, if (sys.is_windows) "%TEMP%\\zterm.sock" else "/tmp/zterm-<uid>.sock" });
 }
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     var args: std.ArrayList([]const u8) = .empty;
     defer args.deinit(alloc);
-    var ai = std.process.Args.Iterator.init(init.minimal.args);
+    var ai = try std.process.Args.Iterator.initAllocator(init.minimal.args, alloc);
+    defer ai.deinit();
     while (ai.next()) |a| try args.append(alloc, a);
 
     // Bare `zterm`: the multiplexer, as tmux runs bare.
@@ -2931,13 +3063,13 @@ test "runner socket path follows baton's home_base tiers" {
     {
         const p = (try runnerSocketPathFrom(a, null, "/bh", "/h", false)).?;
         defer a.free(p);
-        try testing.expectEqualStrings("/bh/var/zterm.sock", p);
+        try testing.expectEqualStrings("/bh" ++ SEP ++ "var" ++ SEP ++ "zterm.sock", p);
     }
     // ~/.baton only when the directory is present.
     {
         const p = (try runnerSocketPathFrom(a, null, null, "/h", true)).?;
         defer a.free(p);
-        try testing.expectEqualStrings("/h/.baton/var/zterm.sock", p);
+        try testing.expectEqualStrings("/h" ++ SEP ++ ".baton" ++ SEP ++ "var" ++ SEP ++ "zterm.sock", p);
     }
     try testing.expect((try runnerSocketPathFrom(a, null, null, "/h", false)) == null);
     try testing.expect((try runnerSocketPathFrom(a, null, null, null, true)) == null);
@@ -2951,6 +3083,9 @@ test "a client looks for the service's runner door before the default control so
             al.free(list);
         }
     }.all;
+    // The default control socket: /tmp/zterm-<uid>.sock, %TEMP%\zterm.sock on Windows.
+    const dflt = if (sys.is_windows) try ctl.defaultSocketPath(a) else try a.dupeZ(u8, "/tmp/zterm-501.sock");
+    defer a.free(dflt);
     // $ZTERM_SOCKET is the only place when it is set.
     {
         const l = try clientSocketCandidates(a, "/x/c.sock", null, "/bh", "/h", true, 501);
@@ -2963,14 +3098,14 @@ test "a client looks for the service's runner door before the default control so
         const l = try clientSocketCandidates(a, null, null, "/bh", "/h", false, 501);
         defer free(a, l);
         try testing.expectEqual(@as(usize, 2), l.len);
-        try testing.expectEqualStrings("/bh/var/zterm.sock", l[0]);
-        try testing.expectEqualStrings("/tmp/zterm-501.sock", l[1]);
+        try testing.expectEqualStrings("/bh" ++ SEP ++ "var" ++ SEP ++ "zterm.sock", l[0]);
+        try testing.expectEqualStrings(dflt, l[1]);
     }
     // ~/.baton's door when that directory exists; an explicit runner path wins.
     {
         const l = try clientSocketCandidates(a, null, null, null, "/h", true, 501);
         defer free(a, l);
-        try testing.expectEqualStrings("/h/.baton/var/zterm.sock", l[0]);
+        try testing.expectEqualStrings("/h" ++ SEP ++ ".baton" ++ SEP ++ "var" ++ SEP ++ "zterm.sock", l[0]);
     }
     {
         const l = try clientSocketCandidates(a, null, "/r/door.sock", null, "/h", true, 501);
@@ -2982,7 +3117,7 @@ test "a client looks for the service's runner door before the default control so
         const l = try clientSocketCandidates(a, null, null, null, "/h", false, 501);
         defer free(a, l);
         try testing.expectEqual(@as(usize, 1), l.len);
-        try testing.expectEqualStrings("/tmp/zterm-501.sock", l[0]);
+        try testing.expectEqualStrings(dflt, l[0]);
     }
 }
 
@@ -3084,7 +3219,7 @@ test "a Claude Code release binary is recognised by its path, as baton does" {
 test "this process is not an agent, whatever its path" {
     // The test binary's own path is not a Claude release, and its name is not
     // on the list: fail closed.
-    try testing.expect(!isAgentProc(c.getpid(), "test", null));
+    try testing.expect(!isAgentProc(sys.selfPid(), "test", null));
     try testing.expect(!isAgentProc(0, "", null));
 }
 

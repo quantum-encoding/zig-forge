@@ -379,9 +379,7 @@ fn performRequest(
     };
     defer allocator.destroy(io_threaded);
 
-    io_threaded.* = std.Io.Threaded.init(allocator, .{
-        .environ = .{ .block = .{ .slice = @ptrCast(std.mem.span(c.environ)) } },
-    });
+    io_threaded.* = std.Io.Threaded.init(allocator, .{ .environ = processEnviron() });
     defer io_threaded.deinit();
 
     const io = io_threaded.io();
@@ -410,6 +408,16 @@ fn performRequest(
     // Publish the worker's error message to this thread's thread-local slot.
     setLastError(ctx.err_buf[0..ctx.err_len]);
     return ctx.code;
+}
+
+/// The process environment, for the IO system (proxy settings and the like).
+/// Windows keeps it in the PEB, which moves whenever it changes, so std reads
+/// it from there on demand; elsewhere it is libc's `environ`.
+fn processEnviron() std.process.Environ {
+    return switch (builtin.os.tag) {
+        .windows => .{ .block = .global },
+        else => .{ .block = .{ .slice = @ptrCast(std.mem.span(c.environ)) } },
+    };
 }
 
 /// Read the configured total-request timeout in milliseconds. `0` disables the

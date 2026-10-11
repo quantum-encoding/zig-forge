@@ -5,6 +5,10 @@
 //! (Linux via TIOCSPTLCK/TIOCGPTN, Darwin via grantpt/unlockpt/ptsname_r).
 //! The rest of the lifecycle (fork/exec, raw mode, winsize ioctls, reaping)
 //! is shared via libc.
+//!
+//! Windows has no PTY devices: there every public name below (`Pty`, `Mutex`,
+//! `reaper`, `RawMode`, `getTerminalSize`) is the ConPTY implementation in
+//! pty_windows.zig, with the same interface.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -12,6 +16,8 @@ const posix = std.posix;
 const c = std.c;
 
 const is_darwin = builtin.os.tag.isDarwin();
+const is_windows = builtin.os.tag == .windows;
+const windows_pty = if (is_windows) @import("pty_windows.zig") else struct {};
 
 /// libc ioctl — used for the portable winsize / controlling-terminal requests.
 extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
@@ -19,8 +25,11 @@ extern "c" fn grantpt(fd: c_int) c_int;
 extern "c" fn unlockpt(fd: c_int) c_int;
 extern "c" fn ptsname_r(fd: c_int, buf: [*]u8, len: usize) c_int;
 
-/// pthread-backed mutex (this toolchain's std has no std.Thread.Mutex).
-pub const Mutex = struct {
+/// pthread-backed mutex (this toolchain's std has no std.Thread.Mutex);
+/// an SRWLOCK on Windows.
+pub const Mutex = if (is_windows) windows_pty.Mutex else PosixMutex;
+
+const PosixMutex = struct {
     inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
 
     pub fn lock(self: *Mutex) void {
@@ -58,7 +67,9 @@ pub const REAP_GRACE_MS: isize = 2000;
 /// pid, plus a one-shot EVFILT_TIMER (same ident) for the SIGKILL escalation.
 /// Nothing polls and no caller blocks. Linux: a detached thread per pid
 /// waiting on its pidfd with the same grace.
-pub const reaper = struct {
+pub const reaper = if (is_windows) windows_pty.reaper else posix_reaper;
+
+const posix_reaper = struct {
     var mutex: Mutex = .{};
     var kq: c_int = -1;
     var started = false;
@@ -247,8 +258,10 @@ pub const Winsize = extern struct {
     ws_ypixel: u16,
 };
 
-/// PTY pair (master + slave)
-pub const Pty = struct {
+/// PTY pair (master + slave); a ConPTY pseudoconsole on Windows.
+pub const Pty = if (is_windows) windows_pty.Pty else PosixPty;
+
+const PosixPty = struct {
     master_fd: posix.fd_t,
     slave_fd: posix.fd_t,
     slave_path: [32]u8,
@@ -683,8 +696,10 @@ fn doIoctl(fd: posix.fd_t, request: c_ulong, arg: anytype) !void {
     if (ioctl(@intCast(fd), request, arg) == -1) return error.IoctlFailed;
 }
 
-/// Raw terminal mode utilities
-pub const RawMode = struct {
+/// Raw terminal mode utilities (console modes on Windows).
+pub const RawMode = if (is_windows) windows_pty.RawMode else PosixRawMode;
+
+const PosixRawMode = struct {
     original: posix.termios,
     fd: posix.fd_t,
 
@@ -735,8 +750,10 @@ pub const RawMode = struct {
     }
 };
 
-/// Get the current terminal size
-pub fn getTerminalSize(fd: posix.fd_t) !Winsize {
+/// Get the current terminal size (the console window's, on Windows).
+pub const getTerminalSize = if (is_windows) windows_pty.getTerminalSize else posixGetTerminalSize;
+
+fn posixGetTerminalSize(fd: posix.fd_t) !Winsize {
     var ws: Winsize = undefined;
     try doIoctl(fd, tioc.GWINSZ, &ws);
     return ws;
@@ -747,6 +764,7 @@ pub fn getTerminalSize(fd: posix.fd_t) !Winsize {
 // =============================================================================
 
 test "pty create and close" {
+    if (is_windows) return error.SkipZigTest; // pty_windows.zig has the ConPTY tests
     // Needs a real PTY: skipped wherever the environment denies allocation.
     const pty = Pty.create() catch |err| {
         if (isUnavailableError(err)) return error.SkipZigTest;
@@ -780,6 +798,7 @@ fn makeSlaveRaw(p: *Pty) !void {
 }
 
 test "write is bounded when the child stops reading" {
+    if (is_windows) return error.SkipZigTest; // pty_windows.zig has the ConPTY tests
     // A PTY nobody drains: the tty input queue fills (~1 KiB) and every
     // further write returns EAGAIN forever — the exact shape of a Ctrl-Z'd or
     // wedged shell, which used to park the host's main thread inside write().
@@ -808,6 +827,7 @@ test "write is bounded when the child stops reading" {
 }
 
 test "write delivers everything when the child IS reading" {
+    if (is_windows) return error.SkipZigTest; // pty_windows.zig has the ConPTY tests
     // The bound must not cost correctness on the normal path: the payload goes
     // through in full when someone drains the other end, even though it is
     // 250x larger than the tty queue that triggers the stall above.
@@ -848,6 +868,7 @@ test "write delivers everything when the child IS reading" {
 }
 
 test "close reaps a child whose output nobody read" {
+    if (is_windows) return error.SkipZigTest; // pty_windows.zig has the ConPTY tests
     // The child floods its terminal and the master is never read, so its
     // exit waits on the tty draining. Reaping before closing the master hung
     // forever: six such threads were found parked in waitpid inside the app.
@@ -884,6 +905,7 @@ test "close reaps a child whose output nobody read" {
 }
 
 test "both pty ends are close-on-exec from creation" {
+    if (is_windows) return error.SkipZigTest; // pty_windows.zig has the ConPTY tests
     var p = Pty.create() catch |err| {
         if (isUnavailableError(err)) return error.SkipZigTest;
         return err;
@@ -899,6 +921,7 @@ fn pidExists(pid: posix.pid_t) bool {
 }
 
 test "close returns at once and the reaper ends and reaps the whole group" {
+    if (is_windows) return error.SkipZigTest; // pty_windows.zig has the ConPTY tests
     // The shell ignores HUP and TERM and leaves a background job in its own
     // process group: closing must not wait for it, the reaper must SIGKILL
     // the GROUP after the grace (the job dies too, not only the leader), and
@@ -955,6 +978,7 @@ test "close returns at once and the reaper ends and reaps the whole group" {
 }
 
 test "close of an ordinary shell reaps it on the hangup, before the grace" {
+    if (is_windows) return error.SkipZigTest; // pty_windows.zig has the ConPTY tests
     var p = Pty.create() catch |err| {
         if (isUnavailableError(err)) return error.SkipZigTest;
         return err;
@@ -981,6 +1005,13 @@ fn monotonicMsForTest() i64 {
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @intCast(@as(i128, ts.sec) * 1000 + @divTrunc(ts.nsec, 1_000_000));
+}
+
+test {
+    // The Windows command line / environment builders are pure: tested here
+    // on every platform. The ConPTY tests run on Windows.
+    _ = @import("win_cmdline.zig");
+    if (is_windows) _ = windows_pty;
 }
 
 test "winsize struct size" {

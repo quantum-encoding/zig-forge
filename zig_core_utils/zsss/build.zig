@@ -266,6 +266,23 @@ pub fn build(b: *std.Build) void {
         ios_step.dependOn(repackForXcode(b, ios_sim_static, ios_sim_install));
     }
 
+    // Windows (MSVC ABI, what Rust's x86_64-pc-windows-msvc links). Zig ships no
+    // MSVC libc headers, so this builds on a Windows host with Visual Studio's
+    // tools installed, not as a cross-compile. Zig names the archive
+    // zsss-x86_64-windows.lib.
+    const windows_step = b.step("windows", "Build the static library for Windows x86_64 (MSVC; on a Windows host)");
+    const windows_static = b.addLibrary(.{
+        .linkage = .static,
+        .name = "zsss-x86_64-windows",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/lib.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .msvc }),
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+        }),
+    });
+    windows_step.dependOn(&b.addInstallArtifact(windows_static, .{}).step);
+
     // Apple combined step
     const apple_step = b.step("apple", "Build libraries for all Apple targets (macOS + iOS)");
     apple_step.dependOn(macos_step);

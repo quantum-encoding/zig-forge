@@ -24,7 +24,8 @@ pub const RandomError = error{RandomFailure};
 
 /// Cross-platform cryptographic random bytes. SYS_getrandom on Linux
 /// (works for both gnu/musl and Android-Bionic without an API-level
-/// gate); arc4random on Darwin/BSD; /dev/urandom otherwise.
+/// gate); arc4random on Darwin/BSD; BCryptGenRandom on Windows;
+/// /dev/urandom otherwise.
 ///
 /// Returns error.RandomFailure if the buffer could not be fully filled;
 /// callers using the output as a nonce/key must not ignore this.
@@ -42,6 +43,7 @@ fn fillRandomBytes(buf: []u8) RandomError!void {
                 filled += rc;
             }
         },
+        .windows => if (!@import("win_random.zig").fill(buf)) return error.RandomFailure,
         else => {
             const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, 0);
             if (fd < 0) return error.RandomFailure;

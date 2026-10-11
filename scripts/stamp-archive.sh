@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Stamp a built archive: what it was built from, and which bytes it is.
 #
-#   scripts/stamp-archive.sh <archive.a> <source-id>
+#   scripts/stamp-archive.sh <archive> <source-id>
 #
-# Writes, beside the archive:
+# The archive is a `lib<name>.a`, or a `<name>.lib` (what Zig writes for a Windows MSVC
+# target). Writes, beside it:
 #
 #   <lib>-source-id.txt   the source identity (scripts/zig-source-id.sh), one line. The
 #                         format every existing reader parses; unchanged.
-#   <lib>.a.sha256        the archive's sha256, in `shasum -a 256` format with the bare
-#                         file name, so `cd <dir> && shasum -a 256 -c <lib>.a.sha256`
-#                         verifies it.
+#   <archive>.sha256      the archive's sha256, in `shasum -a 256` format with the bare
+#                         file name, so `cd <dir> && shasum -a 256 -c <archive>.sha256`
+#                         (or scripts/sha256.sh -c, on a host without shasum) verifies it.
 #
 # The source-id alone says which sources an archive SHOULD be; only the sha256 says the
 # archive beside it IS the one that build wrote. Without it a stamp that travels without
@@ -22,14 +23,15 @@
 # after the last write to the archive (the Xcode repack included).
 set -euo pipefail
 
-archive="${1:?usage: stamp-archive.sh <archive.a> <source-id>}"
-id="${2:?usage: stamp-archive.sh <archive.a> <source-id>}"
+SHA256="$(cd "$(dirname "$0")" && pwd -P)/sha256.sh"
+archive="${1:?usage: stamp-archive.sh <archive> <source-id>}"
+id="${2:?usage: stamp-archive.sh <archive> <source-id>}"
 [ -f "$archive" ] || { echo "error: no archive at $archive" >&2; exit 1; }
-case "$archive" in *.a) ;; *) echo "error: $archive is not a .a" >&2; exit 1 ;; esac
+case "$archive" in *.a | *.lib) ;; *) echo "error: $archive is not a .a or .lib" >&2; exit 1 ;; esac
 
-stamp="${archive%.a}-source-id.txt"
+stamp="${archive%.*}-source-id.txt"
 printf '%s\n' "$id" > "$stamp.tmp"
 mv "$stamp.tmp" "$stamp"
 
 dir="$(dirname "$archive")" name="$(basename "$archive")"
-(cd "$dir" && shasum -a 256 "$name" > "$name.sha256.tmp" && mv "$name.sha256.tmp" "$name.sha256")
+(cd "$dir" && "$SHA256" "$name" > "$name.sha256.tmp" && mv "$name.sha256.tmp" "$name.sha256")

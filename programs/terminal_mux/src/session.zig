@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const pty_mod = @import("pty.zig");
+const sys = @import("sys.zig");
 const terminal_mod = @import("terminal.zig");
 const parser_mod = @import("parser.zig");
 const config = @import("config.zig");
@@ -144,6 +145,13 @@ pub const Pane = struct {
         const n = @min(cmd.len, self.boot_cmd.len);
         @memcpy(self.boot_cmd[0..n], cmd[0..n]);
         self.boot_len = n;
+        // A POSIX tty takes LF as end-of-line; a Windows console's Enter is
+        // CR, and a bare LF there is not a submit.
+        if (sys.is_windows) {
+            for (self.boot_cmd[0..n], 0..) |*ch, i| {
+                if (ch.* == '\n' and (i == 0 or self.boot_cmd[i - 1] != '\r')) ch.* = '\r';
+            }
+        }
     }
 
     pub fn deinit(self: *Self) void {
@@ -188,11 +196,18 @@ pub const Pane = struct {
         @memcpy(shell_buf[0..shell.len], shell);
         shell_buf[shell.len] = 0;
 
+        // Windows has no login-shell convention: argv[0] is the program's
+        // own name (cmd.exe would read a leading `-` as part of its command).
         const base = std.fs.path.basename(shell);
         var name_buf: [256:0]u8 = undefined;
-        name_buf[0] = '-';
-        @memcpy(name_buf[1 .. 1 + base.len], base);
-        name_buf[1 + base.len] = 0;
+        if (sys.is_windows) {
+            @memcpy(name_buf[0..shell.len], shell);
+            name_buf[shell.len] = 0;
+        } else {
+            name_buf[0] = '-';
+            @memcpy(name_buf[1 .. 1 + base.len], base);
+            name_buf[1 + base.len] = 0;
+        }
 
         const argv = [_:null]?[*:0]const u8{&name_buf};
         try pty.spawnIn(&shell_buf, &argv, env, cwd_z);
@@ -321,8 +336,8 @@ pub const Pane = struct {
         return null;
     }
 
-    /// Get the master fd for polling
-    pub fn getFd(self: *const Self) ?std.posix.fd_t {
+    /// Get the master fd for polling (the relay socket, on Windows)
+    pub fn getFd(self: *const Self) ?sys.fd_t {
         if (self.pty) |p| {
             return p.master_fd;
         }

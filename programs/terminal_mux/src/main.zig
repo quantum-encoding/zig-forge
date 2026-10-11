@@ -17,6 +17,18 @@ const posix = std.posix;
 const c = std.c;
 const lib = @import("lib.zig");
 const ctl = @import("ctl.zig");
+const sys = @import("sys.zig");
+const winpty = if (sys.is_windows) @import("pty_windows.zig") else struct {};
+
+/// Standard input for the terminal calls (the Windows versions use the
+/// console and ignore it).
+const STDIN: sys.fd_t = if (sys.is_windows) 0 else posix.STDIN_FILENO;
+
+/// A rendered frame to standard output.
+fn flushOut(bytes: []const u8) void {
+    if (sys.is_windows) return winpty.writeStdout(bytes);
+    _ = c.write(posix.STDOUT_FILENO, bytes.ptr, bytes.len);
+}
 
 /// This toolchain's std.c doesn't expose signal(3); declare the libc extern
 /// directly (same pattern as zig_ai's execvp). Portable signal() over
@@ -149,7 +161,7 @@ pub fn run(allocator: std.mem.Allocator, session_name: []const u8) !void {
 
 fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     // Get terminal size (kept current via SIGWINCH below)
-    var size = lib.pty.getTerminalSize(posix.STDIN_FILENO) catch lib.Winsize{
+    var size = lib.pty.getTerminalSize(STDIN) catch lib.Winsize{
         .ws_row = 24,
         .ws_col = 80,
         .ws_xpixel = 0,
@@ -180,8 +192,10 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     const window = initial_session.getActiveWindow();
     const pane = window.getActivePane();
 
-    const shell = if (std.c.getenv("SHELL")) |s| std.mem.sliceTo(s, 0) else "/bin/bash";
-    const env = std.c.environ;
+    const shell = if (sys.is_windows)
+        (sys.getenv("COMSPEC") orelse "C:\\Windows\\System32\\cmd.exe")
+    else if (std.c.getenv("SHELL")) |s| std.mem.sliceTo(s, 0) else "/bin/bash";
+    const env = if (sys.is_windows) try winpty.environ() else std.c.environ;
     try pane.spawn(shell, env);
 
     // Initialize renderer
@@ -189,7 +203,9 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     defer renderer.deinit();
 
     // Enter raw mode and alternate screen
-    var raw_mode = try lib.RawMode.enter(posix.STDIN_FILENO);
+    var raw_mode = try lib.RawMode.enter(STDIN);
+    // Windows: the console cannot join a socket poll set; a thread forwards it.
+    const stdin_fd: sys.fd_t = if (sys.is_windows) try winpty.stdinSocket() else STDIN;
     defer raw_mode.exit();
 
     renderer.beginFrame();
@@ -200,7 +216,7 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     // forwarding to tracking apps. Host-native selection still works with the
     // usual modifier (⌥/Shift) as in tmux.
     try renderer.enableMouse();
-    _ = c.write(posix.STDOUT_FILENO, renderer.getOutput().ptr, renderer.getOutput().len);
+    flushOut(renderer.getOutput());
 
     // Host terminal resize: the handler only sets a flag; the loop re-reads the
     // size and resizes the session. Portable signal() per the guardian_shield
@@ -212,7 +228,8 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
             got.store(true, .monotonic);
         }
     };
-    _ = signal(@intFromEnum(std.c.SIG.WINCH), winch.handle);
+    // Windows has no SIGWINCH: the console's size is re-read on every pass.
+    if (!sys.is_windows) _ = signal(@intFromEnum(std.c.SIG.WINCH), winch.handle);
 
     // Input state
     var prefix_active = false;
@@ -241,7 +258,7 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     var mode_hint_buf: [160]u8 = undefined;
 
     // Poll set rebuilt per iteration: stdin + every pane's PTY (all windows).
-    var poll_fds: std.ArrayList(posix.pollfd) = .empty;
+    var poll_fds: std.ArrayList(sys.pollfd) = .empty;
     defer poll_fds.deinit(allocator);
     var poll_panes: std.ArrayList(*lib.session.Pane) = .empty;
     defer poll_panes.deinit(allocator);
@@ -254,8 +271,13 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
         // Apply a pending host resize before anything reads pane geometry:
         // grid + PTY follow the new size (SIGWINCH reaches the shell), and a
         // clear + full redraw flushes stale rows the smaller frame won't touch.
+        if (sys.is_windows) {
+            if (lib.pty.getTerminalSize(STDIN) catch null) |ns| {
+                if (ns.ws_row != size.ws_row or ns.ws_col != size.ws_col) winch.got.store(true, .monotonic);
+            }
+        }
         if (winch.got.swap(false, .monotonic)) {
-            if (lib.pty.getTerminalSize(posix.STDIN_FILENO) catch null) |ns| {
+            if (lib.pty.getTerminalSize(STDIN) catch null) |ns| {
                 if (ns.ws_row < 2 or ns.ws_col < 2) continue; // bogus size; keep current
                 size = ns;
                 initial_session.resize(.{
@@ -266,7 +288,7 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
                 }) catch {};
                 renderer.beginFrame();
                 try renderer.clearScreen();
-                _ = c.write(posix.STDOUT_FILENO, renderer.getOutput().ptr, renderer.getOutput().len);
+                flushOut(renderer.getOutput());
             }
         }
 
@@ -277,27 +299,27 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
         poll_fds.clearRetainingCapacity();
         poll_panes.clearRetainingCapacity();
         poll_windows.clearRetainingCapacity();
-        try poll_fds.append(allocator, .{ .fd = posix.STDIN_FILENO, .events = posix.POLL.IN, .revents = 0 });
+        try poll_fds.append(allocator, .{ .fd = stdin_fd, .events = sys.POLL.IN, .revents = 0 });
         for (initial_session.windows.items) |w| {
             for (w.panes.items) |p| {
                 const fd = p.getFd() orelse continue;
-                try poll_fds.append(allocator, .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 });
+                try poll_fds.append(allocator, .{ .fd = fd, .events = sys.POLL.IN, .revents = 0 });
                 try poll_panes.append(allocator, p);
                 try poll_windows.append(allocator, w);
             }
         }
         // Control socket last, so pane indices stay 1..len(poll_panes).
         const ctl_idx: ?usize = if (control) |ct| blk: {
-            try poll_fds.append(allocator, .{ .fd = ct.fd, .events = posix.POLL.IN, .revents = 0 });
+            try poll_fds.append(allocator, .{ .fd = ct.fd, .events = sys.POLL.IN, .revents = 0 });
             break :blk poll_fds.items.len - 1;
         } else null;
 
-        const n_ready = posix.poll(poll_fds.items, 100) catch 0; // 100ms timeout
+        const n_ready = sys.poll(poll_fds.items, 100) catch 0; // 100ms timeout
 
         if (n_ready > 0) {
             // Handle user input from stdin
-            if (poll_fds.items[0].revents & posix.POLL.IN != 0) {
-                const n = posix.read(posix.STDIN_FILENO, &input_buf) catch 0;
+            if (poll_fds.items[0].revents & sys.POLL.IN != 0) {
+                const n = sys.read(stdin_fd, &input_buf) catch 0;
                 if (n == 0) {
                     running = false;
                 } else {
@@ -432,7 +454,7 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
             // Panes created by a split THIS iteration aren't in the set yet;
             // the next iteration picks them up.
             for (poll_panes.items, 0..) |p, i| {
-                if (poll_fds.items[i + 1].revents & posix.POLL.IN == 0) continue;
+                if (poll_fds.items[i + 1].revents & sys.POLL.IN == 0) continue;
                 const n = p.readOutput(&pty_buf) catch continue;
                 if (n > 0) {
                     p.processOutput(pty_buf[0..n]);
@@ -447,7 +469,7 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
 
             // A CLI client (`zterm cli ...`) wants to drive this mux.
             if (ctl_idx) |ci| {
-                if (poll_fds.items[ci].revents & posix.POLL.IN != 0) {
+                if (poll_fds.items[ci].revents & sys.POLL.IN != 0) {
                     if (ctl.accept(control.?.fd, initial_session, shell, env, allocator)) {
                         force_redraw = true;
                     }
@@ -495,7 +517,7 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
         }
 
         // Write output
-        _ = c.write(posix.STDOUT_FILENO, renderer.getOutput().ptr, renderer.getOutput().len);
+        flushOut(renderer.getOutput());
 
         // Reap dead panes in the active window (any pane, not just the focused
         // one). Empty window → close it; last window empty → exit. The reflow
@@ -524,7 +546,7 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     try renderer.disableMouse();
     try renderer.exitAltScreen();
     try renderer.showCursor();
-    _ = c.write(posix.STDOUT_FILENO, renderer.getOutput().ptr, renderer.getOutput().len);
+    flushOut(renderer.getOutput());
 }
 
 

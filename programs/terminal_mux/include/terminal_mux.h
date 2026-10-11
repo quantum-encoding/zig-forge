@@ -81,6 +81,9 @@ bool          zterm_is_attached(zterm_session *handle);
 size_t        zterm_list(uint64_t *out_ids, size_t max);
 
 /* ---- I/O ---- */
+/* The active pane's PTY master fd (-1 if none). On Windows it is a Winsock
+ * SOCKET (one end of the socket pair a relay joins to the pseudoconsole),
+ * pollable with WSAPoll, not a CRT file descriptor. */
 int      zterm_pty_fd(zterm_session *handle);
 long     zterm_pump(zterm_session *handle, int timeout_ms);
 long     zterm_drain(zterm_session *handle);

@@ -88,6 +88,42 @@ const Pty = struct {
 };
 ```
 
+### 1b. Windows: ConPTY (`src/pty_windows.zig`)
+
+Windows has no PTY devices, fork or poll(2) over pipes. On Windows every
+public name in `pty.zig` (`Pty`, `Mutex`, `reaper`, `RawMode`,
+`getTerminalSize`) resolves to `pty_windows.zig`, with the same interface:
+
+- `Pty.create` makes a pseudoconsole (`CreatePseudoConsole`) over two
+  anonymous pipes; `spawnIn` starts the program with `CreateProcessW`, the
+  pseudoconsole in its attribute list and its stdio handles set INVALID (so a
+  server whose own output is redirected to a log does not hand that log to its
+  panes). argv becomes a command line with the C runtime's quoting
+  (`src/win_cmdline.zig`); a `.cmd`/`.bat` program is refused, because
+  cmd.exe would re-parse the arguments by its own rules.
+- Each pane's program runs in its own job object (KILL_ON_JOB_CLOSE),
+  assigned while it is still suspended: the job is the process group.
+- Pipes cannot be polled, so `master_fd` is one end of an AF_UNIX socket pair
+  and relay threads join the other end to the pipes. The event loops poll it
+  with WSAPoll through `src/sys.zig`, whose names are plain aliases of the
+  POSIX calls on Linux and macOS.
+- A waiter thread per pane owns exit and teardown: when the program exits it
+  lets the last output reach the pipe, closes the pseudoconsole (the master
+  then reads end-of-file, the hang-up a POSIX master reports), and on
+  `close` hangs up, waits `REAP_GRACE_MS`, then terminates the job.
+- `zterm server`'s doors are Winsock AF_UNIX sockets at the same paths
+  (control: `$ZTERM_SOCKET`, else `%TEMP%\zterm.sock`; runner door:
+  `<fleet home>\var\zterm.sock`). The runner's "foreground" is the first
+  agent image on the chain from the pane's program through each newest child
+  (Toolhelp32), since Windows has no foreground process group.
+- `zterm attach` and the visible mux use console modes (VT input/output,
+  UTF-8) and read the console through a forwarding thread so stdin joins the
+  same poll set; the console's size is re-read each pass (no SIGWINCH).
+
+Tests: `pty_windows.zig` (ConPTY behaviour, anchored to cmd.exe, ping and
+Microsoft's `CommandLineToArgvW`) runs on Windows; `zig build test-bins
+-Dtarget=x86_64-windows` cross-builds the test executables to run there.
+
 ### 2. Session Management
 
 Sessions contain windows, and windows contain panes.

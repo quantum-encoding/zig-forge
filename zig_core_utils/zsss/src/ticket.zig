@@ -16,10 +16,12 @@ const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 
 const stego = @import("stego.zig");
+const win_random = @import("win_random.zig");
 
 /// Cross-platform cryptographic random bytes. SYS_getrandom on Linux
 /// (works for both gnu/musl and Android-Bionic without an API-level
-/// gate); arc4random on Darwin/BSD; /dev/urandom otherwise.
+/// gate); arc4random on Darwin/BSD; BCryptGenRandom on Windows;
+/// /dev/urandom otherwise.
 pub const RandomError = error{RandomFailure};
 
 fn fillRandomBytes(buf: []u8) RandomError!void {
@@ -36,6 +38,7 @@ fn fillRandomBytes(buf: []u8) RandomError!void {
                 filled += rc;
             }
         },
+        .windows => if (!win_random.fill(buf)) return error.RandomFailure,
         else => {
             const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, 0);
             if (fd < 0) return error.RandomFailure;

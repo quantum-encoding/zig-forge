@@ -76,7 +76,7 @@ UI surface.
 ### I/O
 | Function | Purpose |
 |---|---|
-| `int zterm_pty_fd(zterm_session *)` | Active pane's PTY master fd (-1 if none). Register with a `DispatchSource`/`kqueue` readability source. |
+| `int zterm_pty_fd(zterm_session *)` | Active pane's PTY master fd (-1 if none). Register with a `DispatchSource`/`kqueue` readability source. On Windows it is a Winsock SOCKET (pollable with `WSAPoll`), not a CRT fd. |
 | `long zterm_pump(zterm_session *, int timeout_ms)` | Wait up to `timeout_ms` for PTY output, read one chunk, run it through the VT emulator. Returns bytes processed, 0 on timeout, -1 on error/EOF. |
 | `long zterm_drain(zterm_session *)` | Drain all currently-available PTY output (non-blocking). Returns total bytes. Call this when your readability source fires. |
 | `void zterm_feed(zterm_session *, const uint8_t *data, size_t len)` | Feed raw bytes straight into the VT emulator, bypassing the PTY (deterministic throughput / replay). |

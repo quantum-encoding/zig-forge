@@ -40,7 +40,8 @@ fn wallClockSeconds() i64 {
 
 /// Cross-platform cryptographic random bytes. Goes direct to the OS
 /// CSPRNG — getrandom syscall on Linux (including Android, all API
-/// levels), arc4random on Darwin/BSD, /dev/urandom anywhere else.
+/// levels), arc4random on Darwin/BSD, BCryptGenRandom on Windows,
+/// /dev/urandom anywhere else.
 ///
 /// Returns error.RandomFailure if the buffer could not be fully filled
 /// (e.g. seccomp-blocked getrandom, fd-exhausted /dev/urandom). Callers
@@ -63,6 +64,7 @@ fn fillRandomBytes(buf: []u8) RandomError!void {
                 filled += rc;
             }
         },
+        .windows => if (!@import("win_random.zig").fill(buf)) return error.RandomFailure,
         else => {
             const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, 0);
             if (fd < 0) return error.RandomFailure;

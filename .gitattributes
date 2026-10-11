@@ -1,0 +1,5 @@
+# Check out every file exactly as committed. Archive stamps (scripts/zig-source-id.sh)
+# hash the bytes on disk, so a Windows clone with core.autocrlf=true, which rewrites LF
+# to CRLF, would give the same commit a different identity and every consumer would
+# refuse its archives as stale. The NIST .rsp vectors are committed with CRLF and stay so.
+* -text

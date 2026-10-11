@@ -1058,7 +1058,7 @@ pub fn combineShares(allocator: Allocator, shares: []const Share, passphrase: []
 
 /// Cross-platform cryptographic random bytes, straight to the OS CSPRNG —
 /// getrandom on Linux (including Android at every API level), arc4random on
-/// Darwin/BSD, /dev/urandom elsewhere.
+/// Darwin/BSD, BCryptGenRandom on Windows, /dev/urandom elsewhere.
 ///
 /// "The source of randomness used to generate the values in steps 3 and 4 above
 /// MUST be suitable for generating cryptographic keys" (spec: SplitSecret).
@@ -1079,6 +1079,7 @@ fn fillRandomBytes(buf: []u8) Error!void {
                 filled += rc;
             }
         },
+        .windows => if (!@import("win_random.zig").fill(buf)) return Error.RandomFailure,
         else => {
             const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, 0);
             if (fd < 0) return Error.RandomFailure;

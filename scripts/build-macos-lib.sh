@@ -34,6 +34,11 @@
 # the fleet's Rust FFI build scripts pin. A non-native target also turns off Zig's SDK
 # detection, so the SDK's usr/ is passed as a search prefix: without it a program that
 # links a system library (zig_endpoint_sec's -lEndpointSecurity) finds nothing.
+#
+# On Windows (Git bash) the target is x86_64-windows-msvc, the ABI Rust's
+# x86_64-pc-windows-msvc links. Zig's native target there is the GNU (MinGW) ABI, whose
+# libc references the MSVC linker cannot resolve; being explicit also builds for the
+# baseline x86-64 CPU rather than the build host's. Zig names that archive <lib>.lib.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -70,11 +75,14 @@ if [ "$(uname -s)" = Darwin ]; then
   sdk="$(xcrun --sdk macosx --show-sdk-path)"
   zig build "$step" -Doptimize="$MODE" -Dtarget="$arch-macos.14.0" --search-prefix "$sdk/usr"
 else
-  zig build "$step" -Doptimize="$MODE"
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) zig build "$step" -Doptimize="$MODE" -Dtarget=x86_64-windows-msvc ;;
+    *) zig build "$step" -Doptimize="$MODE" ;;
+  esac
 fi
 
 built=0
-for archive in zig-out/lib/*.a; do
+for archive in zig-out/lib/*.a zig-out/lib/*.lib; do
   [ -e "$archive" ] || continue
   if [ "$(uname -s)" = Darwin ]; then
     # Zig 0.16 emits 2-byte-aligned Mach-O members; ld-prime needs 8. Skipping this

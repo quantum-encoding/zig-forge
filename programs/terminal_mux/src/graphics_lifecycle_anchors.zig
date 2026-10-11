@@ -20,6 +20,10 @@ const pty = @import("pty.zig");
 
 const talloc = std.testing.allocator;
 
+/// A session's program that sits quietly on its terminal while bytes are fed
+/// to the emulator directly (nothing here drains the PTY).
+const SITTER: [*:0]const u8 = if (@import("builtin").os.tag == .windows) "C:\\Windows\\System32\\cmd.exe" else "/bin/cat";
+
 // A 2x2 RGBA test image (red, green, blue, white).
 const PIXELS = [_]u8{
     0xFF, 0x00, 0x00, 0xFF,
@@ -221,7 +225,7 @@ test "lifecycle 4: alt-screen placements never leak into the primary; freed on e
 test "graphics ABI: transmit, place, image_data, scroll-move, delete + freed" {
     try pty.skipIfUnavailable();
     var id: u64 = 0;
-    const hh = capi.zterm_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
+    const hh = capi.zterm_create(24, 80, SITTER, &id) orelse return error.CreateFailed;
     defer capi.zterm_destroy(hh);
 
     const gen0 = capi.zterm_graphics_generation(hh);
@@ -285,7 +289,7 @@ test "recorded-stream anchor: committed .bin replays to the expected ABI state" 
 
     try pty.skipIfUnavailable();
     var id: u64 = 0;
-    const hh = capi.zterm_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
+    const hh = capi.zterm_create(24, 80, SITTER, &id) orelse return error.CreateFailed;
     defer capi.zterm_destroy(hh);
 
     capi.zterm_feed(hh, fixture.ptr, fixture.len);

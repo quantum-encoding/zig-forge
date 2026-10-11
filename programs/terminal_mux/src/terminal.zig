@@ -137,6 +137,7 @@ pub const ScrollRegion = struct {
 /// matches the clock_gettime pattern used across the repo). Monotonic on
 /// purpose: the 2026 sync timeout must not jump with wall-clock changes.
 pub fn monotonicMs() i64 {
+    if (@import("builtin").os.tag == .windows) return @import("sys.zig").monotonicMs();
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @intCast(@as(i128, ts.sec) * 1000 + @divTrunc(ts.nsec, 1_000_000));

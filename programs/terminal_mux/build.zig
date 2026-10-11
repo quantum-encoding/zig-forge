@@ -1,7 +1,7 @@
 //! Terminal Multiplexer Build Configuration
 //!
 //! A modern tmux alternative with:
-//! - PTY management (Linux /dev/ptmx + Darwin openpty)
+//! - PTY management (Linux /dev/ptmx + Darwin openpty; Windows ConPTY)
 //! - VT100/ANSI terminal emulation
 //! - An in-process C ABI (libterminal_mux) for embedding into host apps
 //!   (e.g. a Swift/SwiftUI front-end) — see include/terminal_mux.h
@@ -26,7 +26,9 @@ pub fn build(b: *std.Build) void {
     // glibc >= 2.44 / binutils >= 2.47 put in crt1.o, so Debug builds and
     // `zig build test` die at link time on current rolling distros. LLD cannot
     // link Mach-O, so Apple targets keep Zig's defaults (null = unchanged).
-    const elf_link = !target.result.os.tag.isDarwin();
+    // Windows links with Zig's COFF linker; LLD is only for ELF here.
+    const is_windows = target.result.os.tag == .windows;
+    const elf_link = !target.result.os.tag.isDarwin() and !is_windows;
     const use_llvm: ?bool = if (elf_link) true else null;
     const use_lld: ?bool = if (elf_link) true else null;
 
@@ -73,38 +75,42 @@ pub fn build(b: *std.Build) void {
     }).step);
 
     // ==========================================================================
-    // Benchmark (drives the C ABI like a host application would)
+    // Benchmark (drives the C ABI like a host application would). Both
+    // benchmarks are POSIX tools (they time /bin/sh children and reach the
+    // server by socket path through libc), so a Windows build leaves them out.
     // ==========================================================================
-    const bench = b.addExecutable(.{
-        .name = "zterm-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bench.zig"),
-            .target = target,
-            // A perf bench must ALWAYS be optimized — Debug (the default `optimize`) is bounds-checked +
-            // unoptimized, ~6× slower, and misleads every comparison. Force ReleaseFast regardless of -Doptimize.
-            .optimize = .ReleaseFast,
-        }),
-    });
-    bench.root_module.link_libc = true;
-    b.installArtifact(bench);
+    if (!is_windows) {
+        const bench = b.addExecutable(.{
+            .name = "zterm-bench",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/bench.zig"),
+                .target = target,
+                // A perf bench must ALWAYS be optimized — Debug (the default `optimize`) is bounds-checked +
+                // unoptimized, ~6× slower, and misleads every comparison. Force ReleaseFast regardless of -Doptimize.
+                .optimize = .ReleaseFast,
+            }),
+        });
+        bench.root_module.link_libc = true;
+        b.installArtifact(bench);
 
-    const bench_cmd = b.addRunArtifact(bench);
-    bench_cmd.step.dependOn(b.getInstallStep());
-    const bench_step = b.step("bench", "Run the C ABI throughput benchmark (a recorded run: scripts/bench-run.py)");
-    bench_step.dependOn(&bench_cmd.step);
+        const bench_cmd = b.addRunArtifact(bench);
+        bench_cmd.step.dependOn(b.getInstallStep());
+        const bench_step = b.step("bench", "Run the C ABI throughput benchmark (a recorded run: scripts/bench-run.py)");
+        bench_step.dependOn(&bench_cmd.step);
 
-    // The view-protocol benchmark: a client of a running `zterm server`,
-    // timing what a front end sees. scripts/bench-run.py starts the server.
-    const viewbench = b.addExecutable(.{
-        .name = "zterm-viewbench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/viewbench.zig"),
-            .target = target,
-            .optimize = .ReleaseFast,
-        }),
-    });
-    viewbench.root_module.link_libc = true;
-    b.installArtifact(viewbench);
+        // The view-protocol benchmark: a client of a running `zterm server`,
+        // timing what a front end sees. scripts/bench-run.py starts the server.
+        const viewbench = b.addExecutable(.{
+            .name = "zterm-viewbench",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/viewbench.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+            }),
+        });
+        viewbench.root_module.link_libc = true;
+        b.installArtifact(viewbench);
+    }
 
     // ==========================================================================
     // zterm — THE executable: bare it is the visible multiplexer; `server`,
@@ -218,18 +224,28 @@ pub fn build(b: *std.Build) void {
 
     // The benchmarks' own logic: statistics, fixed inputs, byte accounting.
     const bench_test_step = b.step("test-bench", "Unit-test the benchmark helpers");
-    for ([_][]const u8{ "src/benchstat.zig", "src/bench.zig", "src/viewbench.zig" }) |root| {
-        const t = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(root),
-                .target = target,
-                .optimize = optimize,
-            }),
-            .use_llvm = use_llvm,
-            .use_lld = use_lld,
-        });
-        t.root_module.link_libc = true;
-        bench_test_step.dependOn(&b.addRunArtifact(t).step);
+    if (!is_windows) {
+        for ([_][]const u8{ "src/benchstat.zig", "src/bench.zig", "src/viewbench.zig" }) |root| {
+            const t = b.addTest(.{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(root),
+                    .target = target,
+                    .optimize = optimize,
+                }),
+                .use_llvm = use_llvm,
+                .use_lld = use_lld,
+            });
+            t.root_module.link_libc = true;
+            bench_test_step.dependOn(&b.addRunArtifact(t).step);
+        }
+    }
+
+    // The unit-test executables, installed instead of run: for a target this
+    // host cannot execute (`-Dtarget=x86_64-windows` from a Mac), copied to a
+    // machine that can.
+    const test_bins_step = b.step("test-bins", "Install the unit-test executables to bin/ without running them");
+    for ([_]*std.Build.Step.Compile{ lib_tests, capi_tests, zterm_tests }, [_][]const u8{ "test-lib", "test-capi", "test-zterm" }) |t, name| {
+        test_bins_step.dependOn(&b.addInstallArtifact(t, .{ .dest_sub_path = b.fmt("{s}{s}", .{ name, target.result.exeFileExt() }) }).step);
     }
 
     const test_step = b.step("test", "Run unit tests");

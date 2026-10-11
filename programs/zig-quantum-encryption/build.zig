@@ -17,7 +17,10 @@ pub fn build(b: *std.Build) void {
         // Desktop platforms for Tauri
         .{ .name = "macos-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .macos } },
         .{ .name = "macos-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .macos } },
-        .{ .name = "windows-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows } },
+        // MSVC ABI: what Rust's x86_64-pc-windows-msvc links with link.exe. Zig's
+        // default Windows ABI is GNU, whose bundled compiler_rt.obj link.exe
+        // refuses (LNK1143 "no symbol for COMDAT section").
+        .{ .name = "windows-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .msvc } },
         .{ .name = "linux-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux } },
         // Mobile platforms (future)
         .{ .name = "ios-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .ios } },

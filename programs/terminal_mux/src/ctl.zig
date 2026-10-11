@@ -18,7 +18,9 @@
 //! stable between layout changes; re-`list` after split/kill.
 //!
 //! Socket: $ZTERM_SOCKET, else /tmp/zterm-<uid>.sock (same default as zterm,
-//! newest binder wins the path — one visible mux per user is the normal case).
+//! newest binder wins the path — one visible mux per user is the normal case);
+//! on Windows %TEMP%\zterm.sock, an AF_UNIX socket in the user's own temp
+//! directory.
 
 const std = @import("std");
 const c = std.c;
@@ -26,22 +28,31 @@ const posix = std.posix;
 const session = @import("session.zig");
 const pty = @import("pty.zig");
 const terminal = @import("terminal.zig");
+const sys = @import("sys.zig");
 
 pub const Ctl = struct {
-    fd: c.fd_t,
+    fd: sys.fd_t,
     path: [:0]u8,
 
     pub fn deinit(self: *Ctl, alloc: std.mem.Allocator) void {
-        if (self.fd >= 0) _ = c.close(self.fd);
-        _ = c.unlink(self.path.ptr);
+        if (self.fd >= 0) _ = sys.close(self.fd);
+        if (sys.is_windows) {
+            _ = sys.deletePath(self.path);
+        } else _ = c.unlink(self.path.ptr);
         alloc.free(self.path);
     }
 };
 
 pub fn socketPath(alloc: std.mem.Allocator) ![:0]u8 {
-    if (c.getenv("ZTERM_SOCKET")) |p| {
-        const s = std.mem.sliceTo(p, 0);
-        if (s.len > 0) return alloc.dupeZ(u8, s);
+    if (sys.getenv("ZTERM_SOCKET")) |s| return alloc.dupeZ(u8, s);
+    return defaultSocketPath(alloc);
+}
+
+/// The control socket's path when $ZTERM_SOCKET does not name one.
+pub fn defaultSocketPath(alloc: std.mem.Allocator) ![:0]u8 {
+    if (sys.is_windows) {
+        const tmp = sys.getenv("TEMP") orelse sys.getenv("TMP") orelse "C:\\Windows\\Temp";
+        return std.fmt.allocPrintSentinel(alloc, "{s}\\zterm.sock", .{tmp}, 0);
     }
     return std.fmt.allocPrintSentinel(alloc, "/tmp/zterm-{d}.sock", .{c.getuid()}, 0);
 }
@@ -63,6 +74,7 @@ pub fn fillAddr(path: []const u8) error{SocketPathTooLong}!c.sockaddr.un {
 }
 
 test "fillAddr refuses a path that would be truncated" {
+    if (sys.is_windows) return error.SkipZigTest; // sys.unixAddr is the Windows builder
     var ok_buf: [64]u8 = undefined;
     @memset(&ok_buf, 'a');
     ok_buf[0] = '/';
@@ -86,6 +98,7 @@ test "fillAddr refuses a path that would be truncated" {
 pub fn bind(alloc: std.mem.Allocator) !Ctl {
     const path = try socketPath(alloc);
     errdefer alloc.free(path);
+    if (sys.is_windows) return .{ .fd = try sys.unixListen(path), .path = path };
     _ = c.unlink(path.ptr);
     // Spawned shells must not inherit the listener (or any accepted conn —
     // see accept()): a child holding a conn open means the CLI never sees EOF
@@ -102,10 +115,10 @@ pub fn bind(alloc: std.mem.Allocator) !Ctl {
     return .{ .fd = fd, .path = path };
 }
 
-fn cwrite(fd: c.fd_t, bytes: []const u8) void {
+fn cwrite(fd: sys.fd_t, bytes: []const u8) void {
     var off: usize = 0;
     while (off < bytes.len) {
-        const r = c.write(fd, bytes.ptr + off, bytes.len - off);
+        const r = sys.write(fd, bytes.ptr + off, bytes.len - off);
         if (r <= 0) return;
         off += @intCast(r);
     }
@@ -128,32 +141,39 @@ fn nthPane(sess: *session.Session, n: usize) ?PaneRef {
 /// Accept one pending connection and serve one request. Returns true when the
 /// command changed layout/focus (caller should clear + full-redraw).
 pub fn accept(
-    listen_fd: c.fd_t,
+    listen_fd: sys.fd_t,
     sess: *session.Session,
     shell: []const u8,
     env: [*:null]const ?[*:0]const u8,
     alloc: std.mem.Allocator,
 ) bool {
-    const conn = pty.cloexecUnderLock(c.accept, .{ listen_fd, null, null });
+    const conn = if (sys.is_windows)
+        (sys.acceptConn(listen_fd) catch return false)
+    else
+        pty.cloexecUnderLock(c.accept, .{ listen_fd, null, null });
     if (conn < 0) return false;
-    defer _ = c.close(conn);
+    defer _ = sys.close(conn);
 
     // Don't let a stalled client wedge the UI loop.
-    const tv = c.timeval{ .sec = 0, .usec = 500_000 };
-    _ = c.setsockopt(conn, c.SOL.SOCKET, c.SO.RCVTIMEO, @ptrCast(&tv), @sizeOf(c.timeval));
+    if (sys.is_windows) {
+        sys.setSockTimeouts(conn, 500, 0);
+    } else {
+        const tv = c.timeval{ .sec = 0, .usec = 500_000 };
+        _ = c.setsockopt(conn, c.SOL.SOCKET, c.SO.RCVTIMEO, @ptrCast(&tv), @sizeOf(c.timeval));
+    }
 
     return handle(conn, sess, shell, env, alloc) catch false;
 }
 
 fn handle(
-    conn: c.fd_t,
+    conn: sys.fd_t,
     sess: *session.Session,
     shell: []const u8,
     env: [*:null]const ?[*:0]const u8,
     alloc: std.mem.Allocator,
 ) !bool {
     var buf: [65536]u8 = undefined;
-    const n = posix.read(conn, &buf) catch return false;
+    const n = sys.read(conn, &buf) catch return false;
     if (n == 0) return false;
     var ln = n;
     while (ln > 0 and (buf[ln - 1] == '\n' or buf[ln - 1] == '\r')) ln -= 1;
@@ -266,7 +286,7 @@ const PaneInfo = struct {
     cwd: []const u8,
 };
 
-fn doList(conn: c.fd_t, sess: *session.Session, alloc: std.mem.Allocator) !void {
+fn doList(conn: sys.fd_t, sess: *session.Session, alloc: std.mem.Allocator) !void {
     var infos: std.ArrayList(PaneInfo) = .empty;
     defer infos.deinit(alloc);
     var flat: usize = 0;
@@ -295,7 +315,7 @@ fn doList(conn: c.fd_t, sess: *session.Session, alloc: std.mem.Allocator) !void 
 /// when the shell is up (Pane.setBootCommand — spawn-time typing races zsh's
 /// TCSAFLUSH tty init). Shared by both protocol front-ends.
 fn doSplit(
-    conn: c.fd_t,
+    conn: sys.fd_t,
     sess: *session.Session,
     shell: []const u8,
     env: [*:null]const ?[*:0]const u8,
@@ -322,7 +342,7 @@ fn doSplit(
 }
 
 /// `{"ok":true,"pane":N}` — serialized, never hand-formatted (JSON-IN-FMT).
-fn writePaneOk(conn: c.fd_t, alloc: std.mem.Allocator, pane: usize) void {
+fn writePaneOk(conn: sys.fd_t, alloc: std.mem.Allocator, pane: usize) void {
     const json = std.json.Stringify.valueAlloc(alloc, .{ .ok = true, .pane = pane }, .{}) catch {
         cwrite(conn, "{\"ok\":true}\n");
         return;
@@ -337,7 +357,7 @@ fn writePaneOk(conn: c.fd_t, alloc: std.mem.Allocator, pane: usize) void {
 /// {"cmd":"capture","pane":0,"lines":100,"escapes":true}, plus
 /// list/enter/focus/kill/new-window mirroring the line protocol.
 fn handleJson(
-    conn: c.fd_t,
+    conn: sys.fd_t,
     line: []const u8,
     sess: *session.Session,
     shell: []const u8,
@@ -543,7 +563,7 @@ fn appendSgr(out: *std.ArrayList(u8), alloc: std.mem.Allocator, cell: *const ter
 
 /// The pane's content as text: the last `hist_lines` scrollback rows, then the
 /// live grid. `escapes` preserves colors/attrs as SGR.
-pub fn writeCapture(conn: c.fd_t, pane: *session.Pane, alloc: std.mem.Allocator, hist_lines: usize, escapes: bool) !void {
+pub fn writeCapture(conn: sys.fd_t, pane: *session.Pane, alloc: std.mem.Allocator, hist_lines: usize, escapes: bool) !void {
     const term = &pane.terminal;
     const grid = term.getCurrentGrid();
     var out: std.ArrayList(u8) = .empty;
