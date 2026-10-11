@@ -17,15 +17,34 @@ const SCREENWIDTH = defs.SCREENWIDTH;
 const SCREENHEIGHT = defs.SCREENHEIGHT;
 const SCREENSIZE = defs.SCREENSIZE;
 
-const c = @cImport({
-    @cInclude("termios.h");
-    @cInclude("unistd.h");
-    @cInclude("fcntl.h");
-    @cInclude("sys/ioctl.h");
-    @cInclude("signal.h");
-    @cInclude("time.h");
-    @cInclude("string.h");
-});
+// Hand bindings over std.c (Zig 0.17 removed @cImport); names follow the C headers.
+const c = struct {
+    const termios = std.c.termios;
+    const timespec = std.c.timespec;
+    const mode_t = std.c.mode_t;
+    /// <sys/ioctl.h> struct winsize (identical layout on macOS and Linux).
+    const winsize = extern struct { ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16 };
+    const TIOCGWINSZ: c_int = @intCast(std.c.T.IOCGWINSZ);
+    const TCSAFLUSH = std.c.TCSA.FLUSH;
+    const F_GETFL = std.c.F.GETFL;
+    const F_SETFL = std.c.F.SETFL;
+    const CLOCK_MONOTONIC = std.c.CLOCK.MONOTONIC;
+    const SIGINT: c_int = 2; // same value on macOS and Linux
+    const SIGTERM: c_int = 15;
+    const write = std.c.write;
+    const read = std.c.read;
+    const close = std.c.close;
+    const fcntl = std.c.fcntl;
+    const ioctl = std.c.ioctl;
+    const tcgetattr = std.c.tcgetattr;
+    const tcsetattr = std.c.tcsetattr;
+    const clock_gettime = std.c.clock_gettime;
+    const nanosleep = std.c.nanosleep;
+    extern "c" fn signal(sig: c_int, handler: ?*const fn (c_int) callconv(.c) void) ?*const fn (c_int) callconv(.c) void;
+    fn raise(sig: c_int) c_int {
+        return std.c.raise(@enumFromInt(sig));
+    }
+};
 
 /// Maximum output buffer size for one frame.
 /// Truecolor cells cost ~38 bytes (two `\x1b[38;2;r;g;bm`-style escapes) + the
@@ -55,7 +74,7 @@ const TuiState = struct {
     render_rows: u32 = 50, // 100 pixel rows / 2 = 50 cells, but capped to terminal
 
     // Palette mapping
-    palette_cache: PaletteCache = [_]u8{0} ** 256,
+    palette_cache: PaletteCache = @splat(0),
     palette_valid: bool = false,
 
     // 24-bit truecolor output (exact DOOM palette) vs xterm-256 quantization.
@@ -81,8 +100,8 @@ const TuiState = struct {
     // Synthetic key-hold tracking. A terminal only delivers key *presses*
     // (auto-repeated bytes while held), never releases. We treat a key as held
     // while its bytes keep arriving and release it after KEY_HOLD_MS of silence.
-    key_down: [256]bool = [_]bool{false} ** 256,
-    key_seen_ms: [256]i64 = [_]i64{0} ** 256,
+    key_down: [256]bool = @splat(false),
+    key_seen_ms: [256]i64 = @splat(0),
 
     // Video initialized flag
     video_init: bool = false,
@@ -407,12 +426,19 @@ fn tuiInitVideo(ctx: *anyopaque, _: u32, _: u32) bool {
 
     // Enter raw mode
     var raw = state.orig_termios;
-    raw.c_iflag &= ~@as(c.tcflag_t, @intCast(c.BRKINT | c.ICRNL | c.INPCK | c.ISTRIP | c.IXON));
-    raw.c_oflag &= ~@as(c.tcflag_t, @intCast(c.OPOST));
-    raw.c_cflag |= @as(c.tcflag_t, @intCast(c.CS8));
-    raw.c_lflag &= ~@as(c.tcflag_t, @intCast(c.ECHO | c.ICANON | c.IEXTEN | c.ISIG));
-    raw.c_cc[c.VMIN] = 0;
-    raw.c_cc[c.VTIME] = 0;
+    raw.iflag.BRKINT = false;
+    raw.iflag.ICRNL = false;
+    raw.iflag.INPCK = false;
+    raw.iflag.ISTRIP = false;
+    raw.iflag.IXON = false;
+    raw.oflag.OPOST = false;
+    raw.cflag.CSIZE = .CS8; // CS8 sets both CSIZE bits, so `|= CS8` was this
+    raw.lflag.ECHO = false;
+    raw.lflag.ICANON = false;
+    raw.lflag.IEXTEN = false;
+    raw.lflag.ISIG = false;
+    raw.cc[@intFromEnum(std.c.V.MIN)] = 0;
+    raw.cc[@intFromEnum(std.c.V.TIME)] = 0;
     _ = c.tcsetattr(0, c.TCSAFLUSH, &raw);
     state.raw_mode_active = true;
 
@@ -443,8 +469,8 @@ fn tuiInitVideo(ctx: *anyopaque, _: u32, _: u32) bool {
     // Initialize timer
     var ts: c.timespec = undefined;
     _ = c.clock_gettime(c.CLOCK_MONOTONIC, &ts);
-    state.start_time_s = ts.tv_sec;
-    state.start_time_ns = ts.tv_nsec;
+    state.start_time_s = ts.sec;
+    state.start_time_ns = ts.nsec;
 
     state.video_init = true;
     return true;
@@ -490,7 +516,7 @@ fn tuiFinishUpdate(ctx: *anyopaque, screen: *const [SCREENSIZE]u8, palette: *con
             if (b != 0) pal_nonzero += 1;
         }
         // Also count unique palette indices used in screen
-        var idx_used: [256]bool = [_]bool{false} ** 256;
+        var idx_used: [256]bool = @splat(false);
         for (screen) |px| {
             idx_used[px] = true;
         }
@@ -532,8 +558,9 @@ fn tuiFinishUpdate(ctx: *anyopaque, screen: *const [SCREENSIZE]u8, palette: *con
         dbg2[dp2] = '\n';
         dp2 += 1;
         const dbg_path = "/tmp/doom_debug.txt";
-        const flags = if (state.frame_count == 0) c.O_WRONLY | c.O_CREAT | c.O_TRUNC else c.O_WRONLY | c.O_CREAT | c.O_APPEND;
-        const fd = c.open(dbg_path, flags, @as(c.mode_t, 0o644));
+        const first = state.frame_count == 0;
+        const flags: std.c.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = first, .APPEND = !first };
+        const fd = std.c.open(dbg_path, flags, @as(c.mode_t, 0o644));
         if (fd >= 0) {
             _ = c.write(fd, &dbg2, dp2);
             _ = c.close(fd);
@@ -656,8 +683,8 @@ fn tuiSetPalette(ctx: *anyopaque, _: *const [768]u8) void {
 fn nowMs(state: *const TuiState) i64 {
     var ts: c.timespec = undefined;
     _ = c.clock_gettime(c.CLOCK_MONOTONIC, &ts);
-    const s: i64 = @as(i64, ts.tv_sec) - state.start_time_s;
-    const ns: i64 = @as(i64, ts.tv_nsec) - state.start_time_ns;
+    const s: i64 = @as(i64, ts.sec) - state.start_time_s;
+    const ns: i64 = @as(i64, ts.nsec) - state.start_time_ns;
     return s * 1000 + @divTrunc(ns, 1_000_000);
 }
 
@@ -764,8 +791,8 @@ fn tuiGetTics(ctx: *anyopaque) u32 {
     var ts: c.timespec = undefined;
     _ = c.clock_gettime(c.CLOCK_MONOTONIC, &ts);
 
-    const elapsed_s: i64 = ts.tv_sec - state.start_time_s;
-    const elapsed_ns: i64 = ts.tv_nsec - state.start_time_ns;
+    const elapsed_s: i64 = ts.sec - state.start_time_s;
+    const elapsed_ns: i64 = ts.nsec - state.start_time_ns;
     const elapsed_ms: u64 = @intCast(elapsed_s * 1000 + @divTrunc(elapsed_ns, 1_000_000));
 
     // Convert to 35 Hz tics
@@ -792,8 +819,8 @@ fn tuiUpdateSound(_: *anyopaque) void {}
 
 fn tuiSleep(_: *anyopaque, ms: u32) void {
     var ts: c.timespec = undefined;
-    ts.tv_sec = @intCast(ms / 1000);
-    ts.tv_nsec = @intCast(@as(u64, ms % 1000) * 1_000_000);
+    ts.sec = @intCast(ms / 1000);
+    ts.nsec = @intCast(@as(u64, ms % 1000) * 1_000_000);
     _ = c.nanosleep(&ts, null);
 }
 

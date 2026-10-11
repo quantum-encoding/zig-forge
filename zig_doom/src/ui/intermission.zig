@@ -71,7 +71,7 @@ pub const Intermission = struct {
     sp_secret_patch: ?usize = null,
     time_patch: ?usize = null,
     par_patch: ?usize = null,
-    num_patches: [10]?usize = [_]?usize{null} ** 10,
+    num_patches: [10]?usize = @splat(null),
 
     /// Initialize and start the intermission with level stats
     pub fn start(self: *Intermission, stats: LevelStats, w: *const Wad) void {

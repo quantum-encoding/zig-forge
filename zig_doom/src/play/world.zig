@@ -57,7 +57,7 @@ pub fn reset() void {
 pub fn playSound(origin: ?*anyopaque, sfx_index: i32) void {
     const snd = sound orelse return;
     if (sfx_index <= 0) return;
-    const count = @typeInfo(sound_defs.SfxId).@"enum".fields.len;
+    const count = std.meta.fieldNames(sound_defs.SfxId).len; // 0.17 reshaped Type.Enum; this spelling works on both
     if (sfx_index >= count) return;
     snd.startSound(origin, @enumFromInt(@as(u16, @intCast(sfx_index))));
 }

@@ -6,9 +6,12 @@
 
 const std = @import("std");
 const defs = @import("defs.zig");
-const c = @cImport({
-    @cInclude("stdio.h");
-});
+// Hand bindings over std.c (Zig 0.17 removed @cImport); names follow <stdio.h>.
+const c = struct {
+    const fopen = std.c.fopen;
+    const fclose = std.c.fclose;
+    const fwrite = std.c.fwrite;
+};
 
 pub const SCREENWIDTH = defs.SCREENWIDTH;
 pub const SCREENHEIGHT = defs.SCREENHEIGHT;
@@ -48,7 +51,7 @@ pub const VideoState = struct {
 
     /// Write screen as PPM file
     pub fn writePPM(self: *const VideoState, screen_num: usize, path: []const u8, alloc: std.mem.Allocator) bool {
-        const path_z = alloc.dupeZ(u8, path) catch return false;
+        const path_z = alloc.dupeSentinel(u8, path, 0) catch return false;
         defer alloc.free(path_z);
 
         const file = c.fopen(path_z.ptr, "wb") orelse return false;

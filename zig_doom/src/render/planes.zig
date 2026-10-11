@@ -38,8 +38,8 @@ pub const Visplane = struct {
             .lightlevel = 0,
             .minx = SCREENWIDTH,
             .maxx = -1,
-            .top = [_]u16{MAXOPENHEIGHT} ** SCREENWIDTH,
-            .bottom = [_]u16{0} ** SCREENWIDTH,
+            .top = @as([SCREENWIDTH]u16, @splat(MAXOPENHEIGHT)),
+            .bottom = @as([SCREENWIDTH]u16, @splat(0)),
         };
     }
 };
@@ -53,7 +53,7 @@ pub const PlaneState = struct {
     ceilingplane: ?usize = null,
 
     // Span rendering state
-    spanstart: [SCREENHEIGHT]i32 = [_]i32{0} ** SCREENHEIGHT,
+    spanstart: [SCREENHEIGHT]i32 = @splat(0),
 
     // Sky flat number
     skyflatnum: i32 = -1,

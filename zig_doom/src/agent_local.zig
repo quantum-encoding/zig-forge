@@ -197,11 +197,11 @@ pub fn plan(level: *const setup.Level, start: Point, floor: f64, goal: Point, ou
     const oy = @floor((start[1] - WINDOW) / CELL) * CELL;
     const S = struct {
         // 0 unknown, 1 usable, 2 not.
-        state: [CELLS]u8 = [_]u8{0} ** CELLS,
+        state: [CELLS]u8 = @splat(0),
         floor: [CELLS]f64 = undefined,
         g: [CELLS]f64 = undefined,
         parent: [CELLS]i32 = undefined,
-        closed: [CELLS]bool = [_]bool{false} ** CELLS,
+        closed: [CELLS]bool = @splat(false),
     };
     var st: S = .{};
     @memset(&st.g, std.math.inf(f64));

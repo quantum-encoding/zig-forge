@@ -12,9 +12,15 @@ const defs = @import("../defs.zig");
 const user = @import("user.zig");
 const TicCmd = user.TicCmd;
 
-const c = @cImport({
-    @cInclude("stdio.h");
-});
+// Hand bindings over std.c (Zig 0.17 removed @cImport); names follow <stdio.h>.
+const c = struct {
+    /// Takes the raw pointer exactly as the C prototype did (callers pass `path.ptr`).
+    fn fopen(path: [*]const u8, mode: [*:0]const u8) ?*std.c.FILE {
+        return std.c.fopen(@ptrCast(path), mode);
+    }
+    const fclose = std.c.fclose;
+    const fwrite = std.c.fwrite;
+};
 
 const MAXPLAYERS = defs.MAXPLAYERS;
 const DEMO_VERSION: u8 = 109; // DOOM 1.9
@@ -42,7 +48,7 @@ pub const DemoState = struct {
     fast: bool = false,
     nomonsters: bool = false,
     consoleplayer: u8 = 0,
-    player_in_game: [MAXPLAYERS]bool = [_]bool{false} ** MAXPLAYERS,
+    player_in_game: [MAXPLAYERS]bool = @splat(false),
 
     // Recording buffer
     rec_buffer: ?RecBuffer = null,
@@ -177,8 +183,7 @@ pub const DemoState = struct {
             // Append end marker
             // Need a temporary allocator — use the ArrayList's internal one
             // Since we can't easily get it, just use C file I/O
-            const f = c.fopen(path.ptr, "wb");
-            if (f == null) return false;
+            const f = c.fopen(path.ptr, "wb") orelse return false;
             defer _ = c.fclose(f);
 
             const items = buf.data.items;
