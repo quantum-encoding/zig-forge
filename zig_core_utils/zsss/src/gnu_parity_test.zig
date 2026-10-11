@@ -238,8 +238,10 @@ test "PNG: absurd IHDR dimensions rejected before allocation (overflow fix)" {
 
     // Well-formed chunk framing, but IHDR width/height = 0x40000000 each. The
     // pre-fix decodePng computed width*height*bpp and could overflow usize /
-    // demand an enormous allocation. Must reject as InvalidPng.
-    var buf: [33]u8 = undefined;
+    // demand an enormous allocation. Must reject as InvalidPng. Chunk CRCs are
+    // verified since 2026-10-11 and IEND is required, so the IHDR carries its
+    // real CRC and an IEND follows: the refusal below is the dimension check.
+    var buf: [45]u8 = undefined;
     @memcpy(buf[0..8], &PNG_SIG);
     buf[8] = 0;
     buf[9] = 0;
@@ -261,7 +263,10 @@ test "PNG: absurd IHDR dimensions rejected before allocation (overflow fix)" {
     buf[26] = 0; // compression
     buf[27] = 0; // filter
     buf[28] = 0; // interlace
-    @memset(buf[29..33], 0); // CRC (unchecked)
+    std.mem.writeInt(u32, buf[29..33], std.hash.Crc32.hash(buf[12..29]), .big); // IHDR CRC
+    @memset(buf[33..37], 0); // IEND length 0
+    @memcpy(buf[37..41], "IEND");
+    std.mem.writeInt(u32, buf[41..45], std.hash.Crc32.hash("IEND"), .big); // = 0xAE426082
 
     try testing.expectError(stego.StegoError.InvalidPng, stego.decodePng(allocator, &buf));
 }

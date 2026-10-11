@@ -26,6 +26,16 @@
 const std = @import("std");
 const testing = std.testing;
 const stego = @import("stego.zig");
+const lib = @import("lib.zig");
+
+/// The C ABI as a consumer sees it. lib.zig's `export fn`s are not `pub`, so they are
+/// reached here exactly as Swift and Rust reach them: by symbol.
+const c = struct {
+    extern fn zsss_init() void;
+    extern fn zsss_free(buf: lib.ZsssBuffer) void;
+    extern fn zsss_stego_embed(png: [*]const u8, pl: usize, d: [*]const u8, dl: usize, pw: ?[*]const u8, pwl: usize, layer: i16) lib.ZsssBuffer;
+    extern fn zsss_stego_extract(png: [*]const u8, pl: usize, pw: ?[*]const u8, pwl: usize, layer: i16) lib.ZsssBuffer;
+};
 
 const zlib_bomb = @embedFile("zlib_bomb");
 const png_gradient = @embedFile("png_gradient");
@@ -386,7 +396,8 @@ test "PNG: a chunk length overrunning the file by one byte or by 2^32-1 is refus
     var over = try plainPng(a, 16, 128);
     defer a.free(over);
     std.mem.writeInt(u32, over[8..12], 14, .big); // IHDR claims 14 bytes, file holds 13
-    try testing.expectError(stego.StegoError.InvalidPng, stego.decodePng(a, over));
+    // In bounds, so the CRC is the check that fires: it no longer sits where the length says.
+    try testing.expectError(stego.StegoError.PngCrcMismatch, stego.decodePng(a, over));
     std.mem.writeInt(u32, over[8..12], 0xffffffff, .big);
     try testing.expectError(stego.StegoError.InvalidPng, stego.decodePng(a, over));
     try testing.expectError(stego.StegoError.InvalidPng, stego.getPngDimensions(over));
@@ -482,4 +493,267 @@ test "E-3: a stego header claiming a payload near 2^32 bytes is refused as corru
     const one = try stego.extractFromPixels(a, pixels, null);
     defer a.free(one);
     try testing.expectEqual(@as(usize, 1), one.len);
+}
+
+// =============================================================================
+// E-4 / E-5: distinct error codes at the C ABI; CRC, Adler-32, bit depth and interlace
+// =============================================================================
+
+fn extractCode(png: []const u8, password: ?[]const u8, layer: i16) i32 {
+    const pw_ptr: ?[*]const u8 = if (password) |p| p.ptr else null;
+    const pw_len: usize = if (password) |p| p.len else 0;
+    const r = c.zsss_stego_extract(png.ptr, png.len, pw_ptr, pw_len, layer);
+    defer c.zsss_free(r);
+    return r.error_code;
+}
+
+fn embedCode(png: []const u8, data: []const u8, password: ?[]const u8, layer: i16) i32 {
+    const pw_ptr: ?[*]const u8 = if (password) |p| p.ptr else null;
+    const pw_len: usize = if (password) |p| p.len else 0;
+    const r = c.zsss_stego_embed(png.ptr, png.len, data.ptr, data.len, pw_ptr, pw_len, layer);
+    defer c.zsss_free(r);
+    return r.error_code;
+}
+
+test "E-4: embed/extract round-trip through the C ABI, plain, with password, and on a layer" {
+    c.zsss_init();
+    const a = testing.allocator;
+    // A layer uses every 256th pixel byte, so the layered case needs a 512x512 carrier
+    // (786,432 / 256 = 3072 bits for a 448-bit header + payload).
+    const png = try plainPng(a, 64, 128);
+    defer a.free(png);
+    const png512 = try plainPng(a, 512, 128);
+    defer a.free(png512);
+    const payload = "campaign 2026-10-11";
+    const cases = [_]struct { pw: ?[]const u8, layer: i16, carrier: []const u8 }{
+        .{ .pw = null, .layer = -1, .carrier = png },
+        .{ .pw = "correct horse", .layer = -1, .carrier = png },
+        .{ .pw = "correct horse", .layer = 0, .carrier = png512 },
+        .{ .pw = null, .layer = 255, .carrier = png512 },
+    };
+    for (cases) |cs| {
+        const pw_ptr: ?[*]const u8 = if (cs.pw) |p| p.ptr else null;
+        const pw_len: usize = if (cs.pw) |p| p.len else 0;
+        const emb = c.zsss_stego_embed(cs.carrier.ptr, cs.carrier.len, payload, payload.len, pw_ptr, pw_len, cs.layer);
+        defer c.zsss_free(emb);
+        try testing.expectEqual(lib.ZSSS_OK, emb.error_code);
+        const out = c.zsss_stego_extract(emb.data.?, emb.len, pw_ptr, pw_len, cs.layer);
+        defer c.zsss_free(out);
+        try testing.expectEqual(lib.ZSSS_OK, out.error_code);
+        try testing.expectEqualStrings(payload, out.data.?[0..out.len]);
+    }
+}
+
+test "E-4: each distinct stego failure has its own code at the C ABI" {
+    c.zsss_init();
+    const a = testing.allocator;
+    const good = try plainPng(a, 64, 128);
+    defer a.free(good);
+    const z = try zlibStored(a, &[_]u8{ 0, 1, 2, 3 });
+    defer a.free(z);
+
+    // Not a PNG: bad signature, truncated file, corrupt zlib stream -> INVALID_PNG.
+    var bad_sig = try a.dupe(u8, good);
+    defer a.free(bad_sig);
+    bad_sig[0] = 0x88;
+    try testing.expectEqual(lib.ZSSS_ERR_INVALID_PNG, extractCode(bad_sig, null, -1));
+    try testing.expectEqual(lib.ZSSS_ERR_INVALID_PNG, embedCode(bad_sig, "x", null, -1));
+    try testing.expectEqual(lib.ZSSS_ERR_INVALID_PNG, extractCode(good[0 .. good.len - 5], null, -1));
+    const cut = try buildPng(a, &ihdr(64, 64, 8, 2), z, true); // stream far too short
+    defer a.free(cut);
+    try testing.expectEqual(lib.ZSSS_ERR_INVALID_PNG, extractCode(cut, null, -1));
+    try testing.expectEqual(lib.ZSSS_ERR_INVALID_PNG, embedCode(cut, "x", null, -1));
+
+    // Unsupported: 16-bit samples, Adam7 interlace -> PNG_UNSUPPORTED, on both sides.
+    const deep = try buildPng(a, &ihdr(64, 64, 16, 2), z, true);
+    defer a.free(deep);
+    try testing.expectEqual(lib.ZSSS_ERR_PNG_UNSUPPORTED, extractCode(deep, null, -1));
+    try testing.expectEqual(lib.ZSSS_ERR_PNG_UNSUPPORTED, embedCode(deep, "x", null, -1));
+    const adam7 = try buildPng(a, &ihdrFull(64, 64, 8, 2, 1), z, true);
+    defer a.free(adam7);
+    try testing.expectEqual(lib.ZSSS_ERR_PNG_UNSUPPORTED, extractCode(adam7, null, -1));
+    try testing.expectEqual(lib.ZSSS_ERR_PNG_UNSUPPORTED, embedCode(adam7, "x", null, -1));
+
+    // Too small: 4x4 RGB holds 48 pixel bytes, a header needs 296 -> IMAGE_TOO_SMALL.
+    const tiny = try plainPng(a, 4, 128);
+    defer a.free(tiny);
+    try testing.expectEqual(lib.ZSSS_ERR_IMAGE_TOO_SMALL, extractCode(tiny, null, -1));
+    try testing.expectEqual(lib.ZSSS_ERR_IMAGE_TOO_SMALL, embedCode(tiny, "x", null, -1));
+    // A 64x64 RGB carrier holds (12288/3*3)/8 - 37 = 1499 bytes; 1500 is one too many.
+    const too_much = try a.alloc(u8, 1500);
+    defer a.free(too_much);
+    @memset(too_much, 'x');
+    try testing.expectEqual(lib.ZSSS_ERR_IMAGE_TOO_SMALL, embedCode(good, too_much, null, -1));
+    try testing.expectEqual(lib.ZSSS_OK, embedCode(good, too_much[0..1499], null, -1));
+
+    // No hidden data: a clean, valid carrier -> INVALID_MAGIC.
+    try testing.expectEqual(lib.ZSSS_ERR_INVALID_MAGIC, extractCode(good, null, -1));
+    try testing.expectEqual(lib.ZSSS_ERR_INVALID_MAGIC, extractCode(good, "pw", -1));
+    // On a layer the same 64x64 carrier has 48 usable pixel bytes: too small, not "no data".
+    try testing.expectEqual(lib.ZSSS_ERR_IMAGE_TOO_SMALL, extractCode(good, "pw", 3));
+    const good512 = try plainPng(a, 512, 128);
+    defer a.free(good512);
+    try testing.expectEqual(lib.ZSSS_ERR_INVALID_MAGIC, extractCode(good512, "pw", 3));
+
+    // Integrity: a flipped chunk CRC, a flipped Adler-32 -> PNG_CRC_MISMATCH.
+    var bad_crc = try a.dupe(u8, good);
+    defer a.free(bad_crc);
+    bad_crc[8 + 8 + 13] ^= 0x01; // IHDR CRC, first byte
+    try testing.expectEqual(lib.ZSSS_ERR_PNG_CRC_MISMATCH, extractCode(bad_crc, null, -1));
+    try testing.expectEqual(lib.ZSSS_ERR_PNG_CRC_MISMATCH, embedCode(bad_crc, "x", null, -1));
+    const raw = try filteredRows(a, 16, 3, 128);
+    defer a.free(raw);
+    var zz = try zlibStored(a, raw);
+    defer a.free(zz);
+    zz[zz.len - 1] ^= 0xff; // Adler-32 trailer; the chunk CRC is recomputed by buildPng
+    const bad_adler = try buildPng(a, &ihdr(16, 16, 8, 2), zz, true);
+    defer a.free(bad_adler);
+    try testing.expectEqual(lib.ZSSS_ERR_PNG_CRC_MISMATCH, extractCode(bad_adler, null, -1));
+    try testing.expectEqual(lib.ZSSS_ERR_PNG_CRC_MISMATCH, embedCode(bad_adler, "x", null, -1));
+
+    // Over the decode budget -> PNG_TOO_LARGE.
+    const huge = try buildPng(a, &ihdr(65536, 65536, 8, 6), z, true);
+    defer a.free(huge);
+    try testing.expectEqual(lib.ZSSS_ERR_PNG_TOO_LARGE, extractCode(huge, null, -1));
+    try testing.expectEqual(lib.ZSSS_ERR_PNG_TOO_LARGE, embedCode(huge, "x", null, -1));
+
+    // Header found but impossible: magic + version 1 + data_len 2^32-1, and magic + version 2
+    // -> STEGO_CORRUPTED, not "no hidden data".
+    const header_variants = [_]struct { version: u8, len: u32 }{ .{ .version = 1, .len = 0xFFFFFFFF }, .{ .version = 2, .len = 1 } };
+    for (header_variants) |hv| {
+        var hdr: [stego.HEADER_SIZE]u8 = .{0} ** stego.HEADER_SIZE;
+        @memcpy(hdr[0..4], "ZSSS");
+        hdr[4] = hv.version;
+        std.mem.writeInt(u32, hdr[5..9], hv.len, .little);
+        // No password, no layer: bit i of the header is pixel byte i. Rows of the
+        // 16x16 RGB stream are 1 filter byte + 48 pixel bytes, so map p to row and column.
+        var fixed = try filteredRows(a, 16, 3, 0x80);
+        defer a.free(fixed);
+        for (hdr, 0..) |byte, i| {
+            for (0..8) |b| {
+                const bit: u8 = (byte >> @intCast(7 - b)) & 1;
+                const p = i * 8 + b;
+                fixed[(p / 48) * 49 + 1 + (p % 48)] = 0x80 | bit;
+            }
+        }
+        const zc = try zlibStored(a, fixed);
+        defer a.free(zc);
+        const corrupt = try buildPng(a, &ihdr(16, 16, 8, 2), zc, true);
+        defer a.free(corrupt);
+        try testing.expectEqual(lib.ZSSS_ERR_STEGO_CORRUPTED, extractCode(corrupt, null, -1));
+    }
+
+    // Tampered ciphertext: the header survives, AES-GCM refuses -> DECRYPTION_FAILED.
+    const big = try plainPng(a, 128, 128);
+    defer a.free(big);
+    const secret = try a.alloc(u8, 2000);
+    defer a.free(secret);
+    @memset(secret, 's');
+    const emb = c.zsss_stego_embed(big.ptr, big.len, secret.ptr, secret.len, "pw", 2, -1);
+    defer c.zsss_free(emb);
+    try testing.expectEqual(lib.ZSSS_OK, emb.error_code);
+    var img = try stego.decodePng(a, emb.data.?[0..emb.len]);
+    defer img.deinit();
+    var saw_decrypt_failed = false;
+    var k: usize = 0;
+    while (k < 64 and !saw_decrypt_failed) : (k += 1) {
+        img.pixels[k] ^= 1;
+        const re = try stego.encodePng(a, &img);
+        defer a.free(re);
+        const code = extractCode(re, "pw", -1);
+        img.pixels[k] ^= 1;
+        switch (code) {
+            lib.ZSSS_ERR_DECRYPTION_FAILED => saw_decrypt_failed = true,
+            lib.ZSSS_ERR_INVALID_MAGIC, lib.ZSSS_ERR_STEGO_CORRUPTED, lib.ZSSS_OK => {}, // hit the header, or an unused pixel
+            else => return error.UnexpectedCode,
+        }
+    }
+    try testing.expect(saw_decrypt_failed);
+}
+
+test "E-5: an external encoder's CRCs and Adler-32 are accepted; each flipped one is refused" {
+    // Positive anchor: the CPython-zlib gradient (every CRC and the Adler-32 computed by zlib).
+    var img = try stego.decodePng(testing.allocator, png_gradient);
+    img.deinit();
+    const a = testing.allocator;
+    // IHDR CRC, IDAT CRC, IEND CRC: one bit each.
+    const ihdr_crc = 8 + 8 + 13;
+    const idat_len = std.mem.readInt(u32, png_gradient[33..37], .big);
+    const idat_crc = 33 + 8 + idat_len;
+    const iend_crc = idat_crc + 4 + 8;
+    try testing.expectEqual(png_gradient.len, iend_crc + 4);
+    for ([_]usize{ ihdr_crc, idat_crc, iend_crc }) |off| {
+        var bad = try a.dupe(u8, png_gradient);
+        defer a.free(bad);
+        bad[off + 3] ^= 0x80;
+        try testing.expectError(stego.StegoError.PngCrcMismatch, stego.decodePng(a, bad));
+    }
+    // Adler-32 alone (the chunk CRC re-sealed over the damaged trailer).
+    var bad_adler = try a.dupe(u8, png_gradient);
+    defer a.free(bad_adler);
+    bad_adler[idat_crc - 1] ^= 0x01;
+    std.mem.writeInt(u32, bad_adler[idat_crc..][0..4], std.hash.Crc32.hash(bad_adler[33 + 4 .. idat_crc]), .big);
+    try testing.expectError(stego.StegoError.PngCrcMismatch, stego.decodePng(a, bad_adler));
+}
+
+test "E-5: 16-bit, interlaced and indexed carriers are refused on embed instead of re-encoded as garbage" {
+    const a = testing.allocator;
+    // 8x8, 16-bit RGB: 8 rows of 1 + 8*6 bytes. Refused on the IHDR, so the stream is never read.
+    const raw16 = try a.alloc(u8, 8 * (1 + 8 * 6));
+    defer a.free(raw16);
+    @memset(raw16, 0);
+    const z16 = try zlibStored(a, raw16);
+    defer a.free(z16);
+    const deep = try buildPng(a, &ihdr(8, 8, 16, 2), z16, true);
+    defer a.free(deep);
+    try testing.expectError(stego.StegoError.UnsupportedPng, stego.embedInPng(a, deep, "x", null));
+    try testing.expectError(stego.StegoError.UnsupportedPng, stego.decodePng(a, deep));
+
+    const raw8 = try filteredRows(a, 16, 3, 0);
+    defer a.free(raw8);
+    const z8 = try zlibStored(a, raw8);
+    defer a.free(z8);
+    const adam7 = try buildPng(a, &ihdrFull(16, 16, 8, 2, 1), z8, true);
+    defer a.free(adam7);
+    try testing.expectError(stego.StegoError.UnsupportedPng, stego.embedInPng(a, adam7, "x", null));
+    const bad_interlace = try buildPng(a, &ihdrFull(16, 16, 8, 2, 2), z8, true);
+    defer a.free(bad_interlace);
+    try testing.expectError(stego.StegoError.InvalidPng, stego.decodePng(a, bad_interlace));
+
+    // Indexed (colour type 3): decodes (one byte per pixel) but cannot carry data, since
+    // encodePng would drop its PLTE.
+    const rawi = try filteredRows(a, 32, 1, 7);
+    defer a.free(rawi);
+    const zi = try zlibStored(a, rawi);
+    defer a.free(zi);
+    const indexed = try buildPng(a, &ihdr(32, 32, 8, 3), zi, true);
+    defer a.free(indexed);
+    var img = try stego.decodePng(a, indexed);
+    defer img.deinit();
+    try testing.expectEqual(@as(usize, 32 * 32), img.pixels.len);
+    try testing.expectError(stego.StegoError.UnsupportedPng, stego.embedInPng(a, indexed, "x", null));
+
+    // Colour type 7 does not exist; compression or filter method 1 are undefined.
+    const ct7 = try buildPng(a, &ihdr(16, 16, 8, 7), z8, true);
+    defer a.free(ct7);
+    try testing.expectError(stego.StegoError.UnsupportedPng, stego.decodePng(a, ct7));
+    var h = ihdr(16, 16, 8, 2);
+    h[10] = 1;
+    const comp1 = try buildPng(a, &h, z8, true);
+    defer a.free(comp1);
+    try testing.expectError(stego.StegoError.InvalidPng, stego.decodePng(a, comp1));
+    h[10] = 0;
+    h[11] = 1;
+    const filt1 = try buildPng(a, &h, z8, true);
+    defer a.free(filt1);
+    try testing.expectError(stego.StegoError.InvalidPng, stego.decodePng(a, filt1));
+    // A scanline filter type outside 0..4 (PNG 1.2 §6.2).
+    var raw_f5 = try filteredRows(a, 16, 3, 0);
+    defer a.free(raw_f5);
+    raw_f5[0] = 5;
+    const zf5 = try zlibStored(a, raw_f5);
+    defer a.free(zf5);
+    const f5 = try buildPng(a, &ihdr(16, 16, 8, 2), zf5, true);
+    defer a.free(f5);
+    try testing.expectError(stego.StegoError.InvalidPng, stego.decodePng(a, f5));
 }

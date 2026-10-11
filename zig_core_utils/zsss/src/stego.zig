@@ -92,6 +92,12 @@ pub const StegoError = error{
     CorruptedData,
     /// The IHDR declares more pixels than the decode budget admits (MAX_PIXELS / MAX_DIM).
     ImageTooLarge,
+    /// A well-formed PNG this decoder does not handle: bit depth other than 8, Adam7
+    /// interlace, a colour type outside 0/2/3/4/6, or (on embed) an indexed carrier,
+    /// whose palette encodePng would drop.
+    UnsupportedPng,
+    /// A chunk CRC or the zlib Adler-32 does not match its data (PNG 1.2 §3.2, RFC 1950).
+    PngCrcMismatch,
 };
 
 /// Derive encryption key from password using HKDF-SHA256
@@ -674,6 +680,11 @@ pub fn decodePng(allocator: Allocator, data: []const u8) !PngImage {
         if (chunk_len > data.len - pos - 12) return StegoError.InvalidPng;
         const chunk_data = data[pos + 8 ..][0..chunk_len];
 
+        // Every chunk's CRC covers its type and data (PNG 1.2 §3.2). A chunk that fails
+        // it is damaged; until 2026-10-11 the field was written and never read (E-5).
+        const stored_crc = readU32BE(data[pos + 8 + chunk_len ..][0..4]);
+        if (stored_crc != crc32(data[pos + 4 ..][0 .. 4 + chunk_len])) return StegoError.PngCrcMismatch;
+
         if (mem.eql(u8, chunk_type, "IHDR")) {
             // Exactly one IHDR, first, 13 bytes (PNG 1.2 §4.1.1).
             if (header != null or chunk_len != 13) return StegoError.InvalidPng;
@@ -705,6 +716,20 @@ pub fn decodePng(allocator: Allocator, data: []const u8) !PngImage {
     const height = ihdr.height;
 
     if (width == 0 or height == 0) return StegoError.InvalidPng;
+
+    // Only compression method 0 and filter method 0 are defined (PNG 1.2 §4.1.1).
+    if (ihdr.compression != 0 or ihdr.filter != 0) return StegoError.InvalidPng;
+    // This decoder reads 8-bit, non-interlaced samples of the five defined colour types.
+    // bit_depth and interlace were read and never consulted until 2026-10-11 (E-5): a
+    // 16-bit or Adam7 carrier decoded to garbage and embed re-encoded the garbage under
+    // the original bit depth.
+    switch (ihdr.color_type) {
+        0, 2, 3, 4, 6 => {},
+        else => return StegoError.UnsupportedPng,
+    }
+    if (ihdr.bit_depth != 8) return StegoError.UnsupportedPng;
+    if (ihdr.interlace == 1) return StegoError.UnsupportedPng;
+    if (ihdr.interlace != 0) return StegoError.InvalidPng;
 
     // width/height are untrusted IHDR fields (each up to 2^32-1). Reject
     // absurd dimensions up front — before any decompression or allocation —
@@ -770,6 +795,15 @@ pub fn decodePng(allocator: Allocator, data: []const u8) !PngImage {
         else => return StegoError.PngDecompressError,
     }
 
+    // RFC 1950 §2.2: the trailer is the Adler-32 of the uncompressed data. std's
+    // Decompress stores it (EndOfStream above means the trailer was read) and leaves
+    // the comparison to the caller; a mismatch is a damaged or forged stream.
+    const stored_adler = switch (decompress_state.container_metadata) {
+        .zlib => |z| z.adler,
+        else => unreachable,
+    };
+    if (stored_adler != std.hash.Adler32.hash(filtered)) return StegoError.PngCrcMismatch;
+
     // Allocate pixel buffer
     const pixel_count = std.math.mul(usize, scanline_len, height) catch return StegoError.InvalidPng;
     const pixels = try allocator.alloc(u8, pixel_count);
@@ -799,7 +833,7 @@ pub fn decodePng(allocator: Allocator, data: []const u8) !PngImage {
                 2 => raw +% @as(u8, @intCast(@as(u16, @bitCast(b)) & 0xFF)), // Up
                 3 => raw +% @as(u8, @intCast((@as(u16, @bitCast(a)) + @as(u16, @bitCast(b))) / 2)), // Average
                 4 => raw +% paethPredictor(a, b, c), // Paeth
-                else => raw,
+                else => return StegoError.InvalidPng, // PNG 1.2 §6.2 defines 0..4 only
             };
         }
 
@@ -957,6 +991,11 @@ pub fn embedInPngWithLayer(
     // Decode PNG
     var image = try decodePng(allocator, png_data);
     defer image.deinit();
+
+    // encodePng writes IHDR, IDAT and IEND only. An indexed carrier (colour type 3)
+    // needs its PLTE, which would be dropped, and LSB changes to palette indices are
+    // visible: refuse it rather than emit an image no viewer can open.
+    if (image.color_type == 3) return StegoError.UnsupportedPng;
 
     // Embed data
     try embedInPixelsWithLayer(allocator, image.pixels, secret, password, layer_slot);

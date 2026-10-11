@@ -217,6 +217,15 @@ zsss ticket create --image nft_art.png --event "NFT-ACCESS" -c 1 --tier Owner -o
 | -18 | ZSSS_ERR_TICKET_INVALID | Invalid ticket data |
 | -19 | ZSSS_ERR_LAYER_OCCUPIED | Layer already has data |
 | -11 | ZSSS_ERR_IMAGE_TOO_SMALL | Image cannot hold ticket data |
+| -12 | ZSSS_ERR_INVALID_PNG | Not a PNG, truncated, or corrupt zlib stream |
+| -25 | ZSSS_ERR_PNG_UNSUPPORTED | 16-bit, interlaced or indexed carrier (needs 8-bit grey/RGB/alpha) |
+| -26 | ZSSS_ERR_PNG_CRC_MISMATCH | A chunk CRC or the zlib Adler-32 does not match |
+| -27 | ZSSS_ERR_PNG_TOO_LARGE | Over 16 megapixels or 65536 px per side |
+| -29 | ZSSS_ERR_RANDOM_FAILURE | The OS random source failed while encrypting |
+
+Until 2026-10-11 `zsss_ticket_embed` reported every failure as `ZSSS_ERR_IMAGE_TOO_SMALL`
+and `zsss_stego_extract` every failure as `ZSSS_ERR_INVALID_MAGIC`; the codes above are
+appended, so the old values are unchanged.
 
 ## Best Practices
 

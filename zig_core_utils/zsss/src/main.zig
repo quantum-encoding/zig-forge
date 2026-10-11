@@ -1369,7 +1369,12 @@ fn doStegoEmbed(allocator: Allocator, config: *const Config) !void {
         config.password,
         config.layer_slot,
     ) catch |err| {
-        std.debug.print("Error embedding data: {}\n", .{err});
+        switch (err) {
+            stego.StegoError.UnsupportedPng => std.debug.print("Error: Unsupported carrier (needs 8-bit samples, no interlace, not indexed)\n", .{}),
+            stego.StegoError.PngCrcMismatch => std.debug.print("Error: PNG integrity check failed (chunk CRC or zlib Adler-32)\n", .{}),
+            stego.StegoError.ImageTooLarge => std.debug.print("Error: PNG exceeds the decode budget (16 megapixels)\n", .{}),
+            else => std.debug.print("Error embedding data: {}\n", .{err}),
+        }
         return err;
     };
     defer allocator.free(output_png);
@@ -1434,6 +1439,15 @@ fn doStegoExtract(allocator: Allocator, config: *const Config) !void {
             },
             stego.StegoError.InvalidPassword => {
                 std.debug.print("Error: Data is encrypted but no password provided (-p)\n", .{});
+            },
+            stego.StegoError.UnsupportedPng => {
+                std.debug.print("Error: Unsupported PNG (needs 8-bit samples, no interlace)\n", .{});
+            },
+            stego.StegoError.PngCrcMismatch => {
+                std.debug.print("Error: PNG integrity check failed (chunk CRC or zlib Adler-32)\n", .{});
+            },
+            stego.StegoError.ImageTooLarge => {
+                std.debug.print("Error: PNG exceeds the decode budget (16 megapixels)\n", .{});
             },
             else => {
                 std.debug.print("Error extracting data: {}\n", .{err});

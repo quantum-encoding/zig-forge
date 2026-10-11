@@ -78,6 +78,14 @@ pub const ZSSS_ERR_SLIP39_INVALID_SHARE_SET: i32 = -21;
 pub const ZSSS_ERR_SLIP39_INVALID_DIGEST: i32 = -22;
 pub const ZSSS_ERR_SLIP39_INVALID_CONFIG: i32 = -23;
 pub const ZSSS_ERR_SLIP39_INVALID_PASSPHRASE: i32 = -24;
+// Stego codes added 2026-10-11 (crypto test campaign, track E E-4): until then every
+// zsss_stego_extract failure read as INVALID_MAGIC and every zsss_stego_embed failure as
+// IMAGE_TOO_SMALL. Appended so existing numeric values stay stable for C/Rust/Swift callers.
+pub const ZSSS_ERR_PNG_UNSUPPORTED: i32 = -25;
+pub const ZSSS_ERR_PNG_CRC_MISMATCH: i32 = -26;
+pub const ZSSS_ERR_PNG_TOO_LARGE: i32 = -27;
+pub const ZSSS_ERR_STEGO_CORRUPTED: i32 = -28;
+pub const ZSSS_ERR_RANDOM_FAILURE: i32 = -29;
 pub const ZSSS_ERR_UNKNOWN: i32 = -99;
 
 /// Free a buffer returned by zsss functions
@@ -380,6 +388,29 @@ export fn zsss_slip39_combine(
 // Steganography
 // =============================================================================
 
+/// One code per distinct stego failure, shared by embed, extract and ticket embed.
+fn stegoErrorCode(err: anyerror) i32 {
+    return switch (err) {
+        stego.StegoError.ImageTooSmall => ZSSS_ERR_IMAGE_TOO_SMALL,
+        stego.StegoError.InvalidMagic => ZSSS_ERR_INVALID_MAGIC,
+        stego.StegoError.DecryptionFailed => ZSSS_ERR_DECRYPTION_FAILED,
+        stego.StegoError.InvalidPassword => ZSSS_ERR_INVALID_PASSWORD,
+        stego.StegoError.InvalidPng,
+        stego.StegoError.PngDecompressError,
+        stego.StegoError.PngCompressError,
+        => ZSSS_ERR_INVALID_PNG,
+        stego.StegoError.UnsupportedPng => ZSSS_ERR_PNG_UNSUPPORTED,
+        stego.StegoError.PngCrcMismatch => ZSSS_ERR_PNG_CRC_MISMATCH,
+        stego.StegoError.ImageTooLarge => ZSSS_ERR_PNG_TOO_LARGE,
+        stego.StegoError.UnsupportedVersion,
+        stego.StegoError.CorruptedData,
+        => ZSSS_ERR_STEGO_CORRUPTED,
+        error.OutOfMemory => ZSSS_ERR_OUT_OF_MEMORY,
+        error.RandomFailure => ZSSS_ERR_RANDOM_FAILURE,
+        else => ZSSS_ERR_UNKNOWN,
+    };
+}
+
 /// Embed data into a PNG image
 /// password can be null for no encryption
 /// layer_slot: -1 for default (all pixels), 0-255 for specific layer
@@ -407,8 +438,8 @@ export fn zsss_stego_embed(
         secret_data,
         password,
         layer,
-    ) catch {
-        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_IMAGE_TOO_SMALL };
+    ) catch |err| {
+        return .{ .data = null, .len = 0, .error_code = stegoErrorCode(err) };
     };
 
     return .{ .data = output.ptr, .len = output.len, .error_code = ZSSS_OK };
@@ -437,8 +468,8 @@ export fn zsss_stego_extract(
         png_data,
         password,
         layer,
-    ) catch {
-        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_MAGIC };
+    ) catch |err| {
+        return .{ .data = null, .len = 0, .error_code = stegoErrorCode(err) };
     };
 
     return .{ .data = output.ptr, .len = output.len, .error_code = ZSSS_OK };
@@ -524,8 +555,8 @@ export fn zsss_ticket_embed(
         ticket_bytes,
         password,
         layer,
-    ) catch {
-        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_IMAGE_TOO_SMALL };
+    ) catch |err| {
+        return .{ .data = null, .len = 0, .error_code = stegoErrorCode(err) };
     };
 
     return .{ .data = output.ptr, .len = output.len, .error_code = ZSSS_OK };
@@ -767,6 +798,11 @@ export fn zsss_error_message(error_code: i32) [*:0]const u8 {
         ZSSS_ERR_SLIP39_INVALID_DIGEST => "SLIP-39 digest check failed (shares do not belong to one secret)",
         ZSSS_ERR_SLIP39_INVALID_CONFIG => "Invalid SLIP-39 configuration (secret length, threshold or groups)",
         ZSSS_ERR_SLIP39_INVALID_PASSPHRASE => "SLIP-39 passphrase must be printable ASCII (32-126)",
+        ZSSS_ERR_PNG_UNSUPPORTED => "Unsupported PNG (needs 8-bit samples, no interlace; indexed images cannot carry data)",
+        ZSSS_ERR_PNG_CRC_MISMATCH => "PNG integrity check failed (chunk CRC or zlib Adler-32)",
+        ZSSS_ERR_PNG_TOO_LARGE => "PNG exceeds the decode budget (16 megapixels, 65536 px per side)",
+        ZSSS_ERR_STEGO_CORRUPTED => "Hidden data header is corrupt or from an unsupported version",
+        ZSSS_ERR_RANDOM_FAILURE => "System random number source failed",
         else => "Unknown error",
     };
 }

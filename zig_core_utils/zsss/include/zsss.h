@@ -53,6 +53,13 @@ extern "C" {
 #define ZSSS_ERR_SLIP39_INVALID_DIGEST     -22
 #define ZSSS_ERR_SLIP39_INVALID_CONFIG     -23
 #define ZSSS_ERR_SLIP39_INVALID_PASSPHRASE -24
+/* Steganography (added 2026-10-11; before, every extract failure was INVALID_MAGIC
+ * and every embed failure IMAGE_TOO_SMALL). Existing values are unchanged. */
+#define ZSSS_ERR_PNG_UNSUPPORTED        -25  /* not 8-bit, interlaced, or indexed on embed */
+#define ZSSS_ERR_PNG_CRC_MISMATCH       -26  /* chunk CRC or zlib Adler-32 wrong */
+#define ZSSS_ERR_PNG_TOO_LARGE          -27  /* over 16 Mpx or 65536 px per side */
+#define ZSSS_ERR_STEGO_CORRUPTED        -28  /* hidden-data header corrupt / bad version */
+#define ZSSS_ERR_RANDOM_FAILURE         -29  /* OS CSPRNG failed (embed with password) */
 #define ZSSS_ERR_UNKNOWN                -99
 
 /**
@@ -235,6 +242,13 @@ ZsssBuffer zsss_slip39_combine(
  * @param layer_slot Layer slot for multi-layer embedding (-1 for default, 0-255 for specific layer)
  * @return ZsssBuffer containing new PNG with embedded data
  *
+ * The carrier must be an 8-bit, non-interlaced PNG of colour type 0, 2, 4 or 6 (grey,
+ * RGB, grey+alpha, RGBA), at most 16 megapixels. Every chunk CRC and the zlib Adler-32
+ * are verified. Error codes: ZSSS_ERR_INVALID_INPUT (empty input), ZSSS_ERR_INVALID_PNG
+ * (not a PNG, truncated, corrupt stream), ZSSS_ERR_PNG_UNSUPPORTED (16-bit, interlaced,
+ * indexed), ZSSS_ERR_PNG_CRC_MISMATCH, ZSSS_ERR_PNG_TOO_LARGE, ZSSS_ERR_IMAGE_TOO_SMALL
+ * (not enough pixels for the data), ZSSS_ERR_RANDOM_FAILURE, ZSSS_ERR_OUT_OF_MEMORY.
+ *
  * Example:
  *   // Simple embed without encryption
  *   ZsssBuffer output = zsss_stego_embed(png, png_len, data, data_len, NULL, 0, -1);
@@ -264,6 +278,13 @@ ZsssBuffer zsss_stego_embed(
  * @param password_len Length of password (ignored if password_ptr is NULL)
  * @param layer_slot Layer slot to extract from (-1 for default, 0-255 for specific layer)
  * @return ZsssBuffer containing extracted data
+ *
+ * Error codes: ZSSS_ERR_INVALID_INPUT, ZSSS_ERR_INVALID_PNG, ZSSS_ERR_PNG_UNSUPPORTED,
+ * ZSSS_ERR_PNG_CRC_MISMATCH, ZSSS_ERR_PNG_TOO_LARGE (the image, as for embed);
+ * ZSSS_ERR_IMAGE_TOO_SMALL (fewer pixels than a stego header needs);
+ * ZSSS_ERR_INVALID_MAGIC (no hidden data at this layer/password);
+ * ZSSS_ERR_STEGO_CORRUPTED (header found but its length or version is impossible);
+ * ZSSS_ERR_DECRYPTION_FAILED (payload tampered or wrong key); ZSSS_ERR_OUT_OF_MEMORY.
  *
  * Example:
  *   ZsssBuffer extracted = zsss_stego_extract(png, png_len, "password", 8, -1);
