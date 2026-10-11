@@ -561,7 +561,7 @@ fn procComm(pid: sys.pid_t, buf: []u8) ?[]const u8 {
     if (pid <= 0) return null;
     if (comptime is_linux) {
         var pb: [48]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&pb, "/proc/{d}/comm", .{pid}) catch return null;
+        const path = std.fmt.bufPrintSentinel(&pb, "/proc/{d}/comm", .{pid}, 0) catch return null;
         const fd = c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
         if (fd < 0) return null;
         defer _ = c.close(fd);
@@ -590,7 +590,7 @@ fn procPath(pid: sys.pid_t, buf: []u8) ?[]const u8 {
     if (pid <= 0) return null;
     if (comptime is_linux) {
         var pb: [48]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&pb, "/proc/{d}/exe", .{pid}) catch return null;
+        const path = std.fmt.bufPrintSentinel(&pb, "/proc/{d}/exe", .{pid}, 0) catch return null;
         const n = c.readlink(path.ptr, buf.ptr, buf.len);
         if (n <= 0) return null;
         return buf[0..@intCast(n)];
@@ -611,7 +611,7 @@ fn procCwd(pid: sys.pid_t, buf: []u8) ?[]const u8 {
     if (comptime !is_linux) return null;
     if (pid <= 0) return null;
     var pb: [48]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&pb, "/proc/{d}/cwd", .{pid}) catch return null;
+    const path = std.fmt.bufPrintSentinel(&pb, "/proc/{d}/cwd", .{pid}, 0) catch return null;
     const n = c.readlink(path.ptr, buf.ptr, buf.len);
     if (n <= 0) return null;
     return buf[0..@intCast(n)];
