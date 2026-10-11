@@ -1,5 +1,10 @@
 const std = @import("std");
 
+// Zig 0.17 renamed the optimize tags (Debug/ReleaseSafe/ReleaseFast/ReleaseSmall became
+// debug/safe/fast/small) and keeps the old names only as declarations on the enum, which an
+// enum literal cannot reach; naming them through the type compiles on 0.16 and 0.17.
+const Optimize = std.builtin.OptimizeMode;
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -20,7 +25,10 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    // Zig 0.17 removed `b.args` (configure logic can no longer see run arguments) in
+    // favour of `addPassthruArgs`, which 0.16 does not have; the comptime branch keeps
+    // both compiling.
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zsss");
     run_step.dependOn(&run_cmd.step);
@@ -139,7 +147,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/lib.zig"),
                 .target = resolved,
-                .optimize = .ReleaseFast,
+                .optimize = Optimize.ReleaseFast,
                 .link_libc = true,
                 .pic = true,
             }),
@@ -153,7 +161,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/lib.zig"),
                 .target = resolved,
-                .optimize = .ReleaseFast,
+                .optimize = Optimize.ReleaseFast,
                 .link_libc = true,
             }),
         });
@@ -173,7 +181,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/lib.zig"),
                 .target = resolved,
-                .optimize = .ReleaseFast,
+                .optimize = Optimize.ReleaseFast,
                 .pic = true,
             }),
         });
@@ -186,7 +194,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/lib.zig"),
                 .target = resolved,
-                .optimize = .ReleaseFast,
+                .optimize = Optimize.ReleaseFast,
             }),
         });
         const linux_shared_install = b.addInstallArtifact(linux_shared, .{});
@@ -205,7 +213,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/lib.zig"),
                 .target = resolved,
-                .optimize = .ReleaseFast,
+                .optimize = Optimize.ReleaseFast,
                 .pic = true,
             }),
         });
@@ -218,7 +226,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/lib.zig"),
                 .target = resolved,
-                .optimize = .ReleaseFast,
+                .optimize = Optimize.ReleaseFast,
             }),
         });
         const macos_shared_install = b.addInstallArtifact(macos_shared, .{});
@@ -238,7 +246,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/lib.zig"),
                 .target = resolved,
-                .optimize = .ReleaseFast,
+                .optimize = Optimize.ReleaseFast,
                 .pic = true,
             }),
         });
@@ -258,7 +266,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/lib.zig"),
                 .target = resolved,
-                .optimize = .ReleaseFast,
+                .optimize = Optimize.ReleaseFast,
                 .pic = true,
             }),
         });
@@ -277,7 +285,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/lib.zig"),
             .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .msvc }),
-            .optimize = .ReleaseFast,
+            .optimize = Optimize.ReleaseFast,
             .link_libc = true,
         }),
     });
@@ -392,7 +400,15 @@ fn repackForXcode(
     if (b.graph.host.result.os.tag != .macos) return &install.step;
     const repack = b.addSystemCommand(&.{"bash"});
     repack.addFileArg(b.path("../../scripts/repack-for-xcode.sh"));
-    repack.addArg(b.getInstallPath(.lib, lib.out_lib_filename));
+    // For a static archive out_filename is the installed basename (0.16 also has
+    // out_lib_filename, which 0.17 dropped; they agree for a static library).
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        repack.addArg(b.getInstallPath(.lib, lib.out_filename));
+    } else {
+        // Zig 0.17: the install prefix is known only to the maker process, so the configure
+        // phase can no longer spell the path; it is resolved lazily when the step runs.
+        repack.addFileArg(.{ .relative = .{ .base = .install_lib, .sub_path = lib.out_filename } });
+    }
     repack.has_side_effects = true;
     repack.step.dependOn(&install.step);
     return &repack.step;

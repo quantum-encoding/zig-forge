@@ -1,5 +1,10 @@
 const std = @import("std");
 
+// Zig 0.17 renamed the optimize tags (Debug/ReleaseSafe/ReleaseFast/ReleaseSmall became
+// debug/safe/fast/small) and keeps the old names only as declarations on the enum, which an
+// enum literal cannot reach; naming them through the type compiles on 0.16 and 0.17.
+const Optimize = std.builtin.OptimizeMode;
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -47,9 +52,10 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    // Zig 0.17 removed `b.args` (configure logic can no longer see run arguments) in
+    // favour of `addPassthruArgs`, which 0.16 does not have; the comptime branch keeps
+    // both compiling.
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run the Base58 CLI tool");
     run_step.dependOn(&run_cmd.step);
@@ -74,7 +80,7 @@ pub fn build(b: *std.Build) void {
     const bench_module = b.createModule(.{
         .root_source_file = b.path("src/bench.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
         .link_libc = true,
     });
     bench_module.addImport("base58", base58_module);

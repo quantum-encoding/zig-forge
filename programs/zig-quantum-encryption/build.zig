@@ -1,5 +1,10 @@
 const std = @import("std");
 
+// Zig 0.17 renamed the optimize tags (Debug/ReleaseSafe/ReleaseFast/ReleaseSmall became
+// debug/safe/fast/small) and keeps the old names only as declarations on the enum, which an
+// enum literal cannot reach; naming them through the type compiles on 0.16 and 0.17.
+const Optimize = std.builtin.OptimizeMode;
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -112,10 +117,10 @@ pub fn build(b: *std.Build) void {
 
         // Use ReleaseFast for iOS to avoid dyld debug symbols
         // iOS doesn't support __dyld_get_image_header_containing_address
-        const opt_mode: std.builtin.OptimizeMode = if (ct.query.os_tag == .ios)
-            .ReleaseFast
+        const opt_mode: Optimize = if (ct.query.os_tag == .ios)
+            Optimize.ReleaseFast
         else
-            .ReleaseSafe;
+            Optimize.ReleaseSafe;
 
         const cross_mod = b.createModule(.{
             .root_source_file = b.path("src/quantum_vault_ffi.zig"),
@@ -166,7 +171,10 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(secrets_exe);
 
     const run_secrets = b.addRunArtifact(secrets_exe);
-    if (b.args) |a| run_secrets.addArgs(a);
+    // Zig 0.17 removed `b.args` (configure logic can no longer see run arguments) in
+    // favour of `addPassthruArgs`, which 0.16 does not have; the comptime branch keeps
+    // both compiling.
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_secrets.addPassthruArgs() else if (b.args) |args| run_secrets.addArgs(args);
     const secrets_step = b.step("secrets", "Build and run secrets CLI");
     secrets_step.dependOn(&run_secrets.step);
 
@@ -181,7 +189,7 @@ pub fn build(b: *std.Build) void {
         const s_mod = b.createModule(.{
             .root_source_file = b.path("tools/secrets.zig"),
             .target = b.resolveTargetQuery(ct.query),
-            .optimize = .ReleaseSafe,
+            .optimize = Optimize.ReleaseSafe,
             .link_libc = true,
         });
         const s_exe = b.addExecutable(.{
@@ -368,7 +376,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/differential_std.zig"),
         .target = target,
         // These loops sign and verify thousands of times; Debug would take minutes.
-        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .optimize = if (optimize == Optimize.Debug) Optimize.ReleaseSafe else optimize,
         .link_libc = true,
     });
     const differential_tests = b.addTest(.{
@@ -382,7 +390,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/acvp_kats.zig"),
         .target = target,
         // 60 signatures + 30 verifications over 2.5 MB of hex; Debug is needlessly slow.
-        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .optimize = if (optimize == Optimize.Debug) Optimize.ReleaseSafe else optimize,
         .link_libc = true,
     });
     inline for (.{
@@ -398,7 +406,7 @@ pub fn build(b: *std.Build) void {
     const classical_mod = b.createModule(.{
         .root_source_file = b.path("src/classical_conformance.zig"),
         .target = target,
-        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .optimize = if (optimize == Optimize.Debug) Optimize.ReleaseSafe else optimize,
         .link_libc = true,
     });
     for ([_][2][]const u8{
@@ -442,7 +450,7 @@ pub fn build(b: *std.Build) void {
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("bench.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
         .link_libc = true,
     });
 
@@ -470,7 +478,7 @@ pub fn build(b: *std.Build) void {
     const wasm_mod = b.createModule(.{
         .root_source_file = b.path("src/quantum_vault_ffi.zig"),
         .target = wasm_target,
-        .optimize = .ReleaseSmall,
+        .optimize = Optimize.ReleaseSmall,
     });
 
     const wasm_exe = b.addExecutable(.{

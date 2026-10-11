@@ -1,5 +1,10 @@
 const std = @import("std");
 
+// Zig 0.17 renamed the optimize tags (Debug/ReleaseSafe/ReleaseFast/ReleaseSmall became
+// debug/safe/fast/small) and keeps the old names only as declarations on the enum, which an
+// enum literal cannot reach; naming them through the type compiles on 0.16 and 0.17.
+const Optimize = std.builtin.OptimizeMode;
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -24,7 +29,7 @@ pub fn build(b: *std.Build) void {
     lib.root_module.link_libc = true;
 
     // Strip debug symbols for production (reduces binary size)
-    lib.root_module.strip = optimize != .Debug;
+    lib.root_module.strip = optimize != Optimize.Debug;
 
     // zig-out/lib/libquantum_crypto.a is the archive other repos link (libs.toml
     // row `quantum_crypto`), stamped beside it by scripts/build-macos-lib.sh and
@@ -35,8 +40,8 @@ pub fn build(b: *std.Build) void {
     // archive.
     const lib_step = b.step("lib", "Build the consumed archive zig-out/lib/libquantum_crypto.a (release modes only; use scripts/build-macos-lib.sh)");
     switch (optimize) {
-        .ReleaseSmall, .ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step),
-        .Debug, .ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
+        Optimize.ReleaseSmall, Optimize.ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step),
+        Optimize.Debug, Optimize.ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
             "zig build lib writes zig-out/lib/libquantum_crypto.a, the archive consumers link; " ++
                 "a {t} build keeps Zig's panic machinery and is never that archive. " ++
                 "Run scripts/build-macos-lib.sh programs/simd_crypto_ffi from the repo root " ++
@@ -61,7 +66,7 @@ pub fn build(b: *std.Build) void {
     const android_module = b.createModule(.{
         .root_source_file = b.path("src/ffi-grok.zig"),
         .target = android_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const android_lib = b.addLibrary(.{
@@ -149,7 +154,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/conformance.zig"),
             .target = variant.target,
             // Monte Carlo, PBKDF2 at 80 000 rounds and 2 000 signatures: Debug would take minutes.
-            .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+            .optimize = if (optimize == Optimize.Debug) Optimize.ReleaseSafe else optimize,
             .link_libc = true,
         });
         mod.addOptions("build_options", opts);
