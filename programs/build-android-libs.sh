@@ -162,8 +162,14 @@ build_lib "memory_pool_core" "memory_pool" "src/memory_pool_core.zig" && count 0
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 build_lib "financial_core" "financial_engine" "src/financial_core.zig" && count 0 || count $?
 
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "zigpdf" "zig_pdf_generator" "src/ffi.zig" && count 0 || count $?
+# zigpdf's root imports zig_docx, zig_legend and ml_dsa as modules that only
+# its build.zig wires up, so the bare `zig build-lib` line above cannot build
+# it ("no module named 'zig_docx' available within module 'ffi'" since the
+# DOCX bridge landed) and its android-arm64 directory stayed empty while
+# src-tauri/build.rs links static=zigpdf there under the default
+# pdf_generation feature. Its own `zig build android` step (ReleaseFast,
+# -lc, PIC, stripped) installs libzigpdf.a under zig-out/lib/android-arm64
+# and is run below with the other native steps.
 
 # =============================================================================
 # Programs with their own `zig build android` step.
@@ -219,6 +225,9 @@ native_android_step "financial_engine" && count 0 || count $?
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 native_android_step "mempool_sniffer" && count 0 || count $?
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+native_android_step "zig_pdf_generator" && count 0 || count $?
 
 # zsss lives under zig_core_utils/, not programs/, and is not built here:
 # scripts/build-zsss.sh builds and stamps its Android static archives
