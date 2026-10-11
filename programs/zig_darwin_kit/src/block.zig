@@ -76,8 +76,16 @@ pub fn Block(comptime Ctx: type, comptime handler: anytype) type {
         .@"fn" => |f| f,
         else => @compileError("Block handler must be a function, got " ++ @typeName(Fn)),
     };
-    const params = fn_info.params;
-    if (params.len == 0 or params[0].type != *Ctx)
+    // 0.16: `params: []const Param` with `.type`; 0.17: `param_types: []const ?type`.
+    const params: []const ?type = comptime if (@hasField(@TypeOf(fn_info), "param_types"))
+        fn_info.param_types
+    else blk: {
+        var types: [fn_info.params.len]?type = undefined;
+        for (fn_info.params, 0..) |p, i| types[i] = p.type;
+        const final = types;
+        break :blk &final;
+    };
+    if (params.len == 0 or params[0] != *Ctx)
         @compileError("Block handler's first parameter must be *" ++ @typeName(Ctx));
     if (params.len > 5)
         @compileError("Block supports at most four arguments after the context");
@@ -98,7 +106,7 @@ pub fn Block(comptime Ctx: type, comptime handler: anytype) type {
         const descriptor_storage = Descriptor{ .size = @sizeOf(Self) };
 
         fn Param(comptime i: usize) type {
-            return params[i].type.?;
+            return params[i].?;
         }
 
         const Thunks = struct {
