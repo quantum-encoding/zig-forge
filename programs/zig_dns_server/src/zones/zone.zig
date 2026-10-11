@@ -692,7 +692,7 @@ fn parseIPv4(s: []const u8) ![4]u8 {
 }
 
 fn parseIPv6(s: []const u8) ![16]u8 {
-    var result: [16]u8 = [_]u8{0} ** 16;
+    var result: [16]u8 = @splat(0);
 
     // Handle :: expansion
     if (std.mem.indexOf(u8, s, "::")) |double_colon| {
