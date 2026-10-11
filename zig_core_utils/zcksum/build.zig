@@ -18,9 +18,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Run zcksum");
     run_step.dependOn(&run_cmd.step);
 
@@ -30,7 +28,7 @@ pub fn build(b: *std.Build) void {
     // absolute install path so the test is cwd-independent, and make the test
     // depend on the install.
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "zcksum_path", b.getInstallPath(.bin, "zcksum"));
+    test_opts.addOptionPath("zcksum_path", exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{
