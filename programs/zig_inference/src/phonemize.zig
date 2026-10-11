@@ -193,7 +193,7 @@ pub fn deinit() void {
 pub fn textToPhonemeIds(allocator: Allocator, text: []const u8) !PhonemeResult {
     if (!initialized) return error.EspeakNotInitialized;
 
-    const c_text = try allocator.dupeZ(u8, text);
+    const c_text = try allocator.dupeSentinel(u8, text, 0);
     defer allocator.free(c_text);
 
     // espeak_TextToPhonemes advances the pointer through the text

@@ -60,7 +60,7 @@ pub const VisionFile = struct {
     tts_config: ?TtsConfig = null,
 
     pub fn open(allocator: Allocator, path: []const u8) !VisionFile {
-        const c_path = try allocator.dupeZ(u8, path);
+        const c_path = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(c_path);
 
         const fd = std.c.open(c_path.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));

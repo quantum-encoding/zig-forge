@@ -589,9 +589,9 @@ fn cmdSegment(allocator: std.mem.Allocator, args: []const []const u8) !void {
     printErr("Segmenting: {s}\n", .{ip});
 
     // Need null-terminated paths for C interop
-    const c_input = try allocator.dupeZ(u8, ip);
+    const c_input = try allocator.dupeSentinel(u8, ip, 0);
     defer allocator.free(c_input);
-    const c_output = try allocator.dupeZ(u8, op);
+    const c_output = try allocator.dupeSentinel(u8, op, 0);
     defer allocator.free(c_output);
 
     var result = try segment_mod.segmentAndSave(allocator, &model, c_input.ptr, c_output.ptr);
@@ -599,7 +599,7 @@ fn cmdSegment(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Optionally save mask
     if (mask_path) |mkp| {
-        const c_mask = try allocator.dupeZ(u8, mkp);
+        const c_mask = try allocator.dupeSentinel(u8, mkp, 0);
         defer allocator.free(c_mask);
         try segment_mod.saveMask(allocator, &result, c_mask.ptr);
         printErr("Mask saved: {s}\n", .{mkp});
@@ -995,7 +995,7 @@ test "relu basic" {
 test "Q4_0 dequantize" {
     var block = quant.BlockQ4_0{
         .scale = @as(f16, 1.0),
-        .quants = .{0x88} ** 16,
+        .quants = @splat(0x88),
     };
     var out: [32]f32 = undefined;
     quant.dequantizeQ4_0(&block, &out);
@@ -1025,7 +1025,7 @@ test "dot product f32 simd" {
 
 test "dequant golden: Q8_0 (out = quant * scale)" {
     // ggml Q8_0: 32 signed i8 quants scaled by one f16 delta.
-    var block = quant.BlockQ8_0{ .scale = @as(f16, 3.0), .quants = .{0} ** 32 };
+    var block = quant.BlockQ8_0{ .scale = @as(f16, 3.0), .quants = @splat(0) };
     block.quants[0] = 1;
     block.quants[1] = -1;
     block.quants[2] = 10;
@@ -1044,7 +1044,7 @@ test "dequant golden: Q8_0 (out = quant * scale)" {
 test "dequant golden: Q4_0 (out = (nibble - 8) * scale, lo->0..15 hi->16..31)" {
     // ggml Q4_0: low nibble of byte j -> element j, high nibble -> element j+16,
     // each with a -8 zero-point, scaled by one f16 delta.
-    var block = quant.BlockQ4_0{ .scale = @as(f16, 2.0), .quants = .{0x88} ** 16 };
+    var block = quant.BlockQ4_0{ .scale = @as(f16, 2.0), .quants = @splat(0x88) };
     block.quants[0] = 0xF0; // lo=0, hi=15
     block.quants[1] = 0x8A; // lo=10, hi=8
     var out: [32]f32 = undefined;
@@ -1058,7 +1058,7 @@ test "dequant golden: Q4_0 (out = (nibble - 8) * scale, lo->0..15 hi->16..31)" {
 
 test "dequant golden: Q4_1 (out = nibble * scale + min)" {
     // ggml Q4_1: like Q4_0 but affine (scale, min) with NO zero-point subtraction.
-    var block = quant.BlockQ4_1{ .scale = @as(f16, 2.0), .min = @as(f16, 1.0), .quants = .{0} ** 16 };
+    var block = quant.BlockQ4_1{ .scale = @as(f16, 2.0), .min = @as(f16, 1.0), .quants = @splat(0) };
     block.quants[0] = 0x31; // lo=1, hi=3
     var out: [32]f32 = undefined;
     quant.dequantizeQ4_1(&block, &out);
@@ -1074,9 +1074,9 @@ test "dequant golden: Q6_K (6-bit split ql/qh, -32 zero-point, sub-block scales)
     // ql[0]=0x0A (low nibble 10), qh[0]=0x01 (its 2 high bits = 1) -> q1 = 10|(1<<4)=26,
     // so out[0] = 1*1*(26-32) = -6. A nibble-swap or missing-high-bits bug moves out[0].
     var block = quant.BlockQ6_K{
-        .ql = .{0} ** 128,
-        .qh = .{0} ** 64,
-        .scales = .{1} ** 16,
+        .ql = @splat(0),
+        .qh = @splat(0),
+        .scales = @splat(1),
         .d = @as(f16, 1.0),
     };
     block.ql[0] = 0x0A;
@@ -1098,8 +1098,8 @@ test "dequant golden: Q4_K (affine sub-blocks, 6-bit packed scale/min)" {
     var block = quant.BlockQ4_K{
         .d = @as(f16, 1.0),
         .dmin = @as(f16, 1.0),
-        .scales = .{0} ** 12,
-        .qs = .{0} ** 128,
+        .scales = @splat(0),
+        .qs = @splat(0),
     };
     block.scales[0] = 2;
     block.scales[1] = 3;
