@@ -342,7 +342,7 @@ pub fn main(init: std.process.Init) void {
     }
 
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{name}) catch {
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{name}, 0) catch {
         // Same shape as the syscall failing with ENAMETOOLONG.
         writeStderr("zmknod: ");
         writeStderr(name);
