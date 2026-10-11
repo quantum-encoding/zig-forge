@@ -202,7 +202,7 @@ fn formatDate(timestamp: i64, format: []const u8, utc: bool) void {
     }
 
     var format_buf: [256]u8 = undefined;
-    const format_z = std.fmt.bufPrintZ(&format_buf, "{s}", .{format}) catch {
+    const format_z = std.fmt.bufPrintSentinel(&format_buf, "{s}", .{format}, 0) catch {
         writeStderr("zdate: format string too long\n");
         return;
     };
@@ -294,7 +294,7 @@ fn getFileModTime(path: []const u8) !i64 {
     const cwd = Io.Dir.cwd();
 
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return error.PathTooLong;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return error.PathTooLong;
 
     const stat = cwd.statFile(io, path_z, .{}) catch return error.StatFailed;
     // mtime is an Io.Timestamp with nanoseconds field

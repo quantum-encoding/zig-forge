@@ -181,7 +181,7 @@ const Fixtures = struct {
         var bin: [256]u8 = undefined;
         for (&bin, 0..) |*b, i| b.* = @intCast(i);
         const binary = try writeFixture(gpa, "binary", &bin);
-        const big = try writeFixture(gpa, "big", &[_]u8{0} ** 5000);
+        const big = try writeFixture(gpa, "big", &@as([5000]u8, @splat(0)));
         return .{ .dir_alloc = gpa, .twelve = twelve, .nonl = nonl, .empty = empty, .binary = binary, .big = big };
     }
 

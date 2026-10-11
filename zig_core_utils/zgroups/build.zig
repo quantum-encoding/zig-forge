@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
     // --- Tests: GNU-parity, anchored to the real ggroups binary --------------
     const gnu = "/opt/homebrew/bin/ggroups";
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "zgroups_exe", b.getInstallPath(.bin, "zgroups"));
+    test_opts.addOptionPath("zgroups_exe", exe.getEmittedBin());
     test_opts.addOption([]const u8, "ggroups_exe", gnu);
 
     const test_mod = b.createModule(.{

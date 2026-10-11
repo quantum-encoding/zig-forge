@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) void {
     // GNU coreutils `echo` binary. The test needs the built zecho path and a
     // GNU reference path; both are injected via a generated options module.
     const options = b.addOptions();
-    options.addOption([]const u8, "zecho_path", b.getInstallPath(.bin, "zecho"));
+    options.addOptionPath("zecho_path", exe.getEmittedBin());
     // Optional override for the GNU reference binary; the test also probes
     // well-known Homebrew locations at runtime.
     const gnu_path = b.option([]const u8, "gnu_echo", "Path to a GNU coreutils echo binary for parity tests") orelse "";

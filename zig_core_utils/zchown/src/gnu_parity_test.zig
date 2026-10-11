@@ -105,7 +105,7 @@ fn gidOf(path: [:0]const u8, follow: bool) !u32 {
 // ---------------------------------------------------------------------------
 fn zchownBin() []const u8 {
     if (std.c.getenv("ZCHOWN_BIN")) |v| return std.mem.span(v);
-    return "zig-out/bin/zchown";
+    return @import("build_options").zchown_bin;
 }
 
 fn findGnuChown() ?[:0]const u8 {
@@ -181,11 +181,11 @@ const Env = struct {
 
     fn init(alloc: std.mem.Allocator, io: std.Io) !Env {
         const groups = try twoGroups();
-        var tmpl = [_]u8{0} ** 48;
+        var tmpl: [48]u8 = @splat(0);
         const prefix = "/tmp/zchown_parity_XXXXXX";
         @memcpy(tmpl[0..prefix.len], prefix);
         const made = mkdtemp(@ptrCast(&tmpl)) orelse return error.MkdtempFailed;
-        const root = try alloc.dupeZ(u8, std.mem.span(made));
+        const root = try alloc.dupeSentinel(u8, std.mem.span(made), 0);
         const zdir = try std.fmt.allocPrintSentinel(alloc, "{s}/z", .{root}, 0);
         const gdir = try std.fmt.allocPrintSentinel(alloc, "{s}/g", .{root}, 0);
         if (mkdir(zdir.ptr, 0o755) != 0) return error.MkdirFailed;

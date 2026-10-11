@@ -180,10 +180,10 @@ fn copyFileFallback(io: Io, src_file: Io.File, dst_file: Io.File) !void {
 fn copyFile(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, config: *const Config) !void {
     const io = Io.Threaded.global_single_threaded.io();
 
-    const src_z = try allocator.dupeZ(u8, src);
+    const src_z = try allocator.dupeSentinel(u8, src, 0);
     defer allocator.free(src_z);
 
-    const dst_z = try allocator.dupeZ(u8, dst);
+    const dst_z = try allocator.dupeSentinel(u8, dst, 0);
     defer allocator.free(dst_z);
 
     // Get source file info first: needed for permissions/timestamps and for
@@ -313,10 +313,10 @@ fn copyFile(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, conf
 }
 
 fn copySymlink(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, config: *const Config) !void {
-    const src_z = try allocator.dupeZ(u8, src);
+    const src_z = try allocator.dupeSentinel(u8, src, 0);
     defer allocator.free(src_z);
 
-    const dst_z = try allocator.dupeZ(u8, dst);
+    const dst_z = try allocator.dupeSentinel(u8, dst, 0);
     defer allocator.free(dst_z);
 
     // Read the symlink target
@@ -342,7 +342,7 @@ fn copySymlink(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, c
     }
 
     // Create the symlink
-    const link_target_z = try allocator.dupeZ(u8, link_target);
+    const link_target_z = try allocator.dupeSentinel(u8, link_target, 0);
     defer allocator.free(link_target_z);
 
     const symlink_result = symlink(link_target_z.ptr, dst_z.ptr);
@@ -370,10 +370,10 @@ const SelfCheck = struct {
 fn copyDirectory(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, config: *const Config, parent_check: ?*const SelfCheck) !void {
     const io = Io.Threaded.global_single_threaded.io();
 
-    const src_z = try allocator.dupeZ(u8, src);
+    const src_z = try allocator.dupeSentinel(u8, src, 0);
     defer allocator.free(src_z);
 
-    const dst_z = try allocator.dupeZ(u8, dst);
+    const dst_z = try allocator.dupeSentinel(u8, dst, 0);
     defer allocator.free(dst_z);
 
     // Get source directory info
@@ -433,7 +433,7 @@ fn copyDirectory(allocator: std.mem.Allocator, src: []const u8, dst: []const u8,
         const dst_full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dst, entry_name });
         defer allocator.free(dst_full);
 
-        const src_full_z = try allocator.dupeZ(u8, src_full);
+        const src_full_z = try allocator.dupeSentinel(u8, src_full, 0);
         defer allocator.free(src_full_z);
 
         const file_type = getFileType(src_full_z);
@@ -489,7 +489,7 @@ fn copyDirectory(allocator: std.mem.Allocator, src: []const u8, dst: []const u8,
 }
 
 fn copy(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, config: *const Config) !void {
-    const src_z = try allocator.dupeZ(u8, src);
+    const src_z = try allocator.dupeSentinel(u8, src, 0);
     defer allocator.free(src_z);
 
     const file_type = getFileType(src_z);
@@ -751,7 +751,7 @@ pub fn main(init: std.process.Init) void {
 
     if (config.target_directory) |target_dir| {
         // Copy all sources to target directory
-        const target_z = allocator.dupeZ(u8, target_dir) catch {
+        const target_z = allocator.dupeSentinel(u8, target_dir, 0) catch {
             printError("memory allocation failed");
             std.process.exit(1);
         };
@@ -781,7 +781,7 @@ pub fn main(init: std.process.Init) void {
             };
         }
     } else if (config.destination) |dest| {
-        const dest_z = allocator.dupeZ(u8, dest) catch {
+        const dest_z = allocator.dupeSentinel(u8, dest, 0) catch {
             printError("memory allocation failed");
             std.process.exit(1);
         };

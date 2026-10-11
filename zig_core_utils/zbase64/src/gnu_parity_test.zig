@@ -111,7 +111,7 @@ fn runOnInput(bin: []const u8, args: []const []const u8, input: []const u8) !Run
     // mktemp creates a unique file we own.
     const mk = try runArgs(&.{"mktemp"});
     defer mk.free();
-    const path = try gpa.dupeZ(u8, std.mem.trimEnd(u8, mk.stdout, "\n"));
+    const path = try gpa.dupeSentinel(u8, std.mem.trimEnd(u8, mk.stdout, "\n"), 0);
     defer {
         _ = std.c.unlink(path.ptr);
         gpa.free(path);

@@ -1987,7 +1987,7 @@ fn evalCall(state: *AwkState, name: []const u8, args: []Expr) Value {
 const RxKind = enum { consume, split, jmp, bol, eol, match };
 const RxState = struct {
     kind: RxKind,
-    set: std.StaticBitSet(256) = std.StaticBitSet(256).initEmpty(),
+    set: std.StaticBitSet(256) = std.StaticBitSet(256).empty,
     out: u32 = 0,
     out2: u32 = 0,
 };
@@ -2019,7 +2019,7 @@ const Regex = struct {
     fn runAt(self: *const Regex, text: []const u8, begin: usize) ?usize {
         var clist_buf: [1024]u32 = undefined;
         var nlist_buf: [1024]u32 = undefined;
-        var seen = std.StaticBitSet(4096).initEmpty();
+        var seen = std.StaticBitSet(4096).empty;
         var best: ?usize = null;
 
         const n = self.closureAppend(clist_buf[0..], 0, &seen, self.start, text, begin);
@@ -2030,7 +2030,7 @@ const Regex = struct {
         while (pos < text.len and clist.len > 0) {
             const c = text[pos];
             var cnt: usize = 0;
-            seen = std.StaticBitSet(4096).initEmpty();
+            seen = std.StaticBitSet(4096).empty;
             for (clist) |si| {
                 const st = self.states[si];
                 if (st.kind == .consume and st.set.isSet(c)) {
@@ -2196,7 +2196,7 @@ const RxCompiler = struct {
         }
         if (c == '.') {
             self.pos += 1;
-            var set = std.StaticBitSet(256).initEmpty();
+            var set = std.StaticBitSet(256).empty;
             set = set.complement(); // any byte
             return self.singleOut(.{ .kind = .consume, .set = set });
         }
@@ -2221,14 +2221,14 @@ const RxCompiler = struct {
             };
         }
         self.pos += 1;
-        var set = std.StaticBitSet(256).initEmpty();
+        var set = std.StaticBitSet(256).empty;
         set.set(ch);
         return self.singleOut(.{ .kind = .consume, .set = set });
     }
 
     fn parseClass(self: *RxCompiler) error{OutOfMemory}!Frag {
         self.pos += 1; // consume '['
-        var set = std.StaticBitSet(256).initEmpty();
+        var set = std.StaticBitSet(256).empty;
         var negate = false;
         if (self.pos < self.pattern.len and self.pattern[self.pos] == '^') {
             negate = true;
@@ -2661,7 +2661,7 @@ const Config = struct {
 };
 
 fn readProgramFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     const fd = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
     if (fd < 0) return error.OpenError;
@@ -2836,7 +2836,7 @@ fn processFile(
             }
         }
     } else {
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
 
         const fd_ret = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));

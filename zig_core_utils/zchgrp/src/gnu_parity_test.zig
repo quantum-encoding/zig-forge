@@ -85,7 +85,7 @@ extern "c" fn getgid() u32;
 extern "c" fn getgroups(size: c_int, list: [*]u32) c_int;
 
 fn gidOf(gpa: std.mem.Allocator, path: []const u8) !u32 {
-    const z = try gpa.dupeZ(u8, path);
+    const z = try gpa.dupeSentinel(u8, path, 0);
     defer gpa.free(z);
     var s: Stat = undefined;
     if (lstat(z.ptr, &s) != 0) return error.LstatFailed;

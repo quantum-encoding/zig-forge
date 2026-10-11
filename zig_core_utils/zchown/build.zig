@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Run zchown");
     run_step.dependOn(&run_cmd.step);
 
@@ -47,7 +47,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_parity_tests = b.addRunArtifact(parity_tests);
-    run_parity_tests.setEnvironmentVariable("ZCHOWN_BIN", b.getInstallPath(.bin, "zchown"));
+    // The binary path reaches the test through build_options (b.getInstallPath is gone in
+    // Zig 0.17); ZCHOWN_BIN in the environment still overrides it.
+    const parity_opts = b.addOptions();
+    parity_opts.addOptionPath("zchown_bin", exe.getEmittedBin());
+    parity_tests.root_module.addOptions("build_options", parity_opts);
     run_parity_tests.step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_parity_tests.step);
 }

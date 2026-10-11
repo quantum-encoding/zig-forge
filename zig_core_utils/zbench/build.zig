@@ -20,9 +20,7 @@ pub fn build(b: *std.Build) void {
     // Run command
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zbench");
     run_step.dependOn(&run_cmd.step);
@@ -46,7 +44,7 @@ pub fn build(b: *std.Build) void {
     // documented exit-code semantics and RFC 8259 JSON escaping. The binary's
     // install path is injected via a build-options module.
     const parity_options = b.addOptions();
-    parity_options.addOption([]const u8, "zbench_exe", b.getInstallPath(.bin, "zbench"));
+    parity_options.addOptionPath("zbench_exe", exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{

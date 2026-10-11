@@ -128,7 +128,7 @@ fn makeDir(allocator: std.mem.Allocator, dir: []const u8, name: []const u8, mode
 fn makeSymlink(allocator: std.mem.Allocator, dir: []const u8, name: []const u8, target: []const u8) !void {
     const path = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ dir, name }, 0);
     defer allocator.free(path);
-    const tgt = try allocator.dupeZ(u8, target);
+    const tgt = try allocator.dupeSentinel(u8, target, 0);
     defer allocator.free(tgt);
     if (symlink(tgt.ptr, path.ptr) != 0) return error.SymlinkFailed;
 }
@@ -165,11 +165,11 @@ const Harness = struct {
     root_path: []const u8,
 
     fn init(allocator: std.mem.Allocator) !Harness {
-        const zchmod = getBin("ZCHMOD_BIN", "zig-out/bin/zchmod");
+        const zchmod = getBin("ZCHMOD_BIN", @import("build_options").zchmod_bin);
         const gchmod = getBin("GCHMOD_BIN", "/opt/homebrew/bin/gchmod");
         if (!haveGnu(gchmod)) return error.SkipZigTest;
 
-        var tmpl = [_]u8{0} ** 48;
+        var tmpl: [48]u8 = @splat(0);
         const prefix = "/tmp/zchmod_parity_XXXXXX";
         @memcpy(tmpl[0..prefix.len], prefix);
         const made = mkdtemp(@ptrCast(&tmpl)) orelse return error.MkdtempFailed;

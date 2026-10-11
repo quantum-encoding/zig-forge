@@ -217,7 +217,7 @@ fn processFile(path: []const u8, config: *const Config, allocator: std.mem.Alloc
     var fd: c_int = 0; // stdin
     if (!is_stdin) {
         var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch {
+        const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch {
             writeStderr("zfold: path too long\n");
             return error.PathTooLong;
         };

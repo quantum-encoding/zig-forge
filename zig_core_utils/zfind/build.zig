@@ -28,7 +28,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_tests = b.addRunArtifact(tests);
-    run_tests.setEnvironmentVariable("ZFIND_BIN", b.getInstallPath(.bin, "zfind"));
+    // The binary path reaches the test through build_options (b.getInstallPath is gone in
+    // Zig 0.17); ZFIND_BIN in the environment still overrides it.
+    const test_opts = b.addOptions();
+    test_opts.addOptionPath("zfind_bin", exe.getEmittedBin());
+    tests.root_module.addOptions("build_options", test_opts);
     run_tests.step.dependOn(b.getInstallStep());
 
     const test_step = b.step("test", "Run unit + GNU-parity integration tests");

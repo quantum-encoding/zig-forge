@@ -209,7 +209,7 @@ fn processStdin(out: *OutputBuffer, tabs: *const TabStops, initial_only: bool) b
 
 fn processFile(path: []const u8, out: *OutputBuffer, tabs: *const TabStops, initial_only: bool) bool {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch {
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch {
         errPrint("zexpand: {s}: File name too long\n", .{path});
         return false;
     };

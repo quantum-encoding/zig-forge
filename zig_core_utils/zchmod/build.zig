@@ -41,7 +41,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_parity_tests = b.addRunArtifact(parity_tests);
-    run_parity_tests.setEnvironmentVariable("ZCHMOD_BIN", b.getInstallPath(.bin, "zchmod"));
+    // The binary path reaches the test through build_options (b.getInstallPath is gone in
+    // Zig 0.17); ZCHMOD_BIN in the environment still overrides it.
+    const parity_opts = b.addOptions();
+    parity_opts.addOptionPath("zchmod_bin", exe.getEmittedBin());
+    parity_tests.root_module.addOptions("build_options", parity_opts);
     run_parity_tests.step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_parity_tests.step);
 }

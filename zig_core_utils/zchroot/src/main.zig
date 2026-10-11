@@ -64,7 +64,7 @@ fn resolveUser(allocator: std.mem.Allocator, s: []const u8) UserResult {
     if (std.fmt.parseInt(u32, s, 10)) |uid| {
         return .{ .res = .{ .id = uid } };
     } else |_| {}
-    const z = allocator.dupeZ(u8, s) catch return .{ .res = .not_found };
+    const z = allocator.dupeSentinel(u8, s, 0) catch return .{ .res = .not_found };
     if (getpwnam(z.ptr)) |pw| {
         return .{ .res = .{ .id = pwUid(pw) }, .primary_gid = pwGid(pw) };
     }
@@ -75,7 +75,7 @@ fn resolveGroup(allocator: std.mem.Allocator, s: []const u8) Resolved {
     if (std.fmt.parseInt(u32, s, 10)) |gid| {
         return .{ .id = gid };
     } else |_| {}
-    const z = allocator.dupeZ(u8, s) catch return .not_found;
+    const z = allocator.dupeSentinel(u8, s, 0) catch return .not_found;
     if (getgrnam(z.ptr)) |gr| {
         return .{ .id = grGid(gr) };
     }
@@ -327,13 +327,13 @@ pub fn main(init: std.process.Init) !void {
     defer argv_buf.deinit(allocator);
 
     for (cmd_args.items) |arg| {
-        const z = try allocator.dupeZ(u8, arg);
+        const z = try allocator.dupeSentinel(u8, arg, 0);
         try argv_buf.append(allocator, z.ptr);
     }
     try argv_buf.append(allocator, null);
 
     const argv: [*:null]const ?[*:0]const u8 = @ptrCast(argv_buf.items.ptr);
-    const cmd_z = try allocator.dupeZ(u8, cmd_args.items[0]);
+    const cmd_z = try allocator.dupeSentinel(u8, cmd_args.items[0], 0);
 
     _ = execvp(cmd_z.ptr, argv);
 

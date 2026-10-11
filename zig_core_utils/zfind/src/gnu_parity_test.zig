@@ -31,8 +31,7 @@ var fixtureCounter = std.atomic.Value(u64).init(0);
 
 fn zfindBin(alloc: std.mem.Allocator) ![]u8 {
     if (c.getenv("ZFIND_BIN")) |b| return alloc.dupe(u8, std.mem.span(b));
-    // Fallback for a plain `zig test` run.
-    return alloc.dupe(u8, "zig-out/bin/zfind");
+    return alloc.dupe(u8, @import("build_options").zfind_bin);
 }
 
 const RunResult = struct {
@@ -73,7 +72,7 @@ fn run(alloc: std.mem.Allocator, argv: []const []const u8) !RunResult {
         cargv.deinit(alloc);
     }
     for (argv) |a| {
-        const z = try alloc.dupeZ(u8, a);
+        const z = try alloc.dupeSentinel(u8, a, 0);
         try cargv.append(alloc, z.ptr);
     }
     try cargv.append(alloc, null);

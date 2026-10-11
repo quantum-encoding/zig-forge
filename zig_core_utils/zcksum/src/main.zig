@@ -147,7 +147,7 @@ fn processFile(path: ?[]const u8) bool {
     const fd: c_int = if (path) |p| blk: {
         if (std.mem.eql(u8, p, "-")) break :blk 0;
         var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{p}) catch {
+        const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{p}, 0) catch {
             writeStderr("zcksum: path too long\n");
             return false;
         };

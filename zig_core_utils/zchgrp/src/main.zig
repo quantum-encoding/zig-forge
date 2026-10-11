@@ -164,7 +164,7 @@ fn getGroupName(gid: u32) []const u8 {
 /// (lstat/lchown) semantics. `had_error` is set on any failure so the process
 /// exit code becomes 1, matching GNU.
 fn chgrpFile(allocator: std.mem.Allocator, path: []const u8, config: *const Config, deref: bool, had_error: *bool) void {
-    const path_z = allocator.dupeZ(u8, path) catch {
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch {
         had_error.* = true;
         return;
     };
@@ -248,7 +248,7 @@ fn chgrpFile(allocator: std.mem.Allocator, path: []const u8, config: *const Conf
 }
 
 fn chgrpRecursive(allocator: std.mem.Allocator, dir_path: []const u8, config: *const Config, had_error: *bool) void {
-    const dir_path_z = allocator.dupeZ(u8, dir_path) catch {
+    const dir_path_z = allocator.dupeSentinel(u8, dir_path, 0) catch {
         had_error.* = true;
         return;
     };
@@ -308,7 +308,7 @@ fn isRootPath(path: []const u8) bool {
 }
 
 fn gidFromReference(allocator: std.mem.Allocator, ref: []const u8) ?u32 {
-    const ref_z = allocator.dupeZ(u8, ref) catch return null;
+    const ref_z = allocator.dupeSentinel(u8, ref, 0) catch return null;
     defer allocator.free(ref_z);
     var stat_buf: Stat = undefined;
     if (stat(ref_z.ptr, &stat_buf) != 0) {

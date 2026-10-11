@@ -20,9 +20,7 @@ pub fn build(b: *std.Build) void {
     // Run command
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zdu");
     run_step.dependOn(&run_cmd.step);
@@ -46,7 +44,7 @@ pub fn build(b: *std.Build) void {
     // a build option so the test can shell out to it; the parity step depends on
     // the install so the binary exists when the tests run.
     const parity_opts = b.addOptions();
-    parity_opts.addOption([]const u8, "zdu_bin", b.getInstallPath(.bin, "zdu"));
+    parity_opts.addOptionPath("zdu_bin", exe.getEmittedBin());
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -71,7 +69,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = std.builtin.OptimizeMode.ReleaseFast,
             .link_libc = if (target.result.abi == .android) false else true,
         }),
     });

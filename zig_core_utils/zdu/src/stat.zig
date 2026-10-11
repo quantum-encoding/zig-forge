@@ -28,7 +28,13 @@ inline fn toU64(v: anytype) u64 {
     const T = @TypeOf(v);
     return switch (@typeInfo(T)) {
         .int => |info| if (info.signedness == .signed)
-            @as(u64, @as(std.meta.Int(.unsigned, info.bits), @bitCast(v)))
+            @as(u64, @as(switch (info.bits) {
+                8 => u8,
+                16 => u16,
+                32 => u32,
+                64 => u64,
+                else => @compileError("unexpected stat field width"),
+            }, @bitCast(v)))
         else
             @as(u64, @intCast(v)),
         else => @intCast(v),
