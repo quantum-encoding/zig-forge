@@ -71,14 +71,14 @@ pub fn build(b: *std.Build) void {
     // Run commands
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run the daemon (polling mode)");
     run_step.dependOn(&run_cmd.step);
 
     const run_ebpf_cmd = b.addRunArtifact(ebpf_exe);
     run_ebpf_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_ebpf_cmd.addArgs(args);
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_ebpf_cmd.addPassthruArgs() else if (b.args) |args| run_ebpf_cmd.addArgs(args);
 
     const run_ebpf_step = b.step("run-ebpf", "Run the daemon (eBPF mode, requires root)");
     run_ebpf_step.dependOn(&run_ebpf_cmd.step);

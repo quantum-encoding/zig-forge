@@ -8,11 +8,20 @@
 const std = @import("std");
 const config = @import("config.zig");
 
-// C library imports for file operations
-const c = @cImport({
-    @cInclude("fcntl.h");
-    @cInclude("unistd.h");
-});
+// libc through std.c (Zig 0.17 removed @cImport; same prototypes as fcntl.h/unistd.h).
+const c = struct {
+    const O_RDONLY: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .RDONLY }));
+    const O_WRONLY: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .WRONLY }));
+    const O_CREAT: c_int = @bitCast(@as(std.c.O, .{ .CREAT = true }));
+    const O_TRUNC: c_int = @bitCast(@as(std.c.O, .{ .TRUNC = true }));
+    const O_APPEND: c_int = @bitCast(@as(std.c.O, .{ .APPEND = true }));
+    fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int {
+        return std.c.open(path, @bitCast(flags), mode);
+    }
+    const close = std.c.close;
+    const read = std.c.read;
+    const write = std.c.write;
+};
 const PolicyEngine = @import("policy/engine.zig").PolicyEngine;
 const TaskQueue = @import("queue/scheduler.zig").TaskQueue;
 const State = @import("state.zig").State;
@@ -144,7 +153,7 @@ fn writePidFile() !void {
     const pid_path = "/tmp/claude-shepherd.pid";
 
     var path_buf: [256]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{pid_path}) catch return;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{pid_path}, 0) catch return;
 
     const fd = c.open(@ptrCast(path_z.ptr), c.O_WRONLY | c.O_CREAT | c.O_TRUNC, @as(c_uint, 0o644));
     if (fd < 0) return;
@@ -164,7 +173,7 @@ fn log(comptime level: []const u8, comptime fmt: []const u8, args: anytype) void
 
     const log_path = "/tmp/claude-shepherd.log";
     var path_buf: [256]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{log_path}) catch return;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{log_path}, 0) catch return;
 
     const fd = c.open(@ptrCast(path_z.ptr), c.O_WRONLY | c.O_CREAT | c.O_APPEND, @as(c_uint, 0o644));
     if (fd < 0) return;

@@ -9,16 +9,47 @@ const ClaudeInstance = @import("state.zig").ClaudeInstance;
 const PolicyEngine = @import("policy/engine.zig").PolicyEngine;
 const JsonExporter = @import("export.zig").JsonExporter;
 
-// C bindings for libbpf and file operations
-const c = @cImport({
-    @cInclude("bpf/libbpf.h");
-    @cInclude("bpf/bpf.h");
-    @cInclude("errno.h");
-    @cInclude("signal.h");
-    @cInclude("time.h");
-    @cInclude("unistd.h");
-    @cInclude("fcntl.h");
-});
+// C bindings for libbpf and file operations. Zig 0.17 removed @cImport, so the
+// libbpf calls are bound by hand (prototypes from bpf/libbpf.h and bpf/bpf.h) and
+// libc goes through std.c.
+const c = struct {
+    const bpf_object = opaque {};
+    const bpf_program = opaque {};
+    const bpf_map = opaque {};
+    const bpf_link = opaque {};
+    const ring_buffer = opaque {};
+    const ring_buffer_sample_fn = ?*const fn (ctx: ?*anyopaque, data: ?*anyopaque, size: usize) callconv(.c) c_int;
+
+    const BPF_ANY: u64 = 0;
+
+    extern "c" fn bpf_object__open_file(path: [*:0]const u8, opts: ?*const anyopaque) ?*bpf_object;
+    extern "c" fn bpf_object__load(obj: *bpf_object) c_int;
+    extern "c" fn bpf_object__close(obj: *bpf_object) void;
+    extern "c" fn bpf_object__next_program(obj: *const bpf_object, prog: ?*bpf_program) ?*bpf_program;
+    extern "c" fn bpf_object__find_map_by_name(obj: *const bpf_object, name: [*:0]const u8) ?*bpf_map;
+    extern "c" fn bpf_program__attach(prog: ?*const bpf_program) ?*bpf_link;
+    extern "c" fn bpf_map__fd(map: ?*const bpf_map) c_int;
+    extern "c" fn bpf_map_update_elem(fd: c_int, key: ?*const anyopaque, value: ?*const anyopaque, flags: u64) c_int;
+    extern "c" fn ring_buffer__new(map_fd: c_int, sample_cb: ring_buffer_sample_fn, ctx: ?*anyopaque, opts: ?*const anyopaque) ?*ring_buffer;
+    extern "c" fn ring_buffer__poll(rb: *ring_buffer, timeout_ms: c_int) c_int;
+    extern "c" fn ring_buffer__free(rb: *ring_buffer) void;
+
+    const EINTR: c_int = @intFromEnum(std.c.E.INTR);
+    const SIGINT: c_int = 2;
+    const SIGTERM: c_int = 15;
+    extern "c" fn signal(sig: c_int, handler: ?*const fn (c_int) callconv(.c) void) ?*const anyopaque;
+
+    const F_OK = std.c.F_OK;
+    const access = std.c.access;
+    const O_WRONLY: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .WRONLY }));
+    const O_CREAT: c_int = @bitCast(@as(std.c.O, .{ .CREAT = true }));
+    const O_APPEND: c_int = @bitCast(@as(std.c.O, .{ .APPEND = true }));
+    fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int {
+        return std.c.open(path, @bitCast(flags), mode);
+    }
+    const close = std.c.close;
+    const write = std.c.write;
+};
 
 // Event types (must match shepherd.bpf.c)
 const EVENT_TTY_WRITE: u32 = 1;
@@ -114,7 +145,7 @@ pub const EbpfConsumer = struct {
 
         var found_path: ?[*:0]const u8 = null;
         for (paths) |path| {
-            const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch continue;
+            const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch continue;
             if (c.access(path_z, c.F_OK) == 0) {
                 found_path = path_z;
                 break;
@@ -302,7 +333,7 @@ fn log(comptime level: []const u8, comptime fmt: []const u8, args: anytype) void
 
     // Write to log file
     var path_buf: [256]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "/tmp/claude-shepherd.log", .{}) catch return;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "/tmp/claude-shepherd.log", .{}, 0) catch return;
 
     const fd = c.open(@ptrCast(path_z.ptr), c.O_WRONLY | c.O_CREAT | c.O_APPEND, @as(c_uint, 0o644));
     if (fd < 0) return;
