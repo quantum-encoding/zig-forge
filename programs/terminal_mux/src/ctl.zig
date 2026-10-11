@@ -44,7 +44,7 @@ pub const Ctl = struct {
 };
 
 pub fn socketPath(alloc: std.mem.Allocator) ![:0]u8 {
-    if (sys.getenv("ZTERM_SOCKET")) |s| return alloc.dupeZ(u8, s);
+    if (sys.getenv("ZTERM_SOCKET")) |s| return alloc.dupeSentinel(u8, s, 0);
     return defaultSocketPath(alloc);
 }
 

@@ -238,7 +238,7 @@ fn parseArgs(alloc: std.mem.Allocator, args: []const []const u8) !Config {
         } else if (std.mem.eql(u8, a, "--only")) {
             cfg.only = v;
         } else if (std.mem.eql(u8, a, "--shell")) {
-            cfg.shell = try alloc.dupeZ(u8, v);
+            cfg.shell = try alloc.dupeSentinel(u8, v, 0);
         } else return error.UnknownFlag;
     }
     return cfg;

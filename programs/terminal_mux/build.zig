@@ -16,6 +16,9 @@
 //!   zig build bench        - Run the C ABI throughput/latency benchmark
 
 const std = @import("std");
+// Zig 0.17 renamed the OptimizeMode tags (.fast/.small/.safe/.debug) and keeps
+// the old names only as decls, so they are spelled through the type.
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -61,8 +64,8 @@ pub fn build(b: *std.Build) void {
     // replaces the stamped release archive.
     const lib_step = b.step("lib", "Build the consumed archive zig-out/lib/libterminal_mux.a and its header only (release modes only; use scripts/build-macos-lib.sh)");
     switch (optimize) {
-        .ReleaseSmall, .ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step),
-        .Debug, .ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
+        Optimize.ReleaseSmall, Optimize.ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step),
+        Optimize.Debug, Optimize.ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
             "zig build lib writes zig-out/lib/libterminal_mux.a, the archive consumers link; " ++
                 "a {t} build keeps Zig's panic machinery and is never that archive. " ++
                 "Run scripts/build-macos-lib.sh programs/terminal_mux from the repo root " ++
@@ -87,7 +90,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 // A perf bench must ALWAYS be optimized — Debug (the default `optimize`) is bounds-checked +
                 // unoptimized, ~6× slower, and misleads every comparison. Force ReleaseFast regardless of -Doptimize.
-                .optimize = .ReleaseFast,
+                .optimize = Optimize.ReleaseFast,
             }),
         });
         bench.root_module.link_libc = true;
@@ -105,7 +108,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/viewbench.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = Optimize.ReleaseFast,
             }),
         });
         viewbench.root_module.link_libc = true;
@@ -133,7 +136,9 @@ pub fn build(b: *std.Build) void {
 
     const zterm_run = b.addRunArtifact(zterm);
     zterm_run.step.dependOn(b.getInstallStep());
-    if (b.args) |a| zterm_run.addArgs(a);
+    // Zig 0.17 removed `b.args` in favour of `addPassthruArgs`, which 0.16 does
+    // not have; the comptime branch keeps both compiling.
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) zterm_run.addPassthruArgs() else if (b.args) |a| zterm_run.addArgs(a);
     const zterm_step = b.step("zterm", "Run zterm (e.g. `zig build zterm -- cli list`)");
     zterm_step.dependOn(&zterm_run.step);
     // `zig build run` is the multiplexer — the same binary, run bare.

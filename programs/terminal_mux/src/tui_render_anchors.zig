@@ -26,14 +26,24 @@ fn feedFixture(sess: *session.Session, bytes: []const u8) void {
 /// the original synth fixture lacked them, which is why the grid dumped clean
 /// while the live app underlined everything: an unguarded `m`-final dispatch
 /// read XTMODKEYS' param 4 as SGR underline-on, and no reset ever follows.
+/// `s` repeated `n` times at comptime (Zig 0.17 removed the `**` operator).
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    comptime {
+        var buf: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
+        const out = buf;
+        return &out;
+    }
+}
+
 const TUI =
     "\x1b[?1049h\x1b[H\x1b[2J" ++
     "\x1b[>1u\x1b[>4;2m" ++
     "\x1b[38;2;180;180;190m" ++
-    "\u{256D}" ++ "\u{2500}" ** 20 ++ "\u{256E}\r\n" ++
+    "\u{256D}" ++ repeat("\u{2500}", 20) ++ "\u{256E}\r\n" ++
     "\u{2502} \x1b[0m\x1b[1m\u{2733} Claude\x1b[0m\r\n" ++
     "\u{2502} \x1b[0mSee https://docs.anthropic.com/claude for more.\r\n" ++
-    "\u{2570}" ++ "\u{2500}" ** 20 ++ "\u{2570}\r\n" ++
+    "\u{2570}" ++ repeat("\u{2500}", 20) ++ "\u{2570}\r\n" ++
     "\x1b[0m\u{23F5} auto-accept on   \u{26A0} 3 files\r\n";
 
 test "REAL composer replay: typed text must land unmangled in the grid" {
