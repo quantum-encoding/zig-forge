@@ -20,7 +20,12 @@ pub fn build(b: *std.Build) void {
     // live GNU sha512sum diff). The test binary shells out to the installed
     // zsha512sum, so it needs the install path.
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "z_exe", b.getInstallPath(.bin, "zsha512sum"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        test_opts.addOption([]const u8, "z_exe", b.getInstallPath(.bin, "zsha512sum"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time, so the path is resolved lazily.
+        test_opts.addOptionPathUntracked("z_exe", .{ .relative = .{ .base = .install_bin, .sub_path = "zsha512sum" } });
+    }
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{
