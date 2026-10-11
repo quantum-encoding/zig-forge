@@ -1,11 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const libc = std.c;
-const c = @cImport({
-    @cInclude("sqlite3.h");
-    @cInclude("sys/inotify.h");
-    @cInclude("dbus/dbus.h");
-});
+const c = @import("c.zig");
 
 // Zig 0.16 compatible Mutex using pthreads (std.Thread.Mutex no longer exists)
 const Mutex = struct {

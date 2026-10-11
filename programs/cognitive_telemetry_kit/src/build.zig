@@ -1,3 +1,4 @@
+// TODO(zig-0.17): legacy Linux stack (see LEGACY.md) — this build.zig references sources that no longer exist (chronos-ctl.zig, chronos.zig, chronosd-cognitive.zig, ...), so it fails on 0.16 too; @cImport in dbus_bindings.zig / chronos-stamp-cognitive-direct.zig not ported. Only the b.args spelling is dual.
 //! Guardian Shield - eBPF-based System Security Framework
 //!
 //! Copyright (c) 2025 Richard Tune / Quantum Encoding Ltd
@@ -54,9 +55,9 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    // Zig 0.17 deprecates `b.args` (master removes it) in favour of `addPassthruArgs`,
+    // which 0.16 does not have; the comptime branch keeps both compiling.
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run chronos-ctl");
     run_step.dependOn(&run_cmd.step);
