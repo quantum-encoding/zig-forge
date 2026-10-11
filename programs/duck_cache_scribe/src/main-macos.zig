@@ -124,7 +124,7 @@ fn watchForChanges(repo_path: []const u8) !void {
 
     // Open directory to watch
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{repo_path}) catch return error.PathTooLong;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{repo_path}, 0) catch return error.PathTooLong;
 
     const dir_fd = c.open(path_z.ptr, @bitCast(posix.O{ .ACCMODE = .RDONLY }), @as(c.mode_t, 0));
     if (dir_fd < 0) return error.OpenFailed;
