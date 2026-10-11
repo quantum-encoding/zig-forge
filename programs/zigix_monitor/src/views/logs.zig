@@ -18,13 +18,13 @@ pub const Severity = enum {
 };
 
 const LogEntry = struct {
-    timestamp: [19]u8 = [_]u8{' '} ** 19, // "YYYY-MM-DD HH:MM:SS"
+    timestamp: [19]u8 = @splat(' '), // "YYYY-MM-DD HH:MM:SS"
     severity: Severity = .info,
-    message: [96]u8 = [_]u8{0} ** 96,
+    message: [96]u8 = @splat(0),
     message_len: usize = 0,
 };
 
-var entries: [MAX_ENTRIES]LogEntry = [_]LogEntry{.{}} ** MAX_ENTRIES;
+var entries: [MAX_ENTRIES]LogEntry = @splat(.{});
 var count: usize = 0;
 var head: usize = 0; // Next write position in ring buffer
 var scroll_offset: usize = 0;
