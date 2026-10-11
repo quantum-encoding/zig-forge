@@ -21,6 +21,7 @@
 //!   gpio.GPIOA.MODER.modify(.{ .MODER0 = 0b01 });  // Output mode
 
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -57,7 +58,7 @@ pub fn build(b: *std.Build) void {
     const stm32f4_module = b.createModule(.{
         .root_source_file = b.path("src/hal.zig"),
         .target = stm32f4_target,
-        .optimize = .ReleaseSmall,
+        .optimize = Optimize.ReleaseSmall,
     });
 
     const stm32f4_lib = b.addLibrary(.{
@@ -86,7 +87,7 @@ pub fn build(b: *std.Build) void {
     const rp2040_module = b.createModule(.{
         .root_source_file = b.path("src/hal.zig"),
         .target = rp2040_target,
-        .optimize = .ReleaseSmall,
+        .optimize = Optimize.ReleaseSmall,
     });
 
     const rp2040_lib = b.addLibrary(.{
@@ -115,7 +116,7 @@ pub fn build(b: *std.Build) void {
     const esp32c3_module = b.createModule(.{
         .root_source_file = b.path("src/hal.zig"),
         .target = esp32c3_target,
-        .optimize = .ReleaseSmall,
+        .optimize = Optimize.ReleaseSmall,
     });
 
     const esp32c3_lib = b.addLibrary(.{
@@ -139,7 +140,7 @@ pub fn build(b: *std.Build) void {
     const blink_stm32_module = b.createModule(.{
         .root_source_file = b.path("examples/blink_stm32f4.zig"),
         .target = stm32f4_target,
-        .optimize = .ReleaseSmall,
+        .optimize = Optimize.ReleaseSmall,
     });
     blink_stm32_module.addImport("hal", hal_module);
 

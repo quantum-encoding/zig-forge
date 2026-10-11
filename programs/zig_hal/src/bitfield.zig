@@ -35,8 +35,8 @@ pub fn Register(comptime T: type, comptime addr: usize) type {
 
         pub inline fn modify(fields: anytype) void {
             var value = ptr.*;
-            inline for (@typeInfo(@TypeOf(fields)).@"struct".fields) |field| {
-                @field(value, field.name) = @field(fields, field.name);
+            inline for (comptime std.meta.fieldNames(@TypeOf(fields))) |name| {
+                @field(value, name) = @field(fields, name);
             }
             ptr.* = value;
         }
@@ -53,7 +53,9 @@ pub fn Register(comptime T: type, comptime addr: usize) type {
 
 /// Reserved bits placeholder - ensures correct struct size
 pub fn Reserved(comptime n: comptime_int) type {
-    return std.meta.Int(.unsigned, n);
+    // std.meta.Int is gone on Zig 0.17 (and @Int is an AstGen error on 0.16); the smallest
+    // unsigned type holding 2^n - 1 is exactly `u<n>` on both.
+    return std.math.IntFittingRange(0, (1 << n) - 1);
 }
 
 /// Create a bit mask for a range of bits
