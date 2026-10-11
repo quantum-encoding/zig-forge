@@ -41,14 +41,40 @@ const outputs = @import("outputs.zig");
 const correlation = @import("correlation.zig");
 const grimoire = @import("grimoire.zig");
 
-const c = @cImport({
-    @cInclude("bpf/libbpf.h");
-    @cInclude("bpf/bpf.h");
-    @cInclude("linux/perf_event.h");
-    @cInclude("sys/syscall.h");
-    @cInclude("fcntl.h");
-    @cInclude("unistd.h");
-});
+// Zig 0.17 removed @cImport: the declarations used from bpf/libbpf.h, bpf/bpf.h, linux/perf_event.h, sys/syscall.h, fcntl.h, unistd.h
+// are bound by hand (same prototypes), libc through std.c.
+const c = struct {
+    const bpf_object = opaque {};
+    const bpf_program = opaque {};
+    const bpf_map = opaque {};
+    const bpf_link = opaque {};
+    fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int {
+        return std.c.open(path, @bitCast(flags), mode);
+    }
+    const close = std.c.close;
+    const write = std.c.write;
+    const ring_buffer = opaque {};
+    const BPF_ANY: u64 = 0;
+    extern "c" fn bpf_object__open(path: [*:0]const u8) ?*bpf_object;
+    extern "c" fn bpf_object__load(obj: *bpf_object) c_int;
+    extern "c" fn bpf_object__close(obj: *bpf_object) void;
+    extern "c" fn bpf_object__find_program_by_name(obj: *const bpf_object, name: [*:0]const u8) ?*bpf_program;
+    extern "c" fn bpf_object__find_map_by_name(obj: *const bpf_object, name: [*:0]const u8) ?*bpf_map;
+    extern "c" fn bpf_object__find_map_fd_by_name(obj: *const bpf_object, name: [*:0]const u8) c_int;
+    extern "c" fn bpf_program__attach(prog: ?*const bpf_program) ?*bpf_link;
+    extern "c" fn bpf_link__destroy(link: ?*bpf_link) c_int;
+    extern "c" fn bpf_map__fd(map: ?*const bpf_map) c_int;
+    extern "c" fn bpf_map_update_elem(fd: c_int, key: ?*const anyopaque, value: ?*const anyopaque, flags: u64) c_int;
+    extern "c" fn bpf_map_lookup_elem(fd: c_int, key: ?*const anyopaque, value: ?*anyopaque) c_int;
+    extern "c" fn bpf_map_get_next_key(fd: c_int, key: ?*const anyopaque, next_key: ?*anyopaque) c_int;
+    const ring_buffer_sample_fn = ?*const fn (ctx: ?*anyopaque, data: ?*anyopaque, size: usize) callconv(.c) c_int;
+    extern "c" fn ring_buffer__new(map_fd: c_int, sample_cb: ring_buffer_sample_fn, ctx: ?*anyopaque, opts: ?*const anyopaque) ?*ring_buffer;
+    extern "c" fn ring_buffer__poll(rb: *ring_buffer, timeout_ms: c_int) c_int;
+    extern "c" fn ring_buffer__free(rb: *ring_buffer) void;
+    const O_WRONLY: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .WRONLY }));
+    const O_CREAT: c_int = @bitCast(@as(std.c.O, .{ .CREAT = true }));
+    const O_APPEND: c_int = @bitCast(@as(std.c.O, .{ .APPEND = true }));
+};
 
 const VERSION = "6.0.0-grimoire"; // Phase 6: Sovereign Grimoire - Behavioral Pattern Detection
 
@@ -757,7 +783,7 @@ fn displayResults(
 
     std.debug.print("Top {d} syscalls (by frequency):\n\n", .{display_count});
     std.debug.print("{s:<8} {s:<15} {s:>12}\n", .{ "PID", "SYSCALL", "COUNT" });
-    std.debug.print("{s}\n", .{"─" ** 40});
+    std.debug.print("{s}\n", .{repeat("─", 40)});
 
     for (entries.items[0..display_count]) |entry| {
         const syscall_name = getSyscallName(entry.syscall_nr);
@@ -1059,4 +1085,15 @@ fn printUsage(prog_name: []const u8) void {
     std.debug.print("\n  # Phase 6: Grimoire with enforcement (EXPERIMENTAL!)\n", .{});
     std.debug.print("  sudo {s} --enable-grimoire --grimoire-enforce\n", .{prog_name});
     std.debug.print("\nNote: Requires root privileges (CAP_BPF) to load eBPF programs.\n\n", .{});
+}
+
+/// `s` repeated `n` times at comptime. Zig 0.17 removed the `"ab" ** 64` array-multiplication
+/// syntax, and `@splat` repeats a single byte only.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    const frozen = comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        break :blk out;
+    };
+    return &frozen;
 }

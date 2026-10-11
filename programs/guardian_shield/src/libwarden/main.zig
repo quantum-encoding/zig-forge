@@ -96,13 +96,27 @@ pub const std_options: std.Options = .{
     .signal_stack_size = null,
 };
 
-const c = @cImport({
-    @cInclude("dlfcn.h");
-    @cInclude("fcntl.h");
-    @cInclude("unistd.h");
-    @cInclude("stdlib.h");
-    @cInclude("signal.h");
-});
+// Zig 0.17 removed @cImport: the declarations used from dlfcn.h, fcntl.h, unistd.h, stdlib.h, signal.h
+// are bound by hand (same prototypes), libc through std.c.
+const c = struct {
+    fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int {
+        return std.c.open(path, @bitCast(flags), mode);
+    }
+    const close = std.c.close;
+    const read = std.c.read;
+    const getenv = std.c.getenv;
+    const dlsym = std.c.dlsym;
+    const RTLD_NEXT: ?*anyopaque = @ptrFromInt(std.math.maxInt(usize)); // glibc ((void *) -1)
+    extern "c" fn signal(sig: c_int, handler: ?*const fn (c_int) callconv(.c) void) isize;
+    const SIG_ERR: isize = -1;
+    const SIGHUP: c_int = 1;
+    const SIGUSR2: c_int = 12; // Linux
+    extern "c" fn atexit(func: ?*const fn () callconv(.c) void) c_int;
+    const O_RDONLY: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .RDONLY }));
+    const O_WRONLY: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .WRONLY }));
+    const O_RDWR: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .RDWR }));
+    const O_CREAT: c_int = @bitCast(@as(std.c.O, .{ .CREAT = true }));
+};
 
 // Import errno functions
 extern "c" fn __errno_location() *c_int;

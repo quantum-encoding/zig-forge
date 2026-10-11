@@ -199,7 +199,7 @@ pub const FilterEngine = struct {
             .total_requests = 0,
             .allowed_requests = 0,
             .blocked_requests = 0,
-            .blocks_by_filter = [_]u64{0} ** 4,
+            .blocks_by_filter = @as([4]u64, @splat(0)),
         };
 
         // Initialize whitelist filter if enabled

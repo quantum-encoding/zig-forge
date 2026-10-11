@@ -91,7 +91,7 @@ pub fn main() !void {
     // CONDUCTOR OPERATIONAL DOCTRINE
     // ========================================
     std.debug.print("OPERATIONAL DOCTRINE:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     const doctrine = struct {
         const principles = [_][]const u8{
@@ -113,7 +113,7 @@ pub fn main() !void {
     // DEMONSTRATION: C-ELP BEHAVIORAL SOVEREIGNTY CAMPAIGN
     // ========================================
     std.debug.print("DEMONSTRATION: C-ELP BEHAVIORAL SOVEREIGNTY CAMPAIGN\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     // Simulate mission planning with Scriptorium consultation
     std.debug.print("📚 CONSULTING SCRIPTORIUM...\n", .{});
@@ -157,7 +157,7 @@ pub fn main() !void {
     // PARALLEL EXECUTION STRATEGY
     // ========================================
     std.debug.print("🔄 PARALLEL EXECUTION GROUPS:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     const parallel_groups = try identifyParallelGroups(allocator, execution_steps);
     defer {
@@ -179,7 +179,7 @@ pub fn main() !void {
     // RISK ASSESSMENT
     // ========================================
     std.debug.print("⚠️  RISK ASSESSMENT:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     const risk = try assessMissionRisk(allocator, celp_mission, execution_steps);
     defer {
@@ -203,7 +203,7 @@ pub fn main() !void {
     // MISSION EXECUTION SIMULATION
     // ========================================
     std.debug.print("🚀 MISSION EXECUTION SIMULATION:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     const mission_result = try simulateMissionExecution(allocator, celp_mission, execution_steps);
     defer {
@@ -245,7 +245,7 @@ pub fn main() !void {
     // SCRIPTORIUM ENRICHMENT
     // ========================================
     std.debug.print("📚 ENRICHING SCRIPTORIUM:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     std.debug.print("✓ Mission log structured and formatted\n", .{});
     std.debug.print("✓ Historical precedent updated\n", .{});

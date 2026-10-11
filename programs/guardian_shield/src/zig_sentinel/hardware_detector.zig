@@ -43,10 +43,16 @@
 
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("fcntl.h");
-    @cInclude("unistd.h");
-});
+// Zig 0.17 removed @cImport: the declarations used from fcntl.h, unistd.h
+// are bound by hand (same prototypes), libc through std.c.
+const c = struct {
+    fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int {
+        return std.c.open(path, @bitCast(flags), mode);
+    }
+    const close = std.c.close;
+    const read = std.c.read;
+    const O_RDONLY: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .RDONLY }));
+};
 
 /// Hardware capabilities detected from the system
 pub const HardwareCapabilities = struct {

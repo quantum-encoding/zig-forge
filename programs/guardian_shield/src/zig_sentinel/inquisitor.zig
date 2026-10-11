@@ -44,12 +44,31 @@ const std = @import("std");
 const time_compat = @import("time_compat.zig");
 const emoji_sanitizer = @import("emoji_sanitizer.zig");
 
-const c = @cImport({
-    @cInclude("bpf/libbpf.h");
-    @cInclude("bpf/bpf.h");
-    @cInclude("linux/bpf.h");
-    @cInclude("errno.h");
-});
+// Zig 0.17 removed @cImport: the declarations used from bpf/libbpf.h, bpf/bpf.h, linux/bpf.h, errno.h
+// are bound by hand (same prototypes), libc through std.c.
+const c = struct {
+    const bpf_program = opaque {};
+    const bpf_map = opaque {};
+    const ring_buffer = opaque {};
+    const bpf_object = opaque {};
+    const bpf_link = opaque {};
+    const BPF_ANY: u64 = 0;
+    extern "c" fn bpf_object__open(path: [*:0]const u8) ?*bpf_object;
+    extern "c" fn bpf_object__load(obj: *bpf_object) c_int;
+    extern "c" fn bpf_object__close(obj: *bpf_object) void;
+    extern "c" fn bpf_object__find_program_by_name(obj: *const bpf_object, name: [*:0]const u8) ?*bpf_program;
+    extern "c" fn bpf_object__find_map_by_name(obj: *const bpf_object, name: [*:0]const u8) ?*bpf_map;
+    extern "c" fn bpf_program__attach(prog: ?*const bpf_program) ?*bpf_link;
+    extern "c" fn bpf_program__set_autoload(prog: ?*bpf_program, autoload: bool) c_int;
+    extern "c" fn bpf_program__fd(prog: ?*const bpf_program) c_int;
+    extern "c" fn bpf_link__destroy(link: ?*bpf_link) c_int;
+    extern "c" fn bpf_map__fd(map: ?*const bpf_map) c_int;
+    extern "c" fn bpf_map_update_elem(fd: c_int, key: ?*const anyopaque, value: ?*const anyopaque, flags: u64) c_int;
+    const ring_buffer_sample_fn = ?*const fn (ctx: ?*anyopaque, data: ?*anyopaque, size: usize) callconv(.c) c_int;
+    extern "c" fn ring_buffer__new(map_fd: c_int, sample_cb: ring_buffer_sample_fn, ctx: ?*anyopaque, opts: ?*const anyopaque) ?*ring_buffer;
+    extern "c" fn ring_buffer__poll(rb: *ring_buffer, timeout_ms: c_int) c_int;
+    extern "c" fn ring_buffer__free(rb: *ring_buffer) void;
+};
 
 const MAX_PATTERN_LEN = 64;
 const MAX_BLACKLIST_ENTRIES = 8; // Limited for eBPF verifier compatibility
@@ -98,7 +117,7 @@ pub const Inquisitor = struct {
         std.debug.print("🗡️  The Inquisitor - Loading LSM BPF from: {s}\n", .{obj_path});
 
         // Convert path to null-terminated C string
-        const path_z = try self.allocator.dupeZ(u8, obj_path);
+        const path_z = try self.allocator.dupeSentinel(u8, obj_path, 0);
         defer self.allocator.free(path_z);
 
         // Open eBPF object

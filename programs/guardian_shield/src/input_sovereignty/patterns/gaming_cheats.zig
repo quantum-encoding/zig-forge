@@ -165,7 +165,7 @@ pub const InputPattern = struct {
 
     /// Create pattern name from string (zero-padded)
     pub fn makeName(comptime name_str: []const u8) [32]u8 {
-        var result = [_]u8{0} ** 32;
+        var result = @as([32]u8, @splat(0));
         @memcpy(result[0..@min(name_str.len, 32)], name_str[0..@min(name_str.len, 32)]);
         return result;
     }
