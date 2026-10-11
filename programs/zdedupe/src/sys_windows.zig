@@ -1017,7 +1017,7 @@ pub fn statAt(dir_fd: c_int, name: [*:0]const u8) ?StatInfo {
         return null;
     };
     defer allocator.free(full);
-    const z = allocator.dupeZ(u8, full) catch {
+    const z = allocator.dupeSentinel(u8, full, 0) catch {
         setErrno(.NOMEM);
         return null;
     };
@@ -1176,7 +1176,7 @@ pub fn getenv(name: [*:0]const u8) ?[*:0]const u8 {
     if (n == 0 or n >= value.len) return null;
     const utf8 = unicode.wtf16LeToWtf8Alloc(allocator, value[0..n]) catch return null;
     defer allocator.free(utf8);
-    const owned = allocator.dupeZ(u8, utf8) catch return null;
+    const owned = allocator.dupeSentinel(u8, utf8, 0) catch return null;
     for (owned) |*ch| {
         if (ch.* == '\\') ch.* = '/';
     }

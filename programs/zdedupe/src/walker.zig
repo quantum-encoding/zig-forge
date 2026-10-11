@@ -154,7 +154,7 @@ pub const Walker = struct {
     fn walkRecursiveDepth(self: *Walker, path: []const u8, result: *WalkResult, depth: u32) !void {
         if (depth > max_depth) return error.MaxDepthExceeded;
 
-        const path_z = try self.allocator.dupeZ(u8, path);
+        const path_z = try self.allocator.dupeSentinel(u8, path, 0);
         defer self.allocator.free(path_z);
 
         // Check if path is a directory or file
@@ -213,7 +213,7 @@ pub const Walker = struct {
             const full_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ path, name });
             defer self.allocator.free(full_path);
 
-            const full_path_z = try self.allocator.dupeZ(u8, full_path);
+            const full_path_z = try self.allocator.dupeSentinel(u8, full_path, 0);
             defer self.allocator.free(full_path_z);
 
             // Get file info
@@ -288,7 +288,7 @@ pub const Walker = struct {
 
     fn processSymlink(self: *Walker, path: []const u8, result: *WalkResult, depth: u32) error{MaxDepthExceeded}!void {
         if (depth > max_depth) return error.MaxDepthExceeded;
-        const path_z = self.allocator.dupeZ(u8, path) catch return;
+        const path_z = self.allocator.dupeSentinel(u8, path, 0) catch return;
         defer self.allocator.free(path_z);
 
         // Read symlink target
@@ -309,7 +309,7 @@ pub const Walker = struct {
         };
         defer self.allocator.free(abs_target);
 
-        const abs_z = self.allocator.dupeZ(u8, abs_target) catch return;
+        const abs_z = self.allocator.dupeSentinel(u8, abs_target, 0) catch return;
         defer self.allocator.free(abs_z);
 
         // stat the target (follow the link)
@@ -350,7 +350,7 @@ pub fn listFiles(allocator: std.mem.Allocator, path: []const u8) !std.ArrayListU
 }
 
 fn listFilesRecursive(allocator: std.mem.Allocator, path: []const u8, files: *std.ArrayListUnmanaged([]const u8)) !void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     const dir = libc.opendir(path_z.ptr) orelse {
@@ -372,7 +372,7 @@ fn listFilesRecursive(allocator: std.mem.Allocator, path: []const u8, files: *st
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, name });
         errdefer allocator.free(full_path);
 
-        const full_path_z = try allocator.dupeZ(u8, full_path);
+        const full_path_z = try allocator.dupeSentinel(u8, full_path, 0);
         defer allocator.free(full_path_z);
 
         const stat_buf = pstat.lstat(full_path_z.ptr) catch {

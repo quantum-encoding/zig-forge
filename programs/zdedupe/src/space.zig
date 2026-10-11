@@ -70,7 +70,7 @@ pub const Category = enum(u8) {
     system = 5,
     other = 6,
 };
-pub const category_count = @typeInfo(Category).@"enum".fields.len;
+pub const category_count = std.meta.fieldNames(Category).len;
 
 const by_extension = std.StaticStringMap(Category).initComptime(.{
     // Images, including camera raw and editor documents
@@ -2244,7 +2244,7 @@ pub const View = struct {
         const now = query.now orelse realtimeSeconds();
         const cutoff: ?i64 = if (query.stale_days == 0) null else now -| @as(i64, query.stale_days) * std.time.s_per_day;
 
-        var found: [std.meta.fields(SuggestKind).len]Found = undefined;
+        var found: [std.meta.fieldNames(SuggestKind).len]Found = undefined;
         for (&found) |*f| f.* = .{ .heap = .{ .items = try self.arena.alloc(TopK.Entry, limit) } };
         const built = &found[@intFromEnum(SuggestKind.build_output)];
         const caches = &found[@intFromEnum(SuggestKind.caches)];

@@ -193,10 +193,10 @@ test "chunked compare: matching members get their content digest, a late differe
     defer scratch.deinit();
 
     const size: u64 = 2 * chunk_size + 5 * 1024 * 1024;
-    const head = [_]u8{'h'} ** 4096;
-    const x = [_]u8{'x'} ** 4096;
-    const y = [_]u8{'y'} ** 4096;
-    const zeros = [_]u8{0} ** (1024 * 1024);
+    const head: [4096]u8 = @splat('h');
+    const x: [4096]u8 = @splat('x');
+    const y: [4096]u8 = @splat('y');
+    const zeros: [1024 * 1024]u8 = @splat(0);
     const tail_a = [_]u8{'t'};
     const tail_d = [_]u8{'u'};
     const mid = chunk_size + 1024 * 1024;

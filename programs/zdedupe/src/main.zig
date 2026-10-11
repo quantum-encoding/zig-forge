@@ -249,7 +249,7 @@ fn runDedupe(allocator: std.mem.Allocator, paths: []const []const u8, opts: Opti
         try reporter.writeScanReport(&alloc_writer.writer, groups, summary, dir_analysis);
 
         // Write buffer to file using libc
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
         const fd = std.c.open(path_z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
         if (fd < 0) return error.CannotCreateFile;
@@ -321,7 +321,7 @@ fn runCompare(allocator: std.mem.Allocator, folder_a: []const u8, folder_b: []co
         defer alloc_writer.deinit();
         try reporter.writeCompareReport(&alloc_writer.writer, &result);
 
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
         const fd = std.c.open(path_z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
         if (fd < 0) return error.CannotCreateFile;

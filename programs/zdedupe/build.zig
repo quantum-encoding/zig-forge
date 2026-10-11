@@ -1,4 +1,6 @@
 const std = @import("std");
+// 0.17 renames the OptimizeMode tags; the old names survive only as decls.
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -30,7 +32,7 @@ pub fn build(b: *std.Build) void {
     // Win32 there instead (src/sys_windows.zig).
     const link_libc = target.result.os.tag != .windows;
     static_lib.root_module.link_libc = link_libc;
-    static_lib.root_module.strip = optimize != .Debug;
+    static_lib.root_module.strip = optimize != Optimize.Debug;
     // The results session parses its queries with std.json, whose integer
     // path falls back to f128 (`sliceToInt`), and f128 arithmetic is
     // compiler_rt (__divtf3, __fixtfti, roundq, ...). Nothing in a host's
@@ -47,8 +49,8 @@ pub fn build(b: *std.Build) void {
     // replaces the stamped release archive.
     const lib_step = b.step("lib", "Build the consumed archive zig-out/lib/libzdedupe.a (release modes only; use scripts/build-macos-lib.sh)");
     switch (optimize) {
-        .ReleaseSmall, .ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(static_lib, .{}).step),
-        .Debug, .ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
+        Optimize.ReleaseSmall, Optimize.ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(static_lib, .{}).step),
+        Optimize.Debug, Optimize.ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
             "zig build lib writes zig-out/lib/libzdedupe.a, the archive libs.toml stamps; " ++
                 "a {t} build keeps Zig's panic machinery and is never that archive. " ++
                 "Run scripts/build-macos-lib.sh programs/zdedupe ReleaseFast from the repo root " ++
@@ -78,7 +80,7 @@ pub fn build(b: *std.Build) void {
         .use_lld = use_lld,
     });
     shared_lib.root_module.link_libc = link_libc;
-    shared_lib.root_module.strip = optimize != .Debug;
+    shared_lib.root_module.strip = optimize != Optimize.Debug;
 
     const shared_install = b.addInstallArtifact(shared_lib, .{
         .dest_dir = .{ .override = .{ .custom = "lib/shared" } },
@@ -114,9 +116,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run the CLI tool");
     run_step.dependOn(&run_cmd.step);
@@ -180,8 +180,11 @@ pub fn build(b: *std.Build) void {
     // ============================================================
 
     const fmt_step = b.step("fmt", "Format source files");
+    // 0.17 takes LazyPaths here, 0.16 plain strings; pick by the field's type.
+    const FmtPath = @typeInfo(@FieldType(std.Build.Step.Fmt.Options, "paths")).pointer.child;
+    const fmt_src: FmtPath = if (FmtPath == std.Build.LazyPath) b.path("src") else "src";
     const fmt = b.addFmt(.{
-        .paths = &.{"src"},
+        .paths = &.{fmt_src},
     });
     fmt_step.dependOn(&fmt.step);
 

@@ -1116,7 +1116,7 @@ pub const FastWalker = struct {
             for (paths.items) |p| self.allocator.free(p);
             paths.deinit(self.allocator);
         }
-        try paths.append(self.allocator, try self.allocator.dupeZ(u8, root));
+        try paths.append(self.allocator, try self.allocator.dupeSentinel(u8, root, 0));
 
         if (comptime builtin.os.tag.isDarwin()) {
             if (libc.getenv("HOME")) |home_z| {
@@ -1682,7 +1682,7 @@ test "a guarded folder refused when first asked is recorded and skipped, not ask
 
     // The scratch directory plays the home directory.
     const old_home = libc.getenv("HOME");
-    const old_home_copy = if (old_home) |h| try allocator.dupeZ(u8, std.mem.span(h)) else null;
+    const old_home_copy = if (old_home) |h| try allocator.dupeSentinel(u8, std.mem.span(h), 0) else null;
     defer if (old_home_copy) |h| allocator.free(h);
     defer if (old_home_copy) |h| {
         _ = setenv("HOME", h, 1);
