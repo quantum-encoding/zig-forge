@@ -1,7 +1,5 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("sqlite3.h");
-});
+const c = @import("sqlite3.zig");
 
 const DB_PATH = "/var/lib/cognitive-watcher/cognitive-states.db";
 

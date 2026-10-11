@@ -1,7 +1,5 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("sqlite3.h");
-});
+const c = @import("sqlite3.zig");
 
 // SQLITE_TRANSIENT ((sqlite3_destructor_type)-1) can't be expressed in
 // Zig 0.16 due to function pointer alignment safety. Use SQLITE_STATIC
