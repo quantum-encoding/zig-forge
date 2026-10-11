@@ -505,7 +505,7 @@ fn readDirEntries(allocator: std.mem.Allocator, path: []const u8, config: *const
         entries.deinit(allocator);
     }
 
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     const dir = libc.opendir(path_z.ptr) orelse {
@@ -535,7 +535,7 @@ fn readDirEntries(allocator: std.mem.Allocator, path: []const u8, config: *const
         var stat_buf: Stat = undefined;
         const stat_result = lstat(full_path.ptr, &stat_buf);
 
-        const owned_name = try allocator.dupeZ(u8, name);
+        const owned_name = try allocator.dupeSentinel(u8, name, 0);
         var file_entry: FileEntry = if (stat_result == 0)
             entryFromStat(owned_name, true, &stat_buf)
         else blk: {
@@ -1522,7 +1522,7 @@ pub fn main(init: std.process.Init) void {
     }
 
     for (config.paths.items) |path| {
-        const path_z = allocator.dupeZ(u8, path) catch {
+        const path_z = allocator.dupeSentinel(u8, path, 0) catch {
             exit_serious = true;
             continue;
         };
