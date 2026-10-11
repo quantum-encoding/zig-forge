@@ -43,7 +43,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_parity = b.addRunArtifact(parity_tests);
-    run_parity.setEnvironmentVariable("ZSLEEP_BIN", b.getInstallPath(.bin, "zsleep"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        run_parity.setEnvironmentVariable("ZSLEEP_BIN", b.getInstallPath(.bin, "zsleep"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time and an env var cannot take a
+        // lazy path, so the test runs from the install prefix and is given a relative path.
+        run_parity.setCwd(.{ .relative = .{ .base = .install_prefix } });
+        run_parity.setEnvironmentVariable("ZSLEEP_BIN", "bin/zsleep");
+    }
     run_parity.step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_parity.step);
 }
