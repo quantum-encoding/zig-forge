@@ -9,8 +9,17 @@
 #   scripts/crypto-conformance.sh --no-rust  skip the corpus check (no cargo on this machine)
 #
 # Test builds only: nothing here runs `zig build lib`, so no consumed archive or stamp is touched.
+#
+# The Zig is the one consumed archives are built with (scripts/zig-toolchain.sh): $ZIG,
+# else the forge's patched install (~/.local/zig-0.17.0-p1, scripts/patch-zig-0.17.sh),
+# else PATH `zig`; any other toolchain is refused, so the vectors are proven on the
+# compiler that builds the shipped archives.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=zig-toolchain.sh
+. "$root/scripts/zig-toolchain.sh"
+forge_zig_require
+echo "zig: $ZIG ($ZIG_TOOLCHAIN_ID)"
 mode="${1:-check}"
 programs=(programs/simd_crypto_ffi programs/zig-quantum-encryption zig_core_utils/zsss)
 corpora=(programs/simd_crypto_ffi/testdata/differential/rust_reference.txt
@@ -38,6 +47,6 @@ fi
 
 for p in "${programs[@]}"; do
   echo "== zig build test: $p"
-  (cd "$root/$p" && nice -n 10 zig build test --summary new)
+  (cd "$root/$p" && nice -n 10 "$ZIG" build test --summary new)
 done
 echo "crypto conformance: all green"

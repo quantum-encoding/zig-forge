@@ -340,6 +340,16 @@ scripts/build-consumed-libs.sh terminal_mux   # just the named ones
 | zdedupe | `programs/zdedupe/zig-out/lib/libzdedupe.a` | ReleaseFast | zdedupe app (builds its own xcframework from this source) |
 | endpoint_sec | `programs/zig_endpoint_sec/zig-out/lib/libes_core_zig.a`, `libendpoint_sec.a` | ReleaseFast | Metatron Security (builds its own copy from this source) |
 
+**The toolchain that builds them.** Consumed archives are built with Zig 0.17.0 plus a six-line std patch, [`scripts/zig-0.17.0-ios-nullfile.patch`](scripts/zig-0.17.0-ios-nullfile.patch): official 0.17.0 cannot compile an iOS target that reaches `std.debug.print`. Install it on every machine that stamps archives (each Mac, each Linux builder) with:
+
+```bash
+scripts/patch-zig-0.17.sh            # official 0.17.0 tarball for this host, verified by its
+                                     # ziglang.org sha256, patched, installed to ~/.local/zig-0.17.0-p1
+scripts/patch-zig-0.17.sh --tarball zig-aarch64-macos-0.17.0.tar.xz --prefix /opt/zig-0.17.0-p1
+```
+
+It writes `TOOLCHAIN-ID` beside the `zig` binary (`zig 0.17.0 + zig-0.17.0-ios-nullfile.patch sha256:<patch sha256>`). Every build script selects its Zig through [`scripts/zig-toolchain.sh`](scripts/zig-toolchain.sh): `$ZIG` if set, else that install, else `zig` on PATH, and refuses any Zig that is not the patched 0.17.0 (a vanilla 0.17.0 has the same `zig version`; the patched std file's hash and `TOOLCHAIN-ID` tell them apart). PATH and Homebrew are left alone. Each archive gets `<lib>-toolchain.txt` beside its `-source-id.txt` and `.sha256`, and `scripts/check-archive-stamp.sh` refuses an archive stamped by any other toolchain.
+
 Rebuilding one by hand: `scripts/build-macos-lib.sh <program-dir> [ReleaseSmall|ReleaseFast]`. A plain `zig build` in a program directory is Debug and unrepacked; nothing should link it.
 
 ### Build Specific Programs

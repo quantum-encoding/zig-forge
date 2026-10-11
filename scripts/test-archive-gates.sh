@@ -17,11 +17,13 @@
 #   - a stamp pulled through git onto a clone holding an older archive (the 338c9594
 #     restamp case, replayed with real repos) fails check-archive-stamp.sh;
 #   - so do a missing .a.sha256, a missing archive, and a stale source-id;
+#   - so does an archive whose -toolchain.txt names a Zig the forge does not build with
+#     (an unpatched 0.17.0), or that has none;
 #   - build-android-libs.sh stamps what it builds (A4E49146: it wrote no stamp);
 #   - this repo's .gitignore refuses the programs/ios-libs stamps and every .a.sha256,
 #     and nothing of the kind is tracked.
 #
-# Needs zig (zsh -lc), git and Xcode's SDKs (DEVELOPER_DIR, if xcode-select points at the
+# Needs the forge's Zig (scripts/zig-toolchain.sh), git and Xcode's SDKs (DEVELOPER_DIR, if xcode-select points at the
 # Command Line Tools). Exit status: 0 when every case passes.
 set -euo pipefail
 
@@ -31,7 +33,12 @@ tmp="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/archive-gates-test.XXXXXX")" && pwd -P)"
 trap 'rm -rf "$tmp"' EXIT
 case "$tmp" in "$ROOT"/*) echo "scratch dir $tmp is inside the repo" >&2; exit 1 ;; esac
 
-zig_() { zsh -lc 'zig "$@"' zig "$@"; }
+# The Zig the build scripts use (scripts/zig-toolchain.sh), exported to them.
+# shellcheck source=zig-toolchain.sh
+. "$S/zig-toolchain.sh"
+forge_zig_require
+echo "zig: $ZIG ($ZIG_TOOLCHAIN_ID)"
+zig_() { "$ZIG" "$@"; }
 
 pass=0 fail=0
 ok()  { pass=$((pass + 1)); echo "  ✓ $1"; }
@@ -138,6 +145,29 @@ if "$S/check-archive-stamp.sh" "$tmp/nosum.a" "$prog" 2>/dev/null; then
   bad "a stamp with no .a.sha256 passed"
 else
   ok "a source-id stamp without its .a.sha256 fails the gate"
+fi
+
+# The toolchain stamp: a vanilla 0.17.0 says `zig version` 0.17.0 exactly like the forge's
+# patched one, so only <lib>-toolchain.txt tells their archives apart.
+cp "$tmp/m2/ios-libs/libx.a" "$tmp/vanilla.a"
+"$S/stamp-archive.sh" "$tmp/vanilla.a" "$id" "zig 0.17.0 (unpatched)"
+if out="$("$S/check-archive-stamp.sh" "$tmp/vanilla.a" "$prog" 2>&1)"; then
+  bad "an archive stamped as built by an unpatched 0.17.0 passed"
+elif grep -q "was built with 'zig 0.17.0 (unpatched)'" <<<"$out"; then
+  ok "an archive built by an unpatched Zig 0.17.0 fails the gate (toolchain stamp)"
+else
+  bad "an unpatched-0.17.0 archive failed for the wrong reason: $out"
+fi
+cp "$tmp/m2/ios-libs/libx.a" "$tmp/notc.a"
+"$S/stamp-archive.sh" "$tmp/notc.a" "$id"
+if [ "$(cat "$tmp/notc-toolchain.txt")" != "$ZIG_TOOLCHAIN_ID" ]; then
+  bad "stamp-archive.sh without a toolchain argument did not record \$ZIG_TOOLCHAIN_ID"
+fi
+rm "$tmp/notc-toolchain.txt"
+if "$S/check-archive-stamp.sh" "$tmp/notc.a" "$prog" 2>/dev/null; then
+  bad "an archive with no -toolchain.txt passed"
+else
+  ok "an archive without its -toolchain.txt fails the gate"
 fi
 
 if "$S/check-archive-stamp.sh" "$tmp/absent.a" "$prog" 2>/dev/null; then

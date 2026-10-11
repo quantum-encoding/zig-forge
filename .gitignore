@@ -83,6 +83,7 @@ programs/cognitive_telemetry_kit/chronos-ledger/swift/Vendor/
 # once were while the archives were ignored, and pulling a restamp commit paired a new
 # stamp with an old archive that every freshness gate then called current (FB672FF4).
 programs/ios-libs/**/*-source-id.txt
+*-toolchain.txt
 *.a.sha256
 *.lib.sha256
 *.so.sha256

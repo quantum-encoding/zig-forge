@@ -28,7 +28,8 @@ mkdir -p "$OUT"
 cp "$LIB/zig-out/lib/libchronos_ledger.a" "$OUT/libchronos_ledger.a.tmp"
 mv "$OUT/libchronos_ledger.a.tmp" "$OUT/libchronos_ledger.a"
 "$ROOT/scripts/stamp-archive.sh" "$OUT/libchronos_ledger.a" \
-  "$(tr -d '[:space:]' < "$LIB/zig-out/lib/libchronos_ledger-source-id.txt")"
+  "$(tr -d '[:space:]' < "$LIB/zig-out/lib/libchronos_ledger-source-id.txt")" \
+  "$(head -1 "$LIB/zig-out/lib/libchronos_ledger-toolchain.txt")"
 
 echo "→ $OUT/libchronos_ledger.a"
 echo "  header: $LIB/include  (add to the XPC target's Header Search Paths)"

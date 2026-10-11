@@ -22,7 +22,11 @@ should_build() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ZIG="${ZIG:-zig}"
+# The Zig (scripts/zig-toolchain.sh): $ZIG, else the forge's patched install, else PATH;
+# refused unless consumed archives may be built with it. Stamped as <lib>-toolchain.txt.
+# shellcheck source=../scripts/zig-toolchain.sh
+. "$SCRIPT_DIR/../scripts/zig-toolchain.sh"
+forge_zig_require
 # Zig 0.16+ uses simplified target triples (no vendor)
 IOS_TARGET="aarch64-ios"
 IOS_SIM_TARGET="aarch64-ios-simulator"
@@ -40,7 +44,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}=== Building Zig Libraries for iOS ===${NC}"
-echo -e "Zig version: $($ZIG version)"
+echo -e "Zig: $ZIG ($ZIG_TOOLCHAIN_ID)"
 echo -e "Target: $IOS_TARGET"
 echo -e "iOS SDK: $IOS_SDK"
 echo -e "iOS Sim SDK: $IOS_SIM_SDK"
@@ -71,7 +75,7 @@ finish_archive() {
     local archive="$1" id="$2"
     "$SCRIPT_DIR/../scripts/repack-for-xcode.sh" "$archive" >/dev/null &&
         "$SCRIPT_DIR/../scripts/check-apple-archive.sh" "$archive" &&
-        "$SCRIPT_DIR/../scripts/stamp-archive.sh" "$archive" "$id" || {
+        "$SCRIPT_DIR/../scripts/stamp-archive.sh" "$archive" "$id" "$ZIG_TOOLCHAIN_ID" || {
         echo -e "${RED}  ✗ $archive: repack, link check or stamp failed${NC}"
         return 1
     }
@@ -103,7 +107,7 @@ build_lib() {
     # Build for iOS device (arm64)
     # Use ReleaseSmall + strip to avoid linking std.debug (which uses macOS-only APIs)
     echo -e "  → iOS Device ($IOS_TARGET)"
-    if $ZIG build-lib \
+    if "$ZIG" build-lib \
         -target $IOS_TARGET \
         -OReleaseSmall \
         --name "$lib_name" \
@@ -125,7 +129,7 @@ build_lib() {
 
     # Build for iOS Simulator (arm64)
     echo -e "  → iOS Simulator ($IOS_SIM_TARGET)"
-    if $ZIG build-lib \
+    if "$ZIG" build-lib \
         -target $IOS_SIM_TARGET \
         -OReleaseSmall \
         --name "$lib_name" \

@@ -11,6 +11,7 @@
 #   - no artifact carries Zig's safety-check panic strings ("index out of bounds"), so
 #     none is a Debug or ReleaseSafe build;
 #   - the `-source-id.txt` beside each artifact equals scripts/zig-source-id.sh <dir>,
+#     the `-toolchain.txt` names a Zig scripts/zig-toolchain.sh accepts,
 #     and the `.a.sha256` beside it matches the artifact's bytes
 #     (scripts/check-archive-stamp.sh), so the stamp is this archive's and not one that
 #     arrived without it;
@@ -101,6 +102,14 @@ parse_libs() {
     END { if (bad) exit 1; emit() }
   ' "$LIBS"
 }
+
+# One Zig for every row (scripts/zig-toolchain.sh): $ZIG, else the forge's patched
+# install, else PATH; exported, so each row's build script uses the same one, and
+# refused here, before anything is built, unless consumed archives may be built with it.
+# shellcheck source=zig-toolchain.sh
+. "$ROOT/scripts/zig-toolchain.sh"
+forge_zig_require
+echo "zig: $ZIG ($ZIG_TOOLCHAIN_ID)"
 
 rows="$(parse_libs)" || { echo "error: $LIBS is malformed (see above)" >&2; exit 2; }
 

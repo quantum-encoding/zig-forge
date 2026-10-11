@@ -32,7 +32,11 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ZIG="${ZIG:-zig}"
+# The Zig (scripts/zig-toolchain.sh): $ZIG, else the forge's patched install, else PATH;
+# refused unless consumed archives may be built with it. Stamped as <lib>-toolchain.txt.
+# shellcheck source=../scripts/zig-toolchain.sh
+. "$SCRIPT_DIR/../scripts/zig-toolchain.sh"
+forge_zig_require
 SOURCE_ID="$SCRIPT_DIR/../scripts/zig-source-id.sh"
 STAMP="$SCRIPT_DIR/../scripts/stamp-archive.sh"
 
@@ -53,7 +57,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}=== Building Zig Libraries for Android ===${NC}"
-echo -e "Zig version: $($ZIG version)"
+echo -e "Zig: $ZIG ($ZIG_TOOLCHAIN_ID)"
 echo -e "Target: $ANDROID_TARGET"
 echo ""
 
@@ -112,7 +116,7 @@ build_lib() {
     # use TLS today, but adding `-fPIC` universally protects against
     # the next TLS-using lib landing in this list and silently
     # breaking the Android build.
-    if $ZIG build-lib \
+    if "$ZIG" build-lib \
         -target $ANDROID_TARGET \
         -OReleaseSmall \
         --name "$lib_name" \
@@ -123,7 +127,7 @@ build_lib() {
         "$full_dir/$source" \
         -femit-bin="$output_dir/lib${lib_name}.a" \
         2>&1; then
-        "$STAMP" "$output_dir/lib${lib_name}.a" "$id" || {
+        "$STAMP" "$output_dir/lib${lib_name}.a" "$id" "$ZIG_TOOLCHAIN_ID" || {
             echo -e "${RED}  ✗ stamping $output_dir/lib${lib_name}.a failed${NC}"
             return 1
         }
@@ -207,10 +211,10 @@ native_android_step() {
     echo -e "${CYAN}Native zig build android in $dir...${NC}"
     local id archive
     id="$("$SOURCE_ID" "$full_dir")"
-    if (cd "$full_dir" && $ZIG build android) 2>&1; then
+    if (cd "$full_dir" && "$ZIG" build android) 2>&1; then
         for archive in "$full_dir"/zig-out/lib/android-arm64/*.a; do
             [ -e "$archive" ] || continue
-            "$STAMP" "$archive" "$id" || { echo -e "${RED}  ✗ stamping $archive failed${NC}"; return 1; }
+            "$STAMP" "$archive" "$id" "$ZIG_TOOLCHAIN_ID" || { echo -e "${RED}  ✗ stamping $archive failed${NC}"; return 1; }
         done
         echo -e "${GREEN}  ✓ $dir android step (stamped)${NC}"
         return 0

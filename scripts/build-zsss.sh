@@ -53,6 +53,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ZSSS="$ROOT/zig_core_utils/zsss"
+# The Zig (scripts/zig-toolchain.sh): $ZIG, else the forge's patched install, else PATH;
+# refused unless consumed archives may be built with it. Stamped as <lib>-toolchain.txt.
+# shellcheck source=zig-toolchain.sh
+. "$ROOT/scripts/zig-toolchain.sh"
+forge_zig_require
 [ -d "$ZSSS" ] || { echo "error: no zsss at $ZSSS" >&2; exit 1; }
 
 # The NDK, before anything is built (see the header). One toolchain host directory per
@@ -88,7 +93,7 @@ android_api=29
 id="$("$ROOT/scripts/zig-source-id.sh" "$ZSSS")"
 
 cd "$ZSSS"
-zig build apple linux windows
+"$ZIG" build apple linux windows
 
 # Android: the four ABIs build.zig's android step names, in the order it names them, as
 # `libzsss-<name>.a` and `libzsss-<name>.so` — the files the step would install. Each
@@ -103,7 +108,7 @@ scratch="$(mktemp -d "${TMPDIR:-/tmp}/build-zsss.XXXXXX")"
 trap 'rm -rf "$scratch"' EXIT
 for i in "${!android_targets[@]}"; do
   out="zig-out/lib/libzsss-${android_names[$i]}.a"
-  zig build-lib -OReleaseFast -target "${android_targets[$i]}" -lc -static -fPIC \
+  "$ZIG" build-lib -OReleaseFast -target "${android_targets[$i]}" -lc -static -fPIC \
     --name "zsss-${android_names[$i]}" -Mroot=src/lib.zig -femit-bin="$out.tmp"
   mv "$out.tmp" "$out"
 
@@ -116,7 +121,7 @@ for i in "${!android_targets[@]}"; do
     "$sysroot/usr/include" "$sysroot/usr/include/$triple" "$sysroot/usr/lib/$triple/$android_api" > "$libc_file"
   # Built under its final name, so the SONAME is the file name consumers would load.
   so="libzsss-${android_names[$i]}.so"
-  zig build-lib -OReleaseFast -target "${android_targets[$i]}" -lc -dynamic --libc "$libc_file" \
+  "$ZIG" build-lib -OReleaseFast -target "${android_targets[$i]}" -lc -dynamic --libc "$libc_file" \
     --name "zsss-${android_names[$i]}" -Mroot=src/lib.zig -femit-bin="$scratch/$so"
   mv "$scratch/$so" "zig-out/lib/$so"
 done
@@ -150,8 +155,8 @@ fi
 stamped=0
 for archive in zig-out/lib/libzsss-*.a zig-out/lib/zsss-*-windows.lib zig-out/lib/libzsss-*-android.so; do
   [ -e "$archive" ] || continue
-  "$ROOT/scripts/stamp-archive.sh" "$archive" "$id"
+  "$ROOT/scripts/stamp-archive.sh" "$archive" "$id" "$ZIG_TOOLCHAIN_ID"
   stamped=$((stamped + 1))
 done
 
-echo "zsss built; ${#apple[@]} Apple archives link-checked, $stamped archives stamped as $id"
+echo "zsss built with $ZIG_TOOLCHAIN_ID; ${#apple[@]} Apple archives link-checked, $stamped archives stamped as $id"

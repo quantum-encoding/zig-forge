@@ -50,8 +50,15 @@ instead of extending them.
   one and every consumer's `release.toml` must change with it, or the script refuses to stamp.
 - A new `b.path("../…")` or `.path = "../…"` in a consumed program's build makes the script
   fail until the row's `sources` covers it (`scripts/zig-source-id.sh --deps <dir>`).
+- Consumed archives are built only with the patched Zig 0.17.0 (`scripts/patch-zig-0.17.sh`
+  installs it to `~/.local/zig-0.17.0-p1` from the official tarball by checksum, plus
+  `scripts/zig-0.17.0-ios-nullfile.patch`). The build scripts pick it through
+  `scripts/zig-toolchain.sh` (`$ZIG`, else that install, else PATH `zig`) and refuse any other
+  Zig; never edit PATH or Homebrew for it. Its identity (`zig version` + the patch's sha256) is
+  stamped as `<lib>-toolchain.txt`, which `check-archive-stamp.sh` verifies, so a vanilla-0.17.0
+  archive cannot pass for a patched one. Never stamp with a dev build (`~/.local/zig-master`).
 - Stamp an archive only through `scripts/stamp-archive.sh` (`<lib>-source-id.txt` +
-  `<lib>.a.sha256`), after its last write; gates verify with `scripts/check-archive-stamp.sh`.
+  `<lib>-toolchain.txt` + `<lib>.a.sha256`), after its last write; gates verify with `scripts/check-archive-stamp.sh`.
   Never track a stamp whose archive is ignored. Prove an Apple archive with
   `scripts/check-apple-archive.sh` (ld64 skips a misaligned member with only a warning).
   `scripts/test-archive-gates.sh` covers all of it.

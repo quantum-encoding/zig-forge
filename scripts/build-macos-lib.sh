@@ -55,6 +55,13 @@ case "$MODE" in
     exit 1 ;;
 esac
 
+# The Zig (scripts/zig-toolchain.sh): $ZIG, else the forge's patched install, else PATH;
+# refused unless it is a toolchain consumed archives may be built with. Its identity is
+# stamped beside each archive (<lib>-toolchain.txt).
+# shellcheck source=zig-toolchain.sh
+. "$ROOT/scripts/zig-toolchain.sh"
+forge_zig_require
+
 cd "$ROOT/$DIR"
 
 step=install
@@ -73,11 +80,11 @@ if [ "$(uname -s)" = Darwin ]; then
     *) echo "error: no macOS target for architecture $(uname -m)" >&2; exit 1 ;;
   esac
   sdk="$(xcrun --sdk macosx --show-sdk-path)"
-  zig build "$step" -Doptimize="$MODE" -Dtarget="$arch-macos.14.0" --search-prefix "$sdk/usr"
+  "$ZIG" build "$step" -Doptimize="$MODE" -Dtarget="$arch-macos.14.0" --search-prefix "$sdk/usr"
 else
   case "$(uname -s)" in
-    MINGW* | MSYS* | CYGWIN*) zig build "$step" -Doptimize="$MODE" -Dtarget=x86_64-windows-msvc ;;
-    *) zig build "$step" -Doptimize="$MODE" ;;
+    MINGW* | MSYS* | CYGWIN*) "$ZIG" build "$step" -Doptimize="$MODE" -Dtarget=x86_64-windows-msvc ;;
+    *) "$ZIG" build "$step" -Doptimize="$MODE" ;;
   esac
 fi
 
@@ -92,8 +99,8 @@ for archive in zig-out/lib/*.a zig-out/lib/*.lib; do
     # so prove the repack took: a link that must load every member.
     "$ROOT/scripts/check-apple-archive.sh" "$archive" >/dev/null
   fi
-  "$ROOT/scripts/stamp-archive.sh" "$archive" "$id"
-  echo "built + stamped $DIR/$archive ($MODE)"
+  "$ROOT/scripts/stamp-archive.sh" "$archive" "$id" "$ZIG_TOOLCHAIN_ID"
+  echo "built + stamped $DIR/$archive ($MODE, $ZIG_TOOLCHAIN_ID)"
   built=$((built + 1))
 done
 
