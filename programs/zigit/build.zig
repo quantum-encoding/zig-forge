@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run.addPassthruArgs() else if (b.args) |args| run.addArgs(args);
     const run_step = b.step("run", "Run zigit");
     run_step.dependOn(&run.step);
 
@@ -43,12 +43,13 @@ pub fn build(b: *std.Build) void {
     // (and, for the clone/push sections, network + git-http-backend) that a
     // hermetic unit-test run can't assume — invoke it explicitly with
     // `zig build parity`.
-    const parity = b.addSystemCommand(&.{"bash"});
+    // $ZIGIT_BIN is handed over as the built artifact's path (a lazy path, resolved at
+    // make time): Zig 0.17 removed b.getInstallPath, which read the install prefix at
+    // configure time. This spelling compiles on 0.16 and 0.17.
+    const parity = b.addSystemCommand(&.{"env"});
+    parity.addPrefixedArtifactArg("ZIGIT_BIN=", exe);
+    parity.addArg("bash");
     parity.addFileArg(b.path("tests/parity.sh"));
-    parity.setEnvironmentVariable(
-        "ZIGIT_BIN",
-        b.getInstallPath(.bin, exe.out_filename),
-    );
     parity.step.dependOn(b.getInstallStep());
     const parity_step = b.step("parity", "Run the git-parity harness (requires system git)");
     parity_step.dependOn(&parity.step);

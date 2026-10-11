@@ -480,7 +480,14 @@ test "encode/decode: insertion in middle splits into copy/insert/copy" {
 }
 
 test "encode/decode: empty base behaves like pure literal output" {
-    const target = "Hello, deltify world!" ** 16;
+    // 16 copies of the phrase (Zig 0.17 removed `**`; this builds it at comptime on both).
+    const target: []const u8 = comptime blk: {
+        const unit = "Hello, deltify world!";
+        var out: [unit.len * 16]u8 = undefined;
+        for (0..16) |i| @memcpy(out[i * unit.len ..][0..unit.len], unit);
+        const final = out;
+        break :blk &final;
+    };
     const delta = try encode(testing.allocator, "", target);
     defer testing.allocator.free(delta);
 
