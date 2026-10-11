@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
 
     // Run step.
     const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run.addPassthruArgs() else if (b.args) |args| run.addArgs(args);
     const run_step = b.step("run", "Start the jesternet server");
     run_step.dependOn(&run.step);
 

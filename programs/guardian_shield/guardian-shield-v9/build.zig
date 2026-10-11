@@ -1,3 +1,4 @@
+// TODO(zig-0.17): evidence_log.zig/guardian_shield_loader.zig still @cImport libc+libbpf (struct stat/statvfs/tm field access); needs hand bindings, sub-build already broken at 0.16 baseline (bpftool/clang/libbpf/liburing)
 const std = @import("std");
 
 // Guardian Shield v9 build.
@@ -36,7 +37,8 @@ pub fn build(b: *std.Build) void {
         \\  bpftool btf dump file /sys/kernel/btf/vmlinux format c > bpf/vmlinux.h;
         \\fi
     });
-    gen_vmlinux.addArg(b.build_root.path orelse ".");
+    // b.build_root is gone on Zig 0.17; the lazy path resolves to the same directory.
+    gen_vmlinux.addDirectoryArg(b.path("."));
 
     const bpf_cc = b.addSystemCommand(&.{
         "clang",

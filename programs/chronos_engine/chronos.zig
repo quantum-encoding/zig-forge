@@ -68,7 +68,7 @@ pub const ChronosClock = struct {
         const dir_path = std.fs.path.dirname(path) orelse "/var/lib/chronos";
 
         // Try to create directory using libc mkdir
-        const dir_z = allocator.dupeZ(u8, dir_path) catch {
+        const dir_z = allocator.dupeSentinel(u8, dir_path, 0) catch {
             return initWithPath(allocator, FALLBACK_TICK_PATH);
         };
         defer allocator.free(dir_z);
@@ -125,7 +125,7 @@ pub const ChronosClock = struct {
 
     /// Persist current tick to disk
     pub fn persistTick(self: *const ChronosClock, tick: u64) !void {
-        const path_z = self.allocator.dupeZ(u8, self.tick_path) catch return error.OutOfMemory;
+        const path_z = self.allocator.dupeSentinel(u8, self.tick_path, 0) catch return error.OutOfMemory;
         defer self.allocator.free(path_z);
 
         // Open file for writing (create if not exists, truncate)

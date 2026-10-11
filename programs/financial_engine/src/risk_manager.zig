@@ -89,7 +89,7 @@ pub const RiskManager = struct {
             .used_margin = Decimal.zero(),
             .daily_pnl = Decimal.zero(),
             .total_pnl = Decimal.zero(),
-            .pnl_history = .{ .items = &.{}, .capacity = 0 },
+            .pnl_history = .empty,
             .allocator = allocator,
         };
     }

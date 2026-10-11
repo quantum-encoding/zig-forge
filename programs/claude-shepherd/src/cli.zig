@@ -12,11 +12,16 @@
 
 const std = @import("std");
 
-// C library imports for file operations
-const c = @cImport({
-    @cInclude("fcntl.h");
-    @cInclude("unistd.h");
-});
+// libc through std.c (Zig 0.17 removed @cImport; same prototypes as fcntl.h/unistd.h).
+const c = struct {
+    const O_RDONLY: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .RDONLY }));
+    fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int {
+        return std.c.open(path, @bitCast(flags), mode);
+    }
+    const close = std.c.close;
+    const read = std.c.read;
+    const write = std.c.write;
+};
 
 // C functions for sleep
 const Timespec = extern struct { tv_sec: i64, tv_nsec: i64 };
@@ -31,7 +36,7 @@ const SOCK_STREAM: c_int = 1;
 
 const SockaddrUn = extern struct {
     family: u16 = 1, // AF_UNIX
-    path: [108]u8 = [_]u8{0} ** 108,
+    path: [108]u8 = @splat(0),
 };
 
 const VERSION = "0.1.0";
@@ -131,7 +136,7 @@ fn isDaemonRunning() ?u32 {
     var buf: [32]u8 = undefined;
     var path_buf: [256]u8 = undefined;
 
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{PID_FILE}) catch return null;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{PID_FILE}, 0) catch return null;
     const fd = c.open(@ptrCast(path_z.ptr), c.O_RDONLY, @as(c_uint, 0));
     if (fd < 0) return null;
     defer _ = c.close(fd);
@@ -150,7 +155,7 @@ fn isDaemonRunning() ?u32 {
 
     // Verify process exists
     var proc_path: [64]u8 = undefined;
-    const proc_z = std.fmt.bufPrintZ(&proc_path, "/proc/{d}", .{pid}) catch return null;
+    const proc_z = std.fmt.bufPrintSentinel(&proc_path, "/proc/{d}", .{pid}, 0) catch return null;
     const proc_fd = c.open(@ptrCast(proc_z.ptr), c.O_RDONLY, @as(c_uint, 0));
     if (proc_fd < 0) return null;
     _ = c.close(proc_fd);
@@ -217,7 +222,7 @@ fn printStatus() void {
     // Try reading agents JSON
     var agents_buf: [4096]u8 = undefined;
     var agents_path: [256]u8 = undefined;
-    const agents_z = std.fmt.bufPrintZ(&agents_path, "/tmp/claude-shepherd-agents.json", .{}) catch {
+    const agents_z = std.fmt.bufPrintSentinel(&agents_path, "/tmp/claude-shepherd-agents.json", .{}, 0) catch {
         writeStdout("  " ++ DIM ++ "No active Claude instances" ++ RESET ++ "\n");
         writeStdout("\n");
         return;
@@ -443,7 +448,7 @@ fn showLogs(follow: bool) void {
     const log_path = "/tmp/claude-shepherd.log";
     var path_buf: [256]u8 = undefined;
 
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{log_path}) catch return;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{log_path}, 0) catch return;
     const fd = c.open(@ptrCast(path_z.ptr), c.O_RDONLY, @as(c_uint, 0));
     if (fd < 0) {
         writeStderr(DIM ++ "No log file found\n" ++ RESET);

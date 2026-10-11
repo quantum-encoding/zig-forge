@@ -18,7 +18,7 @@ pub fn main() !void {
     // STRUCT KNOWLEDGE QUERY DEMONSTRATION
     // ========================================
     std.debug.print("📚 SCRIPTORIUM STRUCT KNOWLEDGE QUERIES:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     // Query 1: Memory alignment patterns
     std.debug.print("Query 1: 'Zig struct memory alignment patterns'\n", .{});
@@ -45,7 +45,7 @@ pub fn main() !void {
     // ENHANCED ARCHITECTURAL PLANNING
     // ========================================
     std.debug.print("🏗️  ENHANCED ARCHITECTURAL PLANNING:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     // Mission: Design high-performance network packet processor
     const network_mission = struct {
@@ -80,7 +80,7 @@ pub fn main() !void {
     // STRUCT-SPECIFIC COMPLEXITY ANALYSIS
     // ========================================
     std.debug.print("📊 STRUCT-SPECIFIC COMPLEXITY ANALYSIS:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     const struct_analysis = [_]struct {
         struct_name: []const u8,
@@ -126,7 +126,7 @@ pub fn main() !void {
     // ARCHITECTURAL OPTIMIZATION PATTERNS
     // ========================================
     std.debug.print("⚡ ARCHITECTURAL OPTIMIZATION PATTERNS:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     const optimization_patterns = [_]struct {
         pattern: []const u8,
@@ -166,7 +166,7 @@ pub fn main() !void {
     // SECURITY PATTERNS FROM STRUCT KNOWLEDGE
     // ========================================
     std.debug.print("🛡️  SECURITY PATTERNS FROM STRUCT KNOWLEDGE:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     const security_patterns = [_]struct {
         vulnerability: []const u8,
@@ -206,7 +206,7 @@ pub fn main() !void {
     // AGENT TASKING WITH STRUCT EXPERTISE
     // ========================================
     std.debug.print("🤖 AGENT TASKING WITH STRUCT EXPERTISE:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     const struct_agents = [_]struct {
         agent_type: []const u8,
@@ -256,7 +256,7 @@ pub fn main() !void {
     // STRATEGIC IMPACT QUANTIFICATION
     // ========================================
     std.debug.print("📈 STRATEGIC IMPACT QUANTIFICATION:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     const impact_metrics = struct {
         const performance_improvement = "+65%";

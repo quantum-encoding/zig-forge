@@ -47,14 +47,23 @@ pub const std_options: std.Options = .{
     .signal_stack_size = null,
 };
 
-const c = @cImport({
-    @cInclude("dlfcn.h");
-    @cInclude("unistd.h");
-    @cInclude("errno.h");
-    @cInclude("time.h");
-    @cInclude("fcntl.h");
-    @cInclude("stdlib.h");
-});
+// Zig 0.17 removed @cImport: the declarations used from dlfcn.h, unistd.h, errno.h, time.h, fcntl.h, stdlib.h
+// are bound by hand (same prototypes), libc through std.c.
+const c = struct {
+    fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int {
+        return std.c.open(path, @bitCast(flags), mode);
+    }
+    const close = std.c.close;
+    const read = std.c.read;
+    const getenv = std.c.getenv;
+    const dlsym = std.c.dlsym;
+    const RTLD_NEXT: ?*anyopaque = @ptrFromInt(std.math.maxInt(usize)); // glibc ((void *) -1)
+    const pid_t = std.c.pid_t;
+    extern "c" fn __errno_location() *c_int;
+    const EAGAIN: c_int = @intFromEnum(std.c.E.AGAIN);
+    const ENOSYS: c_int = @intFromEnum(std.c.E.NOSYS);
+    const O_RDONLY: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .RDONLY }));
+};
 
 // Helper for getenv compatibility with Zig 0.16.2187+
 fn getenvCompat(name: []const u8) ?[]const u8 {

@@ -115,9 +115,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(es_exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run es-warden (requires sudo)");
     run_step.dependOn(&run_cmd.step);

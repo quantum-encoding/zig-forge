@@ -139,7 +139,7 @@ pub const ChronosDaemon = struct {
 
             std.debug.print("📞 GetPhiTimestamp({s}) -> {s}\n", .{agent_id, formatted});
 
-            const formatted_z = try self.allocator.dupeZ(u8, formatted);
+            const formatted_z = try self.allocator.dupeSentinel(u8, formatted, 0);
             defer self.allocator.free(formatted_z);
 
             var reply = msg.newMethodReturn() orelse return error.DBusReplyFailed;
@@ -162,7 +162,7 @@ pub const ChronosDaemon = struct {
         }
 
         if (msg.isMethodCall("org.freedesktop.DBus.Introspectable", "Introspect")) {
-            const introspect_z = try self.allocator.dupeZ(u8, dbus_if.INTROSPECTION_XML);
+            const introspect_z = try self.allocator.dupeSentinel(u8, dbus_if.INTROSPECTION_XML, 0);
             defer self.allocator.free(introspect_z);
 
             var reply = msg.newMethodReturn() orelse return error.DBusReplyFailed;

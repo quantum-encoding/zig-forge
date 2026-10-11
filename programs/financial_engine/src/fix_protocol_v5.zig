@@ -375,7 +375,7 @@ pub const MessageBuilder = struct {
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
-            .buffer = Buffer{ .items = &.{}, .capacity = 0 },
+            .buffer = Buffer.empty,
             .allocator = allocator,
         };
     }
@@ -442,7 +442,7 @@ pub const MessageBuilder = struct {
         sending_time: []const u8,
     ) ![]u8 {
         // Build body first (everything after BodyLength, before CheckSum)
-        var body = Buffer{ .items = &.{}, .capacity = 0 };
+        var body = Buffer.empty;
         defer body.deinit(self.allocator);
 
         // MsgType (35) - must be first in body
@@ -466,7 +466,7 @@ pub const MessageBuilder = struct {
         const body_len = body.items.len;
 
         // Build complete message
-        var msg = Buffer{ .items = &.{}, .capacity = 0 };
+        var msg = Buffer.empty;
         errdefer msg.deinit(self.allocator);
 
         // BeginString (8)
@@ -687,7 +687,7 @@ pub const CoinbaseSession = struct {
         // Create signature prehash: SendingTime|MsgType|MsgSeqNum|SenderCompID|TargetCompID|Passphrase
         // Joined with SOH (0x01)
         const Buffer = std.ArrayListAligned(u8, null);
-        var prehash = Buffer{ .items = &.{}, .capacity = 0 };
+        var prehash = Buffer.empty;
         defer prehash.deinit(self.allocator);
 
         try prehash.appendSlice(self.allocator, sending_time);

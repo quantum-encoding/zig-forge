@@ -39,10 +39,23 @@ fn getCwd(buf: []u8) ![]u8 {
     return buf[0 .. result - 1];
 }
 
-const c = @cImport({
-    @cInclude("fcntl.h");
-    @cInclude("unistd.h");
-});
+// Zig 0.17 removed @cImport: the declarations used from fcntl.h, unistd.h
+// are bound by hand (same prototypes), libc through std.c.
+const c = struct {
+    fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int {
+        return std.c.open(path, @bitCast(flags), mode);
+    }
+    const close = std.c.close;
+    const read = std.c.read;
+    const write = std.c.write;
+    const lseek = std.c.lseek;
+    const SEEK_SET = std.c.SEEK.SET;
+    const SEEK_END = std.c.SEEK.END;
+    const O_RDONLY: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .RDONLY }));
+    const O_WRONLY: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .WRONLY }));
+    const O_CREAT: c_int = @bitCast(@as(std.c.O, .{ .CREAT = true }));
+    const O_TRUNC: c_int = @bitCast(@as(std.c.O, .{ .TRUNC = true }));
+};
 
 const VERSION = "8.2.0";
 const CONFIG_PATH = "/etc/warden/warden-config.json";

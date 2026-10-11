@@ -313,7 +313,7 @@ pub fn main() !void {
     const allocator = std.heap.c_allocator;
 
     std.debug.print("🧠 TESTING CONDUCTOR D-BUS BRIDGE\n", .{});
-    std.debug.print("=" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('=')) ++ "\n", .{});
 
     // Initialize conductor daemon
     var conductor = try conductor_daemon.ConductorDaemon.init(allocator);
@@ -343,5 +343,5 @@ pub fn main() !void {
     try bridge.emitSystemStatus(4, 19, 14);
 
     std.debug.print("✅ D-Bus bridge test completed successfully\n", .{});
-    std.debug.print("=" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('=')) ++ "\n", .{});
 }

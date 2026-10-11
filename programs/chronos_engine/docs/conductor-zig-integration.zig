@@ -18,7 +18,7 @@ pub fn main() !void {
     // ZIG KNOWLEDGE QUERY DEMONSTRATION
     // ========================================
     std.debug.print("📚 SCRIPTORIUM ZIG KNOWLEDGE QUERIES:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     // Query 1: Zig ArrayList migration patterns
     std.debug.print("Query 1: 'Zig ArrayList migration patterns 0.16'\n", .{});
@@ -45,7 +45,7 @@ pub fn main() !void {
     // ENHANCED MISSION PLANNING
     // ========================================
     std.debug.print("🎯 ENHANCED MISSION PLANNING WITH ZIG KNOWLEDGE:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     // Mission: Migrate C-ELP behavioral tests to Zig 0.16
     const zig_migration_mission = struct {
@@ -74,7 +74,7 @@ pub fn main() !void {
     // ZIG-SPECIFIC RISK ASSESSMENT
     // ========================================
     std.debug.print("⚠️  ZIG-SPECIFIC RISK ASSESSMENT:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     const zig_risks = [_]struct {
         risk: []const u8,
@@ -114,7 +114,7 @@ pub fn main() !void {
     // AGENT TASKING WITH ZIG EXPERTISE
     // ========================================
     std.debug.print("🤖 AGENT TASKING WITH ZIG EXPERTISE:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     const zig_agents = [_]struct {
         agent_type: []const u8,
@@ -149,7 +149,7 @@ pub fn main() !void {
     // DOCTRINE EXTRACTION FROM ZIG PATTERNS
     // ========================================
     std.debug.print("🧠 DOCTRINE EXTRACTION FROM ZIG PATTERNS:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     const zig_doctrine = [_]struct {
         pattern: []const u8,
@@ -184,7 +184,7 @@ pub fn main() !void {
     // STRATEGIC IMPACT ASSESSMENT
     // ========================================
     std.debug.print("📊 STRATEGIC IMPACT ASSESSMENT:\n", .{});
-    std.debug.print("-" ** 60 ++ "\n", .{});
+    std.debug.print(&@as([60]u8, @splat('-')) ++ "\n", .{});
 
     const impact_metrics = struct {
         const mission_success_improvement = "+50%" ;

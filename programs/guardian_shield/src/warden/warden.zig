@@ -32,10 +32,18 @@ const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
 
-const c = @cImport({
-    @cInclude("fcntl.h");
-    @cInclude("unistd.h");
-});
+// Zig 0.17 removed @cImport: the declarations used from fcntl.h, unistd.h
+// are bound by hand (same prototypes), libc through std.c.
+const c = struct {
+    fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int {
+        return std.c.open(path, @bitCast(flags), mode);
+    }
+    const close = std.c.close;
+    const write = std.c.write;
+    const O_WRONLY: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .WRONLY }));
+    const O_CREAT: c_int = @bitCast(@as(std.c.O, .{ .CREAT = true }));
+    const O_TRUNC: c_int = @bitCast(@as(std.c.O, .{ .TRUNC = true }));
+};
 
 /// Protection flags for a path
 pub const ProtectionFlags = packed struct {

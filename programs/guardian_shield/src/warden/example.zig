@@ -11,9 +11,12 @@
 const std = @import("std");
 const warden = @import("warden");
 
-const c = @cImport({
-    @cInclude("unistd.h");
-});
+// Zig 0.17 removed @cImport: the declarations used from unistd.h
+// are bound by hand (same prototypes), libc through std.c.
+const c = struct {
+    const write = std.c.write;
+    const STDOUT_FILENO: c_int = 1;
+};
 
 fn writeStdout(data: []const u8) void {
     _ = c.write(c.STDOUT_FILENO, data.ptr, data.len);

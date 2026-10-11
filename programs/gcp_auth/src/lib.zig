@@ -423,7 +423,13 @@ pub fn isAllowedTokenUri(uri: []const u8) bool {
     // Extract the percent-decoded authority host. A URI with no host
     // (e.g. `https:///token`, an opaque or relative reference) is rejected.
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = (parsed.getHost(&host_buf) catch return false).bytes;
+    // Zig 0.17 moved std.Uri.getHost to std.Io.net.HostName.fromUri.
+    const HostName = std.Io.net.HostName;
+    const host_name = if (@hasDecl(HostName, "fromUri"))
+        HostName.fromUri(parsed, &host_buf)
+    else
+        parsed.getHost(&host_buf);
+    const host = (host_name catch return false).bytes;
 
     for (allowed_token_hosts) |allowed| {
         if (std.ascii.eqlIgnoreCase(host, allowed)) return true;

@@ -213,7 +213,7 @@ pub const BiquadFilter = struct {
             .coeffs = coeffs,
             .target_coeffs = coeffs,
             .smoothing = 0.0, // No smoothing by default
-            .state = [_]ChannelState{.{}} ** MAX_CHANNELS,
+            .state = @as([MAX_CHANNELS]ChannelState, @splat(.{})),
             .filter_type = filter_type,
             .frequency = frequency,
             .q = q,
@@ -511,7 +511,7 @@ test "coefficient smoothing" {
     filter.setFrequency(5000);
 
     // Process to trigger smoothing
-    var buffer = [_]f32{0.0} ** 8;
+    var buffer = @as([8]f32, @splat(0.0));
     filter.process(&buffer, 4, 2);
 
     // Coefficients should have moved but not reached target yet

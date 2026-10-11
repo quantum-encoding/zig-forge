@@ -45,8 +45,8 @@ pub const QuantumCerebrumConnected = struct {
             .packets_processed = std.atomic.Value(u64).init(0),
             .orders_generated = std.atomic.Value(u64).init(0),
             .total_latency_ns = std.atomic.Value(u64).init(0),
-            .last_prices = [_]u64{0} ** 256,
-            .positions = [_]i32{0} ** 256,
+            .last_prices = @as([256]u64, @splat(0)),
+            .positions = @as([256]i32, @splat(0)),
             .should_stop = std.atomic.Value(bool).init(false),
         };
     }

@@ -1070,7 +1070,7 @@ test "validateGcpProjectId: rejects short, long, illegal chars" {
     // Too short / too long
     try std.testing.expectError(error.InvalidRequest, validateGcpProjectId(""));
     try std.testing.expectError(error.InvalidRequest, validateGcpProjectId("abc12")); // 5
-    try std.testing.expectError(error.InvalidRequest, validateGcpProjectId("a" ** 31));
+    try std.testing.expectError(error.InvalidRequest, validateGcpProjectId(&@as([31]u8, @splat('a'))));
     // Starts with non-letter
     try std.testing.expectError(error.InvalidRequest, validateGcpProjectId("1abcdef"));
     try std.testing.expectError(error.InvalidRequest, validateGcpProjectId("-abcdef"));
@@ -1086,7 +1086,7 @@ test "validateGcpProjectId: rejects short, long, illegal chars" {
     // doesn't end with hyphen
     try validateGcpProjectId("my-proj");        // 7
     try validateGcpProjectId("abcdef");         // 6
-    try validateGcpProjectId("a" ** 30);        // 30
+    try validateGcpProjectId(&@as([30]u8, @splat('a')));        // 30
 }
 
 test "validateModelName: legitimate names accepted" {
@@ -1104,7 +1104,7 @@ test "validateModelName: legitimate names accepted" {
 
 test "validateModelName: URL-injection attempts rejected" {
     try std.testing.expectError(error.InvalidModel, validateModelName(""));
-    try std.testing.expectError(error.InvalidModel, validateModelName("a" ** 129));
+    try std.testing.expectError(error.InvalidModel, validateModelName(&@as([129]u8, @splat('a'))));
     // URL structural chars
     try std.testing.expectError(error.InvalidModel, validateModelName("model?key=x"));
     try std.testing.expectError(error.InvalidModel, validateModelName("model#frag"));

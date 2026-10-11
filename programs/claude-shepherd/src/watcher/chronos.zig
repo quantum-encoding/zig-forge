@@ -6,12 +6,16 @@
 const std = @import("std");
 const State = @import("../state.zig").State;
 
-// C library imports for getenv and file operations
-const c = @cImport({
-    @cInclude("stdlib.h");
-    @cInclude("fcntl.h");
-    @cInclude("unistd.h");
-});
+// libc through std.c (Zig 0.17 removed @cImport; same prototypes as fcntl.h/unistd.h/stdlib.h).
+const c = struct {
+    const O_RDONLY: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .RDONLY }));
+    fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int {
+        return std.c.open(path, @bitCast(flags), mode);
+    }
+    const close = std.c.close;
+    const read = std.c.read;
+    const getenv = std.c.getenv;
+};
 
 fn getenvCompat(name: []const u8) ?[]const u8 {
     var name_buf: [256]u8 = undefined;
@@ -165,7 +169,7 @@ pub const ChronosWatcher = struct {
         };
 
         for (paths) |path| {
-            const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch continue;
+            const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch continue;
             const fd = c.open(@ptrCast(path_z.ptr), c.O_RDONLY, @as(c_uint, 0));
             if (fd >= 0) return fd;
         }
@@ -384,7 +388,7 @@ pub const ChronosWatcher = struct {
         // Use kill(pid, 0) to check if process exists
         // This doesn't send any signal, just checks existence
         var path_buf: [64]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}", .{pid}) catch return false;
+        const path = std.fmt.bufPrintSentinel(&path_buf, "/proc/{d}", .{pid}, 0) catch return false;
 
         const fd = c.open(@ptrCast(path.ptr), c.O_RDONLY, @as(c_uint, 0));
         if (fd >= 0) {

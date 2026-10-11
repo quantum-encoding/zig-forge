@@ -81,7 +81,7 @@ pub const ConfigManager = struct {
 
     pub fn loadFromFile(self: *ConfigManager, path: []const u8) !void {
         // Read file contents using posix APIs
-        const path_z = try self.allocator.dupeZ(u8, path);
+        const path_z = try self.allocator.dupeSentinel(u8, path, 0);
         defer self.allocator.free(path_z);
 
         const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);

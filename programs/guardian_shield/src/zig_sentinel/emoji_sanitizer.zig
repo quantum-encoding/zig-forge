@@ -49,10 +49,18 @@
 const std = @import("std");
 const time_compat = @import("time_compat.zig");
 
-const c = @cImport({
-    @cInclude("fcntl.h");
-    @cInclude("unistd.h");
-});
+// Zig 0.17 removed @cImport: the declarations used from fcntl.h, unistd.h
+// are bound by hand (same prototypes), libc through std.c.
+const c = struct {
+    fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int {
+        return std.c.open(path, @bitCast(flags), mode);
+    }
+    const close = std.c.close;
+    const write = std.c.write;
+    const O_WRONLY: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .WRONLY }));
+    const O_CREAT: c_int = @bitCast(@as(std.c.O, .{ .CREAT = true }));
+    const O_APPEND: c_int = @bitCast(@as(std.c.O, .{ .APPEND = true }));
+};
 const emoji_db = @import("emoji_database.zig");
 
 /// Maximum UTF-8 bytes for any single emoji (accounting for ZWJ sequences)

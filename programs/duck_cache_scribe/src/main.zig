@@ -525,7 +525,7 @@ fn loadConfig(allocator: mem.Allocator) !Config {
     const root = parsed.value.object;
 
     // Extract fields and duplicate strings
-    const repo_path = try allocator.dupeZ(u8, root.get("repo_path").?.string);
+    const repo_path = try allocator.dupeSentinel(u8, root.get("repo_path").?.string, 0);
     const remote_name = try allocator.dupe(u8, root.get("remote_name").?.string);
     const branch_name = try allocator.dupe(u8, root.get("branch_name").?.string);
     const chronos_stamp_path = try allocator.dupe(u8, root.get("chronos_stamp_path").?.string);

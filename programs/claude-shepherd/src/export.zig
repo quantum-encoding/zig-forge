@@ -5,11 +5,17 @@
 const std = @import("std");
 const State = @import("state.zig").State;
 
-// C library imports for file operations
-const c = @cImport({
-    @cInclude("fcntl.h");
-    @cInclude("unistd.h");
-});
+// libc through std.c (Zig 0.17 removed @cImport; same prototypes as fcntl.h/unistd.h).
+const c = struct {
+    const O_WRONLY: c_int = @bitCast(@as(std.c.O, .{ .ACCMODE = .WRONLY }));
+    const O_CREAT: c_int = @bitCast(@as(std.c.O, .{ .CREAT = true }));
+    const O_TRUNC: c_int = @bitCast(@as(std.c.O, .{ .TRUNC = true }));
+    fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int {
+        return std.c.open(path, @bitCast(flags), mode);
+    }
+    const close = std.c.close;
+    const write = std.c.write;
+};
 const ClaudeInstance = @import("state.zig").ClaudeInstance;
 const PermissionRequest = @import("state.zig").PermissionRequest;
 
@@ -134,7 +140,7 @@ fn writePermissionsJson(w: *std.Io.Writer, requests: []const PermissionRequest) 
 
 fn writeFile(path: []const u8, data: []const u8) void {
     var path_buf: [256]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return;
 
     const fd = c.open(@ptrCast(path_z.ptr), c.O_WRONLY | c.O_CREAT | c.O_TRUNC, @as(c_uint, 0o644));
     if (fd < 0) return;

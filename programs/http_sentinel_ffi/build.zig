@@ -1,4 +1,5 @@
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -24,7 +25,7 @@ pub fn build(b: *std.Build) void {
     lib.root_module.link_libc = true;
 
     // Strip debug symbols for production (reduces binary size)
-    lib.root_module.strip = optimize != .Debug;
+    lib.root_module.strip = optimize != Optimize.Debug;
 
     // Install to zig-out/lib/
     b.installArtifact(lib);
@@ -42,7 +43,7 @@ pub fn build(b: *std.Build) void {
     const android_module = b.createModule(.{
         .root_source_file = b.path("src/ffi.zig"),
         .target = android_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const android_lib = b.addLibrary(.{
@@ -86,7 +87,7 @@ pub fn build(b: *std.Build) void {
     // consumer. Built in Debug unconditionally so its assert()s stay live.
     const abi_module = b.createModule(.{
         .target = target,
-        .optimize = .Debug,
+        .optimize = Optimize.Debug,
     });
     abi_module.link_libc = true;
     abi_module.addIncludePath(b.path("include"));

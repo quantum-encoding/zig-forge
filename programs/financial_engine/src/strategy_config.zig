@@ -66,7 +66,7 @@ pub const StrategyConfig = struct {
 
     pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !StrategyConfig {
         // Read file contents using posix APIs
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
 
         const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
@@ -100,7 +100,7 @@ pub const StrategyConfig = struct {
         defer allocator.free(json_str);
 
         // Write file using posix APIs
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
 
         const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{

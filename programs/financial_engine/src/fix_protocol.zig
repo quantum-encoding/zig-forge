@@ -80,10 +80,7 @@ pub const MessageBuilder = struct {
     
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
-            .buffer = std.ArrayListAligned(u8, null){
-                .items = &.{},
-                .capacity = 0,
-            },
+            .buffer = std.ArrayListAligned(u8, null).empty,
             .allocator = allocator,
         };
     }
@@ -129,10 +126,7 @@ pub const MessageBuilder = struct {
         const body_len = self.buffer.items.len - body_start;
         
         // Insert body length after BeginString
-        var final_msg = std.ArrayListAligned(u8, null){
-            .items = &.{},
-            .capacity = 0,
-        };
+        var final_msg = std.ArrayListAligned(u8, null).empty;
         defer final_msg.deinit(self.allocator);
         
         // Copy BeginString
