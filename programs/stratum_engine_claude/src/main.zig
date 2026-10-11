@@ -255,7 +255,7 @@ fn runBenchmark(writer: anytype, allocator: std.mem.Allocator) !void {
         },
         .scalar => {
             try writer.writeAll("⚠️  Benchmarking scalar (no SIMD)...\n");
-            var header = [_]u8{0} ** 80;
+            var header = @as([80]u8, @splat(0));
             var hash: [32]u8 = undefined;
 
             var timer = try Timer.start();

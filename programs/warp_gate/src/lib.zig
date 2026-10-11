@@ -62,7 +62,7 @@ pub const WarpSession = struct {
     pub fn init(allocator: std.mem.Allocator, io: std.Io, role: Role) !Self {
         const code = switch (role) {
             .sender => WarpCode.generate(),
-            .receiver => WarpCode{ .bytes = [_]u8{0} ** 6 }, // Will be set via setCode
+            .receiver => WarpCode{ .bytes = @as([6]u8, @splat(0)) }, // Will be set via setCode
         };
 
         return Self{

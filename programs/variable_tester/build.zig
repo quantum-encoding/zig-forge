@@ -1,4 +1,5 @@
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -81,9 +82,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run the variable tester");
     run_step.dependOn(&run_cmd.step);
@@ -106,9 +105,7 @@ pub fn build(b: *std.Build) void {
 
     const queen_cmd = b.addRunArtifact(queen_exe);
     queen_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        queen_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) queen_cmd.addPassthruArgs() else if (b.args) |args| queen_cmd.addArgs(args);
 
     const queen_step = b.step("queen", "Run the Queen coordinator");
     queen_step.dependOn(&queen_cmd.step);
@@ -133,9 +130,7 @@ pub fn build(b: *std.Build) void {
 
     const worker_cmd = b.addRunArtifact(worker_exe);
     worker_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        worker_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) worker_cmd.addPassthruArgs() else if (b.args) |args| worker_cmd.addArgs(args);
 
     const worker_step = b.step("worker", "Run a Worker drone");
     worker_step.dependOn(&worker_cmd.step);
@@ -144,7 +139,7 @@ pub fn build(b: *std.Build) void {
     const bench_module = b.addModule("bench", .{
         .root_source_file = b.path("benchmarks/bench.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
         .link_libc = true,
     });
     bench_module.addImport("lockfree_queue", lockfree_module);
@@ -167,7 +162,7 @@ pub fn build(b: *std.Build) void {
     const sat_module = b.addModule("saturation_bench", .{
         .root_source_file = b.path("src/saturation_bench.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
         .link_libc = true,
     });
 
@@ -179,9 +174,7 @@ pub fn build(b: *std.Build) void {
 
     const sat_cmd = b.addRunArtifact(sat_exe);
     sat_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        sat_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) sat_cmd.addPassthruArgs() else if (b.args) |args| sat_cmd.addArgs(args);
 
     const sat_step = b.step("saturation", "Run saturation benchmark");
     sat_step.dependOn(&sat_cmd.step);
@@ -190,7 +183,7 @@ pub fn build(b: *std.Build) void {
     const crypto_module = b.addModule("crypto_bench", .{
         .root_source_file = b.path("src/crypto_bench.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
         .link_libc = true,
     });
 
@@ -202,9 +195,7 @@ pub fn build(b: *std.Build) void {
 
     const crypto_cmd = b.addRunArtifact(crypto_exe);
     crypto_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        crypto_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) crypto_cmd.addPassthruArgs() else if (b.args) |args| crypto_cmd.addArgs(args);
 
     const crypto_step = b.step("crypto", "Run crypto brute-force benchmark");
     crypto_step.dependOn(&crypto_cmd.step);
@@ -213,7 +204,7 @@ pub fn build(b: *std.Build) void {
     const forge_module = b.addModule("forge", .{
         .root_source_file = b.path("src/forge.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
         .link_libc = true,
     });
 
@@ -225,9 +216,7 @@ pub fn build(b: *std.Build) void {
 
     const forge_cmd = b.addRunArtifact(forge_exe);
     forge_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        forge_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) forge_cmd.addPassthruArgs() else if (b.args) |args| forge_cmd.addArgs(args);
 
     const forge_step = b.step("forge", "Run The Forge variable tester");
     forge_step.dependOn(&forge_cmd.step);
@@ -236,7 +225,7 @@ pub fn build(b: *std.Build) void {
     const compress_bench_module = b.addModule("compression_bench", .{
         .root_source_file = b.path("src/compression_bench.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
         .link_libc = true,
     });
 
@@ -248,9 +237,7 @@ pub fn build(b: *std.Build) void {
 
     const compress_bench_cmd = b.addRunArtifact(compress_bench_exe);
     compress_bench_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        compress_bench_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) compress_bench_cmd.addPassthruArgs() else if (b.args) |args| compress_bench_cmd.addArgs(args);
 
     const compress_bench_step = b.step("compress-bench", "Run compression formula benchmark with real I/O");
     compress_bench_step.dependOn(&compress_bench_cmd.step);
@@ -262,7 +249,7 @@ pub fn build(b: *std.Build) void {
     const libtest_compression_module = b.addModule("libtest_compression", .{
         .root_source_file = b.path("src/libtest_compression.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const libtest_compression = b.addLibrary(.{

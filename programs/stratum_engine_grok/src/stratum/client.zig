@@ -4,10 +4,8 @@ const compat = @import("../compat.zig");
 const linux = std.os.linux;
 const posix = std.posix;
 const IoUring = linux.IoUring;
-const c = @cImport({
-    @cInclude("netdb.h");
-    @cInclude("arpa/inet.h");
-});
+// getaddrinfo via std.c (Zig 0.17 removed @cImport; identical prototypes).
+const c = std.c;
 
 pub const Client = struct {
     allocator: std.mem.Allocator,
@@ -44,24 +42,24 @@ pub const Client = struct {
         port_buf[port_str.len] = 0;
 
         var hints: c.addrinfo = std.mem.zeroes(c.addrinfo);
-        hints.ai_family = c.AF_INET;
-        hints.ai_socktype = c.SOCK_STREAM;
+        hints.family = c.AF.INET;
+        hints.socktype = c.SOCK.STREAM;
 
         var result: ?*c.addrinfo = null;
-        const gai_ret = c.getaddrinfo(&host_buf, &port_buf, &hints, &result);
+        const gai_ret = @intFromEnum(c.getaddrinfo(host_buf[0..host.len :0], port_buf[0..port_str.len :0], &hints, &result));
         if (gai_ret != 0) {
             std.debug.print("DNS resolution failed: {d}\n", .{gai_ret});
             return error.DNSResolutionFailed;
         }
-        defer c.freeaddrinfo(result);
 
         if (result == null) {
             return error.NoAddressFound;
         }
+        defer c.freeaddrinfo(result.?);
 
         // Copy the resolved address
         var address: linux.sockaddr.in = undefined;
-        const addr_ptr: *linux.sockaddr.in = @ptrCast(@alignCast(result.?.ai_addr));
+        const addr_ptr: *linux.sockaddr.in = @ptrCast(@alignCast(result.?.addr));
         address = addr_ptr.*;
 
         // Submit connect operation

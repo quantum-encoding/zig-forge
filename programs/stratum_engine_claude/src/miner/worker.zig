@@ -324,7 +324,7 @@ pub const Worker = struct {
 
     /// Build 80-byte block header from job and nonce
     fn buildHeader(self: *Self, nonce: u32) [80]u8 {
-        var header = [_]u8{0} ** 80;
+        var header = @as([80]u8, @splat(0));
 
         // Always apply nonce for demo mode (even without a job)
         header[76] = @intCast(nonce & 0xFF);

@@ -7,6 +7,7 @@
 //! Test:  zig build test
 
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -42,9 +43,7 @@ pub fn build(b: *std.Build) void {
     // Run command
     const run_cmd = b.addRunArtifact(warp_exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run the warp CLI");
     run_step.dependOn(&run_cmd.step);
@@ -73,7 +72,7 @@ pub fn build(b: *std.Build) void {
     const bench_module = b.createModule(.{
         .root_source_file = b.path("src/bench.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
         .link_libc = true,
     });
     bench_module.addImport("warp_gate", warp_module);

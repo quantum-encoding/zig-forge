@@ -125,8 +125,7 @@ pub fn defaults(gpa: std.mem.Allocator) !Config {
     const provider: Provider = .anthropic;
 
     var providers: [7]ProviderSettings = undefined;
-    inline for (std.meta.fields(Provider), 0..) |field, i| {
-        const p: Provider = @enumFromInt(field.value);
+    inline for (comptime std.meta.tags(Provider), 0..) |p, i| {
         providers[i] = .{
             .base_url = try a.dupe(u8, p.defaultBaseUrl()),
             .api_key_env = try a.dupe(u8, p.defaultApiKeyEnv()),

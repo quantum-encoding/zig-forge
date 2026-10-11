@@ -45,7 +45,7 @@ pub const FailLogger = struct {
         // Build replay file path: {prefix}.jsonl (or use as-is if already ends in .jsonl)
         const replay_path = blk: {
             if (std.mem.endsWith(u8, prefix, ".jsonl")) {
-                break :blk try allocator.dupeZ(u8, prefix);
+                break :blk try allocator.dupeSentinel(u8, prefix, 0);
             }
             break :blk try std.fmt.allocPrintSentinel(allocator, "{s}.jsonl", .{prefix}, 0);
         };

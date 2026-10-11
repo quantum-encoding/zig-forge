@@ -154,7 +154,7 @@ pub const Sniffer = struct {
 
         if (self.status_callback) |callback| {
             var msg_buf: [256]u8 = undefined;
-            const msg_z = std.fmt.bufPrintZ(&msg_buf, "{s}", .{message}) catch "Status change";
+            const msg_z = std.fmt.bufPrintSentinel(&msg_buf, "{s}", .{message}, 0) catch "Status change";
             callback(status, msg_z.ptr, self.status_user_data);
         }
     }
@@ -462,7 +462,7 @@ test "Sniffer initialization" {
 }
 
 test "MS_Transaction structure" {
-    const hash = MS_TxHash{ .bytes = [_]u8{0} ** 32 };
+    const hash = MS_TxHash{ .bytes = @as([32]u8, @splat(0)) };
     const tx = MS_Transaction{
         .hash = hash,
         .value_satoshis = 100000,
@@ -554,7 +554,7 @@ test "Sniffer state transitions" {
 }
 
 test "MS_Transaction whale detection" {
-    const small_hash = MS_TxHash{ .bytes = [_]u8{0} ** 32 };
+    const small_hash = MS_TxHash{ .bytes = @as([32]u8, @splat(0)) };
 
     // Non-whale transaction
     const small_tx = MS_Transaction{

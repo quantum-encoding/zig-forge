@@ -1,4 +1,5 @@
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -41,7 +42,7 @@ pub fn build(b: *std.Build) void {
     const android_module = b.createModule(.{
         .root_source_file = b.path("src/market_data_core.zig"),
         .target = android_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const android_lib = b.addLibrary(.{
@@ -74,7 +75,7 @@ pub fn build(b: *std.Build) void {
     const bench_module = b.createModule(.{
         .root_source_file = b.path("src/benchmarks/main_bench.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     bench_module.addImport("parser", parser_module);
     bench_module.link_libc = true;

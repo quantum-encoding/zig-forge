@@ -311,12 +311,12 @@ pub const WebSocketBroadcaster = struct {
     pub fn sendShareEvent(self: *Self, share_event: server.ShareEvent) void {
         var payload = Event.SharePayload{
             .miner_id = share_event.miner_id,
-            .miner_name = [_]u8{0} ** 64,
+            .miner_name = @as([64]u8, @splat(0)),
             .miner_name_len = 0,
             .status = share_event.status,
             .difficulty = share_event.difficulty,
             .latency_ms = share_event.latency_ms,
-            .job_id = [_]u8{0} ** 32,
+            .job_id = @as([32]u8, @splat(0)),
             .job_id_len = 0,
         };
 
@@ -343,7 +343,7 @@ pub const WebSocketBroadcaster = struct {
     pub fn sendMinerStatus(self: *Self, miner: miner_registry.MinerInfo) void {
         var payload = Event.MinerStatusPayload{
             .miner_id = miner.id,
-            .miner_name = [_]u8{0} ** 64,
+            .miner_name = @as([64]u8, @splat(0)),
             .miner_name_len = 0,
             .status = miner.status,
             .hashrate_th = miner.current_hashrate_th,
@@ -387,7 +387,7 @@ pub const WebSocketBroadcaster = struct {
         var payload = Event.AlertPayload{
             .severity = alert.severity,
             .miner_id = alert.miner_id,
-            .message = [_]u8{0} ** 256,
+            .message = @as([256]u8, @splat(0)),
             .message_len = 0,
         };
 

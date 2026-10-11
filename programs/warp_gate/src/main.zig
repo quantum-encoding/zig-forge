@@ -408,11 +408,11 @@ fn jsonEvent(event_type: []const u8, data: anytype) void {
     jw.objectField("data") catch return;
     jw.beginObject() catch return;
 
-    inline for (std.meta.fields(@TypeOf(data))) |field| {
-        const value = @field(data, field.name);
+    inline for (comptime std.meta.fieldNames(@TypeOf(data))) |field_name| {
+        const value = @field(data, field_name);
         const FieldType = @TypeOf(value);
 
-        jw.objectField(field.name) catch return;
+        jw.objectField(field_name) catch return;
         if (FieldType == []const u8) {
             jw.write(value) catch return;
         } else if (FieldType == *const [15]u8) {

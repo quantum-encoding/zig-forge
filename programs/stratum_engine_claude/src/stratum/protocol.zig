@@ -15,7 +15,7 @@ pub fn parseJob(allocator: std.mem.Allocator, json_str: []const u8) !types.Job {
 
     return types.Job{
         .job_id = try allocator.dupe(u8, "test_job"),
-        .prevhash = [_]u8{0} ** 32,
+        .prevhash = @as([32]u8, @splat(0)),
         .coinb1 = try allocator.dupe(u8, ""),
         .coinb2 = try allocator.dupe(u8, ""),
         .merkle_branch = &[_][]const u8{},

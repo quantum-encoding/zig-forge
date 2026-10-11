@@ -300,8 +300,8 @@ test "header serialization round-trip" {
 
 test "hello message round-trip" {
     const hello = HelloMsg{
-        .code_hash = [_]u8{0xAB} ** 16,
-        .public_key = [_]u8{0xCD} ** 32,
+        .code_hash = @as([16]u8, @splat(0xAB)),
+        .public_key = @as([32]u8, @splat(0xCD)),
     };
 
     const buf = hello.serialize();

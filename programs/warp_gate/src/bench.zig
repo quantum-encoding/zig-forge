@@ -118,7 +118,7 @@ fn benchCrypto(allocator: std.mem.Allocator) !void {
     print("│ ChaCha20-Poly1305 Encryption                               │\n", .{});
     print("└─────────────────────────────────────────────────────────────┘\n", .{});
 
-    const key = [_]u8{0x42} ** 32;
+    const key = @as([32]u8, @splat(0x42));
     const sizes = [_]usize{ 64, 1024, 16384, 65536 };
 
     for (sizes) |size| {

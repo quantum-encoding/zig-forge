@@ -439,10 +439,11 @@ test "full SVD parse and generate cycle" {
 /// the "compile-the-generated-output" gate: the getFieldType width bug and the
 /// SVD string-injection bug both manifest as source that fails to parse.
 fn expectParsesAsZig(allocator: std.mem.Allocator, source: []const u8) !void {
-    const zsrc = try allocator.dupeZ(u8, source);
+    const zsrc = try allocator.dupeSentinel(u8, source, 0);
     defer allocator.free(zsrc);
 
-    var ast = try std.zig.Ast.parse(allocator, zsrc, .zig);
+    // Zig 0.17 takes an options struct here; 0.16 takes the mode enum.
+    var ast = try std.zig.Ast.parse(allocator, zsrc, if (@hasDecl(std.zig.Ast, "ParseOptions")) .{ .mode = .zig } else .zig);
     defer ast.deinit(allocator);
 
     if (ast.errors.len != 0) {

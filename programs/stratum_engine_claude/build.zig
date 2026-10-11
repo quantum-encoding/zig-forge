@@ -1,4 +1,6 @@
+// TODO(zig-0.17): @cImport of bearssl/mbedtls (by-value TLS context structs) and sqlite3 not yet hand-bound; test step was already broken on 0.16.
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -23,7 +25,7 @@ pub fn build(b: *std.Build) void {
 
     // Enable AVX2/AVX-512 for SIMD optimization
     // User can override with -Dcpu=native for best performance
-    if (optimize == .ReleaseFast or optimize == .ReleaseSafe) {
+    if (optimize == Optimize.ReleaseFast or optimize == Optimize.ReleaseSafe) {
         exe.root_module.addCMacro("ENABLE_SIMD", "1");
     }
 
@@ -45,7 +47,7 @@ pub fn build(b: *std.Build) void {
         .root_module = dash_module,
     });
 
-    if (optimize == .ReleaseFast or optimize == .ReleaseSafe) {
+    if (optimize == Optimize.ReleaseFast or optimize == Optimize.ReleaseSafe) {
         dash_exe.root_module.addCMacro("ENABLE_SIMD", "1");
     }
 
@@ -57,18 +59,14 @@ pub fn build(b: *std.Build) void {
     // Run commands
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run the Stratum mining engine");
     run_step.dependOn(&run_cmd.step);
 
     const dash_cmd = b.addRunArtifact(dash_exe);
     dash_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        dash_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) dash_cmd.addPassthruArgs() else if (b.args) |args| dash_cmd.addArgs(args);
 
     const dash_step = b.step("dashboard", "Run the mining + mempool dashboard");
     dash_step.dependOn(&dash_cmd.step);
@@ -77,12 +75,12 @@ pub fn build(b: *std.Build) void {
     const bench_module = b.createModule(.{
         .root_source_file = b.path("benchmarks/sha256_bench.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     bench_module.addImport("crypto/sha256d.zig", b.createModule(.{
         .root_source_file = b.path("src/crypto/sha256d.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     }));
     bench_module.link_libc = true;
 
@@ -113,9 +111,7 @@ pub fn build(b: *std.Build) void {
 
     const test_mempool_cmd = b.addRunArtifact(test_mempool_exe);
     test_mempool_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        test_mempool_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) test_mempool_cmd.addPassthruArgs() else if (b.args) |args| test_mempool_cmd.addArgs(args);
 
     const test_mempool_step = b.step("test-mempool", "Test Bitcoin P2P mempool connection");
     test_mempool_step.dependOn(&test_mempool_cmd.step);
@@ -140,9 +136,7 @@ pub fn build(b: *std.Build) void {
 
     const test_exec_cmd = b.addRunArtifact(test_exec_exe);
     test_exec_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        test_exec_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) test_exec_cmd.addPassthruArgs() else if (b.args) |args| test_exec_cmd.addArgs(args);
 
     const test_exec_step = b.step("test-exec", "Test high-frequency execution engine");
     test_exec_step.dependOn(&test_exec_cmd.step);
@@ -207,7 +201,7 @@ pub fn build(b: *std.Build) void {
         .root_module = proxy_module,
     });
 
-    if (optimize == .ReleaseFast or optimize == .ReleaseSafe) {
+    if (optimize == Optimize.ReleaseFast or optimize == Optimize.ReleaseSafe) {
         proxy_exe.root_module.addCMacro("ENABLE_SIMD", "1");
     }
 
@@ -221,9 +215,7 @@ pub fn build(b: *std.Build) void {
 
     const proxy_cmd = b.addRunArtifact(proxy_exe);
     proxy_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        proxy_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) proxy_cmd.addPassthruArgs() else if (b.args) |args| proxy_cmd.addArgs(args);
 
     const proxy_step = b.step("proxy", "Run the ASIC Stratum proxy server");
     proxy_step.dependOn(&proxy_cmd.step);
