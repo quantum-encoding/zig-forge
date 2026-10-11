@@ -97,7 +97,7 @@ pub const SlabAllocator = struct {
     /// defer slab.deinit();
     /// ```
     pub fn init(allocator: std.mem.Allocator, capacity: usize) InitError!Self {
-        return initWithCapacities(allocator, [_]usize{capacity} ** NUM_CLASSES);
+        return initWithCapacities(allocator, @as([NUM_CLASSES]usize, @splat(capacity)));
     }
 
     /// Initialize with per-class capacities for fine-grained control.
@@ -110,7 +110,7 @@ pub const SlabAllocator = struct {
     pub fn initWithCapacities(allocator: std.mem.Allocator, capacities: [NUM_CLASSES]usize) InitError!Self {
         var self = Self{
             .allocator = allocator,
-            .slabs = [_]?Slab{null} ** NUM_CLASSES,
+            .slabs = @as([NUM_CLASSES]?Slab, @splat(null)),
             .capacity_per_class = 0,
             .total_allocated = 0,
             .total_freed = 0,
@@ -290,8 +290,8 @@ pub const SlabAllocator = struct {
 
     /// Get allocation statistics.
     pub fn getStats(self: *const Self) Stats {
-        var class_allocated: [NUM_CLASSES]usize = [_]usize{0} ** NUM_CLASSES;
-        var class_capacity: [NUM_CLASSES]usize = [_]usize{0} ** NUM_CLASSES;
+        var class_allocated: [NUM_CLASSES]usize = @as([NUM_CLASSES]usize, @splat(0));
+        var class_capacity: [NUM_CLASSES]usize = @as([NUM_CLASSES]usize, @splat(0));
 
         for (self.slabs, 0..) |maybe_slab, i| {
             if (maybe_slab) |slab| {
