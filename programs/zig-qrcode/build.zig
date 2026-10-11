@@ -1,4 +1,5 @@
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -13,12 +14,16 @@ pub fn build(b: *std.Build) void {
         query: std.Target.Query,
     };
 
+    // Apple slices are pinned to the fleet floor (26.0); un-versioned Apple targets
+    // default to macOS 15 / iOS 18 on Zig 0.17.
+    const apple_floor: std.Target.Query.OsVersion = .{ .semver = .{ .major = 26, .minor = 0, .patch = 0 } };
+
     const cross_targets = [_]CrossTarget{
-        .{ .name = "macos-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .macos } },
-        .{ .name = "macos-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .macos } },
+        .{ .name = "macos-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .macos, .os_version_min = apple_floor } },
+        .{ .name = "macos-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .macos, .os_version_min = apple_floor } },
         .{ .name = "windows-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows } },
         .{ .name = "linux-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux } },
-        .{ .name = "ios-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .ios } },
+        .{ .name = "ios-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .ios, .os_version_min = apple_floor } },
         .{ .name = "android-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .android } },
         .{ .name = "android-arm32", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .android } },
     };
@@ -77,9 +82,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(cli_exe);
 
     const run_cli = b.addRunArtifact(cli_exe);
-    if (b.args) |args| {
-        run_cli.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cli.addPassthruArgs() else if (b.args) |args| run_cli.addArgs(args);
     const run_step = b.step("run", "Run the zigqr CLI");
     run_step.dependOn(&run_cli.step);
 
@@ -93,9 +96,9 @@ pub fn build(b: *std.Build) void {
         const cross_target = b.resolveTargetQuery(ct.query);
 
         const opt_mode: std.builtin.OptimizeMode = if (ct.query.os_tag == .ios)
-            .ReleaseFast
+            Optimize.ReleaseFast
         else
-            .ReleaseSafe;
+            Optimize.ReleaseSafe;
 
         const cross_mod = b.createModule(.{
             .root_source_file = b.path("src/ffi.zig"),
@@ -124,7 +127,7 @@ pub fn build(b: *std.Build) void {
     const wasm_mod = b.createModule(.{
         .root_source_file = b.path("src/ffi.zig"),
         .target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding }),
-        .optimize = .ReleaseSmall,
+        .optimize = Optimize.ReleaseSmall,
     });
 
     const wasm_lib = b.addExecutable(.{
