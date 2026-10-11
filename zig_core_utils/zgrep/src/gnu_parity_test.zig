@@ -32,7 +32,7 @@ fn theIo() Io {
 /// Path to the zgrep binary under test.
 fn zgrepBin() []const u8 {
     if (std.c.getenv("ZGREP_BIN")) |p| return std.mem.span(p);
-    return "zig-out/bin/zgrep";
+    return @import("build_options").zgrep_bin;
 }
 
 const Result = struct {

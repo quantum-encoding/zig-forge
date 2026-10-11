@@ -1459,7 +1459,7 @@ fn grepFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
 
 fn grepRecursive(allocator: std.mem.Allocator, path: []const u8, config: *const Config, results: *GrepResult) void {
     const io_ctx = Io.Threaded.global_single_threaded.io();
-    const path_z = allocator.dupeZ(u8, path) catch return;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return;
     defer allocator.free(path_z);
 
     const dir = libc.opendir(path_z.ptr) orelse {

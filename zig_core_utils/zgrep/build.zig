@@ -31,7 +31,11 @@ pub fn build(b: *std.Build) void {
     // relative to the build root, so ensure it is installed first and pass its
     // resolved path explicitly via ZGREP_BIN.
     run_parity.step.dependOn(b.getInstallStep());
-    run_parity.setEnvironmentVariable("ZGREP_BIN", b.getInstallPath(.bin, "zgrep"));
+    // The binary path reaches the test through build_options (b.getInstallPath is gone in
+    // Zig 0.17); ZGREP_BIN in the environment still overrides it.
+    const parity_opts = b.addOptions();
+    parity_opts.addOptionPath("zgrep_bin", exe.getEmittedBin());
+    parity_tests.root_module.addOptions("build_options", parity_opts);
 
     const test_step = b.step("test", "Run GNU-parity tests");
     test_step.dependOn(&run_parity.step);
