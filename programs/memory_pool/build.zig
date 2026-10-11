@@ -1,4 +1,8 @@
 const std = @import("std");
+
+// Zig 0.17 renamed the optimize tags (Debug/ReleaseSafe/ReleaseFast/ReleaseSmall became
+// debug/safe/fast/small) and keeps the old names only as declarations on the enum, which an
+// enum literal cannot reach; naming them through the type compiles on 0.16 and 0.17.
 const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
@@ -24,10 +28,31 @@ pub fn build(b: *std.Build) void {
     core_lib.root_module.link_libc = true;
     // NO EXTERNAL DEPS
 
-    b.installArtifact(core_lib);
+    // zig-out/lib/libmemory_pool_core.a is the archive other repos link (libs.toml
+    // row `memory_pool_core`), stamped beside it by scripts/build-macos-lib.sh and
+    // scripts/build-consumed-libs.sh. Only the `lib` step writes that path, and
+    // only in a release mode; build-macos-lib.sh runs `zig build lib`. Every
+    // other build — `zig build`, `zig build core`, any -Doptimize — installs its
+    // archive under zig-out/lib/dev/, so a local build never replaces the stamped
+    // release archive.
+    const lib_step = b.step("lib", "Build the consumed archive zig-out/lib/libmemory_pool_core.a (release modes only; use scripts/build-macos-lib.sh)");
+    switch (optimize) {
+        Optimize.ReleaseSmall, Optimize.ReleaseFast => lib_step.dependOn(&b.addInstallArtifact(core_lib, .{}).step),
+        Optimize.Debug, Optimize.ReleaseSafe => lib_step.dependOn(&b.addFail(b.fmt(
+            "zig build lib writes zig-out/lib/libmemory_pool_core.a, the archive consumers link; " ++
+                "a {t} build keeps Zig's panic machinery and is never that archive. " ++
+                "Run scripts/build-macos-lib.sh programs/memory_pool from the repo root " ++
+                "(ReleaseSmall, stamped), or plain `zig build` for zig-out/lib/dev/libmemory_pool_core.a",
+            .{optimize},
+        )).step),
+    }
+    const dev_install = b.addInstallArtifact(core_lib, .{
+        .dest_dir = .{ .override = .{ .custom = "lib/dev" } },
+    });
+    b.getInstallStep().dependOn(&dev_install.step);
 
-    const core_step = b.step("core", "Build core FFI static library (zero deps)");
-    core_step.dependOn(&b.addInstallArtifact(core_lib, .{}).step);
+    const core_step = b.step("core", "Build core FFI static library (zero deps) into zig-out/lib/dev/");
+    core_step.dependOn(&dev_install.step);
 
     // ========================================================================
     // Android ARM64 Cross-Compilation Target

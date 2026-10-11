@@ -235,7 +235,9 @@ void* mp_fixed_pool_alloc(MP_FixedPool* pool);
  *
  * Parameters:
  *   pool - Pool handle (must not be NULL)
- *   ptr  - Object pointer (must have been allocated from this pool)
+ *   ptr  - Object pointer allocated from this pool. Any other pointer --
+ *          foreign, interior to a slot, past the end -- is ignored and the
+ *          pool is unchanged.
  *
  * Performance:
  *   <5ns per free

@@ -93,3 +93,12 @@ artifacts = ["programs/zig_endpoint_sec/zig-out/lib/libes_core_zig.a", "programs
 sources   = ["programs/zig_endpoint_sec", "programs/zig_darwin_kit", "scripts/build-macos-lib.sh", "scripts/zig-toolchain.sh"]
 consumers = []
 notes     = "MetatronSecurity's es-core/build.sh builds and copies libes_core_zig.a itself (`zig build -Doptimize=ReleaseFast xcode`, which writes zig-out/lib/xcode/); this row proves the program builds from a clean checkout in that mode."
+
+[[lib]]
+name      = "memory_pool_core"
+dir       = "programs/memory_pool"
+build     = "scripts/build-macos-lib.sh programs/memory_pool"
+artifacts = ["programs/memory_pool/zig-out/lib/libmemory_pool_core.a"]
+sources   = ["programs/memory_pool", "scripts/build-macos-lib.sh", "scripts/zig-toolchain.sh"]
+consumers = []
+notes     = "quantum_vault links it from this checkout (src-tauri/build.rs: zig-out/lib on desktop, android-arm64/ from programs/build-android-libs.sh, ios-libs/ from programs/build-ios-libs.sh) and fails its build when the -source-id.txt beside the archive names a source this checkout no longer holds. It is not a baton release product, so no release stamp is written."

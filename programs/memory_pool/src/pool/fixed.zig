@@ -78,7 +78,7 @@ pub const FixedPool = struct {
     }
 
     /// True if `ptr` addresses the start of a slot in this pool's backing
-    /// buffer. Used to reject foreign / mis-aligned pointers at the free path.
+    /// buffer. `tryFree` refuses every other pointer before writing through it.
     fn ownsSlot(self: *const FixedPool, ptr: *anyopaque) bool {
         const addr = @intFromPtr(ptr);
         const base = @intFromPtr(self.memory.ptr);
@@ -93,17 +93,28 @@ pub const FixedPool = struct {
         return @as(*anyopaque, @ptrCast(node));
     }
 
+    /// Free a slot this pool handed out. A pointer that is not the start of one
+    /// of its slots is a programming error and panics in every build mode, since
+    /// pushing it would make the next `alloc` hand out memory the pool does not own.
     pub fn free(self: *FixedPool, ptr: *anyopaque) void {
-        // Reject foreign / mis-aligned pointers in safe builds; in ReleaseFast
-        // the @alignCast below would otherwise be UB. (Compiled out in
-        // ReleaseFast, so no cost to the vault's hot path.)
-        std.debug.assert(self.ownsSlot(ptr));
+        if (!self.tryFree(ptr)) {
+            @panic("FixedPool: free() called with a pointer that is not one of this pool's slots");
+        }
+    }
+
+    /// Free `ptr` if it is the start of one of this pool's slots; returns false,
+    /// touching no state, for any other pointer (foreign, interior, past the end).
+    /// Non-fatal counterpart to `free`, used at the C ABI boundary where a bad
+    /// pointer from C must neither abort the host nor be written through as a
+    /// free-list node.
+    pub fn tryFree(self: *FixedPool, ptr: *anyopaque) bool {
+        if (!self.ownsSlot(ptr)) return false;
 
         // A free with nothing outstanding is a spurious / double-free-everything
         // pattern; pushing would still corrupt the free list, but at minimum
         // refuse to underflow `allocated` (which feeds `available =
         // capacity - allocated` in the stats and would wrap to garbage).
-        if (self.allocated == 0) return;
+        if (self.allocated == 0) return true;
 
         // Optionally wipe the payload before the slot re-enters the free list,
         // so secret material does not survive until the slot is reused.
@@ -116,6 +127,7 @@ pub const FixedPool = struct {
         node.next = self.free_list;
         self.free_list = node;
         self.allocated -= 1;
+        return true;
     }
 
     pub fn reset(self: *FixedPool) void {
@@ -467,4 +479,28 @@ test "fixed pool - free and reset keep slots aligned on misaligned backing" {
         try expectSlotsSound(&p, backing[k..], 24, &slots);
         try std.testing.expectError(error.OutOfMemory, p.alloc());
     }
+}
+
+test "fixed pool - tryFree refuses a pointer that is not a slot, touching nothing" {
+    var pool_inst = try FixedPool.init(std.testing.allocator, 48, 3);
+    defer pool_inst.deinit();
+
+    const live = try pool_inst.alloc();
+    const base = @intFromPtr(pool_inst.memory.ptr);
+    var foreign: u64 = 0;
+    const bad = [_]usize{
+        @intFromPtr(&foreign),
+        @intFromPtr(live) + 1,
+        @intFromPtr(live) + pool_inst.object_size / 2,
+        base + pool_inst.memory.len,
+    };
+    const free_list = pool_inst.free_list;
+    for (bad) |addr| {
+        try std.testing.expect(!pool_inst.tryFree(@ptrFromInt(addr)));
+        try std.testing.expectEqual(@as(usize, 1), pool_inst.allocated);
+        try std.testing.expectEqual(free_list, pool_inst.free_list);
+    }
+
+    try std.testing.expect(pool_inst.tryFree(live));
+    try std.testing.expectEqual(@as(usize, 0), pool_inst.allocated);
 }

@@ -38,12 +38,19 @@ p.free(ptr);
 ## Build
 
 ```bash
-zig build            # build the C FFI static library
-zig build core       # explicit core-library step
+zig build            # C FFI static library (Debug) -> zig-out/lib/dev/libmemory_pool_core.a
+zig build core       # the same, as an explicit step
+zig build lib -Doptimize=ReleaseSmall  # -> zig-out/lib/libmemory_pool_core.a (release modes only)
 zig build android    # cross-compile static lib for aarch64-linux-android
 zig build test       # run unit + FFI-layer tests
 zig build bench      # build and run the microbenchmarks
 ```
+
+`zig-out/lib/libmemory_pool_core.a` is the archive quantum_vault links (libs.toml row
+`memory_pool_core`). Build it from the repo root with
+`scripts/build-macos-lib.sh programs/memory_pool` (ReleaseSmall, as the iOS and Android
+slices are), which also writes the
+stamps quantum_vault's build.rs checks; no other build writes that path.
 
 ## Benchmarks
 

@@ -163,7 +163,9 @@ export fn mp_fixed_pool_alloc(pool: ?*MP_FixedPool) ?*anyopaque {
 ///
 /// Parameters:
 ///   pool - Pool handle (must not be NULL)
-///   ptr  - Object pointer (must have been allocated from this pool)
+///   ptr  - Object pointer allocated from this pool. Any other pointer —
+///          foreign, interior to a slot, past the end — is ignored and the
+///          pool is unchanged.
 ///
 /// Performance:
 ///   <5ns per free
@@ -173,7 +175,9 @@ export fn mp_fixed_pool_alloc(pool: ?*MP_FixedPool) ?*anyopaque {
 export fn mp_fixed_pool_free(pool: ?*MP_FixedPool, ptr: ?*anyopaque) void {
     const pool_ptr: *pool_mod.FixedPool = @ptrCast(@alignCast(pool orelse return));
     if (ptr) |p| {
-        pool_ptr.free(p);
+        // A pointer that is not one of this pool's slots is ignored, in every
+        // build mode: the pool is left exactly as it was.
+        _ = pool_ptr.tryFree(p);
     }
 }
 
@@ -609,6 +613,47 @@ test "memory_pool_core - slab free of foreign pointer is a no-op, not a crash" {
     mp_slab_free(slab, owned);
     try std.testing.expectEqual(MP_Error.SUCCESS, mp_slab_stats(slab, &stats));
     try std.testing.expectEqual(@as(usize, 0), stats.in_use);
+}
+
+test "memory_pool_core - fixed pool free of a pointer that is not a slot changes nothing" {
+    const object_size = 64;
+    const capacity = 4;
+    const pool = mp_fixed_pool_create(object_size, capacity) orelse return;
+    defer mp_fixed_pool_destroy(pool);
+
+    const owned = mp_fixed_pool_alloc(pool) orelse return error.TestUnexpectedResult;
+    const base = @intFromPtr(owned);
+
+    // A foreign address, addresses inside the live slot, and the address one
+    // slot past the pool's last. Each must be ignored, in every build mode,
+    // rather than pushed onto the free list for the next alloc to hand out.
+    var foreign: [64]u8 align(16) = undefined;
+    const pool_impl: *pool_mod.FixedPool = @ptrCast(@alignCast(pool));
+    const pool_start = @intFromPtr(pool_impl.memory.ptr);
+    const pool_end = pool_start + pool_impl.memory.len;
+    const bad = [_]usize{ @intFromPtr(&foreign), base + 1, base + 8, base + 16, pool_end };
+    for (bad) |addr| {
+        mp_fixed_pool_free(pool, @ptrFromInt(addr));
+    }
+
+    var stats: MP_FixedPoolStats = undefined;
+    try std.testing.expectEqual(MP_Error.SUCCESS, mp_fixed_pool_stats(pool, &stats));
+    try std.testing.expectEqual(@as(usize, 1), stats.allocated);
+
+    // The free list is intact: the remaining slots are all inside the pool, on
+    // slot boundaries, distinct from the live one, and then the pool is full.
+    var seen: [capacity]usize = undefined;
+    seen[0] = base;
+    var n: usize = 1;
+    while (n < capacity) : (n += 1) {
+        const p = mp_fixed_pool_alloc(pool) orelse return error.TestUnexpectedResult;
+        const a = @intFromPtr(p);
+        try std.testing.expect(a >= pool_start and a < pool_end);
+        try std.testing.expectEqual(@as(usize, 0), (a - pool_start) % pool_impl.object_size);
+        for (seen[0..n]) |prev| try std.testing.expect(prev != a);
+        seen[n] = a;
+    }
+    try std.testing.expect(mp_fixed_pool_alloc(pool) == null);
 }
 
 test "memory_pool_core - arena create/destroy lifecycle" {
