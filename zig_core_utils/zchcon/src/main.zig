@@ -123,7 +123,7 @@ var g_context_buf: [1024]u8 = undefined;
 
 fn getContext(path: []const u8, no_deref: bool) ?[]const u8 {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return null;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return null;
 
     const result = xgetattr(path_z, SELINUX_XATTR, &g_context_buf, g_context_buf.len, no_deref);
 
@@ -138,7 +138,7 @@ fn getContext(path: []const u8, no_deref: bool) ?[]const u8 {
 
 fn setContext(path: []const u8, context: []const u8, no_deref: bool) bool {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return false;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return false;
 
     // libselinux/GNU write the context value with a trailing NUL terminator on
     // the `security.selinux` xattr; readers (including getContext above) expect
