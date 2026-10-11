@@ -51,18 +51,14 @@ pub fn build(b: *std.Build) void {
     // Main MFD executable
     const mfd = addExample(b, "zig-flight", "src/main.zig", target, optimize, zig_flight_module);
     const run_mfd = b.addRunArtifact(mfd);
-    if (b.args) |args| {
-        run_mfd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_mfd.addPassthruArgs() else if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_mfd.addPassthruArgs() else if (b.args) |args| run_mfd.addArgs(args);
     const mfd_step = b.step("run", "Run MFD client");
     mfd_step.dependOn(&run_mfd.step);
 
     // Dataref dump utility
     const dump = addExample(b, "zig-flight-dump", "src/main_dump.zig", target, optimize, zig_flight_module);
     const run_dump = b.addRunArtifact(dump);
-    if (b.args) |args| {
-        run_dump.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_dump.addPassthruArgs() else if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_dump.addPassthruArgs() else if (b.args) |args| run_dump.addArgs(args);
     const dump_step = b.step("run-dump", "Run dataref dumper");
     dump_step.dependOn(&run_dump.step);
 }
