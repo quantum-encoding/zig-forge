@@ -39,6 +39,7 @@ fn fillRandomBytes(buf: []u8) RandomError!void {
             }
         },
         .windows => if (!win_random.fill(buf)) return error.RandomFailure,
+        .wasi => if (std.os.wasi.random_get(buf.ptr, buf.len) != .SUCCESS) return error.RandomFailure,
         else => {
             const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, 0);
             if (fd < 0) return error.RandomFailure;

@@ -195,7 +195,7 @@ pub fn gfDiv(a: u8, b: u8) u8 {
 /// Generator coefficients of the RS1024 code, transcribed from the `GEN` table
 /// in the spec's `rs1024_polymod` snippet.
 const RS1024_GEN = [10]u30{
-    0x0E0E040, 0x1C1C080, 0x3838100, 0x7070200,  0xE0E0009,
+    0x0E0E040,  0x1C1C080,  0x3838100,  0x7070200,  0xE0E0009,
     0x1C0C2412, 0x38086C24, 0x3090FC48, 0x21B1F890, 0x3F3F120,
 };
 
@@ -1080,6 +1080,7 @@ fn fillRandomBytes(buf: []u8) Error!void {
             }
         },
         .windows => if (!@import("win_random.zig").fill(buf)) return Error.RandomFailure,
+        .wasi => if (std.os.wasi.random_get(buf.ptr, buf.len) != .SUCCESS) return Error.RandomFailure,
         else => {
             const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, 0);
             if (fd < 0) return Error.RandomFailure;

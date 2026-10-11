@@ -44,6 +44,9 @@ fn fillRandomBytes(buf: []u8) RandomError!void {
             }
         },
         .windows => if (!@import("win_random.zig").fill(buf)) return error.RandomFailure,
+        // WASI has no /dev/urandom; random_get is its CSPRNG. This is what lets the
+        // test suite run on wasm32, a genuine 32-bit usize target, under node's WASI.
+        .wasi => if (std.os.wasi.random_get(buf.ptr, buf.len) != .SUCCESS) return error.RandomFailure,
         else => {
             const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, 0);
             if (fd < 0) return error.RandomFailure;
@@ -274,9 +277,10 @@ pub fn embedInPixelsWithLayer(
     }
     defer allocator.free(payload);
 
-    // Calculate total bits needed
-    const total_bytes = HEADER_SIZE + payload.len;
-    const total_bits = total_bytes * 8;
+    // Calculate total bits needed (checked: the header stores data_len as a u32)
+    if (payload.len > std.math.maxInt(u32)) return StegoError.ImageTooSmall;
+    const total_bytes = std.math.add(usize, HEADER_SIZE, payload.len) catch return StegoError.ImageTooSmall;
+    const total_bits = std.math.mul(usize, total_bytes, 8) catch return StegoError.ImageTooSmall;
 
     // Check capacity (3 bits per pixel for RGB)
     // If layer partitioning is active, we only have 1/256th of the pixels available
@@ -423,8 +427,11 @@ pub fn extractFromPixelsWithLayer(
     @memcpy(&nonce, header_buf[9..21]);
     @memcpy(&tag, header_buf[21..37]);
 
-    // Now extract the payload
-    const total_bits = (HEADER_SIZE + data_len) * 8;
+    // Now extract the payload. data_len is a u32 read from the pixels: checked
+    // arithmetic, so a value near 2^32 is refused on a 32-bit target rather than
+    // wrapping to a small bit count that passes the bound below.
+    const total_bytes = std.math.add(usize, HEADER_SIZE, data_len) catch return StegoError.CorruptedData;
+    const total_bits = std.math.mul(usize, total_bytes, 8) catch return StegoError.CorruptedData;
     if (total_bits > pixels.len) return StegoError.CorruptedData;
 
     // Get full scrambled positions if password provided
@@ -562,9 +569,11 @@ pub fn getPngDimensions(data: []const u8) !PngDimensions {
     while (pos + 12 <= data.len) {
         const chunk_len = readU32BE(data[pos..][0..4]);
         const chunk_type = data[pos + 4 ..][0..4];
-        // chunk_len is an untrusted big-endian u32; bound the slice against
-        // the actual input length before indexing (else OOB panic / DoS).
-        if (pos + 8 + @as(usize, chunk_len) + 4 > data.len) return StegoError.InvalidPng;
+        // chunk_len is an untrusted big-endian u32; bound it against the bytes that
+        // remain after this chunk's length, type and CRC (the loop condition makes
+        // `data.len - pos - 12` safe). Never `pos + chunk_len`: on a 32-bit target
+        // (the arm/x86 Android archives) that sum wraps and the check passes.
+        if (chunk_len > data.len - pos - 12) return StegoError.InvalidPng;
         const chunk_data = data[pos + 8 ..][0..chunk_len];
 
         if (mem.eql(u8, chunk_type, "IHDR")) {
@@ -658,9 +667,11 @@ pub fn decodePng(allocator: Allocator, data: []const u8) !PngImage {
     while (pos + 12 <= data.len) {
         const chunk_len = readU32BE(data[pos..][0..4]);
         const chunk_type = data[pos + 4 ..][0..4];
-        // chunk_len is an untrusted big-endian u32; bound the slice against
-        // the actual input length before indexing (else OOB panic / DoS).
-        if (pos + 8 + @as(usize, chunk_len) + 4 > data.len) return StegoError.InvalidPng;
+        // chunk_len is an untrusted big-endian u32; bound it against the bytes that
+        // remain after this chunk's length, type and CRC (the loop condition makes
+        // `data.len - pos - 12` safe). Never `pos + chunk_len`: on a 32-bit target
+        // (the arm/x86 Android archives) that sum wraps and the check passes.
+        if (chunk_len > data.len - pos - 12) return StegoError.InvalidPng;
         const chunk_data = data[pos + 8 ..][0..chunk_len];
 
         if (mem.eql(u8, chunk_type, "IHDR")) {

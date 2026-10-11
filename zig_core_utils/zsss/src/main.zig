@@ -65,6 +65,7 @@ fn fillRandomBytes(buf: []u8) RandomError!void {
             }
         },
         .windows => if (!@import("win_random.zig").fill(buf)) return error.RandomFailure,
+        .wasi => if (std.os.wasi.random_get(buf.ptr, buf.len) != .SUCCESS) return error.RandomFailure,
         else => {
             const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, 0);
             if (fd < 0) return error.RandomFailure;
@@ -245,7 +246,9 @@ pub const Share = struct {
             (@as(u32, bytes[pos + 3]) << 24);
         pos += 4;
 
-        if (bytes.len < pos + data_len + 4) return error.ShareTooShort;
+        // Compare against what remains (pos <= 12 < bytes.len here), never
+        // `pos + data_len + 4`: on a 32-bit target that wraps for a length near 2^32.
+        if (data_len > bytes.len - pos or bytes.len - pos - data_len < 4) return error.ShareTooShort;
 
         const data = try allocator.alloc(u8, data_len);
         @memcpy(data, bytes[pos .. pos + data_len]);
@@ -1567,7 +1570,7 @@ fn doTicketCreate(allocator: Allocator, config: *Config) !void {
     }
 
     // Embed all tickets into image
-    std.debug.print("Embedding {d} tickets into image...\n", .{ tickets.items.len });
+    std.debug.print("Embedding {d} tickets into image...\n", .{tickets.items.len});
 
     const result = ticket.embedTickets(allocator, png_data, tickets.items) catch |err| {
         std.debug.print("Error embedding tickets: {}\n", .{err});
@@ -1986,6 +1989,9 @@ test "SSS combine round-trip still recovers exact secret" {
 // Debug, undefined behaviour in the ReleaseFast archives apps link). It must be
 // refused with an error before any share is written.
 test "SLIP-39 split into an output path too long for a share file name is an error" {
+    // The CLI's file I/O is POSIX; the library suites also run on wasm32-wasi (a 32-bit
+    // target) and this test is the only one in the file that reaches it.
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const config = Config{ .threshold = 2, .num_shares = 3, .iteration_exponent = 0 };
     const long_dir = "/zsss-no-such-dir/" ++ "d" ** 300;
@@ -1993,4 +1999,19 @@ test "SLIP-39 split into an output path too long for a share file name is an err
         error.NameTooLong,
         doSplitSlip39(allocator, &config, "0123456789abcdef", long_dir),
     );
+}
+
+// Crypto test campaign 2026-10-11, track E E-3: `pos + data_len + 4` wrapped on a 32-bit
+// target for a data length near 2^32, so the bound passed and the copy ran off the share.
+test "Share.deserialize refuses a data length near 2^32 instead of wrapping the bound" {
+    const allocator = std.testing.allocator;
+    for ([_]u32{ 0xFFFFFFFF, 0xFFFFFFFD, 0xFFFFFFF0, 0x7FFFFFFF }) |len| {
+        var bytes: [20]u8 = .{0} ** 20;
+        bytes[0] = 1; // version
+        bytes[1] = 2; // threshold
+        bytes[2] = 3; // total shares
+        bytes[3] = 1; // index
+        std.mem.writeInt(u32, bytes[8..12], len, .little);
+        try std.testing.expectError(error.ShareTooShort, Share.deserialize(allocator, &bytes));
+    }
 }

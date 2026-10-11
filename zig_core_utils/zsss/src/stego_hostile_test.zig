@@ -423,3 +423,63 @@ test "PNG: truncated or corrupt zlib stream (mid-block cut, bad FCHECK, bad CM, 
     defer a.free(nb);
     try testing.expectError(stego.StegoError.PngDecompressError, stego.decodePng(a, nb));
 }
+
+// =============================================================================
+// E-3: lengths read from the file must never be added to a position (32-bit wrap)
+// =============================================================================
+
+test "E-3: a chunk length near 2^32 at a non-zero offset is refused, not wrapped past the end" {
+    // On a 32-bit target `pos + 8 + chunk_len + 4` wraps: at pos 33 (after the IHDR)
+    // a length of 0xFFFFFFF0 gives 0x100000025 -> 0x25 <= data.len, the old check
+    // passed, and the chunk slice ran off the end of the file. The check now compares
+    // the length with what remains, which cannot wrap on any target. This test is
+    // what the 32-bit build (wasm32 under node's WASI, see the commit) proves.
+    const a = testing.allocator;
+    const good = try plainPng(a, 4, 128);
+    defer a.free(good);
+    const idat_pos: usize = 8 + 12 + 13; // after signature and IHDR
+    try testing.expectEqualStrings("IDAT", good[idat_pos + 4 ..][0..4]);
+    for ([_]u32{ 0xFFFFFFF0, 0xFFFFFFFF, 0xFFFFFFFD, 0x80000000 }) |len| {
+        var bad = try a.dupe(u8, good);
+        defer a.free(bad);
+        std.mem.writeInt(u32, bad[idat_pos..][0..4], len, .big);
+        try testing.expectError(stego.StegoError.InvalidPng, stego.decodePng(a, bad));
+        // IHDR comes first so dimensions still parse; move the bad length onto IHDR too.
+        _ = try stego.getPngDimensions(bad);
+        std.mem.writeInt(u32, bad[8..12], len, .big);
+        try testing.expectError(stego.StegoError.InvalidPng, stego.getPngDimensions(bad));
+        try testing.expectError(stego.StegoError.InvalidPng, stego.decodePng(a, bad));
+    }
+}
+
+test "E-3: a stego header claiming a payload near 2^32 bytes is refused as corrupted, not wrapped" {
+    // The header's data_len is a u32 read out of pixel LSBs; `(HEADER_SIZE + data_len) * 8`
+    // wrapped on 32-bit to a small bit count that passed the pixel bound.
+    const a = testing.allocator;
+    const pixels = try a.alloc(u8, 4096);
+    defer a.free(pixels);
+    @memset(pixels, 0x80);
+    var hdr: [stego.HEADER_SIZE]u8 = .{0} ** stego.HEADER_SIZE;
+    @memcpy(hdr[0..4], "ZSSS");
+    hdr[4] = 1; // version
+    std.mem.writeInt(u32, hdr[5..9], 0xFFFFFFFF, .little);
+    // No password, no layer: bit i of the header lands in pixels[i], MSB first.
+    for (hdr, 0..) |byte, i| {
+        for (0..8) |b| {
+            const bit: u8 = (byte >> @intCast(7 - b)) & 1;
+            pixels[i * 8 + b] = 0x80 | bit;
+        }
+    }
+    try testing.expectError(stego.StegoError.CorruptedData, stego.extractFromPixels(a, pixels, null));
+    // A length that fits the image still reads: 1 byte of payload.
+    std.mem.writeInt(u32, hdr[5..9], 1, .little);
+    for (hdr[5..9], 5..) |byte, i| {
+        for (0..8) |b| {
+            const bit: u8 = (byte >> @intCast(7 - b)) & 1;
+            pixels[i * 8 + b] = 0x80 | bit;
+        }
+    }
+    const one = try stego.extractFromPixels(a, pixels, null);
+    defer a.free(one);
+    try testing.expectEqual(@as(usize, 1), one.len);
+}

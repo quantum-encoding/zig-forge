@@ -188,14 +188,16 @@ export fn zsss_combine(
     }
 
     var pos: usize = 0;
-    while (pos + 4 <= shares_data.len) {
+    while (shares_data.len - pos >= 4) {
         const len: u32 = @as(u32, shares_data[pos]) |
             (@as(u32, shares_data[pos + 1]) << 8) |
             (@as(u32, shares_data[pos + 2]) << 16) |
             (@as(u32, shares_data[pos + 3]) << 24);
         pos += 4;
 
-        if (pos + len > shares_data.len) break;
+        // Compare against what remains, never `pos + len`: on a 32-bit target the
+        // sum wraps for a frame length near 2^32 and the frame is read past the end.
+        if (len > shares_data.len - pos) break;
 
         const share = Share.deserialize(ffi_allocator, shares_data[pos..][0..len]) catch {
             return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_CHECKSUM_MISMATCH };
@@ -351,10 +353,10 @@ export fn zsss_slip39_combine(
 
     const data = mnemonics_ptr[0..mnemonics_len];
     var pos: usize = 0;
-    while (pos + 4 <= data.len) {
+    while (data.len - pos >= 4) {
         const len = std.mem.readInt(u32, data[pos..][0..4], .little);
         pos += 4;
-        if (pos + len > data.len) break;
+        if (len > data.len - pos) break; // not `pos + len`: wraps on 32-bit
         mnemonics.append(ffi_allocator, data[pos..][0..len]) catch {
             return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_OUT_OF_MEMORY };
         };
@@ -720,7 +722,11 @@ export fn zsss_ticket_capacity(
         return 0;
     };
 
-    const total_pixels = dims.width * dims.height;
+    // Both are u32 IHDR fields: the product fits a 64-bit usize but wraps a 32-bit one.
+    const total_pixels = std.math.mul(usize, dims.width, dims.height) catch {
+        bytes_per_ticket.* = 0;
+        return 0;
+    };
     const pixels_per_layer = total_pixels / 256;
     const usable_bytes = (pixels_per_layer * 3) / 8;
     const capacity = if (usable_bytes > stego.HEADER_SIZE) usable_bytes - stego.HEADER_SIZE else 0;
@@ -797,14 +803,14 @@ test "FFI split and combine" {
 fn nthShareFrame(buf: []const u8, n: usize) []const u8 {
     var pos: usize = 0;
     var idx: usize = 0;
-    while (pos + 4 <= buf.len) {
+    while (buf.len - pos >= 4) {
         const len: u32 = @as(u32, buf[pos]) |
             (@as(u32, buf[pos + 1]) << 8) |
             (@as(u32, buf[pos + 2]) << 16) |
             (@as(u32, buf[pos + 3]) << 24);
         const start = pos;
         pos += 4;
-        if (pos + len > buf.len) break;
+        if (len > buf.len - pos) break;
         pos += len;
         if (idx == n) return buf[start..pos];
         idx += 1;
@@ -963,4 +969,35 @@ test "FFI combine cross-secret shares with colliding indices returns error" {
     const result = zsss_combine(combo.items.ptr, combo.items.len);
     defer zsss_free(result);
     try std.testing.expect(result.error_code != ZSSS_OK);
+}
+
+// Crypto test campaign 2026-10-11, track E E-3: a frame length near 2^32 made `pos + len`
+// wrap on the 32-bit Android archives, so the bound passed and the frame was read past the
+// buffer. The parsers now compare the length with what remains. On a 64-bit host this
+// test passes either way; the wasm32 run of the same binary is what proves the fix.
+test "FFI combine: a frame length near 2^32 is dropped, never read, on every target" {
+    zsss_init();
+    for ([_]u32{ 0xFFFFFFFD, 0xFFFFFFFF, 0xFFFFFFF0 }) |len| {
+        var buf: [8]u8 = .{0} ** 8;
+        std.mem.writeInt(u32, buf[0..4], len, .little);
+        const r = zsss_combine(&buf, buf.len);
+        defer zsss_free(r);
+        try std.testing.expectEqual(ZSSS_ERR_NO_SHARES, r.error_code);
+        const s = zsss_slip39_combine(&buf, buf.len, null, 0);
+        defer zsss_free(s);
+        try std.testing.expectEqual(ZSSS_ERR_NO_SHARES, s.error_code);
+    }
+    // The same length after one good frame: that frame still parses, the bad one is dropped.
+    const secret = "frame-bound-test";
+    const split = zsss_split(secret.ptr, secret.len, 2, 3);
+    defer zsss_free(split);
+    try std.testing.expectEqual(ZSSS_OK, split.error_code);
+    const first = nthShareFrame(split.data.?[0..split.len], 0);
+    var mixed: std.ArrayList(u8) = .empty;
+    defer mixed.deinit(std.testing.allocator);
+    try mixed.appendSlice(std.testing.allocator, first);
+    try mixed.appendSlice(std.testing.allocator, &[_]u8{ 0xFD, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0 });
+    const r = zsss_combine(mixed.items.ptr, mixed.items.len);
+    defer zsss_free(r);
+    try std.testing.expectEqual(ZSSS_ERR_INSUFFICIENT_SHARES, r.error_code);
 }
