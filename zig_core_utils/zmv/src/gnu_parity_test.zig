@@ -32,7 +32,7 @@ const gnu_candidates = [_][:0]const u8{
 /// runner's cwd); children run with a different cwd, so absolutize it.
 fn zmvExePath(gpa: std.mem.Allocator) ![]u8 {
     const rel = build_options.zmv_exe;
-    const rel_z = try gpa.dupeZ(u8, rel);
+    const rel_z = try gpa.dupeSentinel(u8, rel, 0);
     defer gpa.free(rel_z);
     var buf: [4096]u8 = undefined;
     const abs = std.c.realpath(rel_z.ptr, &buf) orelse return error.RealpathFailed;
@@ -139,7 +139,7 @@ fn snapshotWalk(
         const label = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ prefix, entry.name });
         defer gpa.free(label);
 
-        const name_z = try gpa.dupeZ(u8, entry.name);
+        const name_z = try gpa.dupeSentinel(u8, entry.name, 0);
         defer gpa.free(name_z);
 
         var st: std.c.Stat = undefined;
