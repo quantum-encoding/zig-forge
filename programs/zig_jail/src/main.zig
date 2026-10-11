@@ -194,13 +194,13 @@ pub fn main(init: std.process.Init) !void {
         defer allocator.free(argv);
 
         for (command_args, 0..) |cmd_arg, i| {
-            const c_str = try allocator.dupeZ(u8, cmd_arg);
+            const c_str = try allocator.dupeSentinel(u8, cmd_arg, 0);
             argv[i] = c_str.ptr;
         }
         argv[command_args.len] = null; // Null terminate the array
 
         // Get path (first arg)
-        const path = try allocator.dupeZ(u8, command_args[0]);
+        const path = try allocator.dupeSentinel(u8, command_args[0], 0);
 
         // execve - this replaces the current process
         // Use linux syscall directly since std.process.execve was removed
@@ -215,7 +215,8 @@ pub fn main(init: std.process.Init) !void {
     } else {
         // Parent process: wait for child
         var status: u32 = 0;
-        _ = std.os.linux.wait4(@intCast(pid), &status, 0, null);
+        // wait4 takes *u32 on Zig 0.16 and *i32 on 0.17; the W.* decoders take u32 on both.
+        _ = std.os.linux.wait4(@intCast(pid), @ptrCast(&status), 0, null);
 
         std.debug.print("\n============================================================\n", .{});
 
