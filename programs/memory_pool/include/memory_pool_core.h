@@ -213,7 +213,8 @@ void mp_fixed_pool_destroy(MP_FixedPool* pool);
  *   pool - Pool handle (must not be NULL)
  *
  * Returns:
- *   Pointer to object, or NULL if pool is full
+ *   Pointer to object (16-byte aligned, malloc parity; no stronger
+ *   alignment is offered), or NULL if pool is full
  *
  * Performance:
  *   <10ns per allocation
@@ -432,8 +433,10 @@ void mp_slab_destroy(MP_Slab* slab);
  *   size - Requested size in bytes
  *
  * Returns:
- *   Pointer to allocated memory, or NULL if the size class is exhausted
- *   (or the backing allocator fails for oversized requests)
+ *   Pointer to allocated memory (16-byte aligned on both the size-class and
+ *   the oversized path; no stronger alignment is offered), or NULL if the
+ *   size class is exhausted (or the backing allocator fails for oversized
+ *   requests)
  *
  * Performance:
  *   <15ns for size <= 4096 (slab path); malloc fallback above that

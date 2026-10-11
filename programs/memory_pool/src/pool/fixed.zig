@@ -23,8 +23,9 @@ pub const FixedPool = struct {
 
     /// Slot alignment (and slot-size granularity). Raised to 16 for malloc
     /// parity so SIMD / `long double` payloads coming from C callers are
-    /// correctly aligned. Must be >= @alignOf(*Node).
-    const slot_align = 16;
+    /// correctly aligned. Must be >= @alignOf(*Node). This is the pool's whole
+    /// alignment guarantee: callers needing more must not use it.
+    pub const slot_align = 16;
 
     pub fn init(allocator: std.mem.Allocator, object_size: usize, capacity: usize) !FixedPool {
         return initOptions(allocator, object_size, capacity, false);

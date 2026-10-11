@@ -47,11 +47,18 @@ const Slab = struct {
     end_addr: usize,
 };
 
+/// Alignment of every pointer the slab hands out, on both paths. The slab
+/// path inherits FixedPool's slot alignment (16, malloc parity); the oversized
+/// path asks the backing allocator for the same, so a caller never sees a
+/// weaker guarantee for a > 4096-byte request than for a small one.
+pub const max_alignment: usize = FixedPool.slot_align;
+const max_align: std.mem.Alignment = std.mem.Alignment.fromByteUnits(max_alignment);
+
 /// Tracks oversized allocations that bypass the slab pools.
 /// Stores the aligned slice directly so that free() can pass
 /// the correct alignment back to the allocator.
 const OversizedEntry = struct {
-    ptr: [*]align(@alignOf(*anyopaque)) u8,
+    ptr: [*]align(max_alignment) u8,
     len: usize,
 };
 
@@ -142,7 +149,7 @@ pub const SlabAllocator = struct {
     pub fn deinit(self: *Self) void {
         // Free all oversized allocations
         for (self.oversized.items) |entry| {
-            const aligned_slice: []align(@alignOf(*anyopaque)) u8 = entry.ptr[0..entry.len];
+            const aligned_slice: []align(max_alignment) u8 = entry.ptr[0..entry.len];
             self.allocator.free(aligned_slice);
         }
         self.oversized.deinit(self.allocator);
@@ -181,15 +188,11 @@ pub const SlabAllocator = struct {
         }
 
         // Oversized allocation path: fall back to general allocator
-        const aligned_size = std.mem.alignForward(usize, size, @alignOf(*anyopaque));
-        const memory = self.allocator.alignedAlloc(
-            u8,
-            std.mem.Alignment.fromByteUnits(@alignOf(*anyopaque)),
-            aligned_size,
-        ) catch return error.OutOfMemory;
+        const aligned_size = std.mem.alignForward(usize, size, max_alignment);
+        const memory = self.allocator.alignedAlloc(u8, max_align, aligned_size) catch return error.OutOfMemory;
 
         self.oversized.append(self.allocator, .{
-            .ptr = @alignCast(memory.ptr),
+            .ptr = memory.ptr,
             .len = memory.len,
         }) catch {
             self.allocator.free(memory);
@@ -235,7 +238,7 @@ pub const SlabAllocator = struct {
         // Must be an oversized allocation
         for (self.oversized.items, 0..) |entry, i| {
             if (@intFromPtr(entry.ptr) == addr) {
-                const aligned_slice: []align(@alignOf(*anyopaque)) u8 = entry.ptr[0..entry.len];
+                const aligned_slice: []align(max_alignment) u8 = entry.ptr[0..entry.len];
                 self.allocator.free(aligned_slice);
                 _ = self.oversized.swapRemove(i);
                 self.oversized_freed += 1;
@@ -255,7 +258,14 @@ pub const SlabAllocator = struct {
     /// const node = try slab.allocTyped(TreeNode);
     /// defer slab.freeTyped(node);
     /// ```
+    /// `T` may not need more than `max_alignment` (16): the slab cannot place
+    /// a 32- or 64-aligned type, and the `@alignCast` below would trap (safe
+    /// builds) or be undefined behaviour (ReleaseFast), so it is refused at
+    /// compile time.
     pub fn allocTyped(self: *Self, comptime T: type) !*T {
+        if (@alignOf(T) > max_alignment) {
+            @compileError("SlabAllocator.allocTyped: " ++ @typeName(T) ++ " needs more than 16-byte alignment");
+        }
         const ptr = try self.alloc(@sizeOf(T));
         return @as(*T, @ptrCast(@alignCast(ptr)));
     }
@@ -277,7 +287,7 @@ pub const SlabAllocator = struct {
 
         // Free all oversized allocations
         for (self.oversized.items) |entry| {
-            const aligned_slice: []align(@alignOf(*anyopaque)) u8 = entry.ptr[0..entry.len];
+            const aligned_slice: []align(max_alignment) u8 = entry.ptr[0..entry.len];
             self.allocator.free(aligned_slice);
         }
         self.oversized.clearRetainingCapacity();
@@ -659,7 +669,7 @@ test "slab - alignment verification" {
     var slab = try SlabAllocator.init(testing.allocator, 16);
     defer slab.deinit();
 
-    const alignment = @alignOf(*anyopaque);
+    const alignment = max_alignment;
 
     // Allocate various sizes and verify alignment
     const ptr1 = try slab.alloc(1);
@@ -788,4 +798,183 @@ test "slab - statistics tracking" {
     slab.free(p3);
     stats = slab.getStats();
     try testing.expectEqual(@as(usize, 0), stats.in_use);
+}
+
+// ====================================================================
+// Address-alignment property tests (misaligned backing buffers)
+//
+// The backing allocator is a FixedBufferAllocator whose buffer starts 1, 3,
+// 7, 9 or 15 bytes past an 8192-byte boundary. Every size 1..8192 (slab
+// classes and the oversized fallback) must come back `max_alignment`-aligned,
+// inside memory the allocator owns, and disjoint from every live allocation.
+// ====================================================================
+
+const misaligned_offsets = [_]usize{ 1, 3, 7, 9, 15 };
+const backing_align = 8192;
+
+fn expectAligned(addr: usize) !void {
+    var a: usize = 1;
+    while (a <= max_alignment) : (a *= 2) {
+        try testing.expectEqual(@as(usize, 0), addr % a);
+    }
+}
+
+/// Bounds of the memory that may legally back `size` bytes at `addr`.
+fn expectOwned(slab: *const SlabAllocator, region: []const u8, addr: usize, size: usize) !void {
+    if (SlabAllocator.sizeClassFor(size)) |class| {
+        const idx = SlabAllocator.sizeClassIndex(size).?;
+        const s = slab.slabs[idx].?;
+        try testing.expect(addr >= s.base_addr);
+        try testing.expect(addr + class <= s.end_addr);
+        try testing.expectEqual(@as(usize, 0), (addr - s.base_addr) % s.pool.object_size);
+    } else {
+        try testing.expect(addr >= @intFromPtr(region.ptr));
+        try testing.expect(addr + size <= @intFromPtr(region.ptr) + region.len);
+    }
+}
+
+test "slab - address alignment on misaligned backing, every size 1..8192" {
+    const backing = try testing.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(backing_align), 64 * 1024);
+    defer testing.allocator.free(backing);
+
+    for (misaligned_offsets) |k| {
+        const region = backing[k..];
+        try testing.expectEqual(k, @intFromPtr(region.ptr) % backing_align);
+        var fba = std.heap.FixedBufferAllocator.init(region);
+        var slab = try SlabAllocator.init(fba.allocator(), 2);
+        defer slab.deinit();
+
+        // One long-lived small allocation, so every later one must avoid it.
+        const anchor = try slab.alloc(24);
+        const anchor_addr = @intFromPtr(anchor);
+
+        var size: usize = 1;
+        while (size <= 8192) : (size += 1) {
+            const p = try slab.alloc(size);
+            const addr = @intFromPtr(p);
+            try expectAligned(addr);
+            try expectOwned(&slab, region, addr, size);
+            try testing.expect(addr >= anchor_addr + 24 or addr + size <= anchor_addr);
+            // Writable over the full request.
+            @memset(@as([*]u8, @ptrCast(p))[0..size], 0x5A);
+            slab.free(p);
+        }
+        try testing.expectEqual(@as(usize, 1), slab.getStats().in_use);
+        slab.free(anchor);
+    }
+}
+
+test "slab - live allocations of every class and oversized are aligned and disjoint" {
+    const backing = try testing.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(backing_align), 96 * 1024);
+    defer testing.allocator.free(backing);
+
+    const sizes = [_]usize{ 1, 9, 17, 33, 65, 129, 257, 513, 1025, 2049, 4097, 5001, 8193 };
+    for (misaligned_offsets) |k| {
+        const region = backing[k..];
+        var fba = std.heap.FixedBufferAllocator.init(region);
+        var slab = try SlabAllocator.init(fba.allocator(), 1);
+        defer slab.deinit();
+
+        var addrs: [sizes.len]usize = undefined;
+        for (sizes, 0..) |size, i| {
+            const p = try slab.alloc(size);
+            addrs[i] = @intFromPtr(p);
+            try expectAligned(addrs[i]);
+            try expectOwned(&slab, region, addrs[i], size);
+            @memset(@as([*]u8, @ptrCast(p))[0..size], @as(u8, @intCast(i + 1)));
+        }
+        // Pairwise disjoint, and no write clobbered another allocation.
+        for (sizes, 0..) |size, i| {
+            for (sizes[0..i], 0..) |other_size, j| {
+                try testing.expect(addrs[i] >= addrs[j] + other_size or addrs[i] + size <= addrs[j]);
+            }
+            for (@as([*]const u8, @ptrFromInt(addrs[i]))[0..size]) |b| {
+                try testing.expectEqual(@as(u8, @intCast(i + 1)), b);
+            }
+        }
+        for (addrs) |a| slab.free(@ptrFromInt(a));
+        try testing.expectEqual(@as(usize, 0), slab.getStats().in_use);
+    }
+}
+
+test "slab - last fitting allocation accepted, next refused, on misaligned backing" {
+    const backing = try testing.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(backing_align), 128 * 1024);
+    defer testing.allocator.free(backing);
+
+    const cap = 3;
+    for (misaligned_offsets) |k| {
+        const region = backing[k..];
+        var fba = std.heap.FixedBufferAllocator.init(region);
+        var slab = try SlabAllocator.init(fba.allocator(), cap);
+        defer slab.deinit();
+
+        // Each class: `cap` accepted (aligned), the next refused, a freed
+        // slot is accepted again at an aligned address.
+        for (SIZE_CLASSES) |class| {
+            var ptrs: [cap]*anyopaque = undefined;
+            for (&ptrs) |*p| {
+                p.* = try slab.alloc(class);
+                try expectAligned(@intFromPtr(p.*));
+            }
+            try testing.expectError(error.OutOfMemory, slab.alloc(class));
+            slab.free(ptrs[1]);
+            const again = try slab.alloc(class);
+            try testing.expectEqual(@intFromPtr(ptrs[1]), @intFromPtr(again));
+            try testing.expectError(error.OutOfMemory, slab.alloc(class));
+        }
+
+        // Oversized: take from the backing until it refuses; every accepted
+        // pointer is aligned and in the region, and a refusal changes nothing.
+        var accepted: usize = 0;
+        while (true) {
+            const before = slab.getStats();
+            const p = slab.alloc(4097) catch |err| {
+                try testing.expectEqual(error.OutOfMemory, err);
+                const after = slab.getStats();
+                try testing.expectEqual(before.total_allocated, after.total_allocated);
+                try testing.expectEqual(before.oversized_allocated, after.oversized_allocated);
+                break;
+            };
+            try expectAligned(@intFromPtr(p));
+            try expectOwned(&slab, region, @intFromPtr(p), 4097);
+            accepted += 1;
+        }
+        try testing.expect(accepted > 0);
+    }
+}
+
+test "slab - reset after aligned allocations on misaligned backing" {
+    const backing = try testing.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(backing_align), 64 * 1024);
+    defer testing.allocator.free(backing);
+
+    for (misaligned_offsets) |k| {
+        const region = backing[k..];
+        var fba = std.heap.FixedBufferAllocator.init(region);
+        var slab = try SlabAllocator.init(fba.allocator(), 2);
+        defer slab.deinit();
+
+        var first: [NUM_CLASSES]usize = undefined;
+        for (SIZE_CLASSES, 0..) |class, i| first[i] = @intFromPtr(try slab.alloc(class));
+        _ = try slab.alloc(6000);
+
+        slab.reset();
+        const stats = slab.getStats();
+        try testing.expectEqual(@as(usize, 0), stats.in_use);
+        try testing.expectEqual(@as(usize, 0), stats.oversized_in_use);
+
+        // Full capacity again, aligned, owned; the first slot of each class
+        // after reset is one of that class's slots from before.
+        for (SIZE_CLASSES, 0..) |class, i| {
+            const a = @intFromPtr(try slab.alloc(class));
+            const b = @intFromPtr(try slab.alloc(class));
+            try expectAligned(a);
+            try expectAligned(b);
+            try expectOwned(&slab, region, a, class);
+            try expectOwned(&slab, region, b, class);
+            try testing.expect(a == first[i] or b == first[i]);
+            try testing.expectError(error.OutOfMemory, slab.alloc(class));
+        }
+        const big = try slab.alloc(6000);
+        try expectAligned(@intFromPtr(big));
+    }
 }
