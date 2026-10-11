@@ -15,7 +15,7 @@ const std = @import("std");
 
 pub fn FixedString(comptime max_len: usize) type {
     return struct {
-        buf: [max_len]u8 = .{0} ** max_len,
+        buf: [max_len]u8 = @splat(0),
         len: u16 = 0,
 
         const Self = @This();
@@ -51,7 +51,7 @@ test "fromSlice + slice round-trip" {
 }
 
 test "truncation on too-long input" {
-    const too_long = "x" ** 100;
+    const too_long = &@as([100]u8, @splat('x'));
     const s = FixedStr64.fromSlice(too_long);
     try std.testing.expectEqual(@as(usize, 64), s.slice().len);
 }
