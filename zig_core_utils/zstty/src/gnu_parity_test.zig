@@ -110,10 +110,10 @@ fn runTool(
         }
         argv.deinit(allocator);
     }
-    try argv.append(allocator, try allocator.dupeZ(u8, bin));
-    try argv.append(allocator, try allocator.dupeZ(u8, "-F"));
-    try argv.append(allocator, try allocator.dupeZ(u8, pts));
-    for (args) |a| try argv.append(allocator, try allocator.dupeZ(u8, a));
+    try argv.append(allocator, try allocator.dupeSentinel(u8, bin, 0));
+    try argv.append(allocator, try allocator.dupeSentinel(u8, "-F", 0));
+    try argv.append(allocator, try allocator.dupeSentinel(u8, pts, 0));
+    for (args) |a| try argv.append(allocator, try allocator.dupeSentinel(u8, a, 0));
     try argv.append(allocator, null);
 
     var fds: [2]c_int = undefined;

@@ -105,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Heap-allocate the NUL-terminated path so the kernel decides on length
     // limits (real ENAMETOOLONG) instead of an arbitrary in-process cap.
-    const path_z = try allocator.dupeZ(u8, operand);
+    const path_z = try allocator.dupeSentinel(u8, operand, 0);
     defer allocator.free(path_z);
 
     const result = unlink(path_z.ptr);

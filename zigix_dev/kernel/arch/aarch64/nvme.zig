@@ -156,7 +156,7 @@ var io_cid: u16 = 1;
 
 // DMA page pool for batched I/O — one page per in-flight command.
 const BATCH_DEPTH: usize = 32; // Max commands per batch (must be < IO_QUEUE_DEPTH)
-var dma_pool: [BATCH_DEPTH]u64 = [_]u64{0} ** BATCH_DEPTH;
+var dma_pool: [BATCH_DEPTH]u64 = @splat(0);
 var dma_pool_initialized: bool = false;
 
 // Legacy single DMA buffer (kept for admin commands and fallback)

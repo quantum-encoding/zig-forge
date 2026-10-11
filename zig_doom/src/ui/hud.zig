@@ -26,7 +26,7 @@ pub const HUD = struct {
     message_on: bool = false,
 
     // Font patches (lump numbers)
-    font: [FONT_NUM_CHARS]?usize = [_]?usize{null} ** FONT_NUM_CHARS,
+    font: [FONT_NUM_CHARS]?usize = @splat(null),
 
     /// Initialize HUD and cache font patches from WAD
     pub fn init(w: *const Wad) HUD {

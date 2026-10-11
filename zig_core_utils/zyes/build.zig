@@ -21,7 +21,12 @@ pub fn build(b: *std.Build) void {
     // against the real GNU `yes`, so they need the install path and must run
     // after the artifact is installed.
     const opts = b.addOptions();
-    opts.addOption([]const u8, "zyes_path", b.getInstallPath(.bin, "zyes"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        opts.addOption([]const u8, "zyes_path", b.getInstallPath(.bin, "zyes"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time, so the path is resolved lazily.
+        opts.addOptionPathUntracked("zyes_path", .{ .relative = .{ .base = .install_bin, .sub_path = "zyes" } });
+    }
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{

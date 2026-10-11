@@ -134,7 +134,7 @@ var rx_ring_phys: u64 = 0;
 var rx_next: usize = 0; // Next RX descriptor to check
 
 // RX DMA buffers (NIC DMAs received packets here)
-var rx_buf_phys: [RX_BUF_COUNT]u64 = [_]u64{0} ** RX_BUF_COUNT;
+var rx_buf_phys: [RX_BUF_COUNT]u64 = @splat(0);
 
 // Kernel rx_ring: circular buffer of received packets (same pattern as virtio_net)
 const RxPacket = struct {
@@ -147,7 +147,7 @@ var rx_ring_head: usize = 0; // IRQ/poll writes here
 var rx_ring_tail: usize = 0; // receive() reads here
 
 // Public state
-pub var mac: [6]u8 = .{0} ** 6;
+pub var mac: [6]u8 = @splat(0);
 pub var irq: u32 = 0;
 
 // SMP lock for TX path

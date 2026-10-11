@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zsum");
     run_step.dependOn(&run_cmd.step);
@@ -28,7 +28,12 @@ pub fn build(b: *std.Build) void {
     // binary and diff its output against the real GNU `sum` (gsum). The absolute
     // path of the installed zsum is threaded in as a build option.
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "zsum_bin", b.getInstallPath(.bin, "zsum"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        test_opts.addOption([]const u8, "zsum_bin", b.getInstallPath(.bin, "zsum"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time, so the path is resolved lazily.
+        test_opts.addOptionPathUntracked("zsum_bin", .{ .relative = .{ .base = .install_bin, .sub_path = "zsum" } });
+    }
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/gnu_parity_test.zig"),

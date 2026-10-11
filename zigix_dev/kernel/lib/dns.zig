@@ -36,7 +36,7 @@ pub const Header = packed struct {
 
 /// Cache entry
 pub const CacheEntry = struct {
-    name: [256]u8 = .{0} ** 256,
+    name: [256]u8 = @splat(0),
     name_len: u8 = 0,
     ip: u32 = 0, // IPv4 address (network byte order)
     ttl_ticks: u64 = 0, // Expiry tick count
@@ -44,7 +44,7 @@ pub const CacheEntry = struct {
 };
 
 const CACHE_SIZE = 64;
-var cache: [CACHE_SIZE]CacheEntry = .{CacheEntry{}} ** CACHE_SIZE;
+var cache: [CACHE_SIZE]CacheEntry = @splat(CacheEntry{});
 var dns_server: u32 = 0; // DNS server IP (from DHCP)
 var next_id: u16 = 1;
 var initialized: bool = false;

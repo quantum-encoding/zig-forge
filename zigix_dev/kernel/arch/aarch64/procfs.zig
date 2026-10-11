@@ -373,7 +373,7 @@ fn procfsReaddir(desc: *vfs.FileDescription, entry: *vfs.DirEntry) bool {
 /// We reuse a small pool since only one readdir/lookup can be active at a time per CPU.
 const MAX_FD_INODES: usize = 16;
 var fd_inodes: [MAX_FD_INODES]vfs.Inode = undefined;
-var fd_inode_fds: [MAX_FD_INODES]u16 = [_]u16{0} ** MAX_FD_INODES; // fd number for readlink
+var fd_inode_fds: [MAX_FD_INODES]u16 = @splat(0); // fd number for readlink
 var fd_inode_next: usize = 0;
 
 const procfs_fd_symlink_ops = vfs.FileOperations{

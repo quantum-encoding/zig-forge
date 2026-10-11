@@ -19,9 +19,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zunlink");
     run_step.dependOn(&run_cmd.step);
@@ -42,7 +40,12 @@ pub fn build(b: *std.Build) void {
     // Inject the built-binary path and the GNU reference path as compile-time
     // options (env-var reads are awkward under the new Io std).
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "zunlink_bin", b.getInstallPath(.bin, "zunlink"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        test_opts.addOption([]const u8, "zunlink_bin", b.getInstallPath(.bin, "zunlink"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time, so the path is resolved lazily.
+        test_opts.addOptionPathUntracked("zunlink_bin", .{ .relative = .{ .base = .install_bin, .sub_path = "zunlink" } });
+    }
     test_opts.addOption([]const u8, "gnu_unlink", "/opt/homebrew/opt/coreutils/libexec/gnubin/unlink");
     tests.root_module.addOptions("build_options", test_opts);
 

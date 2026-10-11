@@ -111,7 +111,7 @@ fn syntaxError() noreturn {
 
 fn getStat(path: []const u8) ?Stat {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return null;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return null;
     var st: Stat = undefined;
     if (stat(path_z, &st) == 0) return st;
     return null;
@@ -119,7 +119,7 @@ fn getStat(path: []const u8) ?Stat {
 
 fn getLstat(path: []const u8) ?Stat {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return null;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return null;
     var st: Stat = undefined;
     if (lstat(path_z, &st) == 0) return st;
     return null;
@@ -127,7 +127,7 @@ fn getLstat(path: []const u8) ?Stat {
 
 fn checkAccess(path: []const u8, mode: c_int) bool {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return false;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return false;
     return access(path_z, mode) == 0;
 }
 

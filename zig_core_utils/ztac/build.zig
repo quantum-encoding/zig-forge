@@ -28,7 +28,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_tests = b.addRunArtifact(tests);
-    run_tests.setEnvironmentVariable("ZTAC_BIN", b.getInstallPath(.bin, "ztac"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        run_tests.setEnvironmentVariable("ZTAC_BIN", b.getInstallPath(.bin, "ztac"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time and an env var cannot take a
+        // lazy path, so the test runs from the install prefix and is given a relative path.
+        run_tests.setCwd(.{ .relative = .{ .base = .install_prefix } });
+        run_tests.setEnvironmentVariable("ZTAC_BIN", "bin/ztac");
+    }
     run_tests.step.dependOn(b.getInstallStep());
     run_tests.has_side_effects = true;
 

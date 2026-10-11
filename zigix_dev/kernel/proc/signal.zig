@@ -241,7 +241,7 @@ fn deliverToHandler(frame: *InterruptFrame, proc: *Process, sig: u6, action: *co
         new_rsp + 0x98; // Legacy: trampoline on stack (requires executable stack)
 
     // Build signal frame in kernel buffer
-    var sig_frame: [0xA8]u8 = [_]u8{0} ** 0xA8;
+    var sig_frame: [0xA8]u8 = @splat(0);
     writeU64LE(sig_frame[0x00..0x08], return_addr);
     writeU64LE(sig_frame[0x08..0x10], frame.rax);
     writeU64LE(sig_frame[0x10..0x18], frame.rbx);
@@ -375,7 +375,7 @@ pub fn sysRtSigaction(frame: *InterruptFrame) void {
 
     // Linux x86_64 struct sigaction: handler(8) + flags(8) + restorer(8) + mask(8) = 32 bytes
     if (oldact_addr != 0) {
-        var buf: [32]u8 = [_]u8{0} ** 32;
+        var buf: [32]u8 = @splat(0);
         writeU64LE(buf[0..8], current.sig_actions[idx].handler);
         writeU64LE(buf[8..16], current.sig_actions[idx].flags);
         writeU64LE(buf[16..24], current.sig_actions[idx].restorer);

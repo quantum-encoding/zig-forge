@@ -20,9 +20,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run ztime");
     run_step.dependOn(&run_cmd.step);
@@ -43,7 +41,12 @@ pub fn build(b: *std.Build) void {
     // and compare its bytes/exit codes against documented GNU behavior and
     // independently-computed system values (page size, shell exit status).
     const build_options = b.addOptions();
-    build_options.addOption([]const u8, "ztime_path", b.getInstallPath(.bin, "ztime"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        build_options.addOption([]const u8, "ztime_path", b.getInstallPath(.bin, "ztime"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time, so the path is resolved lazily.
+        build_options.addOptionPathUntracked("ztime_path", .{ .relative = .{ .base = .install_bin, .sub_path = "ztime" } });
+    }
 
     const parity_tests = b.addTest(.{
         .root_module = b.createModule(.{

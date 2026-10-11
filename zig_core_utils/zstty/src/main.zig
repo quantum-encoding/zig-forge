@@ -652,7 +652,14 @@ fn setWinsize(fd: c_int, rows: ?u16, cols: ?u16) void {
 // ---------------------------------------------------------------------------
 
 fn flagBits(v: anytype) u64 {
-    const B = std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(v)));
+    // Zig 0.17 removed std.meta.Int; spell the unsigned type of the same width.
+    const B = switch (@bitSizeOf(@TypeOf(v))) {
+        8 => u8,
+        16 => u16,
+        32 => u32,
+        64 => u64,
+        else => @compileError("unexpected termios flag width"),
+    };
     return @as(B, @bitCast(v));
 }
 

@@ -10,9 +10,18 @@
 //!   Lump data: raw bytes at filepos
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("stdio.h");
-});
+// Hand bindings over std.c (Zig 0.17 removed @cImport); names follow <stdio.h>.
+const c = struct {
+    const FILE = std.c.FILE;
+    const fopen = std.c.fopen;
+    const fclose = std.c.fclose;
+    const fread = std.c.fread;
+    const fwrite = std.c.fwrite;
+    extern "c" fn fseek(stream: *FILE, offset: c_long, whence: c_int) c_int;
+    extern "c" fn ftell(stream: *FILE) c_long;
+    const SEEK_SET: c_int = 0; // same values on macOS and Linux
+    const SEEK_END: c_int = 2;
+};
 
 pub const WadError = error{
     FileNotFound,
@@ -52,7 +61,7 @@ pub const Wad = struct {
     /// Open and parse a WAD file
     pub fn open(path: []const u8, alloc: std.mem.Allocator) WadError!Wad {
         // Use C file I/O for Zig 0.16 compatibility
-        const path_z = alloc.dupeZ(u8, path) catch return WadError.OutOfMemory;
+        const path_z = alloc.dupeSentinel(u8, path, 0) catch return WadError.OutOfMemory;
         defer alloc.free(path_z);
 
         const file = c.fopen(path_z.ptr, "rb") orelse return WadError.FileNotFound;
@@ -142,7 +151,7 @@ pub const Wad = struct {
 
     /// Find a lump by name (case-insensitive, null-padded 8-char comparison)
     pub fn findLump(self: *const Wad, name: []const u8) ?usize {
-        var search: [8]u8 = [_]u8{0} ** 8;
+        var search: [8]u8 = @splat(0);
         const len = @min(name.len, 8);
         for (0..len) |i| {
             search[i] = std.ascii.toUpper(name[i]);
@@ -158,7 +167,7 @@ pub const Wad = struct {
 
     /// Find a lump starting from a given index (for map lumps)
     pub fn findLumpAfter(self: *const Wad, name: []const u8, start: usize) ?usize {
-        var search: [8]u8 = [_]u8{0} ** 8;
+        var search: [8]u8 = @splat(0);
         const len = @min(name.len, 8);
         for (0..len) |i| {
             search[i] = std.ascii.toUpper(name[i]);

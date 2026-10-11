@@ -118,7 +118,7 @@ fn tryHelp() void {
 /// Find an executable in PATH, returning null-terminated path if found.
 fn findExecutable(cmd: []const u8, path_buf: []u8) ?[*:0]const u8 {
     if (std.mem.indexOfScalar(u8, cmd, '/') != null) {
-        const path_z = std.fmt.bufPrintZ(path_buf, "{s}", .{cmd}) catch return null;
+        const path_z = std.fmt.bufPrintSentinel(path_buf, "{s}", .{cmd}, 0) catch return null;
         if (access(path_z.ptr, X_OK) == 0) return path_z.ptr;
         return null;
     }
@@ -131,7 +131,7 @@ fn findExecutable(cmd: []const u8, path_buf: []u8) ?[*:0]const u8 {
             var path_iter = std.mem.splitScalar(u8, path_val, ':');
             while (path_iter.next()) |dir| {
                 if (dir.len == 0) continue;
-                const full_path = std.fmt.bufPrintZ(path_buf, "{s}/{s}", .{ dir, cmd }) catch continue;
+                const full_path = std.fmt.bufPrintSentinel(path_buf, "{s}/{s}", .{ dir, cmd }, 0) catch continue;
                 if (access(full_path.ptr, X_OK) == 0) return full_path.ptr;
             }
             break;
@@ -170,7 +170,7 @@ fn findLibStdbuf(allocator: std.mem.Allocator) ?[]const u8 {
         std.fmt.allocPrint(allocator, "{s}/../lib/{s}", .{ exe_dir, preload_lib }) catch return null,
     };
     for (candidates, 0..) |cand, idx| {
-        const cand_z = allocator.dupeZ(u8, cand) catch continue;
+        const cand_z = allocator.dupeSentinel(u8, cand, 0) catch continue;
         defer allocator.free(cand_z);
         if (access(cand_z.ptr, F_OK) == 0) {
             // free the other candidate we won't return
@@ -376,7 +376,7 @@ pub fn main(init: std.process.Init) !void {
     var argv_buf = std.ArrayListUnmanaged(?[*:0]const u8).empty;
     defer argv_buf.deinit(allocator);
     for (cmd_args.items) |arg| {
-        const z = try allocator.dupeZ(u8, arg);
+        const z = try allocator.dupeSentinel(u8, arg, 0);
         try argv_buf.append(allocator, z.ptr);
     }
     try argv_buf.append(allocator, null);

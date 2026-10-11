@@ -11,9 +11,7 @@
 
 const std = @import("std");
 const libc = std.c;
-const c = @cImport({
-    @cInclude("utmpx.h");
-});
+const c = @import("utmpx.zig"); // hand bindings (Zig 0.17 removed @cImport)
 
 const VERSION = "0.16.0";
 
@@ -138,7 +136,7 @@ pub fn main(init: std.process.Init) void {
     // for a missing/unreadable database rather than erroring, so a failed
     // utmpxname just yields no users.
     if (file) |path| {
-        const z = allocator.dupeZ(u8, path) catch {
+        const z = allocator.dupeSentinel(u8, path, 0) catch {
             std.process.exit(1);
         };
         defer allocator.free(z);

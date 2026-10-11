@@ -24,7 +24,7 @@ pub const PerCpu = struct {
     pub const NO_PROCESS: usize = std.math.maxInt(usize);
 };
 
-pub var per_cpu_data: [MAX_CPUS]PerCpu = [_]PerCpu{.{}} ** MAX_CPUS;
+pub var per_cpu_data: [MAX_CPUS]PerCpu = @splat(.{});
 pub var online_cpus: u32 = 1;
 
 /// Initialize BSP (hart 0) per-CPU data. Call once from boot.zig.

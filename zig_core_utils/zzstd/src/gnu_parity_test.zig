@@ -194,7 +194,7 @@ fn sysCompress(plain: []const u8, dst_zst: []const u8) !void {
 test "zzstd decodes a system-zstd frame to exact plaintext (external encoder)" {
     if (!haveSystemZstd()) return error.SkipZigTest;
 
-    const payload = "hello zstd world\n" ** 60 ++ "tail line no newline"; // compressible + odd tail
+    const payload = repeat("hello zstd world\n", 60) ++ "tail line no newline"; // compressible + odd tail
 
     const dir = try makeTmpDir();
     defer {
@@ -481,4 +481,15 @@ test "binary payload: system-compressed frame decompresses byte-exact to file" {
     defer std.testing.allocator.free(got);
     try std.testing.expectEqualSlices(u8, &payload, got);
     try std.testing.expect(!existsAbs(zst)); // default: source removed after success
+}
+
+/// Comptime string repeat (Zig 0.17 removed the `**` operator).
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    const frozen = comptime blk: {
+        @setEvalBranchQuota(n * 2 + 100);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        break :blk out;
+    };
+    return &frozen;
 }

@@ -619,7 +619,7 @@ fn formatHumanSize(buf: []u8, size: i64) []const u8 {
 // GNU date rules: local time; recent files (within the past ~6 months, not in
 // the future) show "Mon DD HH:MM", others show "Mon DD  YYYY".
 fn formatDate(timestamp: i64) [12]u8 {
-    var out: [12]u8 = .{' '} ** 12;
+    var out: [12]u8 = @splat(' ');
 
     const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 

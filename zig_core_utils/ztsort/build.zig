@@ -31,7 +31,14 @@ pub fn build(b: *std.Build) void {
 
     const run_tests = b.addRunArtifact(tests);
     // Point the harness at the freshly-installed ztsort binary.
-    run_tests.setEnvironmentVariable("ZTSORT_BIN", b.getInstallPath(.bin, "ztsort"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        run_tests.setEnvironmentVariable("ZTSORT_BIN", b.getInstallPath(.bin, "ztsort"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time and an env var cannot take a
+        // lazy path, so the test runs from the install prefix and is given a relative path.
+        run_tests.setCwd(.{ .relative = .{ .base = .install_prefix } });
+        run_tests.setEnvironmentVariable("ZTSORT_BIN", "bin/ztsort");
+    }
     run_tests.step.dependOn(b.getInstallStep());
 
     const test_step = b.step("test", "Run GNU-parity tests against the built ztsort");

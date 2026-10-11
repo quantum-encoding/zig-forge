@@ -288,7 +288,7 @@ test "check: mismatch warning uses GNU singular/plural wording" {
     defer fx.deinit();
 
     // One wrong digest (all zeros) → singular "1 computed checksum did NOT match".
-    const zeros = "0" ** abc_512.len;
+    const zeros = repeat("0", abc_512.len);
     const body1 = try std.fmt.allocPrint(gpa, "{s}  {s}\n", .{ zeros, fx.abc });
     defer gpa.free(body1);
     const sum1 = try fx.writeFile("bad1.sum", body1);
@@ -444,7 +444,7 @@ test "gnu-diff: check-mode exit codes and stdout match (OK / FAILED / missing)" 
     defer fx.deinit();
 
     // A good line, a tampered line, and a missing file, all in one manifest.
-    const zeros = "0" ** abc_512.len;
+    const zeros = repeat("0", abc_512.len);
     const body = try std.fmt.allocPrint(
         gpa,
         "{s}  {s}\n{s}  {s}\n{s}  {s}/nope\n",
@@ -463,4 +463,15 @@ test "gnu-diff: check-mode exit codes and stdout match (OK / FAILED / missing)" 
 
     try std.testing.expectEqualStrings(rg.stdout, rz.stdout);
     try std.testing.expectEqual(rg.code, rz.code);
+}
+
+/// Comptime string repeat (Zig 0.17 removed the `**` operator).
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    const frozen = comptime blk: {
+        @setEvalBranchQuota(n * 2 + 100);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        break :blk out;
+    };
+    return &frozen;
 }

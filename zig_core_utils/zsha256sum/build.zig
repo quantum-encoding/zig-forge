@@ -27,7 +27,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const options = b.addOptions();
-    options.addOption([]const u8, "zsha_bin", b.getInstallPath(.bin, "zsha256sum"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        options.addOption([]const u8, "zsha_bin", b.getInstallPath(.bin, "zsha256sum"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time, so the path is resolved lazily.
+        options.addOptionPathUntracked("zsha_bin", .{ .relative = .{ .base = .install_bin, .sub_path = "zsha256sum" } });
+    }
     options.addOption([]const u8, "gnu_bin", "/opt/homebrew/bin/gsha256sum");
     tests.root_module.addImport("build_options", options.createModule());
 

@@ -15,24 +15,37 @@ const SCREENHEIGHT = defs.SCREENHEIGHT;
 const SCREENSIZE = defs.SCREENSIZE;
 
 /// SDL2 is only available when the build links it (zig build -Dsdl2=true),
-/// which also sets `build_options.sdl2`. Built that way, `c` is the real
-/// SDL2 API; otherwise it is `stub`, whose functions fail, so the file
-/// compiles everywhere and `--platform sdl2` reports that video is
-/// unavailable.
-const c = if (@import("build_options").sdl2) @cImport({
-    @cDefine("SDL_MAIN_HANDLED", "1");
-    // SDL_cpuinfo.h would pull in arm_neon.h, which translate-c cannot read.
-    @cDefine("SDL_DISABLE_ARM_NEON_H", "1");
-    @cInclude("SDL.h");
-}) else stub;
-
-const stub = struct {
-    // Stand-ins for the SDL2 API, used when SDL2 is not linked.
-    const SDL_Window = anyopaque;
-    const SDL_Renderer = anyopaque;
-    const SDL_Texture = anyopaque;
-    const SDL_Event = extern struct { type: u32 = 0, key: extern struct { repeat: u8 = 0, keysym: extern struct { scancode: c_uint = 0 } = .{} } = .{}, motion: extern struct { xrel: i32 = 0, yrel: i32 = 0 } = .{}, button: extern struct { button: u8 = 0 } = .{} };
-    const SDL_AudioSpec = extern struct { freq: c_int = 0, format: u16 = 0, channels: u8 = 0, samples: u16 = 0, callback: ?*const fn (?*anyopaque, [*c]u8, c_int) callconv(.c) void = null, userdata: ?*anyopaque = null, padding: [16]u8 = undefined };
+/// which also sets `build_options.sdl2`. Built that way, `c`'s functions are
+/// the real SDL2 API (`real`); otherwise they are `stub`, whose functions
+/// fail, so the file compiles everywhere and `--platform sdl2` reports that
+/// video is unavailable.
+///
+/// Hand bindings for the subset of SDL.h used here (Zig 0.17 removed
+/// @cImport): SDL2's stable ABI types and constants, checked against the
+/// 0.16 @cImport translation of SDL 2.x.
+const c = struct {
+    const SDL_Window = opaque {};
+    const SDL_Renderer = opaque {};
+    const SDL_Texture = opaque {};
+    const SDL_Keysym = extern struct { scancode: c_uint, sym: i32, mod: u16, unused: u32 };
+    const SDL_Event = extern union {
+        type: u32,
+        key: extern struct { type: u32, timestamp: u32, windowID: u32, state: u8, repeat: u8, padding2: u8, padding3: u8, keysym: SDL_Keysym },
+        motion: extern struct { type: u32, timestamp: u32, windowID: u32, which: u32, state: u32, x: i32, y: i32, xrel: i32, yrel: i32 },
+        button: extern struct { type: u32, timestamp: u32, windowID: u32, which: u32, button: u8, state: u8, clicks: u8, padding1: u8, x: i32, y: i32 },
+        padding: [56]u8,
+    };
+    const SDL_AudioSpec = extern struct {
+        freq: c_int,
+        format: u16,
+        channels: u8,
+        silence: u8,
+        samples: u16,
+        padding: u16,
+        size: u32,
+        callback: ?*const fn (?*anyopaque, [*c]u8, c_int) callconv(.c) void,
+        userdata: ?*anyopaque,
+    };
     const SDL_AudioDeviceID = u32;
     const SDL_INIT_VIDEO: u32 = 0x20;
     const SDL_INIT_AUDIO: u32 = 0x10;
@@ -97,6 +110,66 @@ const stub = struct {
     const SDL_SCANCODE_7: c_uint = 36;
     const SDL_SCANCODE_8: c_uint = 37;
     const SDL_SCANCODE_9: c_uint = 38;
+
+    const impl = if (@import("build_options").sdl2) real else stub;
+    const SDL_Init = impl.SDL_Init;
+    const SDL_Quit = impl.SDL_Quit;
+    const SDL_CreateWindow = impl.SDL_CreateWindow;
+    const SDL_CreateRenderer = impl.SDL_CreateRenderer;
+    const SDL_CreateTexture = impl.SDL_CreateTexture;
+    const SDL_DestroyTexture = impl.SDL_DestroyTexture;
+    const SDL_DestroyRenderer = impl.SDL_DestroyRenderer;
+    const SDL_DestroyWindow = impl.SDL_DestroyWindow;
+    const SDL_RenderSetLogicalSize = impl.SDL_RenderSetLogicalSize;
+    const SDL_UpdateTexture = impl.SDL_UpdateTexture;
+    const SDL_RenderClear = impl.SDL_RenderClear;
+    const SDL_RenderCopy = impl.SDL_RenderCopy;
+    const SDL_RenderPresent = impl.SDL_RenderPresent;
+    const SDL_PollEvent = impl.SDL_PollEvent;
+    const SDL_GetTicks = impl.SDL_GetTicks;
+    const SDL_Delay = impl.SDL_Delay;
+    const SDL_OpenAudioDevice = impl.SDL_OpenAudioDevice;
+    const SDL_CloseAudioDevice = impl.SDL_CloseAudioDevice;
+    const SDL_PauseAudioDevice = impl.SDL_PauseAudioDevice;
+};
+
+/// The real SDL2 entry points (C prototypes from SDL.h).
+const real = struct {
+    const SDL_Window = c.SDL_Window;
+    const SDL_Renderer = c.SDL_Renderer;
+    const SDL_Texture = c.SDL_Texture;
+    const SDL_Event = c.SDL_Event;
+    const SDL_AudioSpec = c.SDL_AudioSpec;
+    const SDL_AudioDeviceID = c.SDL_AudioDeviceID;
+    extern "c" fn SDL_Init(flags: u32) c_int;
+    extern "c" fn SDL_Quit() void;
+    extern "c" fn SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c_int, h: c_int, flags: u32) ?*SDL_Window;
+    extern "c" fn SDL_CreateRenderer(window: ?*SDL_Window, index: c_int, flags: u32) ?*SDL_Renderer;
+    extern "c" fn SDL_CreateTexture(renderer: ?*SDL_Renderer, format: u32, access: c_int, w: c_int, h: c_int) ?*SDL_Texture;
+    extern "c" fn SDL_DestroyTexture(texture: ?*SDL_Texture) void;
+    extern "c" fn SDL_DestroyRenderer(renderer: ?*SDL_Renderer) void;
+    extern "c" fn SDL_DestroyWindow(window: ?*SDL_Window) void;
+    extern "c" fn SDL_RenderSetLogicalSize(renderer: ?*SDL_Renderer, w: c_int, h: c_int) c_int;
+    extern "c" fn SDL_UpdateTexture(texture: ?*SDL_Texture, rect: ?*const anyopaque, pixels: ?*const anyopaque, pitch: c_int) c_int;
+    extern "c" fn SDL_RenderClear(renderer: ?*SDL_Renderer) c_int;
+    extern "c" fn SDL_RenderCopy(renderer: ?*SDL_Renderer, texture: ?*SDL_Texture, srcrect: ?*const anyopaque, dstrect: ?*const anyopaque) c_int;
+    extern "c" fn SDL_RenderPresent(renderer: ?*SDL_Renderer) void;
+    extern "c" fn SDL_PollEvent(event: ?*SDL_Event) c_int;
+    extern "c" fn SDL_GetTicks() u32;
+    extern "c" fn SDL_Delay(ms: u32) void;
+    extern "c" fn SDL_OpenAudioDevice(device: ?[*:0]const u8, iscapture: c_int, desired: ?*const SDL_AudioSpec, obtained: ?*SDL_AudioSpec, allowed_changes: c_int) SDL_AudioDeviceID;
+    extern "c" fn SDL_CloseAudioDevice(dev: SDL_AudioDeviceID) void;
+    extern "c" fn SDL_PauseAudioDevice(dev: SDL_AudioDeviceID, pause_on: c_int) void;
+};
+
+/// Stand-ins for the SDL2 API, used when SDL2 is not linked.
+const stub = struct {
+    const SDL_Window = c.SDL_Window;
+    const SDL_Renderer = c.SDL_Renderer;
+    const SDL_Texture = c.SDL_Texture;
+    const SDL_Event = c.SDL_Event;
+    const SDL_AudioSpec = c.SDL_AudioSpec;
+    const SDL_AudioDeviceID = c.SDL_AudioDeviceID;
     fn SDL_Init(_: u32) c_int { return -1; }
     fn SDL_Quit() void {}
     fn SDL_CreateWindow(_: [*:0]const u8, _: c_int, _: c_int, _: c_int, _: c_int, _: u32) ?*SDL_Window { return null; }
@@ -106,14 +179,14 @@ const stub = struct {
     fn SDL_DestroyRenderer(_: ?*SDL_Renderer) void {}
     fn SDL_DestroyWindow(_: ?*SDL_Window) void {}
     fn SDL_RenderSetLogicalSize(_: ?*SDL_Renderer, _: c_int, _: c_int) c_int { return 0; }
-    fn SDL_UpdateTexture(_: ?*SDL_Texture, _: ?*anyopaque, _: *const anyopaque, _: c_int) c_int { return 0; }
+    fn SDL_UpdateTexture(_: ?*SDL_Texture, _: ?*const anyopaque, _: ?*const anyopaque, _: c_int) c_int { return 0; }
     fn SDL_RenderClear(_: ?*SDL_Renderer) c_int { return 0; }
-    fn SDL_RenderCopy(_: ?*SDL_Renderer, _: ?*SDL_Texture, _: ?*anyopaque, _: ?*anyopaque) c_int { return 0; }
+    fn SDL_RenderCopy(_: ?*SDL_Renderer, _: ?*SDL_Texture, _: ?*const anyopaque, _: ?*const anyopaque) c_int { return 0; }
     fn SDL_RenderPresent(_: ?*SDL_Renderer) void {}
-    fn SDL_PollEvent(_: *SDL_Event) c_int { return 0; }
+    fn SDL_PollEvent(_: ?*SDL_Event) c_int { return 0; }
     fn SDL_GetTicks() u32 { return 0; }
     fn SDL_Delay(_: u32) void {}
-    fn SDL_OpenAudioDevice(_: ?*anyopaque, _: c_int, _: *const SDL_AudioSpec, _: *SDL_AudioSpec, _: c_int) SDL_AudioDeviceID { return 0; }
+    fn SDL_OpenAudioDevice(_: ?[*:0]const u8, _: c_int, _: ?*const SDL_AudioSpec, _: ?*SDL_AudioSpec, _: c_int) SDL_AudioDeviceID { return 0; }
     fn SDL_CloseAudioDevice(_: SDL_AudioDeviceID) void {}
     fn SDL_PauseAudioDevice(_: SDL_AudioDeviceID, _: c_int) void {}
 };
@@ -150,7 +223,7 @@ const Sdl2State = struct {
 
     // Sound
     audio_device: c.SDL_AudioDeviceID = 0,
-    mix_channels: [NUM_SFX_CHANNELS]MixChannel = [_]MixChannel{.{}} ** NUM_SFX_CHANNELS,
+    mix_channels: [NUM_SFX_CHANNELS]MixChannel = @splat(.{}),
     next_handle: u32 = 1,
     sound_init: bool = false,
 

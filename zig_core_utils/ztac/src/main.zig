@@ -160,10 +160,10 @@ fn reverseLines(allocator: std.mem.Allocator, content: []const u8, cfg: Config, 
 
     if (cfg.regex) {
         // regexec needs a NUL-terminated string.
-        const content_z = try allocator.dupeZ(u8, content);
+        const content_z = try allocator.dupeSentinel(u8, content, 0);
         defer allocator.free(content_z);
         var re: regex_t = undefined;
-        const sep_z = try allocator.dupeZ(u8, cfg.separator);
+        const sep_z = try allocator.dupeSentinel(u8, cfg.separator, 0);
         defer allocator.free(sep_z);
         if (regcomp(&re, sep_z.ptr, REG_EXTENDED) != 0) return error.BadRegex;
         defer regfree(&re);

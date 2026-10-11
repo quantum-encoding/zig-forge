@@ -179,7 +179,7 @@ fn roundUpToBlock(size: u64, blksize: u64) u64 {
 
 fn shredFile(path: []const u8, cfg: *const Config) !void {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return error.PathTooLong;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return error.PathTooLong;
 
     // Open FIRST, then stat via the fd. Doing stat(path) then open(path) as two
     // separate name resolutions is a TOCTOU window (an attacker could swap the

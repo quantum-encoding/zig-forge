@@ -385,7 +385,7 @@ fn spawnAndWait(args: []const []const u8, allocator: std.mem.Allocator) u8 {
     defer allocator.free(argv);
 
     for (args, 0..) |arg, i| {
-        argv[i] = allocator.dupeZ(u8, arg) catch return 126;
+        argv[i] = allocator.dupeSentinel(u8, arg, 0) catch return 126;
     }
     defer {
         for (argv) |ptr| {

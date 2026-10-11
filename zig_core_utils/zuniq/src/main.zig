@@ -309,7 +309,7 @@ pub fn main(init: std.process.Init) !void {
     // Open input
     const in_fd: c_int = if (cfg.input_file) |path| blk: {
         var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch {
+        const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch {
             fatal(&.{ path, ": File name too long" });
         };
         const fd = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
@@ -325,7 +325,7 @@ pub fn main(init: std.process.Init) !void {
     // Open output
     const out_fd: c_int = if (cfg.output_file) |path| blk: {
         var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch {
+        const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch {
             fatal(&.{ path, ": File name too long" });
         };
         const fd = libc.open(path_z.ptr, .{

@@ -19,18 +19,20 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zunexpand");
     run_step.dependOn(&run_cmd.step);
 
     // --- Tests: GNU-parity vectors that shell out to the built binary and
     //     diff its output against the real GNU `unexpand`. ---
-    const exe_path = b.getInstallPath(.bin, "zunexpand");
     const build_opts = b.addOptions();
-    build_opts.addOption([]const u8, "zunexpand_path", exe_path);
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        build_opts.addOption([]const u8, "zunexpand_path", b.getInstallPath(.bin, "zunexpand"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time, so the path is resolved lazily.
+        build_opts.addOptionPathUntracked("zunexpand_path", .{ .relative = .{ .base = .install_bin, .sub_path = "zunexpand" } });
+    }
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{

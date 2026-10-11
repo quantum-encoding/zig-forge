@@ -34,9 +34,16 @@ const LightFlash = lights.LightFlash;
 const StrobeFlash = lights.StrobeFlash;
 const Glow = lights.Glow;
 
-const c = @cImport({
-    @cInclude("stdio.h");
-});
+// Hand bindings over std.c (Zig 0.17 removed @cImport); names follow <stdio.h>.
+const c = struct {
+    /// Takes the raw pointer exactly as the C prototype did (callers pass `path.ptr`).
+    fn fopen(path: [*]const u8, mode: [*:0]const u8) ?*std.c.FILE {
+        return std.c.fopen(@ptrCast(path), mode);
+    }
+    const fclose = std.c.fclose;
+    const fread = std.c.fread;
+    const fwrite = std.c.fwrite;
+};
 
 const MAXPLAYERS = defs.MAXPLAYERS;
 
@@ -186,7 +193,7 @@ pub fn saveGame(
     defer buf.deinit();
 
     // Write description (24 bytes, null-padded)
-    var desc_buf: [SAVE_DESC_LEN]u8 = [_]u8{0} ** SAVE_DESC_LEN;
+    var desc_buf: [SAVE_DESC_LEN]u8 = @splat(0);
     const copy_len = @min(description.len, SAVE_DESC_LEN);
     @memcpy(desc_buf[0..copy_len], description[0..copy_len]);
     buf.writeBytes(&desc_buf);
@@ -223,8 +230,7 @@ pub fn saveGame(
     buf.writeByte(TC_END);
 
     // Write to file
-    const f = c.fopen(path.ptr, "wb");
-    if (f == null) return false;
+    const f = c.fopen(path.ptr, "wb") orelse return false;
     defer _ = c.fclose(f);
     _ = c.fwrite(buf.data.ptr, 1, buf.pos, f);
 
@@ -460,8 +466,7 @@ pub fn loadGame(
     allocator: std.mem.Allocator,
 ) bool {
     // Read file
-    const f = c.fopen(path.ptr, "rb");
-    if (f == null) return false;
+    const f = c.fopen(path.ptr, "rb") orelse return false;
     defer _ = c.fclose(f);
 
     var buf = SaveBuffer.init(allocator) orelse return false;
@@ -747,8 +752,7 @@ pub fn getSaveFilename(slot: u8, buf: *[64]u8) []const u8 {
 
 /// Read just the description from a save file (for menu display)
 pub fn readSaveDescription(path: []const u8, desc_out: *[SAVE_DESC_LEN]u8) bool {
-    const f = c.fopen(path.ptr, "rb");
-    if (f == null) return false;
+    const f = c.fopen(path.ptr, "rb") orelse return false;
     defer _ = c.fclose(f);
 
     const n = c.fread(desc_out, 1, SAVE_DESC_LEN, f);

@@ -15,6 +15,7 @@
 /// Runtime filtering: the drain path checks a bitmask + per-subsystem level.
 /// Entries still go into the ring buffer (fast), but are suppressed on output.
 
+const std = @import("std");
 const ring = @import("ring.zig");
 const sub = @import("subsystems.zig");
 const serial_sink = @import("serial_sink.zig");
@@ -94,13 +95,13 @@ pub fn scoped(comptime subsystem: Subsystem) type {
             if (T != void and T != @TypeOf(.{})) {
                 const fields_info = @typeInfo(T);
                 if (fields_info == .@"struct") {
-                    const struct_fields = fields_info.@"struct".fields;
+                    // 0.17 reshaped std.builtin.Type.Struct; fieldNames works on both.
                     comptime var field_count: u8 = 0;
-                    inline for (struct_fields) |f| {
+                    inline for (comptime std.meta.fieldNames(T)) |f_name| {
                         if (field_count < ring.MAX_FIELDS) {
                             entry.fields[field_count] = ring.Field.init(
-                                f.name,
-                                toU64(@field(fields_arg, f.name)),
+                                f_name,
+                                toU64(@field(fields_arg, f_name)),
                             );
                             field_count += 1;
                         }

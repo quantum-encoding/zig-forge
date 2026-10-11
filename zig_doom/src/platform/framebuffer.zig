@@ -18,15 +18,140 @@ const SCREENSIZE = defs.SCREENSIZE;
 
 const is_linux = builtin.os.tag == .linux;
 
-const c = if (is_linux) @cImport({
-    @cInclude("linux/fb.h");
-    @cInclude("linux/input.h");
-    @cInclude("sys/mman.h");
-    @cInclude("sys/ioctl.h");
-    @cInclude("fcntl.h");
-    @cInclude("unistd.h");
-    @cInclude("time.h");
-}) else struct {
+// Hand bindings (Zig 0.17 removed @cImport): the <linux/fb.h> and <linux/input.h> layouts
+// and constants, libc calls through std.c behind the C-header names and shapes used below.
+const c = if (is_linux) struct {
+    const fb_bitfield = extern struct { offset: u32, length: u32, msb_right: u32 };
+    const fb_var_screeninfo = extern struct {
+        xres: u32,
+        yres: u32,
+        xres_virtual: u32,
+        yres_virtual: u32,
+        xoffset: u32,
+        yoffset: u32,
+        bits_per_pixel: u32,
+        grayscale: u32,
+        red: fb_bitfield,
+        green: fb_bitfield,
+        blue: fb_bitfield,
+        transp: fb_bitfield,
+        nonstd: u32,
+        activate: u32,
+        height: u32,
+        width: u32,
+        accel_flags: u32,
+        pixclock: u32,
+        left_margin: u32,
+        right_margin: u32,
+        upper_margin: u32,
+        lower_margin: u32,
+        hsync_len: u32,
+        vsync_len: u32,
+        sync: u32,
+        vmode: u32,
+        rotate: u32,
+        colorspace: u32,
+        reserved: [4]u32,
+    };
+    const fb_fix_screeninfo = extern struct {
+        id: [16]u8,
+        smem_start: c_ulong,
+        smem_len: u32,
+        type: u32,
+        type_aux: u32,
+        visual: u32,
+        xpanstep: u16,
+        ypanstep: u16,
+        ywrapstep: u16,
+        line_length: u32,
+        mmio_start: c_ulong,
+        mmio_len: u32,
+        accel: u32,
+        capabilities: u16,
+        reserved: [2]u16,
+    };
+    const input_event = extern struct {
+        time: extern struct { tv_sec: c_long, tv_usec: c_long },
+        type: u16,
+        code: u16,
+        value: i32,
+    };
+    /// Same layout as the libc struct timespec on 64-bit Linux.
+    const timespec = extern struct { tv_sec: std.c.time_t, tv_nsec: c_long };
+    const FBIOGET_VSCREENINFO: c_int = 0x4600;
+    const FBIOGET_FSCREENINFO: c_int = 0x4602;
+    const PROT_READ: u32 = @bitCast(std.c.PROT{ .READ = true });
+    const PROT_WRITE: u32 = @bitCast(std.c.PROT{ .WRITE = true });
+    const MAP_SHARED: u32 = @bitCast(std.c.MAP{ .TYPE = .SHARED });
+    const MAP_FAILED = std.c.MAP_FAILED;
+    const O_RDWR: u32 = @bitCast(std.c.O{ .ACCMODE = .RDWR });
+    const O_RDONLY: u32 = @bitCast(std.c.O{ .ACCMODE = .RDONLY });
+    const O_NONBLOCK: u32 = @bitCast(std.c.O{ .NONBLOCK = true });
+    const EV_KEY: u16 = 1;
+    const CLOCK_MONOTONIC = std.c.CLOCK.MONOTONIC;
+    const KEY_UP: u16 = 103;
+    const KEY_DOWN: u16 = 108;
+    const KEY_LEFT: u16 = 105;
+    const KEY_RIGHT: u16 = 106;
+    const KEY_ESC: u16 = 1;
+    const KEY_ENTER: u16 = 28;
+    const KEY_TAB: u16 = 15;
+    const KEY_BACKSPACE: u16 = 14;
+    const KEY_SPACE: u16 = 57;
+    const KEY_LEFTCTRL: u16 = 29;
+    const KEY_RIGHTCTRL: u16 = 97;
+    const KEY_LEFTSHIFT: u16 = 42;
+    const KEY_RIGHTSHIFT: u16 = 54;
+    const KEY_LEFTALT: u16 = 56;
+    const KEY_RIGHTALT: u16 = 100;
+    const KEY_PAUSE: u16 = 119;
+    const KEY_W: u16 = 17;
+    const KEY_A: u16 = 30;
+    const KEY_S: u16 = 31;
+    const KEY_D: u16 = 32;
+    const KEY_E: u16 = 18;
+    const KEY_F1: u16 = 59;
+    const KEY_F2: u16 = 60;
+    const KEY_F3: u16 = 61;
+    const KEY_F4: u16 = 62;
+    const KEY_F5: u16 = 63;
+    const KEY_F6: u16 = 64;
+    const KEY_F7: u16 = 65;
+    const KEY_F8: u16 = 66;
+    const KEY_F9: u16 = 67;
+    const KEY_F10: u16 = 68;
+    const KEY_F11: u16 = 87;
+    const KEY_F12: u16 = 88;
+    const KEY_1: u16 = 2;
+    const KEY_2: u16 = 3;
+    const KEY_3: u16 = 4;
+    const KEY_4: u16 = 5;
+    const KEY_5: u16 = 6;
+    const KEY_6: u16 = 7;
+    const KEY_7: u16 = 8;
+    const KEY_8: u16 = 9;
+    const KEY_9: u16 = 10;
+    const close = std.c.close;
+    const ioctl = std.c.ioctl;
+    fn open(path: [*:0]const u8, flags: u32) c_int {
+        return std.c.open(path, @bitCast(flags));
+    }
+    fn read(fd: c_int, buf: *anyopaque, n: usize) isize {
+        return std.c.read(fd, @ptrCast(buf), n);
+    }
+    fn mmap(addr: ?*anyopaque, len: usize, prot: u32, flags: u32, fd: c_int, off: i64) *anyopaque {
+        return std.c.mmap(@alignCast(addr), len, @bitCast(prot), @bitCast(flags), fd, off);
+    }
+    fn munmap(addr: *anyopaque, len: usize) c_int {
+        return std.c.munmap(@alignCast(addr), len);
+    }
+    fn clock_gettime(clk: std.c.clockid_t, ts: *timespec) c_int {
+        return std.c.clock_gettime(clk, @ptrCast(ts));
+    }
+    fn nanosleep(req: *const timespec, rem: ?*timespec) c_int {
+        return std.c.nanosleep(@ptrCast(req), @ptrCast(rem));
+    }
+} else struct {
     // Stub types for non-Linux platforms so the file compiles
     const fb_var_screeninfo = extern struct { xres: u32 = 0, yres: u32 = 0, bits_per_pixel: u32 = 0 };
     const fb_fix_screeninfo = extern struct { line_length: u32 = 0 };
@@ -125,8 +250,8 @@ const FbState = struct {
     },
 
     // Scale lookup tables (pre-computed for fast nearest-neighbor scaling)
-    col_lut: [MAX_NATIVE_DIM]u16 = [_]u16{0} ** MAX_NATIVE_DIM,
-    row_lut: [MAX_NATIVE_DIM]u16 = [_]u16{0} ** MAX_NATIVE_DIM,
+    col_lut: [MAX_NATIVE_DIM]u16 = @splat(0),
+    row_lut: [MAX_NATIVE_DIM]u16 = @splat(0),
 
     // Input device
     input_fd: c_int = -1,

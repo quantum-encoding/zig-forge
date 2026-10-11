@@ -19,9 +19,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zvdir");
     run_step.dependOn(&run_cmd.step);
@@ -40,7 +38,14 @@ pub fn build(b: *std.Build) void {
     // The parity test shells out to the installed zvdir; make sure it exists
     // and tell the test where to find it.
     run_tests.step.dependOn(b.getInstallStep());
-    run_tests.setEnvironmentVariable("ZVDIR_BIN", b.getInstallPath(.bin, "zvdir"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        run_tests.setEnvironmentVariable("ZVDIR_BIN", b.getInstallPath(.bin, "zvdir"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time and an env var cannot take a
+        // lazy path, so the test runs from the install prefix and is given a relative path.
+        run_tests.setCwd(.{ .relative = .{ .base = .install_prefix } });
+        run_tests.setEnvironmentVariable("ZVDIR_BIN", "bin/zvdir");
+    }
 
     const test_step = b.step("test", "Run GNU-parity tests");
     test_step.dependOn(&run_tests.step);

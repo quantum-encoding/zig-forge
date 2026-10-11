@@ -48,10 +48,14 @@
 //! onto a point instead of orbiting it.
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("fcntl.h");
-    @cInclude("unistd.h");
-});
+// Hand bindings over std.c (Zig 0.17 removed @cImport); names follow the C headers.
+const c = struct {
+    const fcntl = std.c.fcntl;
+    const read = std.c.read;
+    const F_GETFL = std.c.F.GETFL;
+    const F_SETFL = std.c.F.SETFL;
+    const O_NONBLOCK: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+};
 
 const defs = @import("defs.zig");
 const fixed = @import("fixed.zig");

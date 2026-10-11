@@ -20,11 +20,11 @@ const ArpEntry = struct {
 };
 
 const ARP_TABLE_SIZE: usize = 16;
-var arp_table: [ARP_TABLE_SIZE]ArpEntry = [_]ArpEntry{.{
+var arp_table: [ARP_TABLE_SIZE]ArpEntry = @as([ARP_TABLE_SIZE]ArpEntry, @splat(.{
     .ip = 0,
     .mac_addr = .{ 0, 0, 0, 0, 0, 0 },
     .valid = false,
-}} ** ARP_TABLE_SIZE;
+}));
 
 /// Our IP address (host byte order)
 var our_ip: u32 = 0;
