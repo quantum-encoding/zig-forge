@@ -243,7 +243,7 @@ pub fn sysAccept(frame: *idt.InterruptFrame) void {
 
     // Write peer address to user if requested
     if (addr_ptr != 0) {
-        var sa_buf: [16]u8 = [_]u8{0} ** 16;
+        var sa_buf: [16]u8 = @splat(0);
         sa_buf[0] = @truncate(socket.AF_INET); // sa_family low byte
         sa_buf[1] = @truncate(socket.AF_INET >> 8);
         ethernet.putU16BE(sa_buf[2..4], conn.remote_port);
@@ -814,7 +814,7 @@ pub fn sysRecvmsg(frame: *idt.InterruptFrame) void {
     }
 
     // Zero msg_controllen + msg_flags so libc sees no ancillary data.
-    const zero16: [16]u8 = .{0} ** 16;
+    const zero16: [16]u8 = @splat(0);
     _ = syscall.copyToUser(current.page_table, msg_addr + 40, &zero16);
 
     frame.rax = copied;

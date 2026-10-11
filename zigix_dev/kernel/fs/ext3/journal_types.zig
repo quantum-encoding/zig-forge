@@ -190,7 +190,7 @@ pub const TransactionHandle = struct {
     /// Number of blocks reserved for this transaction.
     reserved_blocks: u32 = 0,
     /// Filesystem block numbers queued for journaling.
-    block_numbers: [MAX_TX_ENTRIES]u32 = [_]u32{0} ** MAX_TX_ENTRIES,
+    block_numbers: [MAX_TX_ENTRIES]u32 = @splat(0),
     /// Number of blocks queued.
     block_count: u32 = 0,
     /// Transaction is in progress.

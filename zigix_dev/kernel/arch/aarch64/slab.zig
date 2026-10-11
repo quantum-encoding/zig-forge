@@ -299,7 +299,7 @@ pub fn createCache(name: []const u8, object_size: u32, slab_pages: u8) ?*Cache {
     for (0..MAX_CACHES) |i| {
         if (!cache_pool[i].active) {
             cache_pool[i] = .{
-                .name = [_]u8{0} ** 16,
+                .name = @as([16]u8, @splat(0)),
                 .name_len = 0,
                 .object_size = size,
                 .slab_pages = if (slab_pages == 0) 1 else slab_pages,
@@ -328,7 +328,7 @@ pub fn createCache(name: []const u8, object_size: u32, slab_pages: u8) ?*Cache {
 
 const SIZE_CLASSES = [_]u32{ 16, 32, 64, 128, 256, 512, 1024, 2048, 4096 };
 const NUM_SIZE_CLASSES = SIZE_CLASSES.len;
-var kmalloc_caches: [NUM_SIZE_CLASSES]?*Cache = [_]?*Cache{null} ** NUM_SIZE_CLASSES;
+var kmalloc_caches: [NUM_SIZE_CLASSES]?*Cache = @splat(null);
 
 fn sizeClassIndex(size: u32) ?usize {
     for (SIZE_CLASSES, 0..) |class, i| {

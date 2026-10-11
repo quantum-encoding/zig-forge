@@ -34,7 +34,7 @@ pub var irq: u32 = 0;
 pub var mac: [6]u8 = undefined;
 
 // RX buffer pages (one PMM page per buffer, 4096 bytes each)
-var rx_buf_phys: [RX_BUF_COUNT]u64 = [_]u64{0} ** RX_BUF_COUNT;
+var rx_buf_phys: [RX_BUF_COUNT]u64 = @splat(0);
 
 // TX buffer page (identity mapped: phys == virt)
 var tx_buf_phys: u64 = 0;

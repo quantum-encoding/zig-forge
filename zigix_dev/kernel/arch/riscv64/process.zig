@@ -44,7 +44,7 @@ pub const ProcessState = enum {
 /// x[0..31] are the 32 GP registers (x0 is always 0 but reserved for indexing),
 /// followed by sepc and sstatus.
 pub const Context = extern struct {
-    x: [32]u64 = [_]u64{0} ** 32, // x0-x31
+    x: [32]u64 = @splat(0), // x0-x31
     sepc: u64 = 0,                 // Saved program counter
     sstatus: u64 = 0,              // Saved status register
 
@@ -94,15 +94,15 @@ pub const Process = struct {
     wake_tick: u64 = 0,
     cpu_id: i32 = -1,
     vma_lock: spinlock.IrqSpinlock = .{},
-    fds: [fd_table.MAX_FDS]?*vfs.FileDescription = [_]?*vfs.FileDescription{null} ** fd_table.MAX_FDS,
-    fd_cloexec: [fd_table.MAX_FDS]bool = [_]bool{false} ** fd_table.MAX_FDS,
-    cwd: [256]u8 = [_]u8{'/'} ++ [_]u8{0} ** 255,
+    fds: [fd_table.MAX_FDS]?*vfs.FileDescription = @splat(null),
+    fd_cloexec: [fd_table.MAX_FDS]bool = @splat(false),
+    cwd: [256]u8 = [_]u8{'/'} ++ @as([255]u8, @splat(0)),
     cwd_len: u8 = 1,
-    vmas: vma.VmaList = [_]vma.Vma{.{}} ** vma.MAX_VMAS,
+    vmas: vma.VmaList = @splat(.{}),
     sig_pending: u64 = 0,
     sig_mask: u64 = 0,
-    sig_actions: [MAX_SIGNALS]signal.SignalAction = [_]signal.SignalAction{.{}} ** MAX_SIGNALS,
-    exe_path: [256]u8 = [_]u8{0} ** 256,
+    sig_actions: [MAX_SIGNALS]signal.SignalAction = @splat(.{}),
+    exe_path: [256]u8 = @splat(0),
     exe_path_len: u8 = 0,
     killed: bool = false,
     rq_next: ?*Process = null,
@@ -115,21 +115,21 @@ const MMAP_BASE: u64 = 0x3FFFF0000000;
 pub const MAX_PROCESSES = 256;
 
 /// Process table -- validity tracked by slot_in_use[].
-var processes: [MAX_PROCESSES]Process = [_]Process{.{}} ** MAX_PROCESSES;
-pub var slot_in_use: [MAX_PROCESSES]bool = [_]bool{false} ** MAX_PROCESSES;
+var processes: [MAX_PROCESSES]Process = @splat(.{});
+pub var slot_in_use: [MAX_PROCESSES]bool = @splat(false);
 var next_pid: u64 = 1;
 
 /// SMP lock -- protects process table, slot_in_use, and next_pid.
 pub var proc_lock: spinlock.IrqSpinlock = .{};
 
 // --- Free list for O(1) slot allocation ---
-var free_next: [MAX_PROCESSES]?usize = [_]?usize{null} ** MAX_PROCESSES;
+var free_next: [MAX_PROCESSES]?usize = @splat(null);
 var free_head: ?usize = null;
 var free_list_initialized: bool = false;
 
 // --- PID hash table for O(1) lookup ---
 const PID_HASH_SIZE: usize = 128;
-var pid_to_idx: [PID_HASH_SIZE]?usize = [_]?usize{null} ** PID_HASH_SIZE;
+var pid_to_idx: [PID_HASH_SIZE]?usize = @splat(null);
 
 fn pidHash(pid: u64) usize {
     return @truncate(pid % PID_HASH_SIZE);

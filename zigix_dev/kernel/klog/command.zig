@@ -25,7 +25,7 @@ const serial = struct {
 };
 
 /// Command input buffer — accumulated from serial byte-by-byte.
-var cmd_buf: [256]u8 = .{0} ** 256;
+var cmd_buf: [256]u8 = @splat(0);
 var cmd_len: usize = 0;
 var in_command: bool = false;
 

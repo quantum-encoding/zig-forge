@@ -27,7 +27,7 @@ pub const DelayedState = struct {
     /// Number of blocks reserved but not yet allocated.
     reserved_blocks: u32 = 0,
     /// Dirty data ranges (logical block start + count).
-    dirty_ranges: [MAX_DIRTY_RANGES]DirtyRange = [_]DirtyRange{.{}} ** MAX_DIRTY_RANGES,
+    dirty_ranges: [MAX_DIRTY_RANGES]DirtyRange = @splat(.{}),
     /// Number of active dirty ranges.
     dirty_count: u32 = 0,
     /// Whether delalloc is active for this inode.

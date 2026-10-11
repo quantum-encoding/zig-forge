@@ -37,7 +37,7 @@ const CacheEntry = struct {
 const NONE: u16 = 0xFFFF;
 
 var cache_entries: [MAX_CACHED_PAGES]CacheEntry = init_cache();
-var hash_table: [HASH_SIZE]u16 = [_]u16{NONE} ** HASH_SIZE;
+var hash_table: [HASH_SIZE]u16 = @splat(NONE);
 
 // LRU list: head = MRU, tail = LRU
 var lru_head: u16 = NONE;

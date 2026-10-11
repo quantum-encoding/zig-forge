@@ -39,11 +39,11 @@ pub const ProcessState = enum {
 
 /// Saved CPU context — matches the TrapFrame layout from exception.zig (800 bytes)
 pub const Context = extern struct {
-    x: [31]u64 = [_]u64{0} ** 31,  // X0-X30
+    x: [31]u64 = @splat(0),  // X0-X30
     sp: u64 = 0,                   // User stack pointer (SP_EL0)
     elr: u64 = 0,                  // Exception Link Register (return address)
     spsr: u64 = 0,                 // Saved Program Status Register
-    simd: [32][2]u64 = [_][2]u64{.{ 0, 0 }} ** 32,  // q0-q31 SIMD/FP registers
+    simd: [32][2]u64 = @splat(.{ 0, 0 }),  // q0-q31 SIMD/FP registers
     fpcr: u64 = 0,                 // Floating-point Control Register
     fpsr: u64 = 0,                 // Floating-point Status Register
 
@@ -95,15 +95,15 @@ pub const Process = struct {
     wake_tick: u64 = 0,           // Timer-based wakeup (for epoll timeout, nanosleep)
     cpu_id: i32 = -1,             // CPU currently running this process (-1 = not running)
     vma_lock: spinlock.IrqSpinlock = .{},  // Protects vmas + page_table for CLONE_VM threads
-    fds: [fd_table.MAX_FDS]?*vfs.FileDescription = [_]?*vfs.FileDescription{null} ** fd_table.MAX_FDS,
-    fd_cloexec: [fd_table.MAX_FDS]bool = [_]bool{false} ** fd_table.MAX_FDS,
-    cwd: [256]u8 = [_]u8{'/'} ++ [_]u8{0} ** 255,
+    fds: [fd_table.MAX_FDS]?*vfs.FileDescription = @splat(null),
+    fd_cloexec: [fd_table.MAX_FDS]bool = @splat(false),
+    cwd: [256]u8 = [_]u8{'/'} ++ @as([255]u8, @splat(0)),
     cwd_len: u8 = 1,
-    vmas: vma.VmaList = [_]vma.Vma{.{}} ** vma.MAX_VMAS,
+    vmas: vma.VmaList = @splat(.{}),
     sig_pending: u64 = 0,
     sig_mask: u64 = 0,
-    sig_actions: [MAX_SIGNALS]signal.SignalAction = [_]signal.SignalAction{.{}} ** MAX_SIGNALS,
-    exe_path: [256]u8 = [_]u8{0} ** 256,
+    sig_actions: [MAX_SIGNALS]signal.SignalAction = @splat(.{}),
+    exe_path: [256]u8 = @splat(0),
     exe_path_len: u8 = 0,
 
     // SVE state — lazily allocated on first SVE instruction use.
@@ -152,21 +152,21 @@ pub const MAX_PROCESSES = 512;
 /// mode Zig creates a ~450KB stack temporary (8192 VMAs * 56 bytes) that
 /// overflows the kernel stack and corrupts adjacent BSS (pipe_inodes, etc).
 /// Always use zeroSlot() + individual field writes.
-var processes: [MAX_PROCESSES]Process = [_]Process{.{}} ** MAX_PROCESSES;
-pub var slot_in_use: [MAX_PROCESSES]bool = [_]bool{false} ** MAX_PROCESSES;
+var processes: [MAX_PROCESSES]Process = @splat(.{});
+pub var slot_in_use: [MAX_PROCESSES]bool = @splat(false);
 var next_pid: u64 = 1;
 
 /// SMP lock — protects process table, slot_in_use, and next_pid.
 pub var proc_lock: spinlock.IrqSpinlock = .{};
 
 // --- Free list for O(1) slot allocation ---
-var free_next: [MAX_PROCESSES]?usize = [_]?usize{null} ** MAX_PROCESSES;
+var free_next: [MAX_PROCESSES]?usize = @splat(null);
 var free_head: ?usize = null;
 var free_list_initialized: bool = false;
 
 // --- PID hash table for O(1) lookup ---
 const PID_HASH_SIZE: usize = 512;
-var pid_to_idx: [PID_HASH_SIZE]?usize = [_]?usize{null} ** PID_HASH_SIZE;
+var pid_to_idx: [PID_HASH_SIZE]?usize = @splat(null);
 
 fn pidHash(pid: u64) usize {
     return @truncate(pid % PID_HASH_SIZE);

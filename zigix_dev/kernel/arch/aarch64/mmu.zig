@@ -73,8 +73,8 @@ var mmu_initialized = false;
 
 /// Static page tables for early boot (before PMM is available)
 /// Using 1GB block mappings (L1 blocks), we need L0 + L1 tables only
-var early_l0 align(PAGE_SIZE) = PageTable{ .entries = [_]PageTableEntry{.{ .raw = 0 }} ** ENTRIES_PER_TABLE };
-var early_l1 align(PAGE_SIZE) = PageTable{ .entries = [_]PageTableEntry{.{ .raw = 0 }} ** ENTRIES_PER_TABLE };
+var early_l0 align(PAGE_SIZE) = PageTable{ .entries = @as([ENTRIES_PER_TABLE]PageTableEntry, @splat(.{ .raw = 0 })) };
+var early_l1 align(PAGE_SIZE) = PageTable{ .entries = @as([ENTRIES_PER_TABLE]PageTableEntry, @splat(.{ .raw = 0 })) };
 
 /// Early MMU initialization with identity mapping using 1GB blocks
 /// This creates a simple identity map for boot before PMM exists

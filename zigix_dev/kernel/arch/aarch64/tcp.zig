@@ -59,7 +59,7 @@ const OOO_BUF_SIZE: usize = 1500; // per-segment buffer (MSS)
 const OooSegment = struct {
     seq: u32 = 0,
     len: u16 = 0,
-    data: [OOO_BUF_SIZE]u8 = [_]u8{0} ** OOO_BUF_SIZE,
+    data: [OOO_BUF_SIZE]u8 = @splat(0),
     in_use: bool = false,
 };
 
@@ -104,10 +104,10 @@ pub const TcpConnection = struct {
     rto_deadline: u64,
 
     // --- Out-of-order reassembly ---
-    ooo_segs: [MAX_OOO_SEGS]OooSegment = [_]OooSegment{.{}} ** MAX_OOO_SEGS,
+    ooo_segs: [MAX_OOO_SEGS]OooSegment = @splat(.{}),
 };
 
-var connections: [MAX_TCP_CONNECTIONS]TcpConnection = [_]TcpConnection{emptyConn()} ** MAX_TCP_CONNECTIONS;
+var connections: [MAX_TCP_CONNECTIONS]TcpConnection = @splat(emptyConn());
 var next_ephemeral_port: u16 = 49152;
 
 /// SMP lock protecting all TCP connection state: connections[], next_ephemeral_port.
@@ -124,16 +124,16 @@ fn emptyConn() TcpConnection {
         .send_next = 0,
         .send_unack = 0,
         .recv_next = 0,
-        .rx_buf = [_]u8{0} ** RX_BUF_SIZE,
+        .rx_buf = @as([RX_BUF_SIZE]u8, @splat(0)),
         .rx_head = 0,
         .rx_count = 0,
         .waiting_pid = 0,
         .in_use = false,
-        .tx_buf = [_]u8{0} ** TX_BUF_SIZE,
+        .tx_buf = @as([TX_BUF_SIZE]u8, @splat(0)),
         .tx_head = 0,
         .tx_count = 0,
         .tx_sent = 0,
-        .tx_segs = [_]TxSegment{.{ .seq = 0, .len = 0, .retransmits = 0 }} ** MAX_TX_SEGS,
+        .tx_segs = @as([MAX_TX_SEGS]TxSegment, @splat(.{ .seq = 0, .len = 0, .retransmits = 0 })),
         .tx_seg_count = 0,
         .srtt = 0,
         .rttvar = 0,
@@ -146,7 +146,7 @@ fn emptyConn() TcpConnection {
         .dup_ack_count = 0,
         .in_recovery = false,
         .rto_deadline = 0,
-        .ooo_segs = [_]OooSegment{.{}} ** MAX_OOO_SEGS,
+        .ooo_segs = @as([MAX_OOO_SEGS]OooSegment, @splat(.{})),
     };
 }
 

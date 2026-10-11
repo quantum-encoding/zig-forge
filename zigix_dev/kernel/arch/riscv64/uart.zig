@@ -3,6 +3,8 @@
 /// QEMU virt machine maps a 16550 UART at 0x10000000.
 /// Same interface as ARM64 uart.zig and x86_64 serial.zig.
 
+const std = @import("std");
+
 const UART_BASE: usize = 0x10000000;
 
 // 16550 register offsets
@@ -97,7 +99,8 @@ pub fn writeDec(value: u64) void {
 /// Formatted print (simplified — supports {} for decimal and {x} for hex).
 pub fn print(comptime fmt: []const u8, args: anytype) void {
     const ArgsType = @TypeOf(args);
-    const fields = @typeInfo(ArgsType).@"struct".fields;
+    // Field names only: 0.17 reshaped std.builtin.Type.Struct; fieldNames works on both.
+    const fields = comptime std.meta.fieldNames(ArgsType);
     comptime var arg_idx: usize = 0;
     comptime var i: usize = 0;
 
@@ -106,14 +109,14 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
             if (i + 1 < fmt.len and fmt[i + 1] == '}') {
                 // {} — decimal
                 if (arg_idx < fields.len) {
-                    writeDec(@as(u64, @intCast(@field(args, fields[arg_idx].name))));
+                    writeDec(@as(u64, @intCast(@field(args, fields[arg_idx]))));
                     arg_idx += 1;
                 }
                 i += 2;
             } else if (i + 2 < fmt.len and fmt[i + 1] == 'x' and fmt[i + 2] == '}') {
                 // {x} — hex
                 if (arg_idx < fields.len) {
-                    writeHex(@as(u64, @intCast(@field(args, fields[arg_idx].name))));
+                    writeHex(@as(u64, @intCast(@field(args, fields[arg_idx]))));
                     arg_idx += 1;
                 }
                 i += 3;

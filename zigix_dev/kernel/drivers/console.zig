@@ -35,7 +35,7 @@ var bold: bool = false;
 
 const EscState = enum { normal, esc, csi };
 var esc_state: EscState = .normal;
-var csi_params: [8]u32 = [_]u32{0} ** 8;
+var csi_params: [8]u32 = @splat(0);
 var csi_count: u8 = 0;
 var csi_priv: bool = false;
 

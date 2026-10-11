@@ -37,7 +37,7 @@ pub const CpuLocal = struct {
     online: bool = false,
     dedicated_pid: u64 = 0,
     // Per-CPU SSE/FPU save area (512 bytes, 64-byte aligned for fxsave)
-    fxsave_area: [512]u8 align(64) = [_]u8{0} ** 512,
+    fxsave_area: [512]u8 align(64) = @splat(0),
 };
 
 /// Offsets for assembly access via GS segment override.
@@ -47,7 +47,7 @@ pub const SCRATCH_OFFSET = @offsetOf(CpuLocal, "scratch_rsp");
 
 pub const TIMESLICE_TICKS: u64 = 10; // 100ms at 100 Hz
 
-pub var cpu_locals: [MAX_CPUS]CpuLocal = [_]CpuLocal{.{}} ** MAX_CPUS;
+pub var cpu_locals: [MAX_CPUS]CpuLocal = @splat(.{});
 pub var online_cpus: u32 = 1; // BSP is always online
 
 /// MSR addresses

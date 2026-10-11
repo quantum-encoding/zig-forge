@@ -26,8 +26,8 @@ pub const Pipe = struct {
     in_use: bool,
 };
 
-var pipes: [MAX_PIPES]Pipe = [_]Pipe{.{
-    .buffer = [_]u8{0} ** PIPE_BUF_SIZE,
+var pipes: [MAX_PIPES]Pipe = @as([MAX_PIPES]Pipe, @splat(.{
+    .buffer = @as([PIPE_BUF_SIZE]u8, @splat(0)),
     .read_pos = 0,
     .write_pos = 0,
     .count = 0,
@@ -36,7 +36,7 @@ var pipes: [MAX_PIPES]Pipe = [_]Pipe{.{
     .blocked_reader_pid = 0,
     .blocked_writer_pid = 0,
     .in_use = false,
-}} ** MAX_PIPES;
+}));
 
 var pipe_inodes: [MAX_PIPES]vfs.Inode = undefined;
 var inodes_initialized: bool = false;

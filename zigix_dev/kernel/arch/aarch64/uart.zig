@@ -278,7 +278,8 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
     defer uart_tx_lock.release();
 
     const ArgsType = @TypeOf(args);
-    const fields = @typeInfo(ArgsType).@"struct".fields;
+    // Field names only: 0.17 reshaped std.builtin.Type.Struct; fieldNames works on both.
+    const fields = comptime std.meta.fieldNames(ArgsType);
 
     comptime var arg_idx: usize = 0;
     comptime var i: usize = 0;
@@ -287,7 +288,7 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
         if (fmt[i] == '{') {
             if (i + 1 < fmt.len and fmt[i + 1] == '}') {
                 if (arg_idx < fields.len) {
-                    const val = @field(args, fields[arg_idx].name);
+                    const val = @field(args, fields[arg_idx]);
                     const T = @TypeOf(val);
                     const info = @typeInfo(T);
                     if (info == .int and info.int.signedness == .signed) {
@@ -305,7 +306,7 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
                 i += 2;
             } else if (i + 2 < fmt.len and fmt[i + 1] == 'x' and fmt[i + 2] == '}') {
                 if (arg_idx < fields.len) {
-                    const val = @field(args, fields[arg_idx].name);
+                    const val = @field(args, fields[arg_idx]);
                     const Tx = @TypeOf(val);
                     const infox = @typeInfo(Tx);
                     writeStringRaw("0x");
