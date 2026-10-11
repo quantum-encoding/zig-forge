@@ -821,9 +821,9 @@ fn parseProposalJsonLocal(allocator: std.mem.Allocator, json_str: []const u8) !P
     // overrides its English default (arena-allocated, freed with the arena).
     if (root.get("labels")) |lv| {
         if (lv == .object) {
-            inline for (@typeInfo(QuoteLabels).@"struct".fields) |f| {
-                if (lv.object.get(f.name)) |v| {
-                    if (v == .string) @field(data.labels, f.name) = try allocator.dupe(u8, v.string);
+            inline for (comptime fieldNamesOf(QuoteLabels)) |f_name| {
+                if (lv.object.get(f_name)) |v| {
+                    if (v == .string) @field(data.labels, f_name) = try allocator.dupe(u8, v.string);
                 }
             }
         }
@@ -943,4 +943,18 @@ fn getFloat(obj: std.json.ObjectMap, key: []const u8) f64 {
         };
     }
     return 0;
+}
+
+/// Field names of a struct or enum type. Zig 0.17 replaced `@typeInfo(T).@"struct".fields`
+/// with `field_names`; this spelling compiles on 0.16 and 0.17.
+fn fieldNamesOf(comptime T: type) []const [:0]const u8 {
+    return comptime switch (@typeInfo(T)) {
+        inline .@"struct", .@"enum" => |info| if (@hasField(@TypeOf(info), "field_names")) info.field_names else blk: {
+            var names: [info.fields.len][:0]const u8 = undefined;
+            for (&names, info.fields) |*n, f| n.* = f.name;
+            const final = names;
+            break :blk &final;
+        },
+        else => unreachable,
+    };
 }
