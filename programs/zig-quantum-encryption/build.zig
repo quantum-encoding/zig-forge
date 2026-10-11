@@ -132,10 +132,10 @@ pub fn build(b: *std.Build) void {
             .strip = if (ct.query.os_tag == .ios) true else false,
         });
 
-        // Link bcrypt on Windows for BCryptGenRandom
-        if (ct.query.os_tag == .windows) {
-            cross_mod.linkSystemLibrary("bcrypt", .{});
-        }
+        // No -lbcrypt for the Windows archive: a static archive links nothing,
+        // the consumer links bcrypt for BCryptGenRandom (quantum-crypto-sys's
+        // build.rs does), and for the MSVC ABI Zig would look for the Windows
+        // SDK's bcrypt.lib, which a cross-compiling Mac does not have.
 
         const cross_lib = b.addLibrary(.{
             .linkage = .static,
