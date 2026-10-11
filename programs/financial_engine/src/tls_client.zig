@@ -20,14 +20,11 @@ const std = @import("std");
 const posix = std.posix;
 
 // mbedTLS C imports
-const c = @cImport({
-    @cInclude("mbedtls/ssl.h");
-    @cInclude("mbedtls/net_sockets.h");
-    @cInclude("mbedtls/entropy.h");
-    @cInclude("mbedtls/ctr_drbg.h");
-    @cInclude("mbedtls/error.h");
-    @cInclude("mbedtls/x509_crt.h");
-});
+// mbedtls 3.x headers, translated by the build (build.zig: linkMbedtls3 adds the
+// "mbedtls_c" module from include/mbedtls_c.h). Zig 0.17 removed @cImport, and this file
+// embeds mbedtls contexts by value, so hand bindings would have to copy per-version
+// struct layouts; translate-c from the installed headers keeps them exact.
+const c = @import("mbedtls_c");
 
 // =============================================================================
 // Error Types

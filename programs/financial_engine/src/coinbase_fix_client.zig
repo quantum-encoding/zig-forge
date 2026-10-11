@@ -26,12 +26,35 @@ else
     @import("tls_client.zig").TlsClient;
 
 // libc imports for DNS resolution (not available on Android cross-compile without NDK sysroot)
-const c = if (builtin.abi != .android) @cImport({
-    @cInclude("netdb.h");
-    @cInclude("sys/socket.h");
-    @cInclude("netinet/in.h");
-    @cInclude("arpa/inet.h");
-}) else struct {
+// netdb bound by hand (Zig 0.17 removed @cImport): getaddrinfo/freeaddrinfo with the
+// C field names this file uses. struct addrinfo puts ai_canonname before ai_addr on the
+// BSDs/Darwin and after it on Linux.
+const c = if (builtin.abi != .android) struct {
+    pub const struct_addrinfo = if (builtin.os.tag.isDarwin()) extern struct {
+        ai_flags: c_int = 0,
+        ai_family: c_int = 0,
+        ai_socktype: c_int = 0,
+        ai_protocol: c_int = 0,
+        ai_addrlen: c_uint = 0,
+        ai_canonname: ?[*:0]u8 = null,
+        ai_addr: ?*anyopaque = null,
+        ai_next: ?*struct_addrinfo = null,
+    } else extern struct {
+        ai_flags: c_int = 0,
+        ai_family: c_int = 0,
+        ai_socktype: c_int = 0,
+        ai_protocol: c_int = 0,
+        ai_addrlen: c_uint = 0,
+        ai_addr: ?*anyopaque = null,
+        ai_canonname: ?[*:0]u8 = null,
+        ai_next: ?*struct_addrinfo = null,
+    };
+    pub const AF_INET: c_int = 2;
+    pub const SOCK_STREAM: c_int = 1;
+    pub const IPPROTO_TCP: c_int = 6;
+    pub extern "c" fn getaddrinfo(node: ?[*:0]const u8, service: ?[*:0]const u8, hints: ?*const struct_addrinfo, res: ?*?*struct_addrinfo) c_int;
+    pub extern "c" fn freeaddrinfo(res: ?*struct_addrinfo) void;
+} else struct {
     // Stub types for Android - DNS not supported without NDK sysroot
     pub const struct_addrinfo = extern struct {
         ai_family: c_int = 0,

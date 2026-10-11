@@ -470,11 +470,24 @@ pub fn build(b: *std.Build) void {
 /// Link against mbedtls 3.x. On macOS, Homebrew's `mbedtls` formula is 4.x
 /// which removed the public `mbedtls/entropy.h` and `mbedtls/ctr_drbg.h`
 /// headers; pin to the `mbedtls@3` keg. On Linux, fall back to system paths.
+///
+/// Also gives the module "mbedtls_c" (src/tls_client.zig's mbedtls bindings): Zig 0.17
+/// removed @cImport, so include/mbedtls_c.h goes through the build's translate-c step with
+/// the same include path.
 fn linkMbedtls3(mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    const b = mod.owner;
+    const tc = b.addTranslateC(.{
+        .root_source_file = b.path("include/mbedtls_c.h"),
+        .target = target,
+        .optimize = mod.optimize orelse Optimize.ReleaseFast,
+        .link_libc = true,
+    });
+    mod.addImport("mbedtls_c", tc.createModule());
     if (target.result.os.tag == .macos) {
         // Pin explicitly to mbedtls@3; bypass pkg-config (which resolves
         // to the default keg — currently mbedtls 4.x — and leaks its headers).
         const prefix = "/opt/homebrew/opt/mbedtls@3";
+        tc.addIncludePath(.{ .cwd_relative = prefix ++ "/include" });
         mod.addIncludePath(.{ .cwd_relative = prefix ++ "/include" });
         mod.addLibraryPath(.{ .cwd_relative = prefix ++ "/lib" });
         mod.linkSystemLibrary("mbedtls", .{ .use_pkg_config = .no });

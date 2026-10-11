@@ -303,9 +303,20 @@ const builtin = @import("builtin");
 // ZMQ is only available on desktop (not Android)
 const has_zmq = builtin.abi != .android;
 
-const c = if (has_zmq) @cImport({
-    @cInclude("zmq.h");
-}) else struct {
+// libzmq bound by hand (Zig 0.17 removed @cImport): the seven calls and three constants
+// used here, with zmq.h's prototypes and values; every handle is an opaque pointer.
+const c = if (has_zmq) struct {
+    const ZMQ_PUSH: c_int = 8;
+    const ZMQ_LINGER: c_int = 17;
+    const ZMQ_DONTWAIT: c_int = 1;
+    extern "c" fn zmq_ctx_new() ?*anyopaque;
+    extern "c" fn zmq_ctx_destroy(context: ?*anyopaque) c_int;
+    extern "c" fn zmq_socket(context: ?*anyopaque, type: c_int) ?*anyopaque;
+    extern "c" fn zmq_close(socket: ?*anyopaque) c_int;
+    extern "c" fn zmq_setsockopt(socket: ?*anyopaque, option: c_int, optval: ?*const anyopaque, optvallen: usize) c_int;
+    extern "c" fn zmq_connect(socket: ?*anyopaque, endpoint: [*c]const u8) c_int;
+    extern "c" fn zmq_send(socket: ?*anyopaque, buf: ?*const anyopaque, len: usize, flags: c_int) c_int;
+} else struct {
     // Stub constants for Android compilation
     const ZMQ_PUSH: c_int = 8;
     const ZMQ_LINGER: c_int = 17;
