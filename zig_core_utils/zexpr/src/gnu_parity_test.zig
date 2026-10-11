@@ -112,11 +112,7 @@ const parity_cases = [_]Case{
 test "zexpr matches GNU expr byte-for-byte" {
     const alloc = std.testing.allocator;
 
-    const zexpr_z = std.c.getenv("ZEXPR_BIN") orelse {
-        std.debug.print("ZEXPR_BIN not set; run via `zig build test`\n", .{});
-        return error.SkipZigTest;
-    };
-    const zexpr = std.mem.span(zexpr_z);
+    const zexpr: []const u8 = if (std.c.getenv("ZEXPR_BIN")) |p| std.mem.span(p) else @import("build_options").zexpr_bin;
 
     const gnu = findGnuExpr() orelse {
         std.debug.print("no GNU expr found; skipping live parity block\n", .{});
@@ -179,10 +175,7 @@ const documented_cases = [_]Documented{
 
 test "zexpr matches documented GNU/POSIX bytes" {
     const alloc = std.testing.allocator;
-    const zexpr_z = std.c.getenv("ZEXPR_BIN") orelse {
-        return error.SkipZigTest;
-    };
-    const zexpr = std.mem.span(zexpr_z);
+    const zexpr: []const u8 = if (std.c.getenv("ZEXPR_BIN")) |p| std.mem.span(p) else @import("build_options").zexpr_bin;
 
     var threaded = std.Io.Threaded.init(alloc, .{});
     defer threaded.deinit();

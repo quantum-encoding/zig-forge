@@ -19,9 +19,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zexpr");
     run_step.dependOn(&run_cmd.step);
@@ -38,7 +36,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_tests = b.addRunArtifact(parity_tests);
-    run_tests.setEnvironmentVariable("ZEXPR_BIN", b.getInstallPath(.bin, "zexpr"));
+    // The binary path reaches the test through build_options (b.getInstallPath is gone in
+    // Zig 0.17); ZEXPR_BIN in the environment still overrides it.
+    const test_opts = b.addOptions();
+    test_opts.addOptionPath("zexpr_bin", exe.getEmittedBin());
+    parity_tests.root_module.addOptions("build_options", test_opts);
     run_tests.step.dependOn(b.getInstallStep());
 
     const test_step = b.step("test", "Run GNU parity tests");
