@@ -18,17 +18,22 @@ pub fn build(b: *std.Build) void {
         query: std.Target.Query,
     };
 
+    // Apple targets name their deployment floor (26.0, the fleet's): un-versioned ones take
+    // Zig's default, which 0.17 moved to macOS 15 / iOS 18, and an object newer than the app
+    // linking it makes ld64 warn "built for newer" while the floor silently moves.
+    const apple_floor: std.Target.Query.OsVersion = .{ .semver = .{ .major = 26, .minor = 0, .patch = 0 } };
+
     const cross_targets = [_]CrossTarget{
         // Desktop platforms for Tauri
-        .{ .name = "macos-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .macos } },
-        .{ .name = "macos-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .macos } },
+        .{ .name = "macos-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .macos, .os_version_min = apple_floor } },
+        .{ .name = "macos-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .macos, .os_version_min = apple_floor } },
         // MSVC ABI: what Rust's x86_64-pc-windows-msvc links with link.exe. Zig's
         // default Windows ABI is GNU, whose bundled compiler_rt.obj link.exe
         // refuses (LNK1143 "no symbol for COMDAT section").
         .{ .name = "windows-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .msvc } },
         .{ .name = "linux-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux } },
         // Mobile platforms (future)
-        .{ .name = "ios-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .ios } },
+        .{ .name = "ios-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .ios, .os_version_min = apple_floor } },
         .{ .name = "android-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .android } },
         .{ .name = "android-arm32", .query = .{ .cpu_arch = .arm, .os_tag = .linux, .abi = .android } },
     };
@@ -181,8 +186,8 @@ pub fn build(b: *std.Build) void {
     // Cross-compile secrets for distribution
     const secrets_cross_step = b.step("secrets-cross", "Cross-compile secrets CLI");
     inline for ([_]CrossTarget{
-        .{ .name = "macos-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .macos } },
-        .{ .name = "macos-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .macos } },
+        .{ .name = "macos-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .macos, .os_version_min = apple_floor } },
+        .{ .name = "macos-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .macos, .os_version_min = apple_floor } },
         .{ .name = "linux-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux } },
         .{ .name = "linux-arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux } },
     }) |ct| {

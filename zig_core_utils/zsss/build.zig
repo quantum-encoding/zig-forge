@@ -98,10 +98,16 @@ pub fn build(b: *std.Build) void {
         "aarch64-linux-musl",
     };
 
+    // Every Apple target names its deployment floor: an un-versioned one takes Zig's
+    // default, which moved from macOS 13 / iOS 15 (0.16) to macOS 15 / iOS 18 (0.17), and
+    // an object newer than the app it is linked into makes ld64 warn "built for newer"
+    // while the floor silently moves. The fleet's floor is 26.0 on both (Cifra's).
+    const apple_floor: std.Target.Query.OsVersion = .{ .semver = .{ .major = 26, .minor = 0, .patch = 0 } };
+
     // macOS targets
     const macos_targets = [_]std.Target.Query{
-        .{ .cpu_arch = .aarch64, .os_tag = .macos, .abi = .none },
-        .{ .cpu_arch = .x86_64, .os_tag = .macos, .abi = .none },
+        .{ .cpu_arch = .aarch64, .os_tag = .macos, .abi = .none, .os_version_min = apple_floor },
+        .{ .cpu_arch = .x86_64, .os_tag = .macos, .abi = .none, .os_version_min = apple_floor },
     };
 
     const macos_names = [_][]const u8{
@@ -111,7 +117,7 @@ pub fn build(b: *std.Build) void {
 
     // iOS targets (device)
     const ios_targets = [_]std.Target.Query{
-        .{ .cpu_arch = .aarch64, .os_tag = .ios, .abi = .none },
+        .{ .cpu_arch = .aarch64, .os_tag = .ios, .abi = .none, .os_version_min = apple_floor },
     };
 
     const ios_names = [_][]const u8{
@@ -120,8 +126,8 @@ pub fn build(b: *std.Build) void {
 
     // iOS Simulator targets
     const ios_sim_targets = [_]std.Target.Query{
-        .{ .cpu_arch = .aarch64, .os_tag = .ios, .abi = .simulator },
-        .{ .cpu_arch = .x86_64, .os_tag = .ios, .abi = .simulator },
+        .{ .cpu_arch = .aarch64, .os_tag = .ios, .abi = .simulator, .os_version_min = apple_floor },
+        .{ .cpu_arch = .x86_64, .os_tag = .ios, .abi = .simulator, .os_version_min = apple_floor },
     };
 
     const ios_sim_names = [_][]const u8{

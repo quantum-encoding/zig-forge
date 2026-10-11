@@ -27,9 +27,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../scripts/zig-toolchain.sh
 . "$SCRIPT_DIR/../scripts/zig-toolchain.sh"
 forge_zig_require
-# Zig 0.16+ uses simplified target triples (no vendor)
-IOS_TARGET="aarch64-ios"
-IOS_SIM_TARGET="aarch64-ios-simulator"
+# Zig 0.16+ uses simplified target triples (no vendor). The deployment floor is explicit
+# (26.0, the fleet's): an un-versioned target takes Zig's default (iOS 15 on 0.16, iOS 18
+# on 0.17), and an archive newer than the app linking it makes ld warn "built for newer".
+# The simulator spelling is <arch>-ios.<version>-simulator; "aarch64-ios-simulator.26.0"
+# is refused (InvalidAbiVersion).
+IOS_TARGET="aarch64-ios.26.0"
+IOS_SIM_TARGET="aarch64-ios.26.0-simulator"
 OUTPUT_DIR="$SCRIPT_DIR/ios-libs"
 
 # Find iOS SDKs
