@@ -110,7 +110,7 @@ pub const Table = struct {
             .on_activate = null,
             .focused = false,
             .visible_height = 10,
-            .column_widths = [_]u16{0} ** 16,
+            .column_widths = @splat(0),
         };
     }
 

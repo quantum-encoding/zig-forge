@@ -1,4 +1,5 @@
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const wasm_step = b.step("wasm", "Build WebAssembly module for Cloudflare Workers");
@@ -11,7 +12,7 @@ pub fn build(b: *std.Build) void {
     const wasm_module = b.createModule(.{
         .root_source_file = b.path("src/wasm_ffi.zig"),
         .target = wasm_target,
-        .optimize = .ReleaseSmall,
+        .optimize = Optimize.ReleaseSmall,
     });
 
     const wasm_lib = b.addExecutable(.{

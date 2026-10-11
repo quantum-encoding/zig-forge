@@ -1,4 +1,5 @@
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -48,7 +49,7 @@ pub fn build(b: *std.Build) void {
     const android_module = b.createModule(.{
         .root_source_file = b.path("src/lib.zig"),
         .target = android_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const android_lib = b.addLibrary(.{
@@ -73,7 +74,7 @@ pub fn build(b: *std.Build) void {
     const android_shared_module = b.createModule(.{
         .root_source_file = b.path("src/lib.zig"),
         .target = android_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const android_shared = b.addLibrary(.{
@@ -126,7 +127,7 @@ pub fn build(b: *std.Build) void {
     const android_arm32_module = b.createModule(.{
         .root_source_file = b.path("src/lib.zig"),
         .target = android_arm32_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const android_arm32_shared = b.addLibrary(.{
@@ -157,7 +158,7 @@ pub fn build(b: *std.Build) void {
     const android_x86_64_module = b.createModule(.{
         .root_source_file = b.path("src/lib.zig"),
         .target = android_x86_64_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const android_x86_64_shared = b.addLibrary(.{
@@ -265,25 +266,19 @@ pub fn build(b: *std.Build) void {
 
     // Run commands for pdf-info
     const run_info = b.addRunArtifact(pdf_info);
-    if (b.args) |args| {
-        run_info.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_info.addPassthruArgs() else if (b.args) |args| run_info.addArgs(args);
     const info_step = b.step("info", "Run pdf-info tool");
     info_step.dependOn(&run_info.step);
 
     // Run commands for pdf-text
     const run_text = b.addRunArtifact(pdf_text);
-    if (b.args) |args| {
-        run_text.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_text.addPassthruArgs() else if (b.args) |args| run_text.addArgs(args);
     const text_step = b.step("text", "Run pdf-text tool");
     text_step.dependOn(&run_text.step);
 
     // Run commands for render-debug
     const run_render = b.addRunArtifact(render_debug);
-    if (b.args) |args| {
-        run_render.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_render.addPassthruArgs() else if (b.args) |args| run_render.addArgs(args);
     const render_step = b.step("render", "Run render-debug tool");
     render_step.dependOn(&run_render.step);
 }

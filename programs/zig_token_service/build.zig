@@ -1,4 +1,5 @@
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -65,9 +66,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(demo);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run the token service demo");
     run_step.dependOn(&run_cmd.step);
@@ -86,7 +85,7 @@ pub fn build(b: *std.Build) void {
     const wasm_module = b.createModule(.{
         .root_source_file = b.path("src/wasm_ffi.zig"),
         .target = wasm_target,
-        .optimize = .ReleaseSmall,
+        .optimize = Optimize.ReleaseSmall,
     });
 
     const wasm_lib = b.addExecutable(.{

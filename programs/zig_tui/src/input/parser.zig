@@ -16,7 +16,7 @@ pub const MouseEventKind = event.MouseEventKind;
 /// Input parser state machine
 pub const Parser = struct {
     state: State = .ground,
-    params: [16]u16 = [_]u16{0} ** 16,
+    params: [16]u16 = @splat(0),
     param_count: u8 = 0,
     intermediate: u8 = 0,
     /// Accumulator for a UTF-8 codepoint being decoded from the input stream.
