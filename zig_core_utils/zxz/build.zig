@@ -19,9 +19,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zxz");
     run_step.dependOn(&run_cmd.step);
@@ -39,7 +37,14 @@ pub fn build(b: *std.Build) void {
     });
     const run_tests = b.addRunArtifact(tests);
     run_tests.step.dependOn(b.getInstallStep()); // ensure zxz is built + installed
-    run_tests.setEnvironmentVariable("ZXZ_BIN", b.getInstallPath(.bin, "zxz"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        run_tests.setEnvironmentVariable("ZXZ_BIN", b.getInstallPath(.bin, "zxz"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time and an env var cannot take a
+        // lazy path, so the test runs from the install prefix and is given a relative path.
+        run_tests.setCwd(.{ .relative = .{ .base = .install_prefix } });
+        run_tests.setEnvironmentVariable("ZXZ_BIN", "bin/zxz");
+    }
     // Point at the real GNU xz for the live cross-check; the test skips
     // gracefully if it is absent/non-executable.
     run_tests.setEnvironmentVariable("XZ_BIN", "/opt/homebrew/bin/xz");
