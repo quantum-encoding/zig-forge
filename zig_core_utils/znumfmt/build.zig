@@ -19,9 +19,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run znumfmt");
     run_step.dependOn(&run_cmd.step);
@@ -30,7 +28,7 @@ pub fn build(b: *std.Build) void {
     // The parity tests spawn the freshly-built znumfmt binary; embed its
     // install path as a build option so the test can find it.
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "znumfmt_bin", b.getInstallPath(.bin, "znumfmt"));
+    if (@hasDecl(std.Build, "getInstallPath")) test_opts.addOption([]const u8, "znumfmt_bin", b.getInstallPath(.bin, "znumfmt")) else test_opts.addOptionPath("znumfmt_bin", exe.getEmittedBin());
 
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/gnu_parity_test.zig"),
