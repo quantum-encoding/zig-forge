@@ -1,4 +1,6 @@
 const std = @import("std");
+// Zig 0.17 renamed the OptimizeMode tags; the decl spelling works on both.
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -20,9 +22,7 @@ pub fn build(b: *std.Build) void {
     // Run command
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run ztimeout");
     run_step.dependOn(&run_cmd.step);
@@ -50,7 +50,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_parity_tests = b.addRunArtifact(parity_tests);
-    run_parity_tests.setEnvironmentVariable("ZTIMEOUT_BIN", b.getInstallPath(.bin, "ztimeout"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        run_parity_tests.setEnvironmentVariable("ZTIMEOUT_BIN", b.getInstallPath(.bin, "ztimeout"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time and an env var cannot take a
+        // lazy path, so the test runs from the install prefix and is given a relative path.
+        run_parity_tests.setCwd(.{ .relative = .{ .base = .install_prefix } });
+        run_parity_tests.setEnvironmentVariable("ZTIMEOUT_BIN", "bin/ztimeout");
+    }
     run_parity_tests.step.dependOn(b.getInstallStep());
 
     const test_step = b.step("test", "Run unit + GNU-parity tests");
@@ -63,7 +70,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = Optimize.ReleaseFast,
         }),
     });
 

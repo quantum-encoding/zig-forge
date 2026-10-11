@@ -436,11 +436,11 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
         const argv = try allocator.allocSentinel(?[*:0]const u8, cmd_count, null);
 
         // Store the command name
-        config.command_name = try allocator.dupeZ(u8, args[i]);
+        config.command_name = try allocator.dupeSentinel(u8, args[i], 0);
 
         // Convert each argument to a null-terminated string
         for (0..cmd_count) |j| {
-            argv[j] = try allocator.dupeZ(u8, args[i + j]);
+            argv[j] = try allocator.dupeSentinel(u8, args[i + j], 0);
         }
 
         config.command_argv = argv;
