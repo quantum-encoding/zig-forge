@@ -106,7 +106,7 @@ fn run(
     argv: []const [:0]const u8,
     env: []const [:0]const u8,
 ) !RunResult {
-    const path_z = try a.dupeZ(u8, path);
+    const path_z = try a.dupeSentinel(u8, path, 0);
     defer a.free(path_z);
     const argv_c = try argvVec(a, argv);
     defer a.free(argv_c);
@@ -180,7 +180,7 @@ fn expectParity(argv: []const [:0]const u8, env: []const [:0]const u8) !void {
 }
 
 fn makeTempDir(a: std.mem.Allocator) ![:0]u8 {
-    const template = try a.dupeZ(u8, "/tmp/zdircolors_test_XXXXXX");
+    const template = try a.dupeSentinel(u8, "/tmp/zdircolors_test_XXXXXX", 0);
     errdefer a.free(template);
     if (mkdtemp(template.ptr) == null) return error.MkdtempFailed;
     return template;
