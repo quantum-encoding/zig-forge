@@ -53,9 +53,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(demo);
 
     const run_demo = b.addRunArtifact(demo);
-    if (b.args) |args| {
-        run_demo.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_demo.addPassthruArgs() else if (b.args) |args| run_demo.addArgs(args);
     const demo_step = b.step("demo", "Run socket demo");
     demo_step.dependOn(&run_demo.step);
 
