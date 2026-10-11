@@ -17,7 +17,7 @@
 | Program | LOC | Status | What's Missing |
 |---------|-----|--------|----------------|
 | **lockfree_queue [TODO]** | 150 | 50% | MPMC queue stubbed (SPSC works) |
-| **memory_pool [TODO]** | 177 | 25% | Slab allocator stubbed |
+| **memory_pool** | ~2,700 | 90% | Not stubbed: fixed pool, slab (10 classes + oversized) and arena are implemented and tested. Unpromoted (no external anchors). Alignment: pool/slab 16 bytes, arena any power of 2 on the returned address (fix/memory-pool-arena-alignment) |
 | **zero_copy_net [TODO]** | 1,088 | 30% | UDP socket stubbed |
 
 ## 🗑️ Obsolete
@@ -50,6 +50,6 @@ Programs with `[TODO]` suffix have:
 ## Next Steps
 
 1. Complete `lockfree_queue [TODO]` - Implement MPMC queue
-2. Complete `memory_pool [TODO]` - Implement slab allocator
+2. `memory_pool` - slab is implemented; what is left is promotion (external anchors), not code
 3. Complete `zero_copy_net [TODO]` - Implement UDP socket operations
 4. Remove obsolete `simd_crypto[TODO]` directory
