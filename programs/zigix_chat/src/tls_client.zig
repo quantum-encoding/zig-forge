@@ -8,14 +8,7 @@ const tls = std.crypto.tls;
 const Io = std.Io;
 const linux = std.os.linux;
 
-const posix = @cImport({
-    @cInclude("sys/socket.h");
-    @cInclude("netinet/in.h");
-    @cInclude("arpa/inet.h");
-    @cInclude("unistd.h");
-    @cInclude("string.h");
-    @cInclude("time.h");
-});
+const posix = @import("posix_c.zig");
 
 // ---- Constants ----
 

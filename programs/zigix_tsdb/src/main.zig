@@ -15,15 +15,7 @@
 ///   GET /api/recent — JSON array of last 50 entries
 const std = @import("std");
 
-const posix = @cImport({
-    @cInclude("sys/socket.h");
-    @cInclude("netinet/in.h");
-    @cInclude("unistd.h");
-    @cInclude("stdlib.h");
-    @cInclude("string.h");
-    @cInclude("time.h");
-    @cInclude("sys/time.h");
-});
+const posix = @import("posix_c.zig");
 
 const PORT: u16 = 8081;
 const MAX_ENTRIES: usize = 10000;
@@ -204,7 +196,7 @@ fn handleMetricsClient(fd: c_int, data: []const u8) void {
         .tokens_in = 0,
         .tokens_out = 0,
         .status_ok = true,
-        .model = [_]u8{0} ** 64,
+        .model = @splat(0),
         .model_len = 0,
     };
 

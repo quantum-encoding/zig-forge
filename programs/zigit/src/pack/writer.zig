@@ -95,7 +95,7 @@ pub const PackWriter = struct {
 
         const end_offset: u64 = self.body.written().len;
         const compressed_slice = self.body.written()[@intCast(start_offset)..@intCast(end_offset)];
-        const crc = std.hash.crc.Crc32.hash(compressed_slice);
+        const crc = std.hash.Crc32.hash(compressed_slice);
 
         const entry: Entry = .{ .oid = oid, .offset = start_offset, .crc32 = crc };
         try self.entries.append(self.allocator, entry);
@@ -133,7 +133,7 @@ pub const PackWriter = struct {
 
         const end_offset: u64 = self.body.written().len;
         const compressed_slice = self.body.written()[@intCast(start_offset)..@intCast(end_offset)];
-        const crc = std.hash.crc.Crc32.hash(compressed_slice);
+        const crc = std.hash.Crc32.hash(compressed_slice);
 
         const entry: Entry = .{ .oid = oid, .offset = start_offset, .crc32 = crc };
         try self.entries.append(self.allocator, entry);

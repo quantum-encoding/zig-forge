@@ -32,11 +32,8 @@ pub fn main() !void {
     snapshot = collector.collect();
     // Brief pause for CPU delta measurement
     {
-        const c = @cImport({
-            @cInclude("time.h");
-        });
-        var req = c.struct_timespec{ .tv_sec = 0, .tv_nsec = 100_000_000 };
-        _ = c.nanosleep(&req, null);
+        var req = std.c.timespec{ .sec = 0, .nsec = 100_000_000 };
+        _ = std.c.nanosleep(&req, null);
     }
     snapshot = collector.collect();
     services.refresh();

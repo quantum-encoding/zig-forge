@@ -103,5 +103,5 @@ test "OidPrefix matches odd-length prefix" {
 
 test "OidPrefix rejects too-short / too-long" {
     try std.testing.expectError(error.OidPrefixOutOfRange, OidPrefix.fromHex("abc"));
-    try std.testing.expectError(error.OidPrefixOutOfRange, OidPrefix.fromHex("a" ** 41));
+    try std.testing.expectError(error.OidPrefixOutOfRange, OidPrefix.fromHex(&@as([41]u8, @splat('a'))));
 }

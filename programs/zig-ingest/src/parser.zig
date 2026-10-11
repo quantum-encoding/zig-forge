@@ -38,7 +38,8 @@ pub fn parseFile(
     defer allocator.free(source);
 
     // Parse AST
-    var ast = Ast.parse(allocator, source, .zig) catch |err| {
+    // Zig 0.17 takes an options struct here; 0.16 takes the mode enum.
+    var ast = Ast.parse(allocator, source, if (@hasDecl(Ast, "ParseOptions")) .{ .mode = .zig } else .zig) catch |err| {
         if (verbose) {
             std.debug.print("  Parse error in {s}: {s}\n", .{ file_path, @errorName(err) });
         }

@@ -175,7 +175,7 @@ pub fn build(
         const resolved = try resolveAt(allocator, pack_bytes, raws.items, &offset_to_index, &resolved_cache, raw.start_offset);
         defer allocator.free(resolved.payload);
         const oid = try computeOid(resolved.kind, resolved.payload);
-        const crc = std.hash.crc.Crc32.hash(pack_bytes[@intCast(raw.start_offset)..@intCast(raw.end_offset)]);
+        const crc = std.hash.Crc32.hash(pack_bytes[@intCast(raw.start_offset)..@intCast(raw.end_offset)]);
         try entries.append(allocator, .{ .oid = oid, .offset = raw.start_offset, .crc32 = crc });
     }
 

@@ -117,7 +117,7 @@ pub fn getSystemStats() SystemStats {
         const line = cpu_buf[0..n];
         if (std.mem.startsWith(u8, line, "cpu ")) {
             var iter = std.mem.tokenizeScalar(u8, line["cpu ".len..], ' ');
-            var fields: [10]u64 = .{0} ** 10;
+            var fields: [10]u64 = @splat(0);
             var fi: usize = 0;
             while (iter.next()) |tok| {
                 if (fi >= 10) break;
@@ -188,12 +188,11 @@ pub fn getAllocator() std.mem.Allocator {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn readProcFile(path: [*:0]const u8, buf: []u8) ?usize {
-    const c = @cImport({ @cInclude("fcntl.h"); @cInclude("unistd.h"); });
     // O_CLOEXEC: never leak this /proc fd across a fork/exec into a child window.
-    const fd = c.open(path, c.O_RDONLY | c.O_CLOEXEC);
+    const fd = std.c.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
     if (fd < 0) return null;
-    defer _ = c.close(fd);
-    const n = c.read(fd, buf.ptr, buf.len);
+    defer _ = std.c.close(fd);
+    const n = std.c.read(fd, buf.ptr, buf.len);
     if (n <= 0) return null;
     return @intCast(n);
 }

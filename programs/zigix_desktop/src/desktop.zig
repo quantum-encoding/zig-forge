@@ -358,10 +358,10 @@ fn baseName(path: []const u8) []const u8 {
 fn setNonBlocking(fd_opt: anytype) !void {
     if (!platform.is_linux) return;
     const posix = std.posix;
-    const c = @cImport({ @cInclude("fcntl.h"); });
     const fd: posix.fd_t = fd_opt orelse return;
-    const flags = c.fcntl(fd, c.F_GETFL, @as(c_int, 0));
+    const flags = std.c.fcntl(fd, std.c.F.GETFL, @as(c_int, 0));
     if (flags == -1) return error.FcntlFailed;
-    const rc = c.fcntl(fd, c.F_SETFL, flags | c.O_NONBLOCK);
+    const o_nonblock: c_int = @bitCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    const rc = std.c.fcntl(fd, std.c.F.SETFL, flags | o_nonblock);
     if (rc == -1) return error.FcntlFailed;
 }

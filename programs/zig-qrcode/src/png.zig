@@ -4,7 +4,8 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Crc32 = std.hash.crc.Crc32IsoHdlc;
+// std.hash.Crc32 is CRC-32/ISO-HDLC on both Zig 0.16 and 0.17 (0.17 dropped the Crc32IsoHdlc name).
+const Crc32 = std.hash.Crc32;
 
 const PNG_SIGNATURE = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
 

@@ -18,7 +18,7 @@ const ffi_allocator: std.mem.Allocator = if (is_wasm) std.heap.wasm_allocator el
 // string even if called before any failure sets an error message. An `undefined`
 // buffer has no NUL guarantee and would cause an out-of-bounds read in a C caller
 // doing strlen (e.g. Rust CStr::from_ptr).
-var last_error: [256]u8 = [_]u8{0} ** 256;
+var last_error: [256]u8 = @splat(0);
 var last_error_len: usize = 0;
 
 fn setLastError(msg: []const u8) void {

@@ -2,12 +2,13 @@
 // Abstracted for future Zigix kernel integration via the same /proc interface.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const MAX_CORES: u8 = 16;
 pub const MAX_NET_IFACES: u8 = 8;
 
 pub const NetInterface = struct {
-    name: [16]u8 = [_]u8{0} ** 16,
+    name: [16]u8 = @splat(0),
     name_len: usize = 0,
     rx_bytes: u64 = 0,
     tx_bytes: u64 = 0,
@@ -22,7 +23,7 @@ pub const NetInterface = struct {
 pub const SystemSnapshot = struct {
     // CPU
     cpu_count: u8 = 0,
-    cpu_usage: [MAX_CORES]f32 = [_]f32{0} ** MAX_CORES,
+    cpu_usage: [MAX_CORES]f32 = @splat(0),
     cpu_total: f32 = 0,
 
     // Memory (kilobytes)
@@ -43,11 +44,11 @@ pub const SystemSnapshot = struct {
     uptime_secs: u64 = 0,
 
     // System identity
-    hostname: [64]u8 = [_]u8{0} ** 64,
+    hostname: [64]u8 = @splat(0),
     hostname_len: usize = 0,
-    kernel_version: [64]u8 = [_]u8{0} ** 64,
+    kernel_version: [64]u8 = @splat(0),
     kernel_version_len: usize = 0,
-    machine: [16]u8 = [_]u8{0} ** 16,
+    machine: [16]u8 = @splat(0),
     machine_len: usize = 0,
 
     // Disk (root filesystem)
@@ -55,7 +56,7 @@ pub const SystemSnapshot = struct {
     disk_used_kb: u64 = 0,
 
     // Network
-    net_ifaces: [MAX_NET_IFACES]NetInterface = [_]NetInterface{.{}} ** MAX_NET_IFACES,
+    net_ifaces: [MAX_NET_IFACES]NetInterface = @splat(.{}),
     net_iface_count: u8 = 0,
 
     // Timestamp
@@ -86,15 +87,15 @@ const CpuTimes = struct {
 const CpuTimesArray = [MAX_CORES + 1]CpuTimes;
 
 pub const SysInfoCollector = struct {
-    prev_cpu: CpuTimesArray = [_]CpuTimes{.{}} ** (MAX_CORES + 1),
+    prev_cpu: CpuTimesArray = @splat(.{}),
     has_prev: bool = false,
     identity_loaded: bool = false,
     // Cached identity (only read once)
-    cached_hostname: [64]u8 = [_]u8{0} ** 64,
+    cached_hostname: [64]u8 = @splat(0),
     cached_hostname_len: usize = 0,
-    cached_kernel: [64]u8 = [_]u8{0} ** 64,
+    cached_kernel: [64]u8 = @splat(0),
     cached_kernel_len: usize = 0,
-    cached_machine: [16]u8 = [_]u8{0} ** 16,
+    cached_machine: [16]u8 = @splat(0),
     cached_machine_len: usize = 0,
 
     pub fn collect(self: *SysInfoCollector) SystemSnapshot {
@@ -156,7 +157,7 @@ pub const SysInfoCollector = struct {
         var buf: [16384]u8 = undefined;
         const data = readProcFile("/proc/stat", &buf) orelse return;
 
-        var current: CpuTimesArray = [_]CpuTimes{.{}} ** (MAX_CORES + 1);
+        var current: CpuTimesArray = @splat(.{});
         var core_idx: u8 = 0;
 
         var lines = std.mem.splitScalar(u8, data, '\n');
@@ -316,13 +317,42 @@ fn parseNetDev(snap: *SystemSnapshot) void {
     snap.net_iface_count = iface_idx;
 }
 
+/// Hand binding of `struct statvfs` (sys/statvfs.h), replacing the former `@cImport`
+/// (Zig 0.17 removed it; std.c has no statvfs). Darwin's block/file counts are 32-bit;
+/// glibc/musl on 64-bit use 64-bit counts. The spare tail is oversized on purpose: only
+/// the leading fields are read and a larger buffer than libc writes is harmless.
+const StatVfs = if (builtin.os.tag.isDarwin()) extern struct {
+    f_bsize: c_ulong,
+    f_frsize: c_ulong,
+    f_blocks: c_uint,
+    f_bfree: c_uint,
+    f_bavail: c_uint,
+    f_files: c_uint,
+    f_ffree: c_uint,
+    f_favail: c_uint,
+    f_fsid: c_ulong,
+    f_flag: c_ulong,
+    f_namemax: c_ulong,
+} else extern struct {
+    f_bsize: c_ulong,
+    f_frsize: c_ulong,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_favail: u64,
+    f_fsid: c_ulong,
+    f_flag: c_ulong,
+    f_namemax: c_ulong,
+    f_spare: [16]c_int,
+};
+extern "c" fn statvfs(path: [*:0]const u8, buf: *StatVfs) c_int;
+
 fn getDiskUsage(snap: *SystemSnapshot) void {
     // Use statvfs via libc
-    const c = @cImport({
-        @cInclude("sys/statvfs.h");
-    });
-    var stat: c.struct_statvfs = undefined;
-    if (c.statvfs("/", &stat) == 0) {
+    var stat: StatVfs = undefined;
+    if (statvfs("/", &stat) == 0) {
         const block_size: u64 = stat.f_frsize;
         snap.disk_total_kb = (stat.f_blocks * block_size) / 1024;
         snap.disk_used_kb = ((stat.f_blocks - stat.f_bfree) * block_size) / 1024;
@@ -351,17 +381,13 @@ pub fn currentEpochSecs() ?u64 {
 /// retries on EINTR rather than silently truncating. Returns the populated
 /// slice, or null if the file could not be opened or nothing was read.
 pub fn readProcFile(path: [*:0]const u8, buf: []u8) ?[]const u8 {
-    const c = @cImport({
-        @cInclude("fcntl.h");
-        @cInclude("unistd.h");
-    });
-    const fd = c.open(path, c.O_RDONLY);
+    const fd = std.c.open(path, .{ .ACCMODE = .RDONLY });
     if (fd < 0) return null;
-    defer _ = c.close(fd);
+    defer _ = std.c.close(fd);
 
     var total: usize = 0;
     while (total < buf.len) {
-        const n = c.read(fd, buf.ptr + total, buf.len - total);
+        const n = std.c.read(fd, buf.ptr + total, buf.len - total);
         if (n < 0) {
             // Retry on interrupted syscall; any other error stops the read.
             if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
