@@ -23,9 +23,9 @@ pub const PriceLevel = struct {
 
 /// Order book with bids and asks.
 pub const OrderBook = struct {
-    symbol: [16]u8 = [_]u8{0} ** 16,
-    bids: [MAX_LEVELS]PriceLevel align(64) = [_]PriceLevel{.{}} ** MAX_LEVELS,
-    asks: [MAX_LEVELS]PriceLevel align(64) = [_]PriceLevel{.{}} ** MAX_LEVELS,
+    symbol: [16]u8 = @splat(0),
+    bids: [MAX_LEVELS]PriceLevel align(64) = @splat(.{}),
+    asks: [MAX_LEVELS]PriceLevel align(64) = @splat(.{}),
     bid_count: u32 = 0,
     ask_count: u32 = 0,
     sequence: u64 = 0,
