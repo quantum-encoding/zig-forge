@@ -20,7 +20,12 @@ pub fn build(b: *std.Build) void {
     // Externally-anchored parity tests shell out to the installed zwho binary
     // and the real GNU `who`, so they need the exe's absolute install path.
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "zwho_path", b.getInstallPath(.bin, "zwho"));
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        test_opts.addOption([]const u8, "zwho_path", b.getInstallPath(.bin, "zwho"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time, so the path is resolved lazily.
+        test_opts.addOptionPathUntracked("zwho_path", .{ .relative = .{ .base = .install_bin, .sub_path = "zwho" } });
+    }
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
