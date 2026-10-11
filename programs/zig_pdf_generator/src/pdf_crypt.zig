@@ -242,7 +242,9 @@ pub fn osSeed() [32]u8 {
 /// same way `std.Io.Threaded.randomSecure` does: prefer the fork-safe,
 /// no-seed-required `arc4random_buf` wherever the libc declares it (Apple/BSD,
 /// glibc >= 2.36), then `getrandom(2)` — through libc when it wraps the syscall
-/// (glibc >= 2.25, musl, Android >= 28), otherwise raw.
+/// (glibc >= 2.25, musl, Android >= 28), otherwise raw. Windows has neither and
+/// draws from `BCryptGenRandom` with the system-preferred RNG (CNG), as the
+/// ML-DSA signer's RNG does.
 fn fillOsRandom(buf: []u8) bool {
     const builtin = @import("builtin");
     if (buf.len == 0) return true;
@@ -275,10 +277,29 @@ fn fillOsRandom(buf: []u8) bool {
             }
         }
         return true;
+    } else if (comptime builtin.os.tag == .windows) {
+        // cbBuffer is a ULONG, so a buffer past 4 GiB is drawn in chunks.
+        var off: usize = 0;
+        while (off < buf.len) {
+            const len: u32 = @intCast(@min(buf.len - off, std.math.maxInt(u32)));
+            const status = BCryptGenRandom(null, buf.ptr + off, len, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+            if (status != 0) return false; // anything but STATUS_SUCCESS
+            off += len;
+        }
+        return true;
     } else {
         @compileError("no cryptographically secure OS RNG available for this target");
     }
 }
+
+const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x00000002;
+
+extern "bcrypt" fn BCryptGenRandom(
+    hAlgorithm: ?*anyopaque,
+    pbBuffer: [*]u8,
+    cbBuffer: u32,
+    dwFlags: u32,
+) callconv(.winapi) i32;
 
 // =============================================================================
 // /Encrypt dictionary entries (V5/R6)
@@ -412,6 +433,15 @@ fn testRand() Randomness {
         .o_key_salt = [_]u8{0x55} ** 8,
         .perms_rand = [_]u8{0x66} ** 4,
     };
+}
+
+test "osSeed draws distinct, non-zero OS entropy on native targets" {
+    if (comptime @import("builtin").target.cpu.arch.isWasm()) return error.SkipZigTest;
+    const a = osSeed();
+    const b = osSeed();
+    try std.testing.expect(!std.mem.allEqual(u8, &a, 0));
+    try std.testing.expect(!std.mem.allEqual(u8, &b, 0));
+    try std.testing.expect(!std.mem.eql(u8, &a, &b));
 }
 
 test "AES-256-CBC pad round-trips arbitrary lengths" {
