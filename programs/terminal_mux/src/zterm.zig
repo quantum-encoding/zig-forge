@@ -231,7 +231,7 @@ pub fn runnerSocketPathFrom(
     home: ?[]const u8,
     baton_dir_present: bool,
 ) !?[:0]u8 {
-    if (override) |o| return try alloc.dupeZ(u8, o);
+    if (override) |o| return try alloc.dupeSentinel(u8, o, 0);
     if (baton_home) |b| return try std.fmt.allocPrintSentinel(alloc, "{s}" ++ SEP ++ "var" ++ SEP ++ "{s}.sock", .{ b, RUNNER_NAME }, 0);
     if (baton_dir_present) {
         if (home) |h| return try std.fmt.allocPrintSentinel(alloc, "{s}" ++ SEP ++ ".baton" ++ SEP ++ "var" ++ SEP ++ "{s}.sock", .{ h, RUNNER_NAME }, 0);
@@ -471,7 +471,7 @@ pub fn parseSpawnArgv(alloc: std.mem.Allocator, argv: std.json.Value, why: *[]co
         return null;
     };
     for (items, 0..) |it, made| {
-        out[made] = alloc.dupeZ(u8, it.string) catch {
+        out[made] = alloc.dupeSentinel(u8, it.string, 0) catch {
             freeSpawnEnv(alloc, out[0..made]);
             alloc.free(out);
             why.* = "out of memory";
@@ -2419,7 +2419,7 @@ pub fn clientSocketCandidates(
         out.deinit(alloc);
     }
     if (zterm_socket) |z| {
-        try out.append(alloc, try alloc.dupeZ(u8, z));
+        try out.append(alloc, try alloc.dupeSentinel(u8, z, 0));
         return out.toOwnedSlice(alloc);
     }
     if (try runnerSocketPathFrom(alloc, runner_override, baton_home, home, baton_dir_present)) |door| {
@@ -3084,7 +3084,7 @@ test "a client looks for the service's runner door before the default control so
         }
     }.all;
     // The default control socket: /tmp/zterm-<uid>.sock, %TEMP%\zterm.sock on Windows.
-    const dflt = if (sys.is_windows) try ctl.defaultSocketPath(a) else try a.dupeZ(u8, "/tmp/zterm-501.sock");
+    const dflt = if (sys.is_windows) try ctl.defaultSocketPath(a) else try a.dupeSentinel(u8, "/tmp/zterm-501.sock", 0);
     defer a.free(dflt);
     // $ZTERM_SOCKET is the only place when it is set.
     {
@@ -3180,7 +3180,7 @@ test "pasteLanded needs NEW evidence, never evidence that was already there" {
 }
 
 test "tailOf keeps at most 48 codepoints and never splits one" {
-    const long = "x" ** 60 ++ "日本語";
+    const long = &@as([60]u8, @splat('x')) ++ "日本語";
     const t = tailOf(long);
     try testing.expect(std.unicode.utf8ValidateSlice(t));
     try testing.expectEqual(@as(usize, 48), try std.unicode.utf8CountCodepoints(t));
@@ -3194,7 +3194,7 @@ test "designations: valid names, pid: addressing, case-insensitive match" {
     try testing.expect(!validName(""));
     try testing.expect(!validName("has space"));
     try testing.expect(!validName("pid:12"));
-    try testing.expect(!validName("x" ** 65));
+    try testing.expect(!validName(&@as([65]u8, @splat('x'))));
     try testing.expect(answersTo("Scribe", 42, "scribe"));
     try testing.expect(answersTo("scribe", 42, "pid:42"));
     try testing.expect(!answersTo("scribe", 42, "pid:41"));
@@ -3342,6 +3342,6 @@ test "spawn env: anything outside the bounds is refused whole" {
         try std.testing.expect(why.len > 0);
     }
     // The key-length bound is inclusive at 64.
-    try std.testing.expect(validEnvKey("A" ** SPAWN_ENV_MAX_KEY));
-    try std.testing.expect(!validEnvKey("A" ** (SPAWN_ENV_MAX_KEY + 1)));
+    try std.testing.expect(validEnvKey(&@as([SPAWN_ENV_MAX_KEY]u8, @splat('A'))));
+    try std.testing.expect(!validEnvKey(&@as([SPAWN_ENV_MAX_KEY + 1]u8, @splat('A'))));
 }

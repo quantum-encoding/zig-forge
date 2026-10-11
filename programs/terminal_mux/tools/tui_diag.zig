@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("usage: tui_diag <stream.bin>\n", .{});
         return;
     }
-    const path0 = try alloc.dupeZ(u8, args.items[1]);
+    const path0 = try alloc.dupeSentinel(u8, args.items[1], 0);
     defer alloc.free(path0);
     const fd = try posix.openatZ(std.c.AT.FDCWD, path0, .{ .ACCMODE = .RDONLY }, 0);
     defer _ = std.c.close(fd);
