@@ -526,7 +526,7 @@ test "stun header serialization" {
     const header = StunHeader{
         .msg_type = .binding_request,
         .length = 0,
-        .transaction_id = [_]u8{0x42} ** 12,
+        .transaction_id = @as([12]u8, @splat(0x42)),
     };
 
     const buf = header.serialize();

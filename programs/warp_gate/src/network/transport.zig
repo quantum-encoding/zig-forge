@@ -487,7 +487,7 @@ test "packet header serialization" {
 }
 
 test "checksum computation" {
-    const header = [_]u8{0x01} ** HEADER_SIZE;
+    const header = @as([HEADER_SIZE]u8, @splat(0x01));
     const payload = "Hello";
 
     const cs1 = computeChecksum(&header, payload);
