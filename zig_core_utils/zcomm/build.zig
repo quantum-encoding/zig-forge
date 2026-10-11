@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zcomm");
     run_step.dependOn(&run_cmd.step);
@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
     // (literal 9.10 byte anchors + live-binary diff). The test process locates
     // the built zcomm via ZCOMM_BIN.
     const test_opts = b.addOptions();
-    test_opts.addOption([]const u8, "zcomm_bin", b.getInstallPath(.bin, "zcomm"));
+    test_opts.addOptionPath("zcomm_bin", exe.getEmittedBin());
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/gnu_parity_test.zig"),
