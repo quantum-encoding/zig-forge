@@ -53,7 +53,7 @@ pub fn main() !void {
 }
 
 fn benchmarkScalar(writer: anytype, iterations: u64) !void {
-    var input = [_]u8{0} ** 80;
+    var input = @as([80]u8, @splat(0));
     var output: [32]u8 = undefined;
 
     // Warmup
