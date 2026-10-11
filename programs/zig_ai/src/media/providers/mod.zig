@@ -100,8 +100,7 @@ pub fn getAvailableProviders(config: MediaConfig) []const ImageProvider {
     var count: usize = 0;
     var available: [9]ImageProvider = undefined;
 
-    inline for (std.meta.fields(ImageProvider)) |field| {
-        const provider: ImageProvider = @enumFromInt(field.value);
+    inline for (std.enums.values(ImageProvider)) |provider| {
         if (config.hasProvider(provider)) {
             available[count] = provider;
             count += 1;

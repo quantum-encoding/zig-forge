@@ -15,7 +15,7 @@ pub fn writeResults(
     output_path: []const u8,
 ) !void {
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{output_path}) catch return error.PathTooLong;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{output_path}, 0) catch return error.PathTooLong;
 
     const file = std.c.fopen(path_z, "w") orelse return error.FileOpenFailed;
     defer _ = std.c.fclose(file);
@@ -29,7 +29,7 @@ pub fn writeResults(
         defer allocator.free(line);
 
         var line_buf: [8192]u8 = undefined;
-        const line_z = std.fmt.bufPrintZ(&line_buf, "{s}", .{line}) catch continue;
+        const line_z = std.fmt.bufPrintSentinel(&line_buf, "{s}", .{line}, 0) catch continue;
         _ = fputs(line_z, file);
     }
 

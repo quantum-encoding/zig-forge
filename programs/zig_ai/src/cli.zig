@@ -916,7 +916,7 @@ pub fn saveCodeBlocks(allocator: std.mem.Allocator, content: []const u8, base_na
         defer allocator.free(filename);
 
         // Write file using C API (Zig 0.16 compatible)
-        const filename_z = try allocator.dupeZ(u8, filename);
+        const filename_z = try allocator.dupeSentinel(u8, filename, 0);
         defer allocator.free(filename_z);
 
         const file = std.c.fopen(filename_z, "wb") orelse {

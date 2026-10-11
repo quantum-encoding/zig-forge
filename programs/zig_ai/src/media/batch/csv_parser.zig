@@ -57,7 +57,7 @@ extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *FILE) usize;
 pub fn parseFile(allocator: std.mem.Allocator, file_path: []const u8) ![]types.ImageBatchRequest {
     // Read file using C stdio (Zig 0.16 compatible)
     var path_buf: [4096]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{file_path}) catch return error.PathTooLong;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{file_path}, 0) catch return error.PathTooLong;
 
     const file = std.c.fopen(path_z, "rb") orelse return error.FileOpenFailed;
     defer _ = std.c.fclose(file);

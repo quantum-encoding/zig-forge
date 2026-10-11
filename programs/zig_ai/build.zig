@@ -82,9 +82,7 @@ pub fn build(b: *std.Build) void {
         // Run step
         const run_cmd = b.addRunArtifact(exe);
         run_cmd.step.dependOn(b.getInstallStep());
-        if (b.args) |args| {
-            run_cmd.addArgs(args);
-        }
+        if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
         const run_step = b.step("run", "Run zig-ai CLI");
         run_step.dependOn(&run_cmd.step);
     }
@@ -164,9 +162,7 @@ pub fn build(b: *std.Build) void {
 
     const run_model_tests = b.addRunArtifact(model_test_exe);
     run_model_tests.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_model_tests.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_model_tests.addPassthruArgs() else if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_model_tests.addPassthruArgs() else if (b.args) |args| run_model_tests.addArgs(args);
     const model_test_step = b.step("test-models", "Run model connectivity tests");
     model_test_step.dependOn(&run_model_tests.step);
 
@@ -192,9 +188,7 @@ pub fn build(b: *std.Build) void {
 
     const run_tool_tests = b.addRunArtifact(tool_test_exe);
     run_tool_tests.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_tool_tests.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_tool_tests.addPassthruArgs() else if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_tool_tests.addPassthruArgs() else if (b.args) |args| run_tool_tests.addArgs(args);
     const tool_test_step = b.step("test-tools", "Run tool calling smoke tests");
     tool_test_step.dependOn(&run_tool_tests.step);
 }

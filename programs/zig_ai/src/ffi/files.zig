@@ -72,7 +72,7 @@ export fn zig_ai_file_upload(
     defer allocator.free(result_json);
 
     // Parse JSON response to extract file_id
-    const file_id_copy = allocator.dupeZ(u8, result_json) catch {
+    const file_id_copy = allocator.dupeSentinel(u8, result_json, 0) catch {
         response_out.success = false;
         response_out.error_code = ErrorCode.OUT_OF_MEMORY;
         return;
@@ -83,7 +83,7 @@ export fn zig_ai_file_upload(
     response_out.file_id = .{ .ptr = file_id_copy.ptr, .len = result_json.len };
 
     // Copy filename
-    const name_copy = allocator.dupeZ(u8, name) catch null;
+    const name_copy = allocator.dupeSentinel(u8, name, 0) catch null;
     if (name_copy) |nc| {
         response_out.filename = .{ .ptr = nc.ptr, .len = name.len };
     }
@@ -126,7 +126,7 @@ export fn zig_ai_file_list(
     };
     defer allocator.free(json);
 
-    const json_copy = allocator.dupeZ(u8, json) catch {
+    const json_copy = allocator.dupeSentinel(u8, json, 0) catch {
         result_out.success = false;
         result_out.error_code = ErrorCode.OUT_OF_MEMORY;
         return;
@@ -212,7 +212,7 @@ fn mapError(err: anyerror) i32 {
 }
 
 fn makeErrorString(msg: []const u8) CString {
-    const duped = allocator.dupeZ(u8, msg) catch return .{ .ptr = null, .len = 0 };
+    const duped = allocator.dupeSentinel(u8, msg, 0) catch return .{ .ptr = null, .len = 0 };
     return .{ .ptr = duped.ptr, .len = msg.len };
 }
 

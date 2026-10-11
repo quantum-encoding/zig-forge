@@ -451,7 +451,7 @@ fn runList(allocator: std.mem.Allocator, args: []const []const u8) !void {
     std.debug.print("{s:<40} {s:<14} {s:<8} {s:<8} {s:<8} {s:<8} {s}\n", .{
         "BATCH ID", "STATUS", "OK", "ERR", "CANCEL", "EXPIRE", "CREATED",
     });
-    std.debug.print("{s}\n", .{"-" ** 100});
+    std.debug.print("{s}\n", .{&@as([100]u8, @splat('-'))});
 
     for (batches) |b| {
         const status = if (b.raw_status) |rs| rs else b.processing_status.toString();

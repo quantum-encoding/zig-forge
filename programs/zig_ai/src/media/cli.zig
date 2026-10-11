@@ -1010,8 +1010,7 @@ pub fn listProviders() void {
         \\
     , .{});
 
-    inline for (std.meta.fields(ImageProvider)) |field| {
-        const provider: ImageProvider = @enumFromInt(field.value);
+    inline for (std.enums.values(ImageProvider)) |provider| {
         const available = config.hasProvider(provider);
         const status = if (available) "\x1b[32m✓\x1b[0m" else "\x1b[31m✗\x1b[0m";
 
@@ -1028,8 +1027,7 @@ pub fn listProviders() void {
         \\
     , .{});
 
-    inline for (std.meta.fields(VideoProvider)) |field| {
-        const provider: VideoProvider = @enumFromInt(field.value);
+    inline for (std.enums.values(VideoProvider)) |provider| {
         const available = config.hasVideoProvider(provider);
         const status = if (available) "\x1b[32m✓\x1b[0m" else "\x1b[31m✗\x1b[0m";
 
@@ -1046,8 +1044,7 @@ pub fn listProviders() void {
         \\
     , .{});
 
-    inline for (std.meta.fields(MusicProvider)) |field| {
-        const provider: MusicProvider = @enumFromInt(field.value);
+    inline for (std.enums.values(MusicProvider)) |provider| {
         const available = config.hasMusicProvider(provider);
         const status = if (available) "\x1b[32m✓\x1b[0m" else "\x1b[31m✗\x1b[0m";
 

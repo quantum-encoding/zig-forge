@@ -417,7 +417,7 @@ fn mapError(err: anyerror) i32 {
 }
 
 fn makeErrorString(msg: []const u8) CString {
-    const duped = allocator.dupeZ(u8, msg) catch return .{ .ptr = null, .len = 0 };
+    const duped = allocator.dupeSentinel(u8, msg, 0) catch return .{ .ptr = null, .len = 0 };
     return .{ .ptr = duped.ptr, .len = msg.len };
 }
 
