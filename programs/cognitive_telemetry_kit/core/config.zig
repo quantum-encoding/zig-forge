@@ -42,7 +42,7 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) Config {
     };
 
     // Read config file using C APIs (platform-agnostic, no std.Io needed)
-    const path_z = allocator.dupeZ(u8, path) catch {
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch {
         loadDefaults(allocator, &config);
         return config;
     };
