@@ -477,7 +477,7 @@ pub const DupeFinder = struct {
                 const entry = &self.files.items[idx];
 
                 // Use quick hash if available, otherwise use zero hash (will be unique)
-                const key = entry.quick_hash orelse [_]u8{0} ** 32;
+                const key = entry.quick_hash orelse @as([32]u8, @splat(0));
 
                 const gop = try quick_groups.getOrPut(key);
                 if (!gop.found_existing) {
@@ -709,7 +709,7 @@ pub fn coveringRootsOf(allocator: std.mem.Allocator, paths: []const []const u8) 
 }
 
 fn canonicalPath(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     var buf: [sys.c.PATH_MAX]u8 = undefined;
@@ -771,10 +771,10 @@ test "a sparse disk image and its dense copy are duplicates; a same-size image t
     defer scratch.deinit();
 
     const size: u64 = hasher.probe_sample_min + 4 * 1024 * 1024;
-    const header = [_]u8{'h'} ** 4096;
+    const header: [4096]u8 = @splat('h');
     const sampled = ((size - 4096) / hasher.probeSamples(size) * 3) & ~@as(u64, 4095);
-    const one = [_]u8{'1'} ** 4096;
-    const two = [_]u8{'2'} ** 4096;
+    const one: [4096]u8 = @splat('1');
+    const two: [4096]u8 = @splat('2');
     try scratch.makeDir("vm");
     try scratch.writeSparse("vm/a.img", size, &.{ .{ .offset = 0, .data = &header }, .{ .offset = sampled, .data = &one } });
     try scratch.writeSparse("vm/other.img", size, &.{ .{ .offset = 0, .data = &header }, .{ .offset = sampled, .data = &two } });
@@ -840,7 +840,7 @@ test "APFS clones are read once, share a clone class, and count as one copy" {
     var scratch = try Scratch.init(allocator, "dedupe-clones");
     defer scratch.deinit();
 
-    const data = [_]u8{'c'} ** (200 * 1024);
+    const data: [200 * 1024]u8 = @splat('c');
     try scratch.writeFile("orig", &data);
     try scratch.writeFile("copy", &data);
     const orig = try scratch.joinZ("orig");

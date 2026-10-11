@@ -593,9 +593,9 @@ test "hashBytesSha256 empty data" {
 }
 
 test "hashLessThan sorting" {
-    const hash_a: Hash = [_]u8{0x00} ** 32;
-    const hash_b: Hash = [_]u8{0xff} ** 32;
-    const hash_c: Hash = [_]u8{0x80} ** 32;
+    const hash_a: Hash = @splat(0x00);
+    const hash_b: Hash = @splat(0xff);
+    const hash_c: Hash = @splat(0x80);
 
     try std.testing.expect(hashLessThan({}, hash_a, hash_b));
     try std.testing.expect(!hashLessThan({}, hash_b, hash_a));
@@ -612,7 +612,7 @@ test "BatchHasher initialization" {
 }
 
 test "hashToHex all zeros" {
-    const hash: Hash = [_]u8{0x00} ** 32;
+    const hash: Hash = @splat(0x00);
     var buf: [64]u8 = undefined;
     const hex = hashToHex(&hash, &buf);
 
@@ -623,7 +623,7 @@ test "hashToHex all zeros" {
 }
 
 test "hashToHex all ones" {
-    const hash: Hash = [_]u8{0xff} ** 32;
+    const hash: Hash = @splat(0xff);
     var buf: [64]u8 = undefined;
     const hex = hashToHex(&hash, &buf);
 
@@ -671,9 +671,9 @@ test "a sparse file hashes like its dense copy, and like its bytes" {
     // Data at the start, in the middle across a block boundary, and in the
     // last partial block; holes between, and none at the very end.
     const size: u64 = 3 * 1024 * 1024 + 123;
-    const head = [_]u8{'a'} ** 4096;
-    const middle = [_]u8{'b'} ** 5000;
-    const tail = [_]u8{'c'} ** 100;
+    const head: [4096]u8 = @splat('a');
+    const middle: [5000]u8 = @splat('b');
+    const tail: [100]u8 = @splat('c');
     const extents = [_]Scratch.Extent{
         .{ .offset = 0, .data = &head },
         .{ .offset = 1024 * 1024 + 2048, .data = &middle },
@@ -719,10 +719,10 @@ test "the probe tells big same-size files apart past their first block, and agre
 
     // Two disk images with the same header, differing at the 7th sample.
     const size: u64 = probe_sample_min + 8 * 1024 * 1024;
-    const header = [_]u8{'h'} ** 4096;
+    const header: [4096]u8 = @splat('h');
     const sampled = ((size - 4096) / probeSamples(size) * 7) & ~@as(u64, 4095);
-    const one = [_]u8{'1'} ** 4096;
-    const two = [_]u8{'2'} ** 4096;
+    const one: [4096]u8 = @splat('1');
+    const two: [4096]u8 = @splat('2');
     try scratch.writeSparse("a.img", size, &.{ .{ .offset = 0, .data = &header }, .{ .offset = sampled, .data = &one } });
     try scratch.writeSparse("b.img", size, &.{ .{ .offset = 0, .data = &header }, .{ .offset = sampled, .data = &two } });
     try scratch.writeSparse("a-copy.img", size, &.{ .{ .offset = 0, .data = &header }, .{ .offset = sampled, .data = &one } });
@@ -751,7 +751,7 @@ test "byte progress lands exactly on each file's share" {
     var scratch = try Scratch.init(allocator, "hasher-bytes");
     defer scratch.deinit();
 
-    const data = [_]u8{'d'} ** 10_000;
+    const data: [10_000]u8 = @splat('d');
     try scratch.writeSparse("f", 1024 * 1024, &.{.{ .offset = 0, .data = &data }});
     const path = try scratch.join("f");
     defer allocator.free(path);
