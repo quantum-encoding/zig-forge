@@ -117,8 +117,13 @@ for i in "${!android_targets[@]}"; do
     [ -d "$d" ] || { echo "error: NDK sysroot has no $d" >&2; exit 1; }
   done
   libc_file="$scratch/libc-$triple.txt"
-  printf 'include_dir=%s\nsys_include_dir=%s\ncrt_dir=%s\nmsvc_lib_dir=\nkernel32_lib_dir=\ngcc_dir=\n' \
-    "$sysroot/usr/include" "$sysroot/usr/include/$triple" "$sysroot/usr/lib/$triple/$android_api" > "$libc_file"
+  # gcc_dir is 0.16's name for what 0.17 calls cc_dir (it reads either); 0.17 refuses a
+  # Linux-OS file with it empty or without darwin_sdk_dir, 0.16 ignores the key it does not
+  # know. It names where crtbegin/crtend are looked up; the NDK keeps its crtbegin_so.o /
+  # crtend_so.o in the same per-API directory as the other crt objects.
+  crt="$sysroot/usr/lib/$triple/$android_api"
+  printf 'include_dir=%s\nsys_include_dir=%s\ncrt_dir=%s\nmsvc_lib_dir=\nkernel32_lib_dir=\ngcc_dir=%s\ndarwin_sdk_dir=\n' \
+    "$sysroot/usr/include" "$sysroot/usr/include/$triple" "$crt" "$crt" > "$libc_file"
   # Built under its final name, so the SONAME is the file name consumers would load.
   so="libzsss-${android_names[$i]}.so"
   "$ZIG" build-lib -OReleaseFast -target "${android_targets[$i]}" -lc -dynamic --libc "$libc_file" \
