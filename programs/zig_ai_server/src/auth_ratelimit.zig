@@ -75,7 +75,7 @@ pub const AuthRateLimiter = struct {
     /// Check if a request is allowed for the given IP.
     /// Returns true if allowed, false if rate limited.
     pub fn check(self: *AuthRateLimiter, io: std.Io, ip: []const u8) bool {
-        var key: IpKey = .{0} ** 64;
+        var key: IpKey = @splat(0);
         const copy_len = @min(ip.len, key.len);
         @memcpy(key[0..copy_len], ip[0..copy_len]);
 
