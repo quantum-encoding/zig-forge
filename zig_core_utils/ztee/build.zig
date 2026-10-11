@@ -19,24 +19,24 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run ztee");
     run_step.dependOn(&run_cmd.step);
 
     // --- Tests: externally anchored against the real GNU `tee` binary --------
 
-    // Absolute path of the ztee binary the tests will exec.
-    const ztee_bin = b.getInstallPath(.bin, "ztee");
-
     // Discover a GNU `tee` on the build host (Homebrew coreutils). If none is
     // found, the differential parity tests skip gracefully.
     const gtee_bin = findGnuTee() orelse "";
 
     const options = b.addOptions();
-    options.addOption([]const u8, "ztee_bin", ztee_bin);
+    if (@hasDecl(std.Build, "getInstallPath")) {
+        options.addOption([]const u8, "ztee_bin", b.getInstallPath(.bin, "ztee"));
+    } else {
+        // Zig 0.17: the install prefix is known only at make time, so the path is resolved lazily.
+        options.addOptionPathUntracked("ztee_bin", .{ .relative = .{ .base = .install_bin, .sub_path = "ztee" } });
+    }
     options.addOption([]const u8, "gtee_bin", gtee_bin);
 
     const test_mod = b.createModule(.{
