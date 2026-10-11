@@ -19,9 +19,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run zinstall");
     run_step.dependOn(&run_cmd.step);
@@ -31,7 +29,7 @@ pub fn build(b: *std.Build) void {
     // to invoke the freshly built zinstall, so it depends on the install step
     // and is told the installed binary path via build options.
     const options = b.addOptions();
-    options.addOption([]const u8, "zinstall_path", b.getInstallPath(.bin, "zinstall"));
+    if (@hasDecl(std.Build, "getInstallPath")) options.addOption([]const u8, "zinstall_path", b.getInstallPath(.bin, "zinstall")) else options.addOptionPath("zinstall_path", exe.getEmittedBin());
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/gnu_parity_test.zig"),
