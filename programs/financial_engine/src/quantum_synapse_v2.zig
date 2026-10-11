@@ -430,7 +430,7 @@ const Position = struct {
     positions: [1000]i32, // Position per symbol ID
     
     pub fn init() Position {
-        return .{ .positions = [_]i32{0} ** 1000 };
+        return .{ .positions = @as([1000]i32, @splat(0)) };
     }
     
     pub fn getSize(self: *const Position, symbol_id: u32) u32 {

@@ -191,10 +191,7 @@ pub const HFTSystem = struct {
     pub fn init(allocator: std.mem.Allocator, config: SystemConfig, executor: ?TradeExecutor) !Self {
         return .{
             .order_books = std.StringHashMap(*OrderBook).init(allocator),
-            .strategies = std.ArrayListAligned(Strategy, null){
-                .items = &.{},
-                .capacity = 0,
-            },
+            .strategies = std.ArrayListAligned(Strategy, null).empty,
             .tick_pool = try pool_lib.SimplePool(MarketTick).init(allocator, config.strategy_config.tick_pool_size),
             .signal_pool = try pool_lib.SimplePool(Signal).init(allocator, config.strategy_config.signal_pool_size),
             .executor = executor,

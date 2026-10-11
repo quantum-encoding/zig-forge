@@ -1,4 +1,6 @@
+// TODO(zig-0.17): @cImport of mbedtls/libwebsockets/zmq (by-value lws/mbedtls context structs) needs hand bindings; deps absent here, broken at 0.16 baseline too
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -48,7 +50,7 @@ pub fn build(b: *std.Build) void {
     const android_core_module = b.createModule(.{
         .root_source_file = b.path("src/financial_core.zig"),
         .target = android_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const android_core_lib = b.addLibrary(.{
@@ -76,7 +78,7 @@ pub fn build(b: *std.Build) void {
     const android_ffi_module = b.createModule(.{
         .root_source_file = b.path("src/ffi.zig"),
         .target = android_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const android_ffi_lib = b.addLibrary(.{
@@ -195,7 +197,7 @@ pub fn build(b: *std.Build) void {
 
     // Real HFT System executable
     // NOTE: Force ReleaseFast due to Zig 0.16 dev DWARF bug with libwebsockets/libsystemd in Debug mode
-    const real_hft_optimize = if (optimize == .Debug) .ReleaseFast else optimize;
+    const real_hft_optimize = if (optimize == Optimize.Debug) Optimize.ReleaseFast else optimize;
     const real_hft_exe = b.addExecutable(.{
         .name = "real-hft-system",
         .root_module = b.createModule(.{
@@ -242,9 +244,7 @@ pub fn build(b: *std.Build) void {
     // Run commands
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) run_cmd.addPassthruArgs() else if (b.args) |args| run_cmd.addArgs(args);
     
     const run_step = b.step("run", "Run the main application");
     run_step.dependOn(&run_cmd.step);
@@ -379,7 +379,7 @@ pub fn build(b: *std.Build) void {
     const android_coinbase_fix_module = b.createModule(.{
         .root_source_file = b.path("src/coinbase_fix_ffi.zig"),
         .target = android_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const android_coinbase_fix_lib = b.addLibrary(.{

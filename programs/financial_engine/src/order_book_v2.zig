@@ -85,10 +85,7 @@ pub const PriceLevel = struct {
             .price = price,
             .total_quantity = Decimal.zero(),
             .order_count = 0,
-            .orders = std.ArrayListAligned(*Order, null){
-                .items = &.{},
-                .capacity = 0,
-            },
+            .orders = std.ArrayListAligned(*Order, null).empty,
         };
     }
     
@@ -132,18 +129,9 @@ pub const OrderBook = struct {
     pub fn init(allocator: std.mem.Allocator, symbol: []const u8) Self {
         return .{
             .symbol = symbol,
-            .bids = std.ArrayListAligned(PriceLevel, null){
-                .items = &.{},
-                .capacity = 0,
-            },
-            .asks = std.ArrayListAligned(PriceLevel, null){
-                .items = &.{},
-                .capacity = 0,
-            },
-            .trades = std.ArrayListAligned(Trade, null){
-                .items = &.{},
-                .capacity = 0,
-            },
+            .bids = std.ArrayListAligned(PriceLevel, null).empty,
+            .asks = std.ArrayListAligned(PriceLevel, null).empty,
+            .trades = std.ArrayListAligned(Trade, null).empty,
             .orders = std.AutoHashMap(u64, *Order).init(allocator),
             .allocator = allocator,
             .next_order_id = 1,
