@@ -555,15 +555,15 @@ test "slab - per-class capacities" {
     // Give different capacities to different size classes
     var slab = try SlabAllocator.initWithCapacities(testing.allocator, .{
         128, // 8-byte class: lots of small objects
-        64,  // 16-byte class
-        32,  // 32-byte class
-        16,  // 64-byte class
-        8,   // 128-byte class
-        4,   // 256-byte class
-        2,   // 512-byte class
-        2,   // 1024-byte class
-        1,   // 2048-byte class
-        1,   // 4096-byte class
+        64, // 16-byte class
+        32, // 32-byte class
+        16, // 64-byte class
+        8, // 128-byte class
+        4, // 256-byte class
+        2, // 512-byte class
+        2, // 1024-byte class
+        1, // 2048-byte class
+        1, // 4096-byte class
     });
     defer slab.deinit();
 
