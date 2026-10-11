@@ -1,4 +1,7 @@
 const std = @import("std");
+const Optimize = std.builtin.OptimizeMode;
+// Fleet Apple floor: un-versioned Apple targets floor at macOS 15 / iOS 18 on Zig 0.17.
+const apple_floor: std.Target.Query.OsVersion = .{ .semver = .{ .major = 26, .minor = 0, .patch = 0 } };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -69,32 +72,33 @@ pub fn build(b: *std.Build) void {
     const macos_x64_target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
         .os_tag = .macos,
+        .os_version_min = apple_floor,
     });
 
     const macos_x64_socket = b.createModule(.{
         .root_source_file = b.path("src/socket.zig"),
         .target = macos_x64_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const macos_x64_io_backend = b.createModule(.{
         .root_source_file = b.path("src/io_backend.zig"),
         .target = macos_x64_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     macos_x64_io_backend.addImport("socket", macos_x64_socket);
 
     const macos_x64_bitcoin = b.createModule(.{
         .root_source_file = b.path("src/bitcoin_protocol.zig"),
         .target = macos_x64_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     macos_x64_bitcoin.addImport("socket", macos_x64_socket);
 
     const macos_x64_module = b.createModule(.{
         .root_source_file = b.path("src/mempool_sniffer_core.zig"),
         .target = macos_x64_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     macos_x64_module.addImport("socket", macos_x64_socket);
     macos_x64_module.addImport("io_backend", macos_x64_io_backend);
@@ -124,32 +128,33 @@ pub fn build(b: *std.Build) void {
     const macos_arm64_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
         .os_tag = .macos,
+        .os_version_min = apple_floor,
     });
 
     const macos_arm64_socket = b.createModule(.{
         .root_source_file = b.path("src/socket.zig"),
         .target = macos_arm64_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const macos_arm64_io_backend = b.createModule(.{
         .root_source_file = b.path("src/io_backend.zig"),
         .target = macos_arm64_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     macos_arm64_io_backend.addImport("socket", macos_arm64_socket);
 
     const macos_arm64_bitcoin = b.createModule(.{
         .root_source_file = b.path("src/bitcoin_protocol.zig"),
         .target = macos_arm64_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     macos_arm64_bitcoin.addImport("socket", macos_arm64_socket);
 
     const macos_arm64_module = b.createModule(.{
         .root_source_file = b.path("src/mempool_sniffer_core.zig"),
         .target = macos_arm64_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     macos_arm64_module.addImport("socket", macos_arm64_socket);
     macos_arm64_module.addImport("io_backend", macos_arm64_io_backend);
@@ -190,27 +195,27 @@ pub fn build(b: *std.Build) void {
     const android_socket = b.createModule(.{
         .root_source_file = b.path("src/socket.zig"),
         .target = android_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const android_io_backend = b.createModule(.{
         .root_source_file = b.path("src/io_backend.zig"),
         .target = android_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     android_io_backend.addImport("socket", android_socket);
 
     const android_bitcoin_module = b.createModule(.{
         .root_source_file = b.path("src/bitcoin_protocol.zig"),
         .target = android_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     android_bitcoin_module.addImport("socket", android_socket);
 
     const android_module = b.createModule(.{
         .root_source_file = b.path("src/mempool_sniffer_core.zig"),
         .target = android_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     android_module.addImport("socket", android_socket);
     android_module.addImport("io_backend", android_io_backend);
@@ -248,32 +253,33 @@ pub fn build(b: *std.Build) void {
     const ios_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
         .os_tag = .ios,
+        .os_version_min = apple_floor,
     });
 
     const ios_socket = b.createModule(.{
         .root_source_file = b.path("src/socket.zig"),
         .target = ios_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
 
     const ios_io_backend = b.createModule(.{
         .root_source_file = b.path("src/io_backend.zig"),
         .target = ios_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     ios_io_backend.addImport("socket", ios_socket);
 
     const ios_bitcoin_module = b.createModule(.{
         .root_source_file = b.path("src/bitcoin_protocol.zig"),
         .target = ios_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     ios_bitcoin_module.addImport("socket", ios_socket);
 
     const ios_module = b.createModule(.{
         .root_source_file = b.path("src/mempool_sniffer_core.zig"),
         .target = ios_target,
-        .optimize = .ReleaseFast,
+        .optimize = Optimize.ReleaseFast,
     });
     ios_module.addImport("socket", ios_socket);
     ios_module.addImport("io_backend", ios_io_backend);
