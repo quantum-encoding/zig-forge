@@ -111,6 +111,26 @@ else
   bad "a pulled stamp failed for the wrong reason: $out"
 fi
 
+# An Android shared library is stamped and checked like an archive (same stem, so it
+# shares the .a's source-id line and has its own .so.sha256).
+printf 'shared library bytes\n' > "$tmp/m2/ios-libs/libx.so"
+"$S/stamp-archive.sh" "$tmp/m2/ios-libs/libx.so" "$id"
+if [ -f "$tmp/m2/ios-libs/libx.so.sha256" ] &&
+   "$S/check-archive-stamp.sh" "$tmp/m2/ios-libs/libx.so" "$prog" 2>/dev/null &&
+   "$S/check-archive-stamp.sh" "$tmp/m2/ios-libs/libx.a" "$prog" 2>/dev/null; then
+  ok "a .so is stamped (own .so.sha256) and checked beside the .a of the same stem"
+else
+  bad "a .so could not be stamped and checked beside its .a"
+fi
+printf 'other shared library bytes\n' > "$tmp/m2/ios-libs/libx.so"
+if out="$("$S/check-archive-stamp.sh" "$tmp/m2/ios-libs/libx.so" "$prog" 2>&1)"; then
+  bad "a rewritten .so passed its stamp"
+elif grep -q 'sha256 mismatch' <<<"$out"; then
+  ok "a .so rewritten after stamping fails the gate (sha256 mismatch)"
+else
+  bad "a rewritten .so failed for the wrong reason: $out"
+fi
+
 cp "$tmp/m2/ios-libs/libx.a" "$tmp/nosum.a"
 "$S/stamp-archive.sh" "$tmp/nosum.a" "$id"
 rm "$tmp/nosum.a.sha256"

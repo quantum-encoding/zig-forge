@@ -84,6 +84,8 @@ programs/cognitive_telemetry_kit/chronos-ledger/swift/Vendor/
 # stamp with an old archive that every freshness gate then called current (FB672FF4).
 programs/ios-libs/**/*-source-id.txt
 *.a.sha256
+*.lib.sha256
+*.so.sha256
 
 # ── Zigix OS build artifacts ─────────────────────────────────────
 *.img
