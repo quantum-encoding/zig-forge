@@ -11,7 +11,9 @@
  * same thread that made the failing call.
  *
  * TLS: certificate verification is always on (system CA bundle). There is no
- * option to disable it.
+ * option to disable it. On Windows the CA bundle is read from the system store
+ * through crypt32, which a static library cannot pull in by itself: link
+ * crypt32.lib into the host.
  *
  * Timeouts: each request is bounded by a total (connect + send + receive)
  * deadline, 30000 ms by default. Override per-process with the environment

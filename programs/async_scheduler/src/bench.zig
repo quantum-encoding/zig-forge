@@ -3,45 +3,38 @@
 const std = @import("std");
 const Scheduler = @import("scheduler/worksteal.zig").Scheduler;
 
-/// Simple timer using clock_gettime for Zig 0.16 compatibility
+/// Monotonic timer on the process's Io clock (`.awake`), which every OS implements
+/// (clock_gettime(2) has no Windows counterpart in its C runtime).
 const Timer = struct {
-    start_time: std.c.timespec,
+    io: std.Io,
+    start_time: std.Io.Clock.Timestamp,
 
-    pub fn start() Timer {
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
-        return .{ .start_time = ts };
+    pub fn start(io: std.Io) Timer {
+        return .{ .io = io, .start_time = std.Io.Clock.Timestamp.now(io, .awake) };
     }
 
     pub fn read(self: Timer) u64 {
-        var now: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &now);
-
-        const start_ns = @as(u64, @intCast(self.start_time.sec)) * std.time.ns_per_s +
-            @as(u64, @intCast(self.start_time.nsec));
-        const now_ns = @as(u64, @intCast(now.sec)) * std.time.ns_per_s +
-            @as(u64, @intCast(now.nsec));
-
-        return now_ns - start_ns;
+        return @intCast(self.start_time.untilNow(self.io).raw.nanoseconds);
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
+    const io = init.io;
 
     std.debug.print("\n=== Async Task Scheduler Benchmarks ===\n\n", .{});
 
     // Benchmark 1: Task spawn latency
-    try benchTaskSpawn(allocator);
+    try benchTaskSpawn(allocator, io);
 
     // Benchmark 2: Throughput with many tasks
-    try benchThroughput(allocator);
+    try benchThroughput(allocator, io);
 
     // Benchmark 3: Work stealing efficiency
-    try benchWorkStealing(allocator);
+    try benchWorkStealing(allocator, io);
 }
 
-fn benchTaskSpawn(allocator: std.mem.Allocator) !void {
+fn benchTaskSpawn(allocator: std.mem.Allocator, io: std.Io) !void {
     std.debug.print("Benchmark 1: Task Spawn Latency\n", .{});
     std.debug.print("--------------------------------\n", .{});
 
@@ -56,7 +49,7 @@ fn benchTaskSpawn(allocator: std.mem.Allocator) !void {
     }.run;
 
     const iterations = 1000;
-    var timer = Timer.start();
+    var timer = Timer.start(io);
 
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
@@ -80,7 +73,7 @@ fn benchTaskSpawn(allocator: std.mem.Allocator) !void {
     }
 }
 
-fn benchThroughput(allocator: std.mem.Allocator) !void {
+fn benchThroughput(allocator: std.mem.Allocator, io: std.Io) !void {
     std.debug.print("Benchmark 2: Throughput (10K tasks)\n", .{});
     std.debug.print("-------------------------------------\n", .{});
 
@@ -98,7 +91,7 @@ fn benchThroughput(allocator: std.mem.Allocator) !void {
     }.run;
 
     const task_count = 10_000;
-    var timer = Timer.start();
+    var timer = Timer.start(io);
 
     const handles = try allocator.alloc(@TypeOf(try scheduler.spawn(increment, .{&counter})), task_count);
     defer allocator.free(handles);
@@ -129,7 +122,7 @@ fn benchThroughput(allocator: std.mem.Allocator) !void {
     }
 }
 
-fn benchWorkStealing(allocator: std.mem.Allocator) !void {
+fn benchWorkStealing(allocator: std.mem.Allocator, io: std.Io) !void {
     std.debug.print("Benchmark 3: Work Stealing (unbalanced load)\n", .{});
     std.debug.print("---------------------------------------------\n", .{});
 
@@ -158,7 +151,7 @@ fn benchWorkStealing(allocator: std.mem.Allocator) !void {
     const handles = try allocator.alloc(@TypeOf(try scheduler.spawn(compute, .{ &results[0], @as(u64, 0) })), task_count);
     defer allocator.free(handles);
 
-    var timer = Timer.start();
+    var timer = Timer.start(io);
 
     // Spawn tasks with varying workloads
     for (handles, 0..) |*handle, i| {

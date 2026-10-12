@@ -47,7 +47,9 @@ FORGE_ZIG_INSTALLS=("$HOME/.local/zig-0.17.0-p1/zig" "/opt/zig-0.17.0-p1/zig")
 FORGE_ZIG_ACCEPT=("$FORGE_ZIG_ID")
 FORGE_ZIG_PREFER_INSTALL=1
 
-forge_zig_sha256() { "$FORGE_ZIG_SCRIPTS/sha256.sh" "$1" | cut -d' ' -f1; }
+# Hashed through stdin: a name holding a backslash (every Windows path `zig env` prints)
+# makes both shasum and sha256sum mark the line with a leading "\".
+forge_zig_sha256() { "$FORGE_ZIG_SCRIPTS/sha256.sh" < "$1" | cut -d' ' -f1; }
 
 # The Zig to use, as an absolute path (see the header).
 forge_zig_resolve() {

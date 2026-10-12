@@ -4,7 +4,8 @@
 #
 #   scripts/patch-zig-0.17.sh                          # download for this host, install to
 #                                                      # ~/.local/zig-0.17.0-p1
-#   scripts/patch-zig-0.17.sh --tarball <file.tar.xz>  # use an already-downloaded tarball
+#   scripts/patch-zig-0.17.sh --tarball <file>         # use an already-downloaded tarball
+#                                                      # (.tar.xz; .zip on Windows)
 #   scripts/patch-zig-0.17.sh --prefix /opt/zig-0.17.0-p1
 #   scripts/patch-zig-0.17.sh --force                  # replace an existing install (the old
 #                                                      # one is moved aside, not deleted)
@@ -25,7 +26,8 @@
 #
 #   zig 0.17.0 + zig-0.17.0-ios-nullfile.patch sha256:<sha256 of the patch>
 #
-# Run it on every machine that stamps archives (the M2, the Linux builders). It never
+# Run it on every machine that stamps archives (the M2, the Linux builders, crg-win from
+# Git bash, where ziglang.org publishes a .zip rather than a .tar.xz). It never
 # touches PATH, Homebrew or the user's shell; the forge scripts find the install by its
 # prefix (or take ZIG=<prefix>/zig).
 set -euo pipefail
@@ -48,18 +50,21 @@ while [ $# -gt 0 ]; do
 done
 
 # Official 0.17.0 host tarballs: https://ziglang.org/download/index.json, key "0.17.0".
+ext=tar.xz
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64)   host=aarch64-macos sum=b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a ;;
   Darwin-x86_64)  host=x86_64-macos  sum=4f9a1c5269aa17ebda5e6d3c2b89d6cbf36f7d2b22a0306e9ab98f25f95529c6 ;;
   Linux-x86_64)   host=x86_64-linux  sum=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026 ;;
   Linux-aarch64 | Linux-arm64)
                   host=aarch64-linux sum=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8 ;;
+  MINGW*-x86_64 | MSYS*-x86_64 | CYGWIN*-x86_64)
+                  host=x86_64-windows sum=b5663f69581dcf391293fbf16c06cb80d81d806545ce618b4d0bab7f0eb8c428 ext=zip ;;
   *) echo "error: no pinned Zig 0.17.0 tarball for $(uname -s) $(uname -m); add its" >&2
      echo "  url + shasum from https://ziglang.org/download/index.json to this script" >&2
      exit 1 ;;
 esac
 name="zig-$host-$FORGE_ZIG_VERSION"
-url="https://ziglang.org/download/$FORGE_ZIG_VERSION/$name.tar.xz"
+url="https://ziglang.org/download/$FORGE_ZIG_VERSION/$name.$ext"
 
 [ -f "$FORGE_ZIG_PATCH" ] || { echo "error: no patch at $FORGE_ZIG_PATCH" >&2; exit 1; }
 patch_sum="$(forge_zig_sha256 "$FORGE_ZIG_PATCH")"
@@ -88,18 +93,21 @@ trap 'rm -rf "$work"' EXIT
 
 if [ -z "$tarball" ]; then
   echo "downloading $url"
-  curl -fL --proto '=https' --tlsv1.2 -o "$work/$name.tar.xz" "$url"
-  tarball="$work/$name.tar.xz"
+  curl -fL --proto '=https' --tlsv1.2 -o "$work/$name.$ext" "$url"
+  tarball="$work/$name.$ext"
 fi
 got="$(forge_zig_sha256 "$tarball")"
 if [ "$got" != "$sum" ]; then
-  echo "error: $tarball has sha256 $got; the official $name.tar.xz is $sum" >&2
+  echo "error: $tarball has sha256 $got; the official $name.$ext is $sum" >&2
   exit 1
 fi
-echo "ok    $name.tar.xz sha256 $sum"
+echo "ok    $name.$ext sha256 $sum"
 
 mkdir "$work/x"
-tar -xJf "$tarball" -C "$work/x"
+case "$ext" in
+  zip) unzip -q "$tarball" -d "$work/x" ;;
+  *) tar -xJf "$tarball" -C "$work/x" ;;
+esac
 src="$work/x/$name"
 [ -x "$src/zig" ] || { echo "error: $tarball holds no $name/zig" >&2; exit 1; }
 

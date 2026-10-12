@@ -4,14 +4,10 @@ const std = @import("std");
 const testing = std.testing;
 const Scheduler = @import("scheduler/worksteal.zig").Scheduler;
 
-// std.Thread.sleep / std.time.sleep do not exist in this Zig 0.16; the library
-// links libc everywhere, so sleep via nanosleep(2).
+// Sleeps on the test runner's Io, which every OS implements (nanosleep(2) has no
+// Windows counterpart in its C runtime).
 fn sleepNs(ns: u64) void {
-    var ts: std.c.timespec = .{
-        .sec = @intCast(ns / std.time.ns_per_s),
-        .nsec = @intCast(ns % std.time.ns_per_s),
-    };
-    _ = std.c.nanosleep(&ts, null);
+    std.Io.sleep(std.testing.io, .fromNanoseconds(ns), .awake) catch {};
 }
 
 // Shared state for the concurrent-spawner stress test.

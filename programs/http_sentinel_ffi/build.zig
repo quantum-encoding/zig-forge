@@ -101,6 +101,9 @@ pub fn build(b: *std.Build) void {
         .root_module = abi_module,
     });
     abi_module.linkLibrary(lib);
+    // On Windows std's TLS root-store scan calls crypt32; a static library cannot
+    // carry that dependency, so every C or Rust host links it (include/http_sentinel.h).
+    if (target.result.os.tag == .windows) abi_module.linkSystemLibrary("crypt32", .{});
 
     const abi_step = b.step("abi-smoke", "Compile+link the C header against the static library");
     abi_step.dependOn(&b.addRunArtifact(abi_smoke).step);

@@ -926,41 +926,40 @@ test "header count above the fixed buffer is rejected, not silently truncated" {
 // -----------------------------------------------------------------------------
 // Deterministic loopback tests
 //
-// A tiny in-process TCP server (libc sockets on a background thread) serves
-// canned responses over plain HTTP so the whole request pipeline — including
-// the concurrent timeout wrapper and the gzip decode path — is exercised
-// offline, with no dependency on any external host.
+// A tiny in-process TCP server (std.Io.net on the test runner's Io, on a
+// background thread) serves canned responses over plain HTTP so the whole
+// request pipeline — including the concurrent timeout wrapper and the gzip
+// decode path — is exercised offline, with no dependency on any external host,
+// on every OS the library builds for.
 // -----------------------------------------------------------------------------
 
 const sock = struct {
-    extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) c_int;
-    extern "c" fn bind(fd: c_int, addr: *const anyopaque, len: u32) c_int;
-    extern "c" fn listen(fd: c_int, backlog: c_int) c_int;
-    extern "c" fn accept(fd: c_int, addr: ?*anyopaque, len: ?*u32) c_int;
-    extern "c" fn getsockname(fd: c_int, addr: *anyopaque, len: *u32) c_int;
-    extern "c" fn setsockopt(fd: c_int, level: c_int, optname: c_int, optval: *const anyopaque, optlen: u32) c_int;
-    extern "c" fn read(fd: c_int, buf: [*]u8, n: usize) isize;
-    extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
-    extern "c" fn close(fd: c_int) c_int;
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-    extern "c" fn nanosleep(req: *const TimeSpec, rem: ?*TimeSpec) c_int;
+    const net = std.Io.net;
 
-    const TimeSpec = extern struct { sec: isize, nsec: isize };
-
-    // macOS/BSD sockaddr_in (leading length byte + 1-byte family).
-    const SockaddrIn = extern struct {
-        len: u8 = @sizeOf(SockaddrIn),
-        family: u8 = 2, // AF_INET
-        port: u16, // network byte order
-        addr: u32, // network byte order
-        zero: [8]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0 },
+    // The FFI reads its tunables through libc's getenv, so tests set them in the C
+    // runtime's environment: setenv/unsetenv on POSIX, the MSVC runtime's _putenv_s
+    // on Windows (where an empty value removes the variable).
+    const env_c = if (builtin.os.tag == .windows) struct {
+        extern "c" fn _putenv_s(name: [*:0]const u8, value: [*:0]const u8) c_int;
+    } else struct {
+        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+        extern "c" fn unsetenv(name: [*:0]const u8) c_int;
     };
+
+    fn setEnv(name: [*:0]const u8, value: ?[*:0]const u8) void {
+        if (builtin.os.tag == .windows) {
+            _ = env_c._putenv_s(name, value orelse "");
+        } else if (value) |v| {
+            _ = env_c.setenv(name, v, 1);
+        } else {
+            _ = env_c.unsetenv(name);
+        }
+    }
 
     const ServerMode = enum { gzip_ok, plain_ok, hang, echo_404 };
 
     const Server = struct {
-        listen_fd: c_int,
+        listener: net.Server,
         port: u16,
         mode: ServerMode,
         thread: std.Thread,
@@ -971,33 +970,38 @@ const sock = struct {
         req_len: usize = 0,
     };
 
+    fn writeAll(conn: net.Stream, parts: []const []const u8) void {
+        const io = std.testing.io;
+        var buf: [512]u8 = undefined;
+        var w = conn.writer(io, &buf);
+        for (parts) |part| w.interface.writeAll(part) catch return;
+        w.interface.flush() catch return;
+    }
+
     fn handle(srv: *Server) void {
-        const conn = accept(srv.listen_fd, null, null);
-        if (conn < 0) return;
-        defer _ = close(conn);
-        // Drain the request (a small GET/POST fits in one read).
+        const io = std.testing.io;
+        const conn = srv.listener.accept(io) catch return;
+        defer conn.close(io);
+        // Drain the request (a small GET/POST fits in one read). Through the
+        // reader: Stream.read does not compile in Zig 0.17.0's std.
         var reqbuf: [2048]u8 = undefined;
-        const got = read(conn, &reqbuf, reqbuf.len);
-        if (got > 0) {
-            // read() cannot report more than the buffer it was given; clamp
-            // anyway so a hostile/buggy libc can't drive an over-long memcpy.
-            const n = @min(@as(usize, @intCast(got)), reqbuf.len);
-            @memcpy(srv.req_buf[0..n], reqbuf[0..n]);
-            srv.req_len = n;
-        }
+        var r = conn.reader(io, &reqbuf);
+        r.interface.fillMore() catch {};
+        const got = r.interface.buffered();
+        const n = @min(got.len, srv.req_buf.len);
+        @memcpy(srv.req_buf[0..n], got[0..n]);
+        srv.req_len = n;
 
         switch (srv.mode) {
             .hang => {
                 // Accept the connection but never answer, so the client must
                 // rely on its own timeout to unblock.
-                const ts = TimeSpec{ .sec = 3, .nsec = 0 };
-                _ = nanosleep(&ts, null);
+                std.Io.sleep(io, .fromSeconds(3), .awake) catch {};
             },
             .gzip_ok => {
                 var hdr: [256]u8 = undefined;
                 const h = std.fmt.bufPrint(&hdr, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{gz_vector.len}) catch return;
-                _ = write(conn, h.ptr, h.len);
-                _ = write(conn, &gz_vector, gz_vector.len);
+                writeAll(conn, &.{ h, &gz_vector });
             },
             .plain_ok => {
                 var body: [100]u8 = undefined;
@@ -1005,39 +1009,26 @@ const sock = struct {
                 srv.plain_body_len = body.len;
                 var hdr: [256]u8 = undefined;
                 const h = std.fmt.bufPrint(&hdr, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{body.len}) catch return;
-                _ = write(conn, h.ptr, h.len);
-                _ = write(conn, &body, body.len);
+                writeAll(conn, &.{ h, &body });
             },
             .echo_404 => {
-                const resp = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope";
-                _ = write(conn, resp.ptr, resp.len);
+                writeAll(conn, &.{"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope"});
             },
         }
     }
 
-    /// Create+bind+listen a loopback server, spawn its accept thread, and return
-    /// once the bound port is known. Returns null if sockets are unavailable.
+    /// Listen on an ephemeral loopback port, spawn the accept thread, and return
+    /// once the bound port is known. Skips the test if loopback sockets are
+    /// unavailable.
     fn start(srv: *Server, mode: ServerMode) !void {
-        const fd = socket(2, 1, 0); // AF_INET, SOCK_STREAM
-        if (fd < 0) return error.SkipZigTest;
-        errdefer _ = close(fd);
-
-        const one: c_int = 1;
-        _ = setsockopt(fd, 0xffff, 0x0004, &one, @sizeOf(c_int)); // SOL_SOCKET, SO_REUSEADDR
-
-        var addr = SockaddrIn{
-            .port = 0,
-            .addr = std.mem.nativeToBig(u32, 0x7f000001), // 127.0.0.1
-        };
-        if (bind(fd, &addr, @sizeOf(SockaddrIn)) != 0) return error.SkipZigTest;
-
-        var slen: u32 = @sizeOf(SockaddrIn);
-        if (getsockname(fd, &addr, &slen) != 0) return error.SkipZigTest;
-        if (listen(fd, 1) != 0) return error.SkipZigTest;
+        const io = std.testing.io;
+        const addr: net.IpAddress = .{ .ip4 = .loopback(0) };
+        var listener = addr.listen(io, .{ .reuse_address = true }) catch return error.SkipZigTest;
+        errdefer listener.deinit(io);
 
         srv.* = .{
-            .listen_fd = fd,
-            .port = std.mem.bigToNative(u16, addr.port),
+            .listener = listener,
+            .port = listener.socket.address.getPort(),
             .mode = mode,
             .thread = undefined,
             .plain_body_len = 0,
@@ -1048,7 +1039,7 @@ const sock = struct {
 
     fn stop(srv: *Server) void {
         srv.thread.join();
-        _ = close(srv.listen_fd);
+        srv.listener.deinit(std.testing.io);
     }
 };
 
@@ -1148,8 +1139,8 @@ test "loopback: a non-responsive server trips the request timeout" {
     defer sock.stop(&srv);
 
     // Force a short total timeout for this test only.
-    _ = sock.setenv("HTTP_SENTINEL_TIMEOUT_MS", "400", 1);
-    defer _ = sock.unsetenv("HTTP_SENTINEL_TIMEOUT_MS");
+    sock.setEnv("HTTP_SENTINEL_TIMEOUT_MS", "400");
+    defer sock.setEnv("HTTP_SENTINEL_TIMEOUT_MS", null);
 
     var url_buf: [64]u8 = undefined;
     const url = try std.fmt.bufPrintSentinel(&url_buf, "http://127.0.0.1:{d}/", .{srv.port}, 0);

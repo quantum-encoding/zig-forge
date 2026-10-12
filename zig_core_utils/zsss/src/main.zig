@@ -33,6 +33,7 @@ pub const RandomError = error{RandomFailure};
 /// for wire timestamps that downstream consumers already trust — never for
 /// an attacker-controlled security comparison.
 fn wallClockSeconds() i64 {
+    if (builtin.os.tag == .windows) return @import("win_file.zig").wallClockSeconds();
     var ts: std.c.timespec = undefined;
     if (std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts) != 0) return 0;
     return @intCast(ts.sec);
@@ -568,7 +569,10 @@ fn parseArgs(allocator: Allocator, init: std.process.Init) !Config {
         .allocator = allocator,
     };
 
-    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    // initAllocator: Windows (and WASI without libc) decode the command line into
+    // a buffer; elsewhere it allocates nothing. Every argument kept is duped.
+    var args_iter = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args_iter.deinit();
     _ = args_iter.next(); // Skip program name
 
     while (args_iter.next()) |arg| {
@@ -692,10 +696,34 @@ fn parseArgs(allocator: Allocator, init: std.process.Init) !Config {
 }
 
 // =============================================================================
-// File I/O Helpers (Zig 0.16 compatible)
+// File I/O Helpers (Zig 0.16 compatible). POSIX here; Windows in win_file.zig,
+// with the same no-symlink-following guarantee.
 // =============================================================================
 
+const win_file = @import("win_file.zig");
+
 fn readFileAlloc(allocator: Allocator, path: []const u8, max_size: usize) ![]u8 {
+    return if (builtin.os.tag == .windows)
+        win_file.readFileAlloc(allocator, path, max_size)
+    else
+        posixReadFileAlloc(allocator, path, max_size);
+}
+
+fn writeFileAlloc(allocator: Allocator, path: []const u8, data: []const u8) !void {
+    return if (builtin.os.tag == .windows)
+        win_file.writeFile(allocator, path, data)
+    else
+        posixWriteFileAlloc(allocator, path, data);
+}
+
+fn makeDirectory(allocator: Allocator, path: []const u8) !void {
+    return if (builtin.os.tag == .windows)
+        win_file.makeDirectory(allocator, path)
+    else
+        posixMakeDirectory(allocator, path);
+}
+
+fn posixReadFileAlloc(allocator: Allocator, path: []const u8, max_size: usize) ![]u8 {
     const path_z = try allocator.dupeSentinel(u8, path, 0); // dupeZ is gone in Zig 0.17; dupeSentinel exists on 0.16 too
     defer allocator.free(path_z);
 
@@ -719,7 +747,7 @@ fn readFileAlloc(allocator: Allocator, path: []const u8, max_size: usize) ![]u8 
     return data.toOwnedSlice(allocator);
 }
 
-fn writeFileAlloc(allocator: Allocator, path: []const u8, data: []const u8) !void {
+fn posixWriteFileAlloc(allocator: Allocator, path: []const u8, data: []const u8) !void {
     const path_z = try allocator.dupeSentinel(u8, path, 0); // dupeZ is gone in Zig 0.17; dupeSentinel exists on 0.16 too
     defer allocator.free(path_z);
 
@@ -739,7 +767,7 @@ fn writeFileAlloc(allocator: Allocator, path: []const u8, data: []const u8) !voi
 
 extern "c" fn mkdir(path: [*:0]const u8, mode: std.c.mode_t) c_int;
 
-fn makeDirectory(allocator: Allocator, path: []const u8) !void {
+fn posixMakeDirectory(allocator: Allocator, path: []const u8) !void {
     const path_z = try allocator.dupeSentinel(u8, path, 0); // dupeZ is gone in Zig 0.17; dupeSentinel exists on 0.16 too
     defer allocator.free(path_z);
 
@@ -2013,6 +2041,83 @@ test "SLIP-39 split into an output path too long for a share file name is an err
         error.NameTooLong,
         doSplitSlip39(allocator, &config, "0123456789abcdef", long_dir),
     );
+}
+
+/// `.zig-cache/tmp/<sub>/<name>`, the path of `name` inside a `std.testing.tmpDir`.
+fn tmpPath(allocator: Allocator, tmp: *const std.testing.TmpDir, name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name });
+}
+
+// The CLI's file helpers on every OS it builds for (POSIX open/read/write; the
+// Win32 file API in win_file.zig): what is written reads back byte for byte, an
+// existing file is truncated, a directory is made once and making it again is not
+// an error, and a missing input is FileNotFound.
+test "CLI file I/O round-trips, truncates, and makes directories" {
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir = try tmpPath(allocator, &tmp, "shares");
+    defer allocator.free(dir);
+    try makeDirectory(allocator, dir);
+    try makeDirectory(allocator, dir);
+
+    const file = try tmpPath(allocator, &tmp, "shares/share-1.txt");
+    defer allocator.free(file);
+    try writeFileAlloc(allocator, file, "a long first payload\x00\xff");
+    try writeFileAlloc(allocator, file, "short");
+    const back = try readFileAlloc(allocator, file, 1024);
+    defer allocator.free(back);
+    try std.testing.expectEqualStrings("short", back);
+
+    try std.testing.expectError(error.FileTooBig, readFileAlloc(allocator, file, 4));
+    const missing = try tmpPath(allocator, &tmp, "no-such-file");
+    defer allocator.free(missing);
+    try std.testing.expectError(error.FileNotFound, readFileAlloc(allocator, missing, 1024));
+}
+
+extern "kernel32" fn CreateSymbolicLinkW(link: [*:0]const u16, target: [*:0]const u16, flags: u32) callconv(.winapi) u8;
+
+/// Make `link` a symlink to `target`, or return false where this process may not.
+fn makeTestSymlink(allocator: Allocator, target: []const u8, link: []const u8) !bool {
+    if (builtin.os.tag == .windows) {
+        const t = try std.unicode.utf8ToUtf16LeAllocZ(allocator, target);
+        defer allocator.free(t);
+        const l = try std.unicode.utf8ToUtf16LeAllocZ(allocator, link);
+        defer allocator.free(l);
+        // SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE: works in Developer Mode or elevated.
+        return CreateSymbolicLinkW(l.ptr, t.ptr, 0x2) != 0;
+    }
+    const t = try allocator.dupeSentinel(u8, target, 0);
+    defer allocator.free(t);
+    const l = try allocator.dupeSentinel(u8, link, 0);
+    defer allocator.free(l);
+    return std.c.symlink(t.ptr, l.ptr) == 0;
+}
+
+// A symlink planted at an input or output path is never followed: reading through
+// it is refused, and writing to it is refused with the link's target untouched (a
+// share file name an attacker pre-creates must not redirect a secret elsewhere).
+test "CLI file I/O refuses a planted symlink at the input and the output path" {
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const victim = try tmpPath(allocator, &tmp, "victim.txt");
+    defer allocator.free(victim);
+    try writeFileAlloc(allocator, victim, "original");
+    const link = try tmpPath(allocator, &tmp, "share-1.txt");
+    defer allocator.free(link);
+    // A relative target resolves against the link's directory.
+    if (!try makeTestSymlink(allocator, "victim.txt", link)) return error.SkipZigTest;
+
+    try std.testing.expectError(error.FileNotFound, readFileAlloc(allocator, link, 1024));
+    try std.testing.expectError(error.CreateFileFailed, writeFileAlloc(allocator, link, "secret share"));
+    const after = try readFileAlloc(allocator, victim, 1024);
+    defer allocator.free(after);
+    try std.testing.expectEqualStrings("original", after);
 }
 
 // Crypto test campaign 2026-10-11, track E E-3: `pos + data_len + 4` wrapped on a 32-bit
