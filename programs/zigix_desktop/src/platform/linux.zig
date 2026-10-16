@@ -65,9 +65,9 @@ pub const ProcessHandle = struct {
 
 /// Spawn a shell process with a PTY. Returns a handle for I/O.
 pub fn spawnProcess(shell: []const u8, _: std.mem.Allocator) !ProcessHandle {
-    // Use terminal_mux Pane or raw PTY — for now, simplified fork/exec
+    // Use zterm_plex Pane or raw PTY — for now, simplified fork/exec
     _ = shell;
-    return error.NotImplemented; // Delegates to terminal_mux in the real build
+    return error.NotImplemented; // Delegates to zterm_plex in the real build
 }
 
 /// Read output from a spawned process. Non-blocking.

@@ -1,5 +1,5 @@
 /*
- * terminal_mux — in-process C ABI (libterminal_mux)
+ * zterm_plex — in-process C ABI (libzterm_plex)
  *
  * libghostty-style embedding surface: link the static library and drive the
  * multiplexer core (PTY + VT100 emulator) directly in-process. No socket hop.
@@ -11,8 +11,8 @@
  *
  * Generated to match src/capi.zig. Keep the two in sync.
  */
-#ifndef TERMINAL_MUX_H
-#define TERMINAL_MUX_H
+#ifndef ZTERM_PLEX_H
+#define ZTERM_PLEX_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -400,4 +400,4 @@ size_t tmux_take_freed_images(zterm_session *handle, uint32_t *out_ids, size_t m
 }
 #endif
 
-#endif /* TERMINAL_MUX_H */
+#endif /* ZTERM_PLEX_H */

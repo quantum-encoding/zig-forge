@@ -3,7 +3,7 @@
 # must link it, and prove each one.
 #
 #   scripts/build-consumed-libs.sh                       # every row of libs.toml
-#   scripts/build-consumed-libs.sh terminal_mux zsss     # the named rows
+#   scripts/build-consumed-libs.sh zterm_plex zsss       # the named rows
 #   scripts/build-consumed-libs.sh --no-release-stamp    # build and check only
 #
 # For each row it runs the row's `build` from the repo root, then checks that

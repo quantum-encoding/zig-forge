@@ -1,4 +1,4 @@
-# terminal_mux — in-process C ABI (`libterminal_mux`)
+# zterm_plex — in-process C ABI (`libzterm_plex`)
 
 A libghostty-style embedding surface. A host application links the static
 library and drives the multiplexer core (PTY + VT100 emulator) **in-process** —
@@ -7,7 +7,7 @@ address space; the host owns the run loop and the text/GPU rendering. This is
 the model the Swift/SwiftUI front-end uses to evaluate an Apple-native terminal
 (the same Zig-core + Swift-UI split as Ghostty).
 
-The header is [`include/terminal_mux.h`](../include/terminal_mux.h); it is the
+The header is [`include/zterm_plex.h`](../include/zterm_plex.h); it is the
 source of truth for the ABI and is kept in lock-step with
 [`src/capi.zig`](../src/capi.zig).
 
@@ -16,8 +16,8 @@ source of truth for the ABI and is kept in lock-step with
 ## Build
 
 ```sh
-cd programs/terminal_mux
-zig build -Doptimize=ReleaseFast          # → zig-out/lib/libterminal_mux.a + zig-out/include/terminal_mux.h
+cd programs/zterm_plex
+zig build -Doptimize=ReleaseFast          # → zig-out/lib/libzterm_plex.a + zig-out/include/zterm_plex.h
 ```
 
 ### macOS: no repack
@@ -29,7 +29,7 @@ proves the link with `scripts/check-apple-archive.sh`.
 
 **Linux needs no repack.** The alignment constraint is specific to Apple's
 Mach-O `ld`; on Linux the archive is plain ELF `ar` and links as emitted —
-`cc app.c -Iinclude zig-out/lib/libterminal_mux.a` works directly with GNU
+`cc app.c -Iinclude zig-out/lib/libzterm_plex.a` works directly with GNU
 `ld`/`lld` (verified against a C consumer calling `zterm_version()`).
 
 ---
@@ -174,17 +174,17 @@ fd = zterm_pty_fd(s);
 ## Linking from Swift
 
 ### Xcode (bridging header)
-1. Add `libterminal_mux.a` to *Build Phases → Link Binary With Libraries*.
+1. Add `libzterm_plex.a` to *Build Phases → Link Binary With Libraries*.
 2. *Build Settings → Header Search Paths* → the `include/` dir.
-3. In the bridging header: `#import "terminal_mux.h"`.
+3. In the bridging header: `#import "zterm_plex.h"`.
 4. Functions are then callable directly (`zterm_create(...)`, etc.).
 
 ### SwiftPM (system library target)
 `Sources/CTerminalMux/module.modulemap`:
 ```
 module CTerminalMux {
-    header "terminal_mux.h"
-    link "terminal_mux"
+    header "zterm_plex.h"
+    link "zterm_plex"
     export *
 }
 ```

@@ -176,5 +176,5 @@ on both, and nothing 0.17-only lands.
 
 Repo-wide `zig-lens --strict programs/` still carries 5 known gating findings in fleet-owned
 files (`chronos_engine/chronos-run.zig`, `guardian_shield/guardian-shield-v9/build.zig`,
-`terminal_mux` ctl/zterm). Per-program `--strict` must be clean for anything you touch, and
+`zterm_plex` ctl/zterm). Per-program `--strict` must be clean for anything you touch, and
 your program must never add a sixth.

@@ -42,7 +42,7 @@ const PosixMutex = struct {
 };
 
 /// Serializes fork against fd creation that cannot be atomically CLOEXEC.
-/// Every terminal_mux site that creates an fd and then sets FD_CLOEXEC with a
+/// Every zterm_plex site that creates an fd and then sets FD_CLOEXEC with a
 /// separate fcntl (Darwin has no SOCK_CLOEXEC / accept4) holds it across both
 /// calls, and every fork holds it across the fork, so a child never inherits
 /// such an fd in the gap. PTY ends are opened O_CLOEXEC and need no lock.
@@ -449,7 +449,7 @@ const PosixPty = struct {
         envp: [*:null]const ?[*:0]const u8,
         cwd: ?[*:0]const u8,
     ) !void {
-        // Held across fork so no terminal_mux fd that is still between
+        // Held across fork so no zterm_plex fd that is still between
         // creation and its FD_CLOEXEC fcntl can be inherited.
         fd_lock.lock();
         const pid = c.fork();

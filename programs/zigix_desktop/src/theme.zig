@@ -87,6 +87,6 @@ pub const text_dim = Style{ .fg = amber_dim };
 pub const text_error = Style{ .fg = red_amber, .attrs = .{ .bold = true } };
 
 // ── Default terminal colors ─────────────────────────────────────────────────
-// When terminal_mux cells use CellColor.default, map to amber-on-black.
+// When zterm_plex cells use CellColor.default, map to amber-on-black.
 pub const term_default_fg = amber;
 pub const term_default_bg = Color.black;

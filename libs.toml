@@ -32,13 +32,13 @@ consumers = ["cosmic-duck-os"]
 notes     = "Also CryptoWalletKit and Cifra (scripts/check-zig-slices.sh compares the -source-id.txt stamp); iOS slices come from programs/build-ios-libs.sh."
 
 [[lib]]
-name      = "terminal_mux"
-dir       = "programs/terminal_mux"
-build     = "scripts/build-macos-lib.sh programs/terminal_mux"
-artifacts = ["programs/terminal_mux/zig-out/lib/libterminal_mux.a"]
-sources   = ["programs/terminal_mux", "scripts/build-macos-lib.sh", "scripts/zig-toolchain.sh"]
+name      = "zterm_plex"
+dir       = "programs/zterm_plex"
+build     = "scripts/build-macos-lib.sh programs/zterm_plex"
+artifacts = ["programs/zterm_plex/zig-out/lib/libzterm_plex.a", "programs/zterm_plex/zig-out/lib/libterminal_mux.a"]
+sources   = ["programs/zterm_plex", "scripts/build-macos-lib.sh", "scripts/zig-toolchain.sh"]
 consumers = ["cosmic-duck-os", "aiconductor"]
-notes     = "aiconductor's Xcode Run Script runs programs/terminal_mux/scripts/ensure-fresh-lib.sh, which rebuilds with this command when the stamp does not match. rust_agent's agent-ffi/ensure-fresh-lib.sh calls that script too."
+notes     = "Formerly terminal_mux: programs/terminal_mux is a link to programs/zterm_plex, terminal_mux.h includes zterm_plex.h, and the lib step also installs libterminal_mux.a, so consumers still on the old names build unchanged until they move. aiconductor's Xcode Run Script runs programs/terminal_mux/scripts/ensure-fresh-lib.sh, which rebuilds with this command when the stamp does not match. rust_agent's agent-ffi/ensure-fresh-lib.sh calls that script too."
 
 [[lib]]
 name      = "zig_docx"

@@ -1,4 +1,4 @@
-//! Win32 declarations terminal_mux needs on Windows: ConPTY, job objects,
+//! Win32 declarations zterm_plex needs on Windows: ConPTY, job objects,
 //! pipes, console modes, Toolhelp32 and Winsock (AF_UNIX streams + WSAPoll).
 //!
 //! Zig 0.16's std declares almost none of these (it talks to ntdll), so they

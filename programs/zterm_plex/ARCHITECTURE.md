@@ -1,13 +1,13 @@
-# Terminal Multiplexer (terminal_mux) - Architecture Design
+# Terminal Multiplexer (zterm_plex) - Architecture Design
 
 > **Status note (2026-07):** this is the ORIGINAL design doc and is stale in
 > places. What actually shipped: the event loop is portable `poll(2)` (not
 > epoll), rendering is host-app GPU (Swift/Metal over the C ABI in
-> `src/capi.zig` / `include/terminal_mux.h`) or the diff ANSI renderer (not
+> `src/capi.zig` / `include/zterm_plex.h`) or the diff ANSI renderer (not
 > DRM/KMS), there is no WAL persistence, and the socket control plane is
 > `src/ctl.zig` + `src/zterm.zig` (line/JSON protocol + attach relay), not the
 > length-prefixed IPC described below (that module was deleted). Treat
-> `docs/program-reports-2026-07-17/terminal_mux.md` and the source as truth.
+> `docs/program-reports-2026-07-17/zterm_plex.md` and the source as truth.
 
 A high-performance terminal multiplexer written in Zig, designed as a modern tmux alternative
 with GPU-accelerated rendering and native Zig configuration.
@@ -229,7 +229,7 @@ WAL-based persistence for crash recovery and session resurrection.
 ### 6. IPC (Client-Server Communication)
 
 **Unix Domain Socket Protocol:**
-- Server listens on $XDG_RUNTIME_DIR/terminal_mux.sock or /tmp/terminal_mux-$UID/default.sock
+- Server listens on $XDG_RUNTIME_DIR/zterm_plex.sock or /tmp/zterm_plex-$UID/default.sock
 - Binary protocol with length-prefixed messages
 
 **Message Types:**
@@ -294,7 +294,7 @@ const default_bindings = [_]Binding{
 ## File Structure
 
 ```
-terminal_mux/
+zterm_plex/
 ├── build.zig
 ├── src/
 │   ├── main.zig           # Entry point (server or client mode)

@@ -1,8 +1,8 @@
-//! zterm — standalone mux server + CLI for terminal_mux, mirroring the `wezterm cli` verbs so the agent
+//! zterm — standalone mux server + CLI for zterm_plex, mirroring the `wezterm cli` verbs so the agent
 //! ecosystem (mac-drive / imsg bridge / the roster / baton) can drive the Zig terminal exactly as it drives
 //! WezTerm — with no WezTerm installed.
 //!
-//! One binary, `zterm` (terminal_mux):
+//! One binary, `zterm` (zterm_plex):
 //!   - `zterm` / `zterm new` — the VISIBLE multiplexer in this terminal
 //!     (src/main.zig). It binds the control socket too (src/ctl.zig), so
 //!     `zterm cli` drives it: list/send/enter/capture plus `split h|v`,

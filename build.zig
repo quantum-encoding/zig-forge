@@ -92,7 +92,7 @@ pub fn build(b: *std.Build) void {
     buildProgram(b, "duck_agent_scribe", target, optimize, build_all);
     buildProgram(b, "duck_cache_scribe", target, optimize, build_all);
     buildProgram(b, "claude-shepherd", target, optimize, build_all);
-    buildProgram(b, "terminal_mux", target, optimize, build_all);
+    buildProgram(b, "zterm_plex", target, optimize, build_all);
 
     // ── Compute and Research ─────────────────────────────────────────
     buildProgram(b, "variable_tester", target, optimize, build_all);
@@ -172,7 +172,7 @@ pub fn build(b: *std.Build) void {
     testProgram(b, "zig_tui", test_all);
     testProgram(b, "audio_forge", test_all);
     testProgram(b, "claude-shepherd", test_all);
-    testProgram(b, "terminal_mux", test_all);
+    testProgram(b, "zterm_plex", test_all);
     testProgram(b, "variable_tester", test_all);
     testProgram(b, "hydra", test_all);
     testProgram(b, "zigix_desktop", test_all);

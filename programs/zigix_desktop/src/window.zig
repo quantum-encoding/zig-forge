@@ -1,5 +1,5 @@
-// Window — wraps a terminal_mux Pane with desktop chrome (title bar, border).
-// Handles cell conversion between terminal_mux and zig_tui cell types.
+// Window — wraps a zterm_plex Pane with desktop chrome (title bar, border).
+// Handles cell conversion between zterm_plex and zig_tui cell types.
 
 const std = @import("std");
 const platform = @import("platform.zig");
@@ -12,8 +12,8 @@ const Color = tui.Color;
 const TuiRect = tui.Rect;
 const Cell = tui.Cell;
 
-// terminal_mux types only available on Linux
-const mux = if (platform.is_linux) @import("terminal_mux") else struct {
+// zterm_plex types only available on Linux
+const mux = if (platform.is_linux) @import("zterm_plex") else struct {
     pub const Pane = void;
     pub const Rect = struct { x: u16, y: u16, width: u16, height: u16 };
     pub const CellColor = void;
@@ -41,7 +41,7 @@ pub const Window = struct {
 
     const Self = @This();
 
-    /// Create a new window wrapping a terminal_mux Pane (Linux).
+    /// Create a new window wrapping a zterm_plex Pane (Linux).
     pub fn init(pane: anytype, id: u16, name: []const u8) Self {
         var win = Self{
             .pane = if (platform.is_linux) pane else {},
@@ -197,8 +197,8 @@ pub const Window = struct {
                 while (col < content.width and col < grid.cols) : (col += 1) {
                     const tc = grid.getCellConst(row, col);
                     const Attrs = tui.Attrs;
-                    const CellColor = @import("terminal_mux").CellColor;
-                    const CellAttrs = @import("terminal_mux").CellAttrs;
+                    const CellColor = @import("zterm_plex").CellColor;
+                    const CellAttrs = @import("zterm_plex").CellAttrs;
                     _ = Attrs;
                     const fg_color = switch (tc.fg) {
                         .default => theme.term_default_fg,

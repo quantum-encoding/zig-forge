@@ -22,7 +22,7 @@
 # an input's identity — says which mode built the archive.
 #
 # A program whose build.zig declares a `lib` step is built with that step, so building
-# its library does not also reinstall its executables (terminal_mux's `zterm` in
+# its library does not also reinstall its executables (zterm_plex's `zterm` in
 # zig-out/bin is the CLI on PATH).
 #
 # On a Mac the target is explicit: <arch>-macos.26.0. Zig's native target stamps every

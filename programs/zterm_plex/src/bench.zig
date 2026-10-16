@@ -1,7 +1,7 @@
-//! Core benchmark for the terminal_mux C ABI: what one pane costs, with no
+//! Core benchmark for the zterm_plex C ABI: what one pane costs, with no
 //! server and no client in the way.
 //!
-//! Drives the exported libterminal_mux entry points (src/capi.zig) exactly as a
+//! Drives the exported libzterm_plex entry points (src/capi.zig) exactly as a
 //! host (e.g. the Swift front-end) would, and measures:
 //!   1. Emulator ingest — MiB/s fed straight through the VT parser into the grid
 //!      (`zterm_feed`), the pure core hot path, over four fixed inputs: mixed SGR

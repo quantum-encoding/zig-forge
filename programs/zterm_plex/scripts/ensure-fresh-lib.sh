@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 #
-# ensure-fresh-lib.sh — rebuild libterminal_mux.a unless it is the canonical build of
+# ensure-fresh-lib.sh — rebuild libzterm_plex.a unless it is the canonical build of
 # the current sources.
 #
-# The Swift host (aiconductor) links zig-out/lib/libterminal_mux.a by relative
-# path. Nothing in the Xcode build graph knows about src/*.zig, so an edited
+# The Swift hosts (aiconductor, CosmicDuckOS) link zig-out/lib/libzterm_plex.a — or
+# libterminal_mux.a, the copy under the library's former name — by relative path.
+# Nothing in the Xcode build graph knows about src/*.zig, so an edited
 # core links against yesterday's archive and the change silently does not exist
 # at runtime. This script closes that gap.
 #
 # The archive is current when scripts/check-archive-stamp.sh accepts it:
-#   - libterminal_mux-source-id.txt beside it equals scripts/zig-source-id.sh for
+#   - libzterm_plex-source-id.txt beside it equals scripts/zig-source-id.sh for
 #     the program now (same sources, by content — not by mtime);
-#   - libterminal_mux-toolchain.txt names the Zig consumed archives are built with;
-#   - libterminal_mux.a.sha256 matches the archive's bytes, so the stamps describe
+#   - libzterm_plex-toolchain.txt names the Zig consumed archives are built with;
+#   - libzterm_plex.a.sha256 matches the archive's bytes, so the stamps describe
 #     THIS archive. Anything that rewrote it after build-macos-lib.sh stamped it — a
 #     hand-run `zig build lib -Doptimize=…` (host macOS floor, no link proof), a copy
 #     or a restore — fails here whatever the file times say. (Plain `zig build` writes
@@ -23,17 +24,22 @@
 # Wire it as a Run Script build phase placed BEFORE "Compile Sources", or run it
 # by hand before an Xcode build:
 #
-#     zig-forge/programs/terminal_mux/scripts/ensure-fresh-lib.sh
+#     zig-forge/programs/zterm_plex/scripts/ensure-fresh-lib.sh
+#
+# programs/terminal_mux is a link to this directory for consumers still on the
+# former path, so the directory is resolved physically: the source id is taken
+# over the real sources, whichever path the script was called by.
 #
 # Exit status: 0 when the archive is current (already or after rebuilding),
 # non-zero when the rebuild failed — which fails the Xcode build, by design.
 
 set -euo pipefail
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 program="$(dirname "$here")"
 repo="$(cd "$program/../.." && pwd)"
-archive="$program/zig-out/lib/libterminal_mux.a"
+archive="$program/zig-out/lib/libzterm_plex.a"
+compat="$program/zig-out/lib/libterminal_mux.a"
 
 # Xcode's Run Script phases run with a minimal PATH that usually lacks zig. The
 # forge's patched install is found off PATH (scripts/zig-toolchain.sh); PATH `zig` is
@@ -52,13 +58,15 @@ if [[ ! -f "$archive" ]]; then
     reason="archive missing"
 elif ! why="$("$repo/scripts/check-archive-stamp.sh" "$archive" "$program" 2>&1)"; then
     reason="$(printf '%s' "$why" | tr '\n' ' ')"
+elif [[ ! -f "$compat" ]]; then
+    reason="libterminal_mux.a (the former name consumers may still link) missing"
 fi
 
 if [[ -z "$reason" ]]; then
-    echo "libterminal_mux.a is current"
+    echo "libzterm_plex.a is current"
     exit 0
 fi
 
-echo "rebuilding libterminal_mux.a ($reason)"
-"$repo/scripts/build-macos-lib.sh" programs/terminal_mux
-echo "libterminal_mux.a rebuilt"
+echo "rebuilding libzterm_plex.a ($reason)"
+"$repo/scripts/build-macos-lib.sh" programs/zterm_plex
+echo "libzterm_plex.a rebuilt"

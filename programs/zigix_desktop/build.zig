@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
 
     if (is_freestanding) {
         // ── Zigix freestanding build ─────────────────────────────────────────
-        // No libc, no terminal_mux — pure syscall-based desktop.
+        // No libc, no zterm_plex — pure syscall-based desktop.
         // Uses tui_pure.zig instead of zig_tui.
         // Link against Zigix userspace syscall lib.
 
@@ -44,7 +44,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(exe);
     } else {
         // ── Linux/macOS hosted build ─────────────────────────────────────────
-        // Full zig_tui + terminal_mux with libc.
+        // Full zig_tui + zterm_plex with libc.
 
         const tui_mod = b.createModule(.{
             .root_source_file = b.path("../zig_tui/src/lib.zig"),
@@ -54,7 +54,7 @@ pub fn build(b: *std.Build) void {
         });
 
         const mux_mod = b.createModule(.{
-            .root_source_file = b.path("../terminal_mux/src/lib.zig"),
+            .root_source_file = b.path("../zterm_plex/src/lib.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         exe.root_module.addImport("zig_tui", tui_mod);
-        exe.root_module.addImport("terminal_mux", mux_mod);
+        exe.root_module.addImport("zterm_plex", mux_mod);
         b.installArtifact(exe);
 
         // Run step

@@ -1,4 +1,4 @@
-//! sys — the descriptor-level calls terminal_mux's event loops make, on every
+//! sys — the descriptor-level calls zterm_plex's event loops make, on every
 //! platform it builds for.
 //!
 //! On POSIX each name here is an ALIAS of the call it stands for (`read` is

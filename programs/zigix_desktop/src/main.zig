@@ -3,7 +3,7 @@
 // Dual-use: builds for Linux (with libc, PTY, /proc) or Zigix freestanding
 // (pure syscalls, UART). Platform selection is compile-time via build.zig.
 //
-// On Linux: full terminal_mux PTY integration, /proc stats, termios raw mode.
+// On Linux: full zterm_plex PTY integration, /proc stats, termios raw mode.
 // On Zigix: direct UART I/O, fork+execve processes, kernel stats.
 //
 // Architecture:

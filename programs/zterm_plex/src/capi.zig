@@ -1,4 +1,4 @@
-//! C ABI for terminal_mux — in-process embedding surface (libterminal_mux).
+//! C ABI for zterm_plex — in-process embedding surface (libzterm_plex).
 //!
 //! This is the libghostty-style interface: a host application (e.g. a Swift /
 //! SwiftUI front-end) links the static library and drives the multiplexer core
@@ -160,7 +160,7 @@ pub const ColorKind = enum(u8) {
 };
 
 /// A single terminal cell, flattened for C consumers. Matches `zterm_cell` in
-/// include/terminal_mux.h. `attrs` is the bit-for-bit `CellAttrs` byte:
+/// include/zterm_plex.h. `attrs` is the bit-for-bit `CellAttrs` byte:
 ///   bit0 bold, bit1 dim, bit2 italic, bit3 underline,
 ///   bit4 blink, bit5 inverse, bit6 invisible, bit7 strikethrough.
 pub const CCell = extern struct {

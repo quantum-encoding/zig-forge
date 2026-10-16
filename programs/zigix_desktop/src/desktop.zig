@@ -7,7 +7,7 @@ const tui = if (platform.is_linux) @import("zig_tui") else @import("tui_pure.zig
 const Window = @import("window.zig").Window;
 const theme = @import("theme.zig");
 
-const mux = if (platform.is_linux) @import("terminal_mux") else struct {
+const mux = if (platform.is_linux) @import("zterm_plex") else struct {
     pub const Pane = void;
     pub const Rect = struct { x: u16, y: u16, width: u16, height: u16 };
 };
@@ -65,7 +65,7 @@ pub const Desktop = struct {
         const idx = self.window_count;
 
         if (platform.is_linux) {
-            // Linux: use terminal_mux Pane with PTY
+            // Linux: use zterm_plex Pane with PTY
             const pane_rect = MuxRect{ .x = 0, .y = 0, .width = 80, .height = 24 };
             const pane = try Pane.init(self.allocator, self.next_id, pane_rect, DEFAULT_SCROLLBACK);
             errdefer pane.deinit();

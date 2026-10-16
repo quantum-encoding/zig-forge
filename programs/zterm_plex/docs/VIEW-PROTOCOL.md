@@ -2,7 +2,7 @@
 
 The wire form of the render contract a front end needs to draw a pane that a
 `zterm server` owns: grid state out, input in, on one connection. It is the
-same contract the in-process C ABI (`src/capi.zig`, `include/terminal_mux.h`)
+same contract the in-process C ABI (`src/capi.zig`, `include/zterm_plex.h`)
 gives the Swift/Metal host — cells, cursor, modes, title, bell, clipboard —
 carried over the socket so the shells live in the server and survive the
 front end.

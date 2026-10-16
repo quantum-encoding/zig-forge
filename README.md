@@ -144,7 +144,7 @@ zig-forge/
 | **duck_agent_scribe** | Agent accountability — lifecycle logging, turn tracking, batch manifests. | `duckagent-scribe` | Complete |
 | **duck_cache_scribe** | Git sync daemon — inotify file watching, debounced commits, chronos timestamps. | `duckcache-scribe` | Complete |
 | **claude-shepherd** | Claude Code orchestrator — multi-instance management, permission policies, D-Bus, eBPF. | `claude-shepherd` | WIP |
-| **terminal_mux** | Terminal multiplexer — PTY management, pane splitting, 10K scrollback, Unix socket IPC. | `tmux` | Complete |
+| **zterm_plex** | Terminal multiplexer engine behind `zterm` (formerly terminal_mux) — PTY management, pane splitting, 10K scrollback, Unix socket IPC. | `tmux` | Complete |
 
 ### Compute and Research
 
@@ -157,7 +157,7 @@ zig-forge/
 
 | Program | Description | Binary | Status |
 |---------|-------------|--------|--------|
-| **zigix_desktop** | TUI window manager — tiled windows, PTY terminal emulation, PC-98 amber theme. Dual-use: Linux (full zig_tui + terminal_mux) or Zigix freestanding (13KB RISC-V ELF). | `zigix-desktop` | Complete |
+| **zigix_desktop** | TUI window manager — tiled windows, PTY terminal emulation, PC-98 amber theme. Dual-use: Linux (full zig_tui + zterm_plex) or Zigix freestanding (13KB RISC-V ELF). | `zigix-desktop` | Complete |
 | **zigix_monitor** | System dashboard — CPU/memory/disk/network, tabbed interface, /proc integration. | `zigix-monitor` | Complete |
 
 ### Cross-Platform Build Artifacts
@@ -324,7 +324,7 @@ Cosmic Duck OS, AI Conductor, Cifra, Metatron Security and other apps link stati
 
 ```bash
 scripts/build-consumed-libs.sh                # every library in libs.toml
-scripts/build-consumed-libs.sh terminal_mux   # just the named ones
+scripts/build-consumed-libs.sh zterm_plex     # just the named ones
 ```
 
 [`libs.toml`](libs.toml) lists each library with its exact build command, its artifacts, and the `sources` a consumer's `release.toml` must declare. Each build is a release mode, link-checked on a Mac (`scripts/check-apple-archive.sh`: ld64 skips a Mach-O member that is not 8-byte aligned with only a warning; Zig 0.17 writes aligned members, so the 0.16-era repack is gone), and stamped with `<lib>-source-id.txt`, `<lib>-toolchain.txt` from `scripts/zig-source-id.sh`, which hashes every file the build reads, including the sibling directories `build.zig` imports. In a git checkout that `baton release` products point at, the command also writes `<archive>.release-stamp.json` for each consuming product. That stamp is what makes the input read `fresh` in `baton release plan`, and it is refused when the product's `release.toml` declares the input differently from `libs.toml`. The command exits non-zero if any library fails to build, comes out as a Debug or ReleaseSafe build, carries a stale stamp, or cannot be stamped.
@@ -332,7 +332,7 @@ scripts/build-consumed-libs.sh terminal_mux   # just the named ones
 | Library | Archive | Mode | Linked by |
 |---|---|---|---|
 | quantum_crypto | `programs/simd_crypto_ffi/zig-out/lib/libquantum_crypto.a` | ReleaseSmall | Cosmic Duck OS, CryptoWalletKit, Cifra |
-| terminal_mux | `programs/terminal_mux/zig-out/lib/libterminal_mux.a` | ReleaseSmall | Cosmic Duck OS, AI Conductor, rust_agent |
+| zterm_plex | `programs/zterm_plex/zig-out/lib/libzterm_plex.a` (+ `libterminal_mux.a` under the former name) | ReleaseSmall | Cosmic Duck OS, AI Conductor, rust_agent |
 | zig_docx | `programs/zig_docx/zig-out/lib/libzig_docx.a` | ReleaseSmall | Cosmic Duck OS |
 | zigpdf | `programs/zig_pdf_generator/zig-out/lib/libzigpdf.a` | ReleaseSmall | Cosmic Duck OS |
 | zsss | `zig_core_utils/zsss/zig-out/lib/libzsss-aarch64-macos.a` (plus iOS and Linux) | ReleaseFast | Cosmic Duck OS, Cifra, Tessera |
@@ -369,7 +369,7 @@ zig build wasm_runtime
 zig build zig_dns_server
 zig build zig_reverse_proxy
 zig build warp_gate
-zig build terminal_mux
+zig build zterm_plex
 zig build guardian_shield
 zig build chronos_engine
 zig build zig_jail

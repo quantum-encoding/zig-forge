@@ -1,4 +1,4 @@
-# terminal_mux — inline graphics protocol (scope)
+# zterm_plex — inline graphics protocol (scope)
 
 Goal: let programs draw real pixels in the embedded terminal — image previews,
 plots, DOOM at full resolution — instead of the half-block approximation. The
@@ -169,7 +169,7 @@ free; decode lives where the platform already has an accelerated decoder.
 RGBA/RGB need no decode anywhere — the standalone ANSI renderer supports those
 directly (half-block downsample), PNG only where a host decoder exists.
 
-### C ABI additions (`src/capi.zig`, `include/terminal_mux.h`)
+### C ABI additions (`src/capi.zig`, `include/zterm_plex.h`)
 
 New calls, all additive (no existing symbol/struct changes):
 
