@@ -1,33 +1,33 @@
 {
-  "commit": "d24e37fa7ea2dc7c82c1eca5cecf18379888cb9c",
-  "source_id": "ce9f2f4a46b26cd4bd96ad91b8d2d08701f4910b6f879f65176c89abcb69df5c",
+  "commit": "d8bb8ddb9c8cb4f01300846be52588c333113b1c",
+  "source_id": "78bdb90243da4066663891ec82f2806a13da8a239889300ac8d4f1c630299c31",
   "toolchain": "zig 0.17.0 + zig-0.17.0-ios-nullfile.patch sha256:56ace2b887defd50bb1ac7f929964689cbeaddccec3d10e12ca19e907c0ea79c",
-  "marked_at": "2026-10-16T17:04:36Z",
+  "marked_at": "2026-10-16T17:37:09Z",
   "marked_on": "qe-ltd-m5",
-  "note": "folder comparison byte-for-byte on every core: compare 4.07s/1.0c -> 0.99s/8.5c, results identical. Known: big same-size files 2 cores",
+  "note": "large same-size candidates by BLAKE3 subtree on every core: big 1.12s/1.96c -> 0.17s/12.8c, results identical. Next: compare's walk (0.53s of 0.98s on 2 cores)",
   "baselines": {
     "qe-ltd-m5": {
       "big": {
-        "wall_s": 1.1537,
-        "cores": 1.96,
+        "wall_s": 0.1749,
+        "cores": 12.82,
         "n": 3,
         "digest": "c4c841ea16f86128"
       },
       "clones": {
-        "wall_s": 0.074,
-        "cores": 9.17,
+        "wall_s": 0.0755,
+        "cores": 9.32,
         "n": 3,
         "digest": "fe2722ff9d386c28"
       },
       "compare": {
-        "wall_s": 0.9869,
-        "cores": 8.49,
+        "wall_s": 0.984,
+        "cores": 8.54,
         "n": 3,
         "digest": "f00b8efaf9679480"
       },
       "small": {
-        "wall_s": 1.3761,
-        "cores": 15.12,
+        "wall_s": 1.356,
+        "cores": 16.1,
         "n": 3,
         "digest": "6e9bfcd120586300"
       }

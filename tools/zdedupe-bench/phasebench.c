@@ -57,8 +57,9 @@ static int walk_only;
 static volatile int running = 1;
 static zdedupe_ctx* ctx;
 static double t0, cancel_sent;
-// Per phase: when it was first entered (wall, and process CPU) and its item count.
-static double ph_start[NPHASES], ph_cpu[NPHASES];
+// Per phase: when it was first entered (wall, process CPU, and the system part of that CPU)
+// and its item count.
+static double ph_start[NPHASES], ph_cpu[NPHASES], ph_sys[NPHASES];
 static uint64_t ph_items[NPHASES];
 static int seen[NPHASES];
 
@@ -73,6 +74,13 @@ static double cpu_now(void) {
   struct rusage u;
   getrusage(RUSAGE_SELF, &u);
   return u.ru_utime.tv_sec + u.ru_utime.tv_usec / 1e6 + u.ru_stime.tv_sec + u.ru_stime.tv_usec / 1e6;
+}
+
+// The system (kernel) part of it: opens, reads, and on macOS their authorizations.
+static double sys_now(void) {
+  struct rusage u;
+  getrusage(RUSAGE_SELF, &u);
+  return u.ru_stime.tv_sec + u.ru_stime.tv_usec / 1e6;
 }
 
 static size_t footprint(void) {
@@ -121,6 +129,7 @@ static void* poll(void* unused) {
         seen[ph] = 1;
         ph_start[ph] = now() - t0;
         ph_cpu[ph] = cpu_now();
+        ph_sys[ph] = sys_now();
       }
       fprintf(stderr, "[%8.2fs] -> %s (found=%llu total=%llu)\n", now() - t0, names[ph], (unsigned long long)p.files_found, (unsigned long long)p.total);
       last = ph;
@@ -200,7 +209,7 @@ int main(int argc, char** argv) {
 
   pthread_t th;
   t0 = now();
-  double cpu0 = cpu_now();
+  double cpu0 = cpu_now(), sys0 = sys_now();
   pthread_create(&th, 0, poll, 0);
   int rc;
   const char* report = NULL;
@@ -212,7 +221,7 @@ int main(int argc, char** argv) {
     rc = zdedupe_run_to_file(ctx, out);
   }
   double total = now() - t0;
-  double cpu_total = cpu_now() - cpu0;
+  double cpu_total = cpu_now() - cpu0, sys_total = sys_now() - sys0;
   running = 0;
   pthread_join(th, 0);
 
@@ -229,10 +238,11 @@ int main(int argc, char** argv) {
       order[b] = order[b - 1];
       order[b - 1] = t;
     }
-  double end_wall[NPHASES], end_cpu[NPHASES];
+  double end_wall[NPHASES], end_cpu[NPHASES], end_sys[NPHASES];
   for (int i = 0; i < n; i++) {
     end_wall[i] = i + 1 < n ? ph_start[order[i + 1]] : total;
     end_cpu[i] = i + 1 < n ? ph_cpu[order[i + 1]] : cpu0 + cpu_total;
+    end_sys[i] = i + 1 < n ? ph_sys[order[i + 1]] : sys0 + sys_total;
     if (order[i] == 7) continue;
     double wall = end_wall[i] - ph_start[order[i]], cpu = end_cpu[i] - ph_cpu[order[i]];
     printf("  %-10s %8.3fs  cores=%5.2f  items=%llu\n", names[order[i]], wall, wall > 0 ? cpu / wall : 0, (unsigned long long)ph_items[order[i]]);
@@ -274,14 +284,14 @@ int main(int argc, char** argv) {
 #else
     double maxrss_mb = u.ru_maxrss / 1e3; // kilobytes on Linux
 #endif
-    fprintf(f, "{\"rc\":%d,\"cancelled\":%s,\"wall_s\":%.6f,\"cpu_s\":%.6f,\"maxrss_mb\":%.1f,\"phases\":[",
-            rc, cancel_sent > 0 ? "true" : "false", total, cpu_total, maxrss_mb);
+    fprintf(f, "{\"rc\":%d,\"cancelled\":%s,\"wall_s\":%.6f,\"cpu_s\":%.6f,\"sys_s\":%.6f,\"maxrss_mb\":%.1f,\"phases\":[",
+            rc, cancel_sent > 0 ? "true" : "false", total, cpu_total, sys_total, maxrss_mb);
     int first = 1;
     for (int i = 0; i < n; i++) {
       if (order[i] == 7) continue;
-      fprintf(f, "%s{\"name\":\"%s\",\"start_s\":%.6f,\"wall_s\":%.6f,\"cpu_s\":%.6f,\"items\":%llu}", first ? "" : ",",
+      fprintf(f, "%s{\"name\":\"%s\",\"start_s\":%.6f,\"wall_s\":%.6f,\"cpu_s\":%.6f,\"sys_s\":%.6f,\"items\":%llu}", first ? "" : ",",
               names[order[i]], ph_start[order[i]], end_wall[i] - ph_start[order[i]], end_cpu[i] - ph_cpu[order[i]],
-              (unsigned long long)ph_items[order[i]]);
+              end_sys[i] - ph_sys[order[i]], (unsigned long long)ph_items[order[i]]);
       first = 0;
     }
     fprintf(f, "],\"overview\":%s}\n", overview ? overview : "null");

@@ -63,6 +63,9 @@ changes.
   stuck). The build keeps its symbols, so `sample` on it names functions.
 - A commit from before the Zig 0.17 port needs `--zig /path/to/zig-0.16`; the toolchain
   is part of the build's identity, so its runs are kept apart.
+- On a machine other sessions share, `--quiet 4` waits before each run until the 1-minute
+  load average is under 4 (each run records its load and the wait), so their builds do not
+  land in the timings.
 - With an Endpoint Security client installed, an agent's process tree can be authorized
   on a slower path than an app. `--detached` runs each scan as a launchd job instead.
   Builds compared in the same mode are compared fairly either way.

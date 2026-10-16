@@ -412,7 +412,26 @@ def run_detached(cmd, rundir, timeout):
         subprocess.run(["launchctl", "remove", label], capture_output=True)
 
 
+def wait_quiet(args):
+    """With --quiet, wait (up to --quiet-wait seconds) for the 1-minute load average
+    to fall under the threshold; a shared machine's other work otherwise shows up
+    as noise. Returns the seconds waited."""
+    if not args.quiet:
+        return 0.0
+    t0 = time.time()
+    told = False
+    while os.getloadavg()[0] > args.quiet and time.time() - t0 < args.quiet_wait:
+        if not told:
+            print(f"bench: waiting for load < {args.quiet} (now {os.getloadavg()[0]:.1f})", file=sys.stderr, flush=True)
+            told = True
+        time.sleep(5)
+    if os.getloadavg()[0] > args.quiet:
+        print(f"bench: load still {os.getloadavg()[0]:.1f} after {args.quiet_wait:.0f}s; running anyway", file=sys.stderr)
+    return round(time.time() - t0, 1)
+
+
 def run_one(b, name, spec, round_no, args):
+    waited = wait_quiet(args)
     rundir = Path(tempfile.mkdtemp(dir=HOME / "runs"))
     try:
         flags = list(APP_FLAGS[spec["mode"]]) + (["-d"] if args.dirs and spec["mode"] == 0 else [])
@@ -435,6 +454,7 @@ def run_one(b, name, spec, round_no, args):
             "source_id": b.source_id, "toolchain": b.toolchain, "build": b.key,
             "target": name, "fixture_version": spec["version"], "flags": flags,
             "detached": bool(args.detached and DARWIN), "round": round_no, "load": round(load, 2),
+            "waited_s": waited,
         }
         if timed_out:
             return {**rec, "rc": None, "timeout": True, "wall_s": float(args.timeout)}
@@ -444,9 +464,11 @@ def run_one(b, name, spec, round_no, args):
             return {**rec, "rc": rc, "timeout": False, "error": err}
         r = json.loads(res_path.read_text())
         phases = {p["name"]: {"wall_s": round(p["wall_s"], 4), "cpu_s": round(p["cpu_s"], 4),
+                              "sys_s": round(p.get("sys_s", 0.0), 4),
                               "cores": round(p["cpu_s"] / p["wall_s"], 2) if p["wall_s"] > 0 else 0.0}
                   for p in r["phases"]}
         return {**rec, "rc": r["rc"], "timeout": False, "wall_s": round(r["wall_s"], 4), "cpu_s": round(r["cpu_s"], 4),
+                "sys_s": round(r.get("sys_s", 0.0), 4),
                 "cores": round(r["cpu_s"] / r["wall_s"], 2) if r["wall_s"] > 0 else 0.0,
                 "maxrss_mb": r["maxrss_mb"], "phases": phases,
                 "result": fingerprint(spec["mode"], rundir / "export", r.get("overview"))}
@@ -496,9 +518,10 @@ def cmd_run(args):
             build(b)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+    started = now_iso()
     load = os.getloadavg()[0]
-    if load > (os.cpu_count() or 1) * 0.25:
-        print(f"bench: load average is {load:.1f} on {os.cpu_count()} CPUs; other work will show in the timings", file=sys.stderr)
+    if load > (os.cpu_count() or 1) * 0.25 and not args.quiet:
+        print(f"bench: load average is {load:.1f} on {os.cpu_count()} CPUs; other work will show in the timings (--quiet waits)", file=sys.stderr)
     for t in targets:
         spec = target_spec(t, args)
         if spec is None:
@@ -514,17 +537,21 @@ def cmd_run(args):
                 print(f"  {b.label:22} run {i + 1}: {describe_run(rec)}", flush=True)
     if len(builds) >= 2:
         print()
-        report(builds[0], builds[-1], targets)
+        # This invocation's runs only: interleaved, so under the same conditions.
+        report(builds[0], builds[-1], targets, since=started)
     print(f"\nbench: runs recorded in {ledger_path().relative_to(FORGE)}")
 
 
 # --- comparing -------------------------------------------------------------------
 
-def runs_of(b, target, ledger=None):
+def runs_of(b, target, ledger=None, since=None, max_load=None):
+    """Recorded runs of build `b` on `target`: from `since` (an ISO time) on, and
+    started at a load average of at most `max_load`, when given."""
     ledger = read_ledger() if ledger is None else ledger
     spec_v = TARGETS[target]["version"] if target in TARGETS else 0
     return [r for r in ledger if r["source_id"] == b.source_id and r["toolchain"] == b.toolchain
-            and r["target"] == target and r.get("fixture_version") == spec_v and r.get("round", 0) >= 0]
+            and r["target"] == target and r.get("fixture_version") == spec_v and r.get("round", 0) >= 0
+            and (since is None or r["at"] >= since) and (max_load is None or r.get("load", 0) <= max_load)]
 
 
 def summarize(runs):
@@ -567,12 +594,20 @@ def verdict(a, b):
     return f"same within noise ({delta:+.1%}, noise {noise:.0%}){few}", False
 
 
-def report(a, b, targets):
+def report(a, b, targets, since=None, max_load=None):
     ledger = read_ledger()
     bad = False
-    print(f"A = {a.label} ({a.ref})   B = {b.label} ({b.ref})   on {MACHINE['host']} ({MACHINE['cpu']})")
+    scope = f"runs since {since}" if since else "all recorded runs"
+    if max_load is not None:
+        scope += f" started at load <= {max_load:g}"
+    print(f"A = {a.label} ({a.ref})   B = {b.label} ({b.ref})   on {MACHINE['host']} ({MACHINE['cpu']}); {scope}")
     for t in targets:
-        sa, sb = summarize(runs_of(a, t, ledger)), summarize(runs_of(b, t, ledger))
+        sa, sb = summarize(runs_of(a, t, ledger, since, max_load)), summarize(runs_of(b, t, ledger, since, max_load))
+        if max_load is not None:
+            left_out = len(runs_of(a, t, ledger, since)) + len(runs_of(b, t, ledger, since)) - sa["n"] - sb["n"] \
+                - sa.get("timeouts", 0) - sb.get("timeouts", 0) - sa.get("failed", 0) - sb.get("failed", 0)
+            if left_out:
+                print(f"  {t}: {left_out} run(s) started above load {max_load:g} left out")
         text, regressed = verdict(sa, sb)
         same = "results: n/a"
         if sa["n"] and sb["n"]:
@@ -608,7 +643,8 @@ def cmd_compare(args):
     targets = args.target or sorted({r["target"] for r in ledger if r["source_id"] in (a.source_id, b.source_id)})
     if not targets:
         die(f"no runs recorded for {a.label} or {b.label}: `bench.py run {args.a} {args.b}` first")
-    sys.exit(1 if report(a, b, targets) else 0)
+    max_load = None if args.max_load < 0 else (args.max_load if args.max_load else (os.cpu_count() or 1) * 0.25)
+    sys.exit(1 if report(a, b, targets, since=args.since, max_load=max_load) else 0)
 
 
 def cmd_log(args):
@@ -645,8 +681,9 @@ def cmd_good(args):
         shutil.rmtree(scratch, ignore_errors=True)
     ledger = read_ledger()
     base = {}
+    quiet = (os.cpu_count() or 1) * 0.25  # a loaded run is no baseline
     for t in sorted({r["target"] for r in ledger}):
-        s = summarize(runs_of(b, t, ledger))
+        s = summarize(runs_of(b, t, ledger, max_load=quiet))
         if s["n"]:
             base[t] = {"wall_s": round(s["wall_s"], 4), "cores": round(s["cores"], 2), "n": s["n"],
                        "digest": s["digests"][0] if len(s["digests"]) == 1 else None}
@@ -728,12 +765,17 @@ def main():
     p.add_argument("--timeout", type=float, default=900)
     p.add_argument("--dirs", action="store_true", help="duplicate scans also analyze folders")
     p.add_argument("--detached", action="store_true", help="run each scan as a launchd job, outside this process tree (macOS)")
+    p.add_argument("--quiet", type=float, metavar="LOAD", help="before each run, wait for the 1-minute load average to fall under LOAD")
+    p.add_argument("--quiet-wait", type=float, default=900, help="longest wait for --quiet, in seconds (default 900)")
     p.set_defaults(fn=cmd_run)
     p = sub.add_parser("compare")
     p.add_argument("a")
     p.add_argument("b")
     p.add_argument("-t", "--target", action="append")
     p.add_argument("--zig-b", help="B was built with this Zig")
+    p.add_argument("--since", help="only runs from this ISO time on (e.g. 2026-10-16T17:00)")
+    p.add_argument("--max-load", type=float, default=0,
+                   help="leave out runs started above this load average (default: a quarter of the CPUs; -1 keeps all)")
     p.set_defaults(fn=cmd_compare)
     p = sub.add_parser("log")
     p.add_argument("-t", "--target", action="append")
