@@ -556,93 +556,115 @@ pub const DupeFinder = struct {
         // Clone classes, per group: clone id -> class number.
         var classes: std.AutoHashMapUnmanaged(u64, u32) = .empty;
         defer classes.deinit(self.allocator);
-        // Group by full hash
-        var hash_groups = std.AutoHashMap([32]u8, std.ArrayListUnmanaged(usize)).init(self.allocator);
-        defer {
-            var iter = hash_groups.valueIterator();
-            while (iter.next()) |list| list.deinit(self.allocator);
-            hash_groups.deinit();
-        }
+        // One size group's hashed files at a time. Equal content has equal
+        // size, so each size group is grouped by full hash on its own, by
+        // sorting: no map over every hashed file, no list per distinct hash.
+        var hashed: std.ArrayListUnmanaged(usize) = .empty;
+        defer hashed.deinit(self.allocator);
 
         var sg_iter = size_groups.valueIterator();
         while (sg_iter.next()) |sg| {
+            hashed.clearRetainingCapacity();
             for (sg.indices.items) |idx| {
-                const entry = &self.files.items[idx];
-
-                // Only include files with computed hashes
-                const hash_key = entry.hash orelse continue;
-
-                const gop = try hash_groups.getOrPut(hash_key);
-                if (!gop.found_existing) {
-                    gop.value_ptr.* = .empty;
+                // Only files with computed hashes
+                if (self.files.items[idx].hash != null) try hashed.append(self.allocator, idx);
+            }
+            if (hashed.items.len < 2) continue;
+            std.mem.sort(usize, hashed.items, self.files.items, struct {
+                fn lessThan(files: []types.FileEntry, lhs: usize, rhs: usize) bool {
+                    return std.mem.order(u8, &files[lhs].hash.?, &files[rhs].hash.?) == .lt;
                 }
-                try gop.value_ptr.append(self.allocator, idx);
+            }.lessThan);
+            var first: usize = 0;
+            while (first < hashed.items.len) {
+                const hash = self.files.items[hashed.items[first]].hash.?;
+                var end = first + 1;
+                while (end < hashed.items.len and
+                    std.mem.eql(u8, &self.files.items[hashed.items[end]].hash.?, &hash)) end += 1;
+                if (end - first >= 2) try self.addGroup(hashed.items[first..end], hash, &classes);
+                first = end;
             }
         }
 
-        // Build DuplicateGroup for each group with 2+ files
-        var hg_iter = hash_groups.iterator();
-        while (hg_iter.next()) |kv| {
-            if (kv.value_ptr.items.len < 2) continue;
+        // Sort groups by savings (largest first). The hash breaks ties so the
+        // order is total: a parallel walk reports files in no fixed order, and
+        // the same disk must still produce the same report every time. An
+        // index is sorted and each group moved once, not swapped about.
+        const order = try self.allocator.alloc(u32, self.groups.items.len);
+        defer self.allocator.free(order);
+        for (order, 0..) |*o, i| o.* = @intCast(i);
+        std.mem.sort(u32, order, self.groups.items, struct {
+            fn lessThan(groups: []const types.DuplicateGroup, lhs: u32, rhs: u32) bool {
+                const a = &groups[lhs];
+                const b = &groups[rhs];
+                if (a.savings != b.savings) return a.savings > b.savings;
+                return std.mem.order(u8, &a.hash, &b.hash) == .lt;
+            }
+        }.lessThan);
+        var sorted = try std.ArrayListUnmanaged(types.DuplicateGroup).initCapacity(self.allocator, order.len);
+        for (order) |i| sorted.appendAssumeCapacity(self.groups.items[i]);
+        self.groups.deinit(self.allocator);
+        self.groups = sorted;
+    }
 
-            const first_idx = kv.value_ptr.items[0];
-            const size = self.files.items[first_idx].size;
+    /// A duplicate group of `members` (indices into `files`, all of one
+    /// content), unless its size is outside the configured window.
+    fn addGroup(self: *DupeFinder, members: []usize, hash: [32]u8, classes: *std.AutoHashMapUnmanaged(u64, u32)) !void {
+        const size = self.files.items[members[0]].size;
 
-            // Under directory analysis the walk ignored the size window (see
-            // scan); it is applied here so the file groups are unchanged.
-            if (!self.config.sizeInRange(size)) continue;
+        // Under directory analysis the walk ignored the size window (see
+        // scan); it is applied here so the file groups are unchanged.
+        if (!self.config.sizeInRange(size)) return;
 
-            var group = types.DuplicateGroup.init(self.allocator, size, kv.key_ptr.*);
-            errdefer group.deinit();
+        var group = types.DuplicateGroup.init(self.allocator, size, hash);
+        errdefer group.deinit();
 
-            // Oldest first, path as the tie-break: consumers present the first
-            // file as the one to keep, and "keep the oldest" should not depend
-            // on the order the walk happened to visit things in.
-            std.sort.heap(usize, kv.value_ptr.items, self.files.items, struct {
-                fn lessThan(files: []types.FileEntry, lhs: usize, rhs: usize) bool {
-                    if (files[lhs].mtime != files[rhs].mtime) return files[lhs].mtime < files[rhs].mtime;
-                    return std.mem.order(u8, files[lhs].path, files[rhs].path) == .lt;
-                }
-            }.lessThan);
+        // Oldest first, path as the tie-break: consumers present the first
+        // file as the one to keep, and "keep the oldest" should not depend
+        // on the order the walk happened to visit things in.
+        std.sort.heap(usize, members, self.files.items, struct {
+            fn lessThan(files: []types.FileEntry, lhs: usize, rhs: usize) bool {
+                if (files[lhs].mtime != files[rhs].mtime) return files[lhs].mtime < files[rhs].mtime;
+                return std.mem.order(u8, files[lhs].path, files[rhs].path) == .lt;
+            }
+        }.lessThan);
 
-            // A clone id shared by two or more files of the group is a clone
-            // class; the group numbers its classes from 1, in file order.
-            classes.clearRetainingCapacity();
-            for (kv.value_ptr.items) |idx| {
+        // A clone id shared by two or more files of the group is a clone
+        // class; the group numbers its classes from 1, in file order. Most
+        // groups hold no clone, and clearing the map costs what the largest
+        // group before made it, so it is only touched for a group with one.
+        const has_clones = for (members) |idx| {
+            if (self.files.items[idx].clone_id != 0) break true;
+        } else false;
+        if (has_clones) {
+            if (classes.capacity() > 8 * members.len + 64) classes.clearAndFree(self.allocator) else classes.clearRetainingCapacity();
+            for (members) |idx| {
                 const id = self.files.items[idx].clone_id;
                 if (id == 0) continue;
                 const gop = try classes.getOrPut(self.allocator, id);
                 gop.value_ptr.* = if (gop.found_existing) 1 else 0; // 1 = shared
             }
-            var next_class: u32 = 1;
             var it = classes.valueIterator();
             while (it.next()) |v| v.* = if (v.* == 1) std.math.maxInt(u32) else 0;
-            for (kv.value_ptr.items) |idx| {
-                const entry = &self.files.items[idx];
-                var class: u32 = 0;
-                if (entry.clone_id != 0) {
-                    const slot = classes.getPtr(entry.clone_id).?;
-                    if (slot.* == std.math.maxInt(u32)) {
-                        slot.* = next_class;
-                        next_class += 1;
-                    }
-                    class = slot.*;
+        }
+        var next_class: u32 = 1;
+        try group.files.ensureTotalCapacity(self.allocator, members.len);
+        try group.file_infos.ensureTotalCapacity(self.allocator, members.len);
+        for (members) |idx| {
+            const entry = &self.files.items[idx];
+            var class: u32 = 0;
+            if (has_clones and entry.clone_id != 0) {
+                const slot = classes.getPtr(entry.clone_id).?;
+                if (slot.* == std.math.maxInt(u32)) {
+                    slot.* = next_class;
+                    next_class += 1;
                 }
-                try group.addFileWithClone(entry.path, entry.mtime, class);
+                class = slot.*;
             }
-
-            try self.groups.append(self.allocator, group);
+            try group.addFileWithClone(entry.path, entry.mtime, class);
         }
 
-        // Sort groups by savings (largest first). The hash breaks ties so the
-        // order is total: a parallel walk reports files in no fixed order, and
-        // the same disk must still produce the same report every time.
-        std.sort.heap(types.DuplicateGroup, self.groups.items, {}, struct {
-            fn cmp(_: void, a: types.DuplicateGroup, b: types.DuplicateGroup) bool {
-                if (a.savings != b.savings) return a.savings > b.savings;
-                return std.mem.order(u8, &a.hash, &b.hash) == .lt;
-            }
-        }.cmp);
+        try self.groups.append(self.allocator, group);
     }
 
     fn checkCancelled(self: *const DupeFinder) error{Cancelled}!void {
