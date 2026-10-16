@@ -297,6 +297,28 @@ pub const Hasher = struct {
     }
 };
 
+/// std.crypto.hash.Blake3's interface (unkeyed) over `Hasher`, for code that
+/// is generic over its hasher: the same digest, from the vector path.
+pub const Blake3 = struct {
+    pub const digest_length = 32;
+    pub const Options = struct {};
+
+    inner: Hasher = Hasher.init(0),
+
+    pub fn init(_: Options) Blake3 {
+        return .{};
+    }
+
+    pub fn update(self: *Blake3, input: []const u8) void {
+        self.inner.update(input);
+    }
+
+    pub fn final(self: *const Blake3, out: []u8) void {
+        const digest = self.inner.final(&.{});
+        @memcpy(out[0..Blake3.digest_length], &digest);
+    }
+};
+
 /// BLAKE3 of `input`, cut into runs of `run_chunks` chunks hashed one by one:
 /// what a caller does across threads.
 fn hashByRuns(input: []const u8, run_chunks: u64, cvs: []Cv) [digest_length]u8 {
@@ -342,6 +364,19 @@ test "every length up to 40 KiB, cut into runs of 1, 2, 4, 8 and 64 chunks, matc
             }
         }
     }
+}
+
+test "the std-shaped Blake3 gives std's digest" {
+    var data: [3 * lanes * chunk_len + 77]u8 = undefined;
+    for (&data, 0..) |*x, i| x.* = @truncate(i *% 7 +% 3);
+    var want: [digest_length]u8 = undefined;
+    std.crypto.hash.Blake3.hash(&data, &want, .{});
+    var h = Blake3.init(.{});
+    h.update(data[0..100]);
+    h.update(data[100..]);
+    var got: [digest_length]u8 = undefined;
+    h.final(&got);
+    try std.testing.expectEqual(want, got);
 }
 
 test "the digest does not depend on how the input is split into updates" {

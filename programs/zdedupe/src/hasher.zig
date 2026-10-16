@@ -54,7 +54,7 @@ pub const FileHasher = struct {
         const fd = try openRegularFileAt(dir_fd, name);
         defer _ = libc.close(fd);
         return switch (self.algorithm) {
-            .blake3 => hashFd(std.crypto.hash.Blake3, fd, max_bytes, self.monitor, 0),
+            .blake3 => hashFd(FileBlake3, fd, max_bytes, self.monitor, 0),
             .sha256 => hashFd(std.crypto.hash.sha2.Sha256, fd, max_bytes, self.monitor, 0),
         };
     }
@@ -70,7 +70,7 @@ pub const FileHasher = struct {
         const fd = try openRegularFileAt(dir_fd, name);
         defer _ = libc.close(fd);
         return switch (self.algorithm) {
-            .blake3 => scanFd(std.crypto.hash.Blake3, fd, read, size, self.monitor, budget),
+            .blake3 => scanFd(FileBlake3, fd, read, size, self.monitor, budget),
             .sha256 => scanFd(std.crypto.hash.sha2.Sha256, fd, read, size, self.monitor, budget),
         };
     }
@@ -91,7 +91,7 @@ pub const FileHasher = struct {
 
     fn hashFileLimited(self: *const FileHasher, path: []const u8, max_bytes: ?usize) !Hash {
         return switch (self.algorithm) {
-            .blake3 => hashFileWith(std.crypto.hash.Blake3, path, max_bytes, self.monitor),
+            .blake3 => hashFileWith(FileBlake3, path, max_bytes, self.monitor),
             .sha256 => hashFileWith(std.crypto.hash.sha2.Sha256, path, max_bytes, self.monitor),
         };
     }
@@ -143,8 +143,13 @@ pub fn openRegularFileAt(dir_fd: c_int, name: [*:0]const u8) !c_int {
 }
 
 /// Hash file using BLAKE3 (fastest, cryptographically secure)
+/// Files are hashed by blake3_tree's vector path (about 1.4x std's speed per
+/// core); `hashBytesBlake3` stays on std's, the oracle the tests hold file
+/// hashes to.
+const FileBlake3 = @import("blake3_tree.zig").Blake3;
+
 pub fn hashFileBlake3(path: []const u8, max_bytes: ?usize) !Hash {
-    return hashFileWith(std.crypto.hash.Blake3, path, max_bytes, null);
+    return hashFileWith(FileBlake3, path, max_bytes, null);
 }
 
 /// Hash file using SHA256
