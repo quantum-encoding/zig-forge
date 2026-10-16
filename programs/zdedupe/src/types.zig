@@ -78,6 +78,11 @@ pub const DuplicateGroup = struct {
     file_infos: std.ArrayListUnmanaged(DuplicateFileInfo),
     /// Potential space savings if all but one file deleted
     savings: u64,
+    /// `distinctCopies` of `file_infos`, kept as files are added.
+    copies: u64,
+    /// The clone classes in `file_infos`, so an added file's class is known
+    /// to be new or not without looking at the files before it.
+    classes: std.AutoHashMapUnmanaged(u32, void),
     /// Allocator for managing the list
     allocator: std.mem.Allocator,
 
@@ -88,6 +93,8 @@ pub const DuplicateGroup = struct {
             .files = .empty,
             .file_infos = .empty,
             .savings = 0,
+            .copies = 0,
+            .classes = .empty,
             .allocator = allocator,
         };
     }
@@ -95,6 +102,7 @@ pub const DuplicateGroup = struct {
     pub fn deinit(self: *DuplicateGroup) void {
         self.files.deinit(self.allocator);
         self.file_infos.deinit(self.allocator);
+        self.classes.deinit(self.allocator);
     }
 
     pub fn addFile(self: *DuplicateGroup, path: []const u8) !void {
@@ -112,28 +120,24 @@ pub const DuplicateGroup = struct {
 
     /// Add a file and its clone class (see `DuplicateFileInfo.clone_class`).
     /// Savings count each set of clones once: they hold one copy of the data.
+    /// Constant time, so a group of n files is built in O(n).
     pub fn addFileWithClone(self: *DuplicateGroup, path: []const u8, mtime: i64, clone_class: u32) !void {
-        try self.files.append(self.allocator, path);
-        try self.file_infos.append(self.allocator, .{ .path = path, .mtime = mtime, .clone_class = clone_class });
-        self.savings = self.size *| (self.distinctCopies() -| 1);
+        // Everything that can fail first: the group never holds a file its
+        // count has not seen.
+        try self.files.ensureUnusedCapacity(self.allocator, 1);
+        try self.file_infos.ensureUnusedCapacity(self.allocator, 1);
+        if (clone_class != 0) try self.classes.ensureUnusedCapacity(self.allocator, 1);
+        self.files.appendAssumeCapacity(path);
+        self.file_infos.appendAssumeCapacity(.{ .path = path, .mtime = mtime, .clone_class = clone_class });
+        const new_copy = clone_class == 0 or !self.classes.getOrPutAssumeCapacity(clone_class).found_existing;
+        self.copies += @intFromBool(new_copy);
+        self.savings = self.size *| (self.copies -| 1);
     }
 
     /// Copies of the data the group really holds: every file outside a clone
     /// class, plus one per clone class.
     pub fn distinctCopies(self: *const DuplicateGroup) u64 {
-        var copies: u64 = 0;
-        for (self.file_infos.items, 0..) |info, i| {
-            if (info.clone_class == 0) {
-                copies += 1;
-                continue;
-            }
-            // First file of its class.
-            const first = for (self.file_infos.items[0..i]) |earlier| {
-                if (earlier.clone_class == info.clone_class) break false;
-            } else true;
-            if (first) copies += 1;
-        }
-        return copies;
+        return self.copies;
     }
 
     /// Files beyond the first of their clone class.
@@ -882,6 +886,45 @@ test "DuplicateGroup" {
 
     try group.addFile("/path/c");
     try std.testing.expectEqual(@as(u64, 2048), group.savings);
+}
+
+test "DuplicateGroup counts clone classes once, as a naive count over the files does" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const random = prng.random();
+    for (0..50) |_| {
+        var group = DuplicateGroup.init(allocator, 100, @as([32]u8, @splat(0)));
+        defer group.deinit();
+        const n = random.intRangeAtMost(usize, 1, 60);
+        for (0..n) |_| {
+            // Half the files outside any class, the rest in one of a few.
+            const class: u32 = if (random.boolean()) 0 else random.intRangeAtMost(u32, 1, 6);
+            try group.addFileWithClone("/f", 0, class);
+        }
+        var naive: u64 = 0;
+        for (group.file_infos.items, 0..) |info, i| {
+            const first = for (group.file_infos.items[0..i]) |earlier| {
+                if (info.clone_class != 0 and earlier.clone_class == info.clone_class) break false;
+            } else true;
+            naive += @intFromBool(first);
+        }
+        try std.testing.expectEqual(naive, group.distinctCopies());
+        try std.testing.expectEqual(n - naive, group.cloneFiles());
+        try std.testing.expectEqual(@as(u64, 100) *| (naive -| 1), group.savings);
+    }
+}
+
+test "DuplicateGroup builds a group of 50,000 clones in linear time" {
+    // Recounting the classes on every add made this cubic: hours, on one
+    // core, for a group this size (pnpm's node_modules make them).
+    const allocator = std.testing.allocator;
+    var group = DuplicateGroup.init(allocator, 4096, @as([32]u8, @splat(0)));
+    defer group.deinit();
+    const n: u32 = 50_000;
+    for (0..n) |i| try group.addFileWithClone("/f", 0, @intCast(i / 2 + 1));
+    try std.testing.expectEqual(@as(u64, n / 2), group.distinctCopies());
+    try std.testing.expectEqual(@as(u64, n / 2), group.cloneFiles());
+    try std.testing.expectEqual(@as(u64, 4096) * (n / 2 - 1), group.savings);
 }
 
 test "stalledNs follows the oldest item in progress and is 0 when idle" {

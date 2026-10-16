@@ -593,6 +593,7 @@ pub const DupeFinder = struct {
             if (!self.config.sizeInRange(size)) continue;
 
             var group = types.DuplicateGroup.init(self.allocator, size, kv.key_ptr.*);
+            errdefer group.deinit();
 
             // Oldest first, path as the tie-break: consumers present the first
             // file as the one to keep, and "keep the oldest" should not depend
