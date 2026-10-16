@@ -87,6 +87,9 @@ TARGETS = {
         "desc": "Compare mode: 20,000 files and four 512 MiB files per side, a few changed, missing or added",
     },
 }
+# How `fingerprint` digests what a scan found; digests of different versions never compare.
+# 2: the scanned roots are replaced by a placeholder first.
+FINGERPRINT = 2
 FIXTURE_MTIME = 1_700_000_000  # every fixture file gets this mtime, so results do not depend on when it was made
 
 
@@ -493,7 +496,7 @@ def run_one(b, name, spec, round_no, args):
             "source_id": b.source_id, "toolchain": b.toolchain, "build": b.key,
             "target": name, "fixture_version": spec["version"], "flags": flags,
             "detached": bool(args.detached and DARWIN), "round": round_no, "load": round(load, 2),
-            "waited_s": waited,
+            "waited_s": waited, "fingerprint": FINGERPRINT,
         }
         if timed_out:
             return {**rec, "rc": None, "timeout": True, "wall_s": float(args.timeout)}
@@ -624,7 +627,7 @@ def summarize(runs):
         "maxrss_mb": statistics.median(r["maxrss_mb"] for r in ok),
         "phases": {n: {"wall_s": statistics.median(w for w, _ in v), "cores": statistics.median(c for _, c in v)}
                    for n, v in phases.items()},
-        "digests": sorted({(r.get("result") or {}).get("digest") for r in ok} - {None}),
+        "digests": sorted({(r.get("result") or {}).get("digest") for r in ok if r.get("fingerprint", 1) == FINGERPRINT} - {None}),
     }
 
 
@@ -662,7 +665,9 @@ def report(a, b, targets, since=None, max_load=None):
                 print(f"  {t}: {left_out} run(s) started above load {max_load:g} left out")
         text, regressed = verdict(sa, sb)
         same = "results: n/a"
-        if sa["n"] and sb["n"]:
+        if sa["n"] and sb["n"] and not (sa["digests"] and sb["digests"]):
+            same = "results: n/a (no runs with the current fingerprint on one side)"
+        elif sa["n"] and sb["n"]:
             if sa["digests"] == sb["digests"] and len(sa["digests"]) == 1:
                 same = "results: same"
             elif t not in TARGETS:
