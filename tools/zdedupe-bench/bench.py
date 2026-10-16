@@ -595,21 +595,29 @@ def cmd_run(args):
     if len(builds) >= 2:
         print()
         # This invocation's runs only: interleaved, so under the same conditions.
-        report(builds[0], builds[-1], targets, since=started)
+        report(builds[0], builds[-1], targets, since=started, dirs=args.dirs)
     print(f"\nbench: runs recorded in {ledger_path().relative_to(FORGE)}")
 
 
 # --- comparing -------------------------------------------------------------------
 
-def runs_of(b, target, ledger=None, since=None, max_load=None, detached=False):
+def target_mode(name):
+    if name in TARGETS:
+        return TARGETS[name]["mode"]
+    return 1 if name.startswith("compare:") else 0
+
+
+def runs_of(b, target, ledger=None, since=None, max_load=None, detached=False, dirs=False):
     """Recorded runs of build `b` on `target`, launched the same way (in this process
-    tree, or `detached`): from `since` (an ISO time) on, and started at a load average
-    of at most `max_load`, when given."""
+    tree, or `detached`) and with folder analysis on or off (`dirs`): from `since` (an
+    ISO time) on, and started at a load average of at most `max_load`, when given."""
     ledger = read_ledger() if ledger is None else ledger
     spec_v = TARGETS[target]["version"] if target in TARGETS else 0
     return [r for r in ledger if r["source_id"] == b.source_id and r["toolchain"] == b.toolchain
             and r["target"] == target and r.get("fixture_version") == spec_v and r.get("round", 0) >= 0
             and bool(r.get("detached")) == detached
+            # Folder analysis is a duplicates-scan option; a folder comparison never takes it.
+            and (target_mode(target) != 0 or ("-d" in r.get("flags", [])) == dirs)
             and (since is None or r["at"] >= since) and (max_load is None or r.get("load", 0) <= max_load)]
 
 
@@ -653,7 +661,7 @@ def verdict(a, b):
     return f"same within noise ({delta:+.1%}, noise {noise:.0%}){few}", False
 
 
-def report(a, b, targets, since=None, max_load=None):
+def report(a, b, targets, since=None, max_load=None, dirs=False):
     ledger = read_ledger()
     bad = False
     scope = f"runs since {since}" if since else "all recorded runs"
@@ -661,9 +669,10 @@ def report(a, b, targets, since=None, max_load=None):
         scope += f" started at load <= {max_load:g}"
     print(f"A = {a.label} ({a.ref})   B = {b.label} ({b.ref})   on {MACHINE['host']} ({MACHINE['cpu']}); {scope}")
     for t in targets:
-        sa, sb = summarize(runs_of(a, t, ledger, since, max_load)), summarize(runs_of(b, t, ledger, since, max_load))
+        sa = summarize(runs_of(a, t, ledger, since, max_load, dirs=dirs))
+        sb = summarize(runs_of(b, t, ledger, since, max_load, dirs=dirs))
         if max_load is not None:
-            left_out = len(runs_of(a, t, ledger, since)) + len(runs_of(b, t, ledger, since)) - sa["n"] - sb["n"] \
+            left_out = len(runs_of(a, t, ledger, since, dirs=dirs)) + len(runs_of(b, t, ledger, since, dirs=dirs)) - sa["n"] - sb["n"] \
                 - sa.get("timeouts", 0) - sb.get("timeouts", 0) - sa.get("failed", 0) - sb.get("failed", 0)
             if left_out:
                 print(f"  {t}: {left_out} run(s) started above load {max_load:g} left out")
@@ -705,7 +714,7 @@ def cmd_compare(args):
     if not targets:
         die(f"no runs recorded for {a.label} or {b.label}: `bench.py run {args.a} {args.b}` first")
     max_load = None if args.max_load < 0 else (args.max_load if args.max_load else (os.cpu_count() or 1) * 0.25)
-    sys.exit(1 if report(a, b, targets, since=args.since, max_load=max_load) else 0)
+    sys.exit(1 if report(a, b, targets, since=args.since, max_load=max_load, dirs=args.dirs) else 0)
 
 
 def cmd_log(args):
@@ -835,6 +844,7 @@ def main():
     p.add_argument("-t", "--target", action="append")
     p.add_argument("--zig-b", help="B was built with this Zig")
     p.add_argument("--since", help="only runs from this ISO time on (e.g. 2026-10-16T17:00)")
+    p.add_argument("--dirs", action="store_true", help="the runs made with folder analysis (run --dirs)")
     p.add_argument("--max-load", type=float, default=0,
                    help="leave out runs started above this load average (default: a quarter of the CPUs; -1 keeps all)")
     p.set_defaults(fn=cmd_compare)
