@@ -9,7 +9,8 @@
 //   -J FILE writes the run as JSON: total and per-phase wall and CPU seconds, peak RSS, and the
 //           scan's overview (modes 0 and 2). bench.py beside this file reads it.
 //   -E FILE writes what the scan found, for comparing two builds: the CSV export (mode 0), or the
-//           compare report (mode 1).
+//           compare report (mode 1); with folder analysis (-d) also FILE.dirs, every identical
+//           set and overlapping pair as the results session pages them.
 //   -D      after a duplicates scan, deletes every copy but the oldest of each group, PERMANENTLY,
 //           through the results session (content-verified), and times it. Only on a copy made
 //           to be destroyed: bench.py runs it on a fresh clone of a fixture.
@@ -49,6 +50,8 @@ zdedupe_results* zdedupe_results_open(const char* store_path, const char* roots_
 void zdedupe_results_close(zdedupe_results*);
 const char* zdedupe_results_last_error(const zdedupe_results*);
 const char* zdedupe_results_overview(zdedupe_results*);
+const char* zdedupe_results_identical_sets(zdedupe_results*, const char* query_json);
+const char* zdedupe_results_overlaps(zdedupe_results*, const char* query_json);
 int zdedupe_results_export(zdedupe_results*, const char* format, const char* path);
 typedef int (*zdedupe_trash_fn)(void*, const char* const*, size_t, char*, size_t);
 const char* zdedupe_results_delete(zdedupe_results*, const char* selection_json, bool use_trash, zdedupe_trash_fn, void*);
@@ -150,6 +153,22 @@ static void* poll(void* unused) {
     usleep(1000);
   }
   return 0;
+}
+
+// Every page of a paged results query, one per line. Returns 0 if a page failed.
+static int write_pages(FILE* f, zdedupe_results* r, const char* (*query)(zdedupe_results*, const char*)) {
+  for (int offset = 0;; offset += 200) {
+    char q[64];
+    snprintf(q, sizeof q, "{\"offset\":%d,\"limit\":200}", offset);
+    const char* page = query(r, q);
+    if (!page) return 0;
+    fputs(page, f);
+    fputc('\n', f);
+    // The last page holds fewer than 200 rows; "total" says how many there are in all.
+    const char* t = strstr(page, "\"total\":");
+    long total = t ? strtol(t + 8, NULL, 10) : 0;
+    if (offset + 200 >= total) return 1;
+  }
 }
 
 // The scan roots as a JSON array, for zdedupe_results_open.
@@ -269,6 +288,16 @@ int main(int argc, char** argv) {
     }
     if (results && export_out && mode == 0 && zdedupe_results_export(results, "csv", export_out) != 0)
       fprintf(stderr, "export failed: %s\n", zdedupe_results_last_error(results));
+    if (results && export_out && mode == 0 && overview && strstr(overview, "\"has_directories\":true")) {
+      char dirs_path[4096];
+      snprintf(dirs_path, sizeof dirs_path, "%s.dirs", export_out);
+      FILE* f = fopen(dirs_path, "w");
+      if (f) {
+        if (!write_pages(f, results, zdedupe_results_identical_sets) || !write_pages(f, results, zdedupe_results_overlaps))
+          fprintf(stderr, "folder findings export failed: %s\n", zdedupe_results_last_error(results));
+        fclose(f);
+      }
+    }
   }
   // The delete, timed on its own: verification reads every file it removes and a survivor.
   double del_wall = -1, del_cpu = 0, del_sys = 0;

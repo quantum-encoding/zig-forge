@@ -416,6 +416,10 @@ def fingerprint(mode, export_path, overview, roots=()):
         return {"digest": sha256_bytes(json.dumps(lists, sort_keys=True).encode())[:16],
                 **{f"{k}_count": len(v) for k, v in lists.items()}}
     text = export_path.read_text(errors="surrogateescape")
+    # With folder analysis, phasebench also writes every identical set and overlapping pair.
+    dirs = export_path.with_name(export_path.name + ".dirs")
+    if dirs.exists():
+        text += dirs.read_text(errors="surrogateescape")
     for root in sorted(roots, key=len, reverse=True):
         text = text.replace(root, "<root>")
     out = {"digest": sha256_bytes(text.encode(errors="surrogateescape"))[:16]}
