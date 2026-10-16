@@ -478,8 +478,11 @@ def run_one(b, name, spec, round_no, args):
         if spec.get("copy"):
             # A target that destroys what it scans gets a fresh APFS clone (a plain copy
             # elsewhere) of its fixture: cheap, and its files are no clones of each other.
+            # Timestamps are kept, or every copy would digest differently (the export
+            # carries each file's mtime).
             copy = rundir / "tree"
-            subprocess.run(["cp", "-c" if DARWIN else "--reflink=auto", "-R", spec["root"], str(copy)], check=True)
+            cp = ["cp", "-c", "-R", "-p"] if DARWIN else ["cp", "-a", "--reflink=auto"]
+            subprocess.run([*cp, spec["root"], str(copy)], check=True)
             paths = [str(copy / os.path.relpath(p, spec["root"])) for p in paths]
         cmd = [str(b.bin), "-m", str(spec["mode"]), *flags, "-o", str(rundir / "store.bin"),
                "-J", str(rundir / "result.json"), "-E", str(rundir / "export"), *paths]
