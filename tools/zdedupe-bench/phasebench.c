@@ -10,6 +10,9 @@
 //           scan's overview (modes 0 and 2). bench.py beside this file reads it.
 //   -E FILE writes what the scan found, for comparing two builds: the CSV export (mode 0), or the
 //           compare report (mode 1).
+//   -D      after a duplicates scan, deletes every copy but the oldest of each group, PERMANENTLY,
+//           through the results session (content-verified), and times it. Only on a copy made
+//           to be destroyed: bench.py runs it on a fresh clone of a fixture.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,6 +50,8 @@ void zdedupe_results_close(zdedupe_results*);
 const char* zdedupe_results_last_error(const zdedupe_results*);
 const char* zdedupe_results_overview(zdedupe_results*);
 int zdedupe_results_export(zdedupe_results*, const char* format, const char* path);
+typedef int (*zdedupe_trash_fn)(void*, const char* const*, size_t, char*, size_t);
+const char* zdedupe_results_delete(zdedupe_results*, const char* selection_json, bool use_trash, zdedupe_trash_fn, void*);
 
 #define NPHASES 8
 static const char* names[NPHASES] = {"idle", "walk", "size-group", "quick-hash", "full-hash", "analyze", "write", "done"};
@@ -175,7 +180,8 @@ int main(int argc, char** argv) {
   const char* out = "/tmp/zd-store.bin";
   const char *json_out = NULL, *export_out = NULL;
   const char* xs[32];
-  while ((c = getopt(argc, argv, "m:dxcHWj:o:L:X:C:J:E:")) != -1) {
+  int delete_after = 0;
+  while ((c = getopt(argc, argv, "m:dxcHWj:o:L:X:C:J:E:D")) != -1) {
     switch (c) {
       case 'm': mode = atoi(optarg); break;
       case 'd': dirs = true; break;
@@ -190,6 +196,7 @@ int main(int argc, char** argv) {
       case 'X': if (nx < 32) xs[nx++] = optarg; break;
       case 'J': json_out = optarg; break;
       case 'E': export_out = optarg; break;
+      case 'D': delete_after = 1; break;
       default: return 2;
     }
   }
@@ -250,7 +257,7 @@ int main(int argc, char** argv) {
 
   char* overview = NULL;
   zdedupe_results* results = NULL;
-  if (rc == 0 && mode != 1 && (json_out || export_out)) {
+  if (rc == 0 && mode != 1 && (json_out || export_out || delete_after)) {
     char* roots = roots_json(argv + optind, argc - optind);
     results = zdedupe_results_open(out, roots);
     free(roots);
@@ -262,6 +269,19 @@ int main(int argc, char** argv) {
     }
     if (results && export_out && mode == 0 && zdedupe_results_export(results, "csv", export_out) != 0)
       fprintf(stderr, "export failed: %s\n", zdedupe_results_last_error(results));
+  }
+  // The delete, timed on its own: verification reads every file it removes and a survivor.
+  double del_wall = -1, del_cpu = 0, del_sys = 0;
+  char* del_report = NULL;
+  if (results && delete_after && mode == 0) {
+    double w0 = now(), c0 = cpu_now(), s0 = sys_now();
+    const char* rep = zdedupe_results_delete(results, "{\"rule\":{\"filters\":{}}}", false, NULL, NULL);
+    del_wall = now() - w0;
+    del_cpu = cpu_now() - c0;
+    del_sys = sys_now() - s0;
+    del_report = rep ? strdup(rep) : NULL;
+    printf("  %-10s %8.3fs  cores=%5.2f\n", "delete", del_wall, del_wall > 0 ? del_cpu / del_wall : 0);
+    if (!rep) fprintf(stderr, "delete failed: %s\n", zdedupe_results_last_error(results));
   }
   if (rc == 0 && mode == 1 && export_out) {
     FILE* f = fopen(export_out, "w");
@@ -294,10 +314,15 @@ int main(int argc, char** argv) {
               end_sys[i] - ph_sys[order[i]], (unsigned long long)ph_items[order[i]]);
       first = 0;
     }
-    fprintf(f, "],\"overview\":%s}\n", overview ? overview : "null");
+    fprintf(f, "],\"overview\":%s", overview ? overview : "null");
+    if (del_wall >= 0)
+      fprintf(f, ",\"delete\":{\"wall_s\":%.6f,\"cpu_s\":%.6f,\"sys_s\":%.6f,\"report\":%s}", del_wall, del_cpu, del_sys,
+              del_report ? del_report : "null");
+    fprintf(f, "}\n");
     fclose(f);
   }
   free(overview);
+  free(del_report);
   if (results) zdedupe_results_close(results);
   zdedupe_free(ctx);
   return rc;

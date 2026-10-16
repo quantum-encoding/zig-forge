@@ -70,6 +70,14 @@ TARGETS = {
         "fixture": "clones", "version": 1, "mode": 0, "paths": ["."], "darwin": True,
         "desc": "8,000 identical 16 KiB files in 4,000 APFS clone pairs: grouping and clone accounting",
     },
+    "medium": {
+        "fixture": "medium", "version": 1, "mode": 0, "paths": ["."],
+        "desc": "190 files of 1-32 MiB: 60 exact copies, 30 that differ only in their last 4 KiB: whole-file hashing",
+    },
+    "delete": {
+        "fixture": "medium", "version": 2, "mode": 0, "paths": ["."], "copy": True, "flags": ["-D"],
+        "desc": "permanent delete of every extra copy in a clone of `medium`, verified by content",
+    },
     "big": {
         "fixture": "big", "version": 1, "mode": 0, "paths": ["."],
         "desc": "six 1 GiB files of one size: two identical pairs, one differing at the end, one at the start",
@@ -282,6 +290,23 @@ def make_clones(root):
         clonefile(root / "copies" / f"c{i:05d}", root / "clones" / f"k{i:05d}")
 
 
+def make_medium(root):
+    # Below chunked.zig's 64 MiB, so every candidate is hashed whole by the
+    # parallel hasher; the near copies share a size and first MiB with an
+    # original, so only a full hash tells them apart.
+    rng = random.Random(8)
+    originals = []
+    for i in range(100):
+        data = rng.randbytes(rng.randint(1 << 20, 32 << 20))
+        write_fixed(root / "originals" / f"o{i:03d}.bin", data)
+        originals.append(data)
+    for i in range(60):
+        write_fixed(root / "copies" / f"c{i:03d}.bin", originals[i])
+    for i in range(30):
+        data = originals[60 + i]
+        write_fixed(root / "near" / f"n{i:03d}.bin", data[:-4096] + bytes(b ^ 0xA5 for b in data[-4096:]))
+
+
 def make_big(root):
     # a1 = a2 and b1 = b2; c is a1 with its last 64 KiB changed (read to the end before it
     # differs), d is b1 with its first 4 KiB changed (differs at once).
@@ -333,11 +358,13 @@ def make_compare(root):
         f.write(bytes([last[0] ^ 1]))
 
 
-MAKERS = {"small": make_small, "clones": make_clones, "big": make_big, "compare": make_compare}
+MAKERS = {"small": make_small, "clones": make_clones, "medium": make_medium, "big": make_big, "compare": make_compare}
 
 
 def ensure_fixture(t):
     spec = TARGETS[t]
+    if spec["fixture"] != t:  # a target that runs on another's fixture
+        return ensure_fixture(spec["fixture"])
     root = fixture_dir(spec["fixture"])
     stamp = root.with_name(root.name + ".version")
     if root.exists() and stamp.exists() and stamp.read_text().strip() == str(spec["version"]):
@@ -372,10 +399,12 @@ def target_spec(name, args):
     root = ensure_fixture(name)
     if root is None:
         return None
-    return {**spec, "paths": [str(root / p) if p != "." else str(root) for p in spec["paths"]]}
+    return {**spec, "root": str(root), "paths": [str(root / p) if p != "." else str(root) for p in spec["paths"]]}
 
 
-def fingerprint(mode, export_path, overview):
+def fingerprint(mode, export_path, overview, roots=()):
+    """What a scan found, comparable across builds and runs: the scanned roots are
+    replaced by a placeholder, so a run on a fresh clone of a fixture matches another."""
     if not export_path.exists():
         return None
     if mode == 1:
@@ -383,7 +412,10 @@ def fingerprint(mode, export_path, overview):
         lists = {k: sorted(rep.get(k, [])) for k in ("identical", "only_in_a", "only_in_b", "modified")}
         return {"digest": sha256_bytes(json.dumps(lists, sort_keys=True).encode())[:16],
                 **{f"{k}_count": len(v) for k, v in lists.items()}}
-    out = {"digest": sha256_bytes(export_path.read_bytes())[:16]}
+    text = export_path.read_text(errors="surrogateescape")
+    for root in sorted(roots, key=len, reverse=True):
+        text = text.replace(root, "<root>")
+    out = {"digest": sha256_bytes(text.encode(errors="surrogateescape"))[:16]}
     for k in ("files_scanned", "duplicate_groups", "duplicate_files", "space_savings", "identical_sets"):
         if overview and k in overview:
             out[k] = overview[k]
@@ -434,9 +466,16 @@ def run_one(b, name, spec, round_no, args):
     waited = wait_quiet(args)
     rundir = Path(tempfile.mkdtemp(dir=HOME / "runs"))
     try:
-        flags = list(APP_FLAGS[spec["mode"]]) + (["-d"] if args.dirs and spec["mode"] == 0 else [])
+        flags = list(APP_FLAGS[spec["mode"]]) + (["-d"] if args.dirs and spec["mode"] == 0 else []) + spec.get("flags", [])
+        paths = spec["paths"]
+        if spec.get("copy"):
+            # A target that destroys what it scans gets a fresh APFS clone (a plain copy
+            # elsewhere) of its fixture: cheap, and its files are no clones of each other.
+            copy = rundir / "tree"
+            subprocess.run(["cp", "-c" if DARWIN else "--reflink=auto", "-R", spec["root"], str(copy)], check=True)
+            paths = [str(copy / os.path.relpath(p, spec["root"])) for p in paths]
         cmd = [str(b.bin), "-m", str(spec["mode"]), *flags, "-o", str(rundir / "store.bin"),
-               "-J", str(rundir / "result.json"), "-E", str(rundir / "export"), *spec["paths"]]
+               "-J", str(rundir / "result.json"), "-E", str(rundir / "export"), *paths]
         load = os.getloadavg()[0]
         timed_out = False
         if args.detached and DARWIN:
@@ -467,11 +506,22 @@ def run_one(b, name, spec, round_no, args):
                               "sys_s": round(p.get("sys_s", 0.0), 4),
                               "cores": round(p["cpu_s"] / p["wall_s"], 2) if p["wall_s"] > 0 else 0.0}
                   for p in r["phases"]}
-        return {**rec, "rc": r["rc"], "timeout": False, "wall_s": round(r["wall_s"], 4), "cpu_s": round(r["cpu_s"], 4),
-                "sys_s": round(r.get("sys_s", 0.0), 4),
-                "cores": round(r["cpu_s"] / r["wall_s"], 2) if r["wall_s"] > 0 else 0.0,
-                "maxrss_mb": r["maxrss_mb"], "phases": phases,
-                "result": fingerprint(spec["mode"], rundir / "export", r.get("overview"))}
+        result = fingerprint(spec["mode"], rundir / "export", r.get("overview"), paths)
+        wall, cpu, sys_s = r["wall_s"], r["cpu_s"], r.get("sys_s", 0.0)
+        if "delete" in r:
+            d = r["delete"]
+            phases["delete"] = {"wall_s": round(d["wall_s"], 4), "cpu_s": round(d["cpu_s"], 4), "sys_s": round(d["sys_s"], 4),
+                                "cores": round(d["cpu_s"] / d["wall_s"], 2) if d["wall_s"] > 0 else 0.0}
+            # A delete target is judged on scan and delete together.
+            wall, cpu, sys_s = wall + d["wall_s"], cpu + d["cpu_s"], sys_s + d["sys_s"]
+            rep = d.get("report") or {}
+            if result is not None:
+                result = {**result, **{f"delete_{k}": rep.get(k) for k in ("deleted", "skipped_changed", "failed_count")}}
+                result["digest"] = sha256_bytes((result["digest"] + json.dumps(
+                    [rep.get("deleted"), rep.get("skipped_changed"), rep.get("failed_count")])).encode())[:16]
+        return {**rec, "rc": r["rc"], "timeout": False, "wall_s": round(wall, 4), "cpu_s": round(cpu, 4),
+                "sys_s": round(sys_s, 4), "cores": round(cpu / wall, 2) if wall > 0 else 0.0,
+                "maxrss_mb": r["maxrss_mb"], "phases": phases, "result": result}
     finally:
         shutil.rmtree(rundir, ignore_errors=True)
 

@@ -47,6 +47,8 @@ the core alone share one build and one history.
 |---|---|
 | `small` | 100,000 files of 100 B–48 KiB, 40% duplicates: per-file cost (walk, open, hash) |
 | `clones` | 8,000 identical files in 4,000 APFS clone pairs: grouping and clone accounting (macOS) |
+| `medium` | 190 files of 1–32 MiB, 60 exact copies and 30 near copies: whole-file hashing |
+| `delete` | scans a fresh clone of `medium`, then deletes every extra copy permanently, verified by content |
 | `big` | six 1 GiB files of one size: chunked comparison of large candidates |
 | `compare` | Compare mode (and the check behind a permanent folder delete): 20,000 files and four 512 MiB files per side |
 | `-p PATH` | a real tree, duplicates mode |
