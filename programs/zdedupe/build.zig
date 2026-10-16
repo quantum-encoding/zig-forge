@@ -137,6 +137,7 @@ pub fn build(b: *std.Build) void {
         "src/dirstream.zig",
         "src/chunked.zig",
         "src/blake3_tree.zig",
+        "src/filehash.zig",
         "src/fast_walker.zig",
         "src/parallel.zig",
         "src/dedupe.zig",

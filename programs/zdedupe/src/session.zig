@@ -42,6 +42,7 @@ const libc = sys.c;
 const store = @import("store.zig");
 const hasher = @import("hasher.zig");
 const pstat = @import("pstat.zig");
+const filehash = @import("filehash.zig");
 const compare = @import("compare.zig");
 const report_mod = @import("report.zig");
 const filters_mod = @import("filters.zig");
@@ -70,6 +71,14 @@ pub const max_facets: usize = 100;
 /// Files handed to the Trash in one call, to amortise its per-call cost.
 /// Progress and cancel are per group, not per batch.
 pub const trash_batch: usize = 200;
+
+/// A permanent delete reads its files on every core a window at a time, then
+/// deletes that window, so a file is deleted soon after it was verified.
+const verify_window_bytes: u64 = 8 << 30;
+const verify_window_groups: usize = 256;
+
+/// Digests read ahead for a window of a permanent delete, by path.
+const Prehashed = std.StringHashMapUnmanaged(filehash.Item);
 /// Failures reported back in detail. The count is always exact.
 pub const max_reported_failures: usize = 20;
 
@@ -1917,24 +1926,79 @@ pub const Session = struct {
 
         var batch: std.ArrayListUnmanaged(Target) = .empty;
         try batch.ensureTotalCapacity(arena, trash_batch);
-        for (plan.items) |entry| {
-            if (self.del.cancel.load(.acquire)) {
-                report.cancelled = true;
-                break;
-            }
-            const group = try self.reader.group(entry.group);
-            var doomed: std.ArrayListUnmanaged([]const u8) = .empty;
-            try self.deletable(arena, &group, entry.targets, verify, report, &doomed);
-            for (doomed.items) |path| {
-                batch.appendAssumeCapacity(.{ .path = path, .size = group.size });
-                if (batch.items.len == trash_batch) {
-                    self.removeBatch(arena, batch.items, use_trash, trash_fn, user, report);
-                    batch.clearRetainingCapacity();
+        // BLAKE3 content checks are read ahead on every core, a window at a
+        // time; SHA-256 has no tree to split a file by, and is read in turn.
+        const read_ahead = switch (verify) {
+            .content => |c| !c.sha256,
+            .metadata => false,
+        };
+        var prehashed: Prehashed = .empty;
+        defer prehashed.deinit(self.gpa);
+        var start: usize = 0;
+        windows: while (start < plan.items.len) {
+            var end = plan.items.len;
+            if (read_ahead) {
+                end = start;
+                var bytes: u64 = 0;
+                while (end < plan.items.len and (end == start or
+                    (bytes < verify_window_bytes and end - start < verify_window_groups))) : (end += 1)
+                {
+                    const group = try self.reader.group(plan.items[end].group);
+                    bytes +|= group.size *| (plan.items[end].targets.len + 1);
                 }
+                try self.prehash(plan.items[start..end], &prehashed);
             }
-            _ = self.del.done.fetchAdd(entry.targets.len, .release);
+            for (plan.items[start..end]) |entry| {
+                if (self.del.cancel.load(.acquire)) {
+                    report.cancelled = true;
+                    break :windows;
+                }
+                const group = try self.reader.group(entry.group);
+                var doomed: std.ArrayListUnmanaged([]const u8) = .empty;
+                try self.deletable(arena, &group, entry.targets, verify, if (read_ahead) &prehashed else null, report, &doomed);
+                for (doomed.items) |path| {
+                    batch.appendAssumeCapacity(.{ .path = path, .size = group.size });
+                    if (batch.items.len == trash_batch) {
+                        self.removeBatch(arena, batch.items, use_trash, trash_fn, user, report);
+                        batch.clearRetainingCapacity();
+                    }
+                }
+                _ = self.del.done.fetchAdd(entry.targets.len, .release);
+            }
+            // A window's verified files go before the next window is read.
+            self.removeBatch(arena, batch.items, use_trash, trash_fn, user, report);
+            batch.clearRetainingCapacity();
+            start = end;
         }
         self.removeBatch(arena, batch.items, use_trash, trash_fn, user, report);
+    }
+
+    /// Read, on every core, the files `deletable` will check by content for
+    /// `entries` (each with a `group` and its `targets`): the first copy of
+    /// each group that could survive, and every target not protected.
+    fn prehash(self: *Session, entries: anytype, out: *Prehashed) !void {
+        out.clearRetainingCapacity();
+        var items: std.ArrayListUnmanaged(filehash.Item) = .empty;
+        defer items.deinit(self.gpa);
+        const guard = self.protection();
+        for (entries) |entry| {
+            const group = try self.reader.group(entry.group);
+            for (0..group.file_count) |f| {
+                if (std.mem.indexOfScalar(u32, entry.targets, @intCast(f)) != null) continue;
+                const file = try self.reader.groupFile(&group, f);
+                if (!plausibleCopy(file.path, group.size)) continue;
+                try items.append(self.gpa, .{ .path = file.path, .size = group.size });
+                break;
+            }
+            for (entry.targets) |f| {
+                const file = try self.reader.groupFile(&group, f);
+                if (guard.protects(file.path)) continue;
+                try items.append(self.gpa, .{ .path = file.path, .size = group.size });
+            }
+        }
+        const threads: u32 = @intCast(std.Thread.getCpuCount() catch 4);
+        try filehash.hashAll(self.gpa, items.items, threads, &self.del.cancel);
+        for (items.items) |item| try out.put(self.gpa, item.path, item);
     }
 
     /// Locate each hand-picked path in the store, by the lossy spelling a UI
@@ -1990,6 +2054,7 @@ pub const Session = struct {
         group: *const store.Group,
         targets: []const u32,
         verify: Verify,
+        prehashed: ?*const Prehashed,
         report: *Report,
         out: *std.ArrayListUnmanaged([]const u8),
     ) !void {
@@ -2000,7 +2065,7 @@ pub const Session = struct {
         for (0..group.file_count) |f| {
             if (std.mem.indexOfScalar(u32, targets, @intCast(f)) != null) continue;
             const file = try self.reader.groupFile(group, f);
-            if (stillACopy(file.path, group.size, file.mtime, &group.hash, verify)) {
+            if (stillACopy(file.path, group.size, file.mtime, &group.hash, verify, prehashed)) {
                 has_survivor = true;
                 break;
             }
@@ -2018,7 +2083,7 @@ pub const Session = struct {
                 report.fail(arena, file.path, "is in a protected location");
                 continue;
             }
-            if (stillACopy(file.path, group.size, file.mtime, &group.hash, verify)) {
+            if (stillACopy(file.path, group.size, file.mtime, &group.hash, verify, prehashed)) {
                 try out.append(arena, file.path);
             } else {
                 report.skipped_changed += 1;
@@ -2912,8 +2977,18 @@ fn removeChildren(dir_fd: c_int) ?libc.E {
     return null;
 }
 
-/// True if `path` is still the file the scan hashed.
-fn stillACopy(path: []const u8, size: u64, mtime: i64, hash: *const [32]u8, verify: Verify) bool {
+/// A regular file of `size` at `path`, as a copy must be before it is read.
+fn plausibleCopy(path: []const u8, size: u64) bool {
+    var buf: [4096]u8 = undefined;
+    const path_z = pathZ(&buf, path) orelse return false;
+    const st = pstat.lstat(path_z) catch return false;
+    return st.isFile() and st.size == size;
+}
+
+/// True if `path` is still the file the scan hashed. By content, a digest in
+/// `prehashed` stands for reading the file again, as long as the file's mtime
+/// is the one it had when that digest was read.
+fn stillACopy(path: []const u8, size: u64, mtime: i64, hash: *const [32]u8, verify: Verify, prehashed: ?*const Prehashed) bool {
     var buf: [4096]u8 = undefined;
     const path_z = pathZ(&buf, path) orelse return false;
 
@@ -2925,6 +3000,12 @@ fn stillACopy(path: []const u8, size: u64, mtime: i64, hash: *const [32]u8, veri
     return switch (verify) {
         .metadata => st.mtime_sec == mtime,
         .content => |c| blk: {
+            if (prehashed) |p| if (p.get(path)) |read| {
+                const digest = read.digest orelse break :blk false;
+                if (read.mtime != st.mtime_sec) break :blk false;
+                // zig-lens-ignore: EQL-FOR-SECRETS content digest, as below.
+                break :blk std.mem.eql(u8, &digest, hash);
+            };
             const file_hasher = hasher.FileHasher.init(if (c.sha256) .sha256 else .blake3);
             const digest = file_hasher.hashFile(path) catch break :blk false;
             // zig-lens-ignore: EQL-FOR-SECRETS content digest of the user's own
@@ -3148,6 +3229,34 @@ test "CSV fields are quoted only when they have to be" {
     try testing.expectEqualStrings(
         \\/plain/path.txt|"/has,comma.txt"|"/has""quote.txt"
     , writer.buffered());
+}
+
+test "a digest read ahead stands for the file only while its mtime is the one it was read at" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var scratch = try @import("testing_scratch.zig").Scratch.init(gpa, "session-prehash");
+    defer scratch.deinit();
+    try scratch.writeFile("f", "the content the scan hashed");
+    const path = try scratch.join("f");
+    defer gpa.free(path);
+    const want = hasher.hashBytesBlake3("the content the scan hashed");
+    const verify: Verify = .{ .content = .{ .sha256 = false } };
+
+    var items = [_]filehash.Item{.{ .path = path, .size = 27 }};
+    try filehash.hashAll(gpa, &items, 2, null);
+    var prehashed: Prehashed = .empty;
+    defer prehashed.deinit(gpa);
+    try prehashed.put(gpa, path, items[0]);
+    try std.testing.expect(stillACopy(path, 27, 0, &want, verify, &prehashed));
+
+    // Changed since it was read (its mtime says so): the digest no longer counts.
+    prehashed.getPtr(path).?.mtime -= 10;
+    try std.testing.expect(!stillACopy(path, 27, 0, &want, verify, &prehashed));
+    // Unreadable when it was read: never verified.
+    prehashed.getPtr(path).?.digest = null;
+    try std.testing.expect(!stillACopy(path, 27, 0, &want, verify, &prehashed));
+    // Not read ahead: read now, as before.
+    try std.testing.expect(stillACopy(path, 27, 0, &want, verify, null));
 }
 
 test "clones hold one copy: savings and freed bytes count a clone class once, and only when it all goes" {
