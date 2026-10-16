@@ -886,11 +886,13 @@ const Analyzer = struct {
     /// every unshared path of a large tree just to keep a hundred of them
     /// dominated the whole analysis. Nearly every path fails the single
     /// comparison against the current largest and costs nothing more.
-    fn keepSmallest(self: *Analyzer, list: *std.ArrayListUnmanaged([]const u8), path: []const u8) !void {
+    /// Every path given (and so every one in `list`) starts with the same
+    /// `skip` bytes, which the comparisons pass over.
+    fn keepSmallest(self: *Analyzer, list: *std.ArrayListUnmanaged([]const u8), path: []const u8, skip: usize) !void {
         const limit = self.options.max_only_listed;
         if (limit == 0) return;
         if (list.items.len == limit) {
-            if (std.mem.order(u8, path, list.items[limit - 1]) != .lt) return;
+            if (orderFrom(path, list.items[limit - 1], skip) != .lt) return;
             _ = list.pop();
         }
 
@@ -899,7 +901,7 @@ const Analyzer = struct {
         var hi: usize = list.items.len;
         while (lo < hi) {
             const mid = lo + (hi - lo) / 2;
-            if (std.mem.order(u8, list.items[mid], path) == .lt) lo = mid + 1 else hi = mid;
+            if (orderFrom(list.items[mid], path, skip) == .lt) lo = mid + 1 else hi = mid;
         }
         try list.insert(self.scratch, lo, path);
     }
@@ -935,6 +937,10 @@ const Analyzer = struct {
         const only = &self.only_scratch;
         only.clearRetainingCapacity();
 
+        // Every file beneath `node` starts with its path and a slash, so the
+        // "only here" ordering compares what follows (a subtree's paths share
+        // a long prefix, and this runs for every file of every compared pair).
+        const skip = if (std.mem.endsWith(u8, node.path, "/")) node.path.len else node.path.len + 1;
         for (self.subtreeFiles(node)) |file_index| {
             const entry = &self.files[file_index];
             if (other_seen[self.content_id[file_index]] == tag) {
@@ -942,7 +948,8 @@ const Analyzer = struct {
                 side.shared_bytes += entry.size;
             } else {
                 side.only_count += 1;
-                try self.keepSmallest(only, entry.path);
+                std.debug.assert(entry.path.len >= skip and std.mem.startsWith(u8, entry.path, node.path));
+                try self.keepSmallest(only, entry.path, skip);
             }
         }
 
@@ -953,6 +960,23 @@ const Analyzer = struct {
         return side;
     }
 };
+
+/// `std.mem.order(u8, a, b)` for two strings whose first `skip` bytes are the
+/// same: compares from there, eight bytes at a time (as big-endian integers,
+/// which order as the bytes do).
+fn orderFrom(a: []const u8, b: []const u8, skip: usize) std.math.Order {
+    const n = @min(a.len, b.len);
+    var i = @min(skip, n);
+    while (i + 8 <= n) : (i += 8) {
+        const x = std.mem.readInt(u64, a[i..][0..8], .big);
+        const y = std.mem.readInt(u64, b[i..][0..8], .big);
+        if (x != y) return std.math.order(x, y);
+    }
+    while (i < n) : (i += 1) {
+        if (a[i] != b[i]) return std.math.order(a[i], b[i]);
+    }
+    return std.math.order(a.len, b.len);
+}
 
 /// Parent directory of `path`, or null for a bare name or the filesystem root.
 fn parentPath(path: []const u8) ?[]const u8 {
@@ -971,6 +995,24 @@ fn baseName(path: []const u8) []const u8 {
 // Unit tests for the pure helpers live here. Behaviour against real trees on
 // disk — the part that decides what a user is told is safe to delete — is
 // covered end to end in tier1_anchors.zig.
+
+test "orderFrom orders as std.mem.order does, from any shared prefix" {
+    var prng = std.Random.DefaultPrng.init(0xd125);
+    const random = prng.random();
+    var a_buf: [40]u8 = undefined;
+    var b_buf: [40]u8 = undefined;
+    for (0..20_000) |_| {
+        // Few distinct bytes, so ties, prefixes and late differences are common.
+        const a = a_buf[0..random.uintAtMost(usize, a_buf.len)];
+        const b = b_buf[0..random.uintAtMost(usize, b_buf.len)];
+        for (a) |*x| x.* = "ab/-\xff"[random.uintLessThan(usize, 5)];
+        for (b) |*x| x.* = "ab/-\xff"[random.uintLessThan(usize, 5)];
+        const shared = random.uintAtMost(usize, @min(a.len, b.len));
+        @memcpy(b[0..shared], a[0..shared]);
+        try std.testing.expectEqual(std.mem.order(u8, a, b), orderFrom(a, b, shared));
+        try std.testing.expectEqual(std.mem.order(u8, a, b), orderFrom(a, b, 0));
+    }
+}
 
 test "parentPath" {
     try std.testing.expectEqualStrings("/a/b", parentPath("/a/b/c").?);
