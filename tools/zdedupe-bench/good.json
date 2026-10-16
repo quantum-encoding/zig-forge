@@ -2,21 +2,21 @@
   "commit": "70e6854ed1a2d162d6688f996dbd70665424c564",
   "source_id": "6e76dc05cb7be0ad7e1d011c7473fb2c4adc44e389e7d9e05608c5bb741ed75b",
   "toolchain": "zig 0.17.0 + zig-0.17.0-ios-nullfile.patch sha256:56ace2b887defd50bb1ac7f929964689cbeaddccec3d10e12ca19e907c0ea79c",
-  "marked_at": "2026-10-16T17:47:50Z",
+  "marked_at": "2026-10-16T17:48:04Z",
   "marked_on": "qe-ltd-m5",
   "note": "compare walks with fast_walker, every hard-linked name listed: compare 0.99s -> 0.90s, results identical. Found: small-file and compare phases are kernel-bound (open ~10us; ~4 threads match 18 warm)",
   "baselines": {
     "qe-ltd-m5": {
       "compare": {
-        "wall_s": 0.8989,
-        "cores": 15.42,
-        "n": 5,
+        "wall_s": 0.896,
+        "cores": 16.02,
+        "n": 3,
         "digest": "f00b8efaf9679480"
       },
       "small": {
-        "wall_s": 1.4119,
-        "cores": 15.26,
-        "n": 5,
+        "wall_s": 1.3644,
+        "cores": 16.06,
+        "n": 3,
         "digest": "6e9bfcd120586300"
       }
     }

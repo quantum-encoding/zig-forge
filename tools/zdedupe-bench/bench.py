@@ -544,13 +544,15 @@ def cmd_run(args):
 
 # --- comparing -------------------------------------------------------------------
 
-def runs_of(b, target, ledger=None, since=None, max_load=None):
-    """Recorded runs of build `b` on `target`: from `since` (an ISO time) on, and
-    started at a load average of at most `max_load`, when given."""
+def runs_of(b, target, ledger=None, since=None, max_load=None, detached=False):
+    """Recorded runs of build `b` on `target`, launched the same way (in this process
+    tree, or `detached`): from `since` (an ISO time) on, and started at a load average
+    of at most `max_load`, when given."""
     ledger = read_ledger() if ledger is None else ledger
     spec_v = TARGETS[target]["version"] if target in TARGETS else 0
     return [r for r in ledger if r["source_id"] == b.source_id and r["toolchain"] == b.toolchain
             and r["target"] == target and r.get("fixture_version") == spec_v and r.get("round", 0) >= 0
+            and bool(r.get("detached")) == detached
             and (since is None or r["at"] >= since) and (max_load is None or r.get("load", 0) <= max_load)]
 
 
