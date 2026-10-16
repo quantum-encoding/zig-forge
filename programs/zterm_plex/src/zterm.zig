@@ -166,6 +166,14 @@ fn cwrite(fd: sys.fd_t, bytes: []const u8) void {
     }
 }
 
+/// Connections the kernel queues for the server while its single-threaded
+/// loop is busy. The loop accepts one per listener per wake, and a viewer
+/// opens one `view` stream per visible pane: thirty tiles connecting at once
+/// overflowed a queue of 16, and on macOS a connect to a full unix-socket
+/// queue fails at once with ECONNREFUSED, which a client reads as "zterm is
+/// not running". 128 is macOS's default kern.ipc.somaxconn.
+const listen_backlog = 128;
+
 fn paccept(lfd: sys.fd_t) !sys.fd_t {
     // Windows: no process inherits a socket (panes start with bInheritHandles
     // FALSE), so there is no close-on-exec race to guard.
@@ -939,7 +947,7 @@ const Server = struct {
         // Owner-only (matches ctl.zig): any local user on a 0755 socket could
         // spawn shells and type into them.
         _ = c.chmod(path.ptr, 0o600);
-        if (c.listen(lfd, 16) < 0) return error.ListenFailed;
+        if (c.listen(lfd, listen_backlog) < 0) return error.ListenFailed;
         try self.listeners.append(self.alloc, .{ .fd = lfd, .path = path, .kind = kind, .ident = pathIdent(path.ptr) });
     }
 
@@ -3034,6 +3042,32 @@ test {
     // these; lib.zig's suite imports neither.
     _ = ctl;
     _ = view;
+}
+
+test "a burst of viewers fits in the listen queue while the loop is busy" {
+    if (sys.is_windows) return error.SkipZigTest;
+    // Relative to the test's working directory, so the path stays short.
+    const path = "zterm-backlog-test.sock";
+    _ = c.unlink(path);
+    defer _ = c.unlink(path);
+    var addr = try ctl.fillAddr(path);
+    const lfd = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
+    try std.testing.expect(lfd >= 0);
+    defer _ = c.close(lfd);
+    try std.testing.expect(c.bind(lfd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) == 0);
+    try std.testing.expect(c.listen(lfd, listen_backlog) == 0);
+    // Forty connects with nothing accepted: a 30-tile viewer plus headroom.
+    var fds: [40]c_int = undefined;
+    var opened: usize = 0;
+    defer for (fds[0..opened]) |f| {
+        _ = c.close(f);
+    };
+    for (&fds) |*f| {
+        f.* = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
+        try std.testing.expect(f.* >= 0);
+        opened += 1;
+        try std.testing.expectEqual(@as(c_int, 0), c.connect(f.*, @ptrCast(&addr), @sizeOf(c.sockaddr.un)));
+    }
 }
 
 test "a clipboard event carries the application's base64 as written, or nothing" {
