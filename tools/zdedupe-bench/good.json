@@ -1,33 +1,33 @@
 {
-  "commit": "669e84125176389d89c89f3c8c0e0ad9bd1587a5",
-  "source_id": "39306abb3446bb5ebb4a88e358afd9eba7fa2847847a26d5b738ba9334499a86",
+  "commit": "d24e37fa7ea2dc7c82c1eca5cecf18379888cb9c",
+  "source_id": "ce9f2f4a46b26cd4bd96ad91b8d2d08701f4910b6f879f65176c89abcb69df5c",
   "toolchain": "zig 0.17.0 + zig-0.17.0-ios-nullfile.patch sha256:56ace2b887defd50bb1ac7f929964689cbeaddccec3d10e12ca19e907c0ea79c",
-  "marked_at": "2026-10-16T16:58:10Z",
+  "marked_at": "2026-10-16T17:04:36Z",
   "marked_on": "qe-ltd-m5",
-  "note": "clone-class grouping linear (12.8s -> 0.08s on clones); permanent folder delete checks permissions first. Known: compare 1 core, big same-size files 2 cores",
+  "note": "folder comparison byte-for-byte on every core: compare 4.07s/1.0c -> 0.99s/8.5c, results identical. Known: big same-size files 2 cores",
   "baselines": {
     "qe-ltd-m5": {
       "big": {
-        "wall_s": 1.1185,
+        "wall_s": 1.1537,
         "cores": 1.96,
         "n": 3,
         "digest": "c4c841ea16f86128"
       },
       "clones": {
-        "wall_s": 0.0767,
-        "cores": 8.91,
+        "wall_s": 0.074,
+        "cores": 9.17,
         "n": 3,
         "digest": "fe2722ff9d386c28"
       },
       "compare": {
-        "wall_s": 3.9954,
-        "cores": 1.0,
+        "wall_s": 0.9869,
+        "cores": 8.49,
         "n": 3,
         "digest": "f00b8efaf9679480"
       },
       "small": {
-        "wall_s": 1.382,
-        "cores": 15.26,
+        "wall_s": 1.3761,
+        "cores": 15.12,
         "n": 3,
         "digest": "6e9bfcd120586300"
       }
