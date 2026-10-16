@@ -5,8 +5,10 @@
 //! - Only in A / only in B
 //! - Modified: same relative path, different size or bytes
 //!
-//! Both trees are walked at once, one thread each. Files in both with one size
-//! are then compared byte for byte, not by digest: each file is read once, and
+//! Each tree is walked by fast_walker on every core, every path listed (hard
+//! links too: a folder and its copy must name the same files, however the
+//! filesystem stores them). Files in both with one size are then compared
+//! byte for byte, not by digest: each file is read once, and
 //! a pair stops being read at its first difference. The pairs are cut into
 //! ranges of `default_range_size` that any worker may take, so a single very large
 //! file is read by every core rather than one.
@@ -20,6 +22,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const hasher = @import("hasher.zig");
 const walker = @import("walker.zig");
+const fast_walker = @import("fast_walker.zig");
 const libc = @import("sys.zig").c;
 
 // Stat comes from pstat.zig: std.c ($INODE64-correct) on Darwin, statx on Linux.
@@ -72,20 +75,11 @@ pub const FolderComparator = struct {
         var result = try types.CompareResult.init(allocator, folder_a, folder_b);
         errdefer result.deinit();
 
-        // Walk both at once.
         if (monitor) |m| m.enter(.scanning, 0);
         self.updateProgress(.scanning, 0, 0, null);
-        var walk_b: WalkJob = .{ .comparator = self, .base = folder_b };
-        const thread = std.Thread.spawn(.{}, WalkJob.run, .{&walk_b}) catch null;
-        if (thread == null) walk_b.run();
-        const walked_a = self.walkAndIndex(folder_a);
-        if (thread) |t| t.join();
-        var files_a = walked_a catch |err| {
-            if (walk_b.result) |*index| freeIndex(allocator, index) else |_| {}
-            return err;
-        };
+        var files_a = try self.walkAndIndex(folder_a);
         defer freeIndex(allocator, &files_a);
-        var files_b = try walk_b.result;
+        var files_b = try self.walkAndIndex(folder_b);
         defer freeIndex(allocator, &files_b);
         try checkCancelled(monitor);
 
@@ -201,14 +195,20 @@ pub const FolderComparator = struct {
         var index = Index.init(self.allocator);
         errdefer freeIndex(self.allocator, &index);
 
-        var w = walker.Walker.init(self.allocator, self.config);
-        defer w.deinit();
+        var fw = fast_walker.FastWalker.init(self.allocator);
+        defer fw.deinit();
+        fw.setIncludeHidden(self.config.include_hidden);
+        fw.setFollowSymlinks(self.config.follow_symlinks);
+        fw.setSizeFilter(self.config.min_size, self.config.max_size);
+        fw.setOneFilesystem(self.config.one_filesystem);
+        fw.disableHardLinkDetection();
+        fw.setMonitor(self.config.monitor);
+        fw.setThreads(self.config.getThreadCount());
+        try fw.walk(base_path);
+        try fw.finish();
 
-        var walk_result = try w.walk(base_path);
-        defer walk_result.deinit(self.allocator);
-
-        // walk_result owns its paths, so the index takes copies.
-        for (walk_result.files.items) |entry| {
+        // The walker owns its paths, so the index takes copies.
+        for (fw.files.items) |entry| {
             const rel_path = walker.Walker.relativePath(base_path, entry.path);
             if (index.contains(rel_path)) continue; // the same relative path twice: keep the first
             const rel_copy = try self.allocator.dupe(u8, rel_path);
@@ -229,16 +229,6 @@ pub const FolderComparator = struct {
         if (self.progress_callback) |cb| cb(&self.progress);
     }
 
-    /// The other tree's walk, run on its own thread.
-    const WalkJob = struct {
-        comparator: *const FolderComparator,
-        base: []const u8,
-        result: anyerror!Index = error.NotWalked,
-
-        fn run(self: *WalkJob) void {
-            self.result = self.comparator.walkAndIndex(self.base);
-        }
-    };
 };
 
 /// Two files at one relative path.
@@ -599,6 +589,29 @@ test "a file of many ranges is compared range by range, to its first and last by
 
     try expectNames(result.identical.items, &.{"same.bin"});
     try expectNames(result.modified.items, &.{ "first.bin", "last.bin" });
+}
+
+test "every path is compared: two names for one file match two separate copies" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "compare-links");
+    defer scratch.deinit();
+    try scratch.makeDir("a");
+    try scratch.makeDir("b");
+    try scratch.writeFile("a/x", "same content");
+    try scratch.hardLink("a/x", "a/y");
+    try scratch.writeFile("b/x", "same content");
+    try scratch.writeFile("b/y", "same content");
+    const a = try scratch.join("a");
+    defer allocator.free(a);
+    const b = try scratch.join("b");
+    defer allocator.free(b);
+
+    var comparator = FolderComparator.init(allocator, .{ .min_size = 0 });
+    var result = try comparator.compare(a, b);
+    defer result.deinit();
+    try expectNames(result.identical.items, &.{ "x", "y" });
+    try std.testing.expect(result.isIdentical());
 }
 
 test "a file whose size is not the one the walk saw never matches" {
