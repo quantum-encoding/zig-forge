@@ -1,36 +1,52 @@
-//! Folder comparison module
+//! Folder comparison
 //!
-//! Compares two directories and categorizes files into:
-//! - Identical: Same relative path, same content
-//! - Only in A: Files only in first folder
-//! - Only in B: Files only in second folder
-//! - Modified: Same relative path, different content
+//! Compares two directories and sorts the files of both into:
+//! - Identical: same relative path, same bytes
+//! - Only in A / only in B
+//! - Modified: same relative path, different size or bytes
+//!
+//! Both trees are walked at once, one thread each. Files in both with one size
+//! are then compared byte for byte, not by digest: each file is read once, and
+//! a pair stops being read at its first difference. The pairs are cut into
+//! ranges of `default_range_size` that any worker may take, so a single very large
+//! file is read by every core rather than one.
+//!
+//! This is also the check behind a permanent folder delete
+//! (`session.foldersIdentical`), so "identical" must hold for the files as they
+//! are while they are read: every range checks that both files still have the
+//! size the walk saw, and any error reading either counts as a difference.
 
 const std = @import("std");
 const types = @import("types.zig");
 const hasher = @import("hasher.zig");
 const walker = @import("walker.zig");
 const libc = @import("sys.zig").c;
-const builtin = @import("builtin");
 
 // Stat comes from pstat.zig: std.c ($INODE64-correct) on Darwin, statx on Linux.
 const pstat = @import("pstat.zig");
+
+/// Bytes of one pair a worker compares before it takes more work; see
+/// `FolderComparator.range_size`.
+pub const default_range_size: u64 = 64 * 1024 * 1024;
+
+/// Bytes read from each side at a time.
+const chunk_size: usize = 1024 * 1024;
 
 /// Folder comparator
 pub const FolderComparator = struct {
     allocator: std.mem.Allocator,
     config: types.Config,
-    file_hasher: hasher.FileHasher,
-    /// Progress callback
+    /// Progress callback, called from the thread that called `compare`.
     progress_callback: ?types.ProgressCallback,
     /// Current progress
     progress: types.Progress,
+    /// Pairs are compared in ranges of this many bytes.
+    range_size: u64 = default_range_size,
 
     pub fn init(allocator: std.mem.Allocator, config: types.Config) FolderComparator {
         return .{
             .allocator = allocator,
             .config = config,
-            .file_hasher = hasher.FileHasher.init(config.hash_algorithm),
             .progress_callback = null,
             .progress = .{
                 .phase = .scanning,
@@ -48,92 +64,128 @@ pub const FolderComparator = struct {
         self.progress_callback = callback;
     }
 
-    /// Compare two folders
+    /// Compare two folders. With `config.monitor`, reports progress through it
+    /// and stops with error.Cancelled when it is cancelled.
     pub fn compare(self: *FolderComparator, folder_a: []const u8, folder_b: []const u8) !types.CompareResult {
-        var result = try types.CompareResult.init(self.allocator, folder_a, folder_b);
+        const allocator = self.allocator;
+        const monitor = self.config.monitor;
+        var result = try types.CompareResult.init(allocator, folder_a, folder_b);
         errdefer result.deinit();
 
-        // Phase 1: Walk folder A
+        // Walk both at once.
+        if (monitor) |m| m.enter(.scanning, 0);
         self.updateProgress(.scanning, 0, 0, null);
-        var files_a = try self.walkAndIndex(folder_a);
-        defer {
-            // Free both keys (rel_path) and values (abs_path)
-            var iter = files_a.iterator();
-            while (iter.next()) |kv| {
-                self.allocator.free(kv.key_ptr.*);
-                self.allocator.free(kv.value_ptr.path);
-            }
-            files_a.deinit();
-        }
+        var walk_b: WalkJob = .{ .comparator = self, .base = folder_b };
+        const thread = std.Thread.spawn(.{}, WalkJob.run, .{&walk_b}) catch null;
+        if (thread == null) walk_b.run();
+        const walked_a = self.walkAndIndex(folder_a);
+        if (thread) |t| t.join();
+        var files_a = walked_a catch |err| {
+            if (walk_b.result) |*index| freeIndex(allocator, index) else |_| {}
+            return err;
+        };
+        defer freeIndex(allocator, &files_a);
+        var files_b = try walk_b.result;
+        defer freeIndex(allocator, &files_b);
+        try checkCancelled(monitor);
 
-        // Phase 2: Walk folder B
-        var files_b = try self.walkAndIndex(folder_b);
-        defer {
-            // Free both keys (rel_path) and values (abs_path)
-            var iter = files_b.iterator();
-            while (iter.next()) |kv| {
-                self.allocator.free(kv.key_ptr.*);
-                self.allocator.free(kv.value_ptr.path);
-            }
-            files_b.deinit();
-        }
-
-        // Calculate total for progress
-        const total_files = files_a.count() + files_b.count();
-        self.updateProgress(.full_hashing, 0, total_files, null);
-
-        var processed: u64 = 0;
-
-        // Phase 3: Compare files
-        // Check all files in A against B
+        // Pair up by relative path. The lists keep the order the walk index
+        // gives, as they always have.
+        var pairs: std.ArrayListUnmanaged(Pair) = .empty;
+        defer pairs.deinit(allocator);
         var iter_a = files_a.iterator();
         while (iter_a.next()) |kv| {
-            const rel_path = kv.key_ptr.*;
-            const entry_a = kv.value_ptr.*;
-
-            processed += 1;
-            self.progress.files_processed = processed;
-            self.progress.current_file = entry_a.path;
-            if (self.progress_callback) |cb| cb(&self.progress);
-
-            if (files_b.get(rel_path)) |entry_b| {
-                // File exists in both - compare content
-                const same = try self.compareFiles(entry_a.path, entry_b.path);
-                const rel_copy = try self.allocator.dupe(u8, rel_path);
-
-                if (same) {
-                    try result.identical.append(self.allocator, rel_copy);
-                } else {
-                    try result.modified.append(self.allocator, rel_copy);
-                }
+            if (files_b.get(kv.key_ptr.*)) |entry_b| {
+                try pairs.append(allocator, .{ .rel = kv.key_ptr.*, .a = kv.value_ptr.*, .b = entry_b });
             } else {
-                // File only in A
-                const rel_copy = try self.allocator.dupe(u8, rel_path);
-                try result.only_in_a.append(self.allocator, rel_copy);
+                try appendOwned(allocator, &result.only_in_a, kv.key_ptr.*);
             }
         }
-
-        // Check files only in B
         var iter_b = files_b.iterator();
         while (iter_b.next()) |kv| {
-            const rel_path = kv.key_ptr.*;
-            const entry_b = kv.value_ptr.*;
-
-            processed += 1;
-            self.progress.files_processed = processed;
-            self.progress.current_file = entry_b.path;
-            if (self.progress_callback) |cb| cb(&self.progress);
-
-            if (!files_a.contains(rel_path)) {
-                // File only in B
-                const rel_copy = try self.allocator.dupe(u8, rel_path);
-                try result.only_in_b.append(self.allocator, rel_copy);
-            }
+            if (!files_a.contains(kv.key_ptr.*)) try appendOwned(allocator, &result.only_in_b, kv.key_ptr.*);
         }
 
-        self.updateProgress(.done, total_files, total_files, null);
+        try self.compareContents(pairs.items);
 
+        for (pairs.items) |*pair| {
+            const list = if (pair.differs.load(.acquire)) &result.modified else &result.identical;
+            try appendOwned(allocator, list, pair.rel);
+        }
+        const total = files_a.count() + files_b.count();
+        self.updateProgress(.done, total, total, null);
         return result;
+    }
+
+    /// Decide every pair: `differs` is left false only for two files of one
+    /// size whose bytes all matched.
+    fn compareContents(self: *FolderComparator, pairs: []Pair) !void {
+        const allocator = self.allocator;
+        const monitor = self.config.monitor;
+
+        // Different sizes differ without a read; empty files match without one.
+        var units: std.ArrayListUnmanaged(Unit) = .empty;
+        defer units.deinit(allocator);
+        var bytes_total: u64 = 0;
+        var decided: u64 = 0;
+        for (pairs, 0..) |*pair, i| {
+            if (pair.a.size != pair.b.size) {
+                pair.differs.store(true, .monotonic);
+                decided += 1;
+                continue;
+            }
+            const size = pair.a.size;
+            if (size == 0) {
+                decided += 1;
+                continue;
+            }
+            const ranges = std.math.divCeil(u64, size, self.range_size) catch unreachable;
+            pair.ranges_left.store(@intCast(ranges), .monotonic);
+            var start: u64 = 0;
+            while (start < size) : (start += self.range_size) {
+                try units.append(allocator, .{ .pair = @intCast(i), .start = start, .end = @min(size, start + self.range_size) });
+            }
+            bytes_total +|= 2 * size;
+        }
+        // Largest pairs first, so a big file is never what the last worker is
+        // still reading alone; the stable sort keeps a file's ranges in order.
+        std.mem.sort(Unit, units.items, pairs, struct {
+            fn lessThan(ps: []Pair, x: Unit, y: Unit) bool {
+                return ps[x.pair].a.size > ps[y.pair].a.size;
+            }
+        }.lessThan);
+
+        if (monitor) |m| {
+            m.enterBytes(.full_hashing, pairs.len, bytes_total);
+            _ = m.done.fetchAdd(decided, .release);
+        }
+        self.updateProgress(.full_hashing, decided, pairs.len, null);
+        if (units.items.len == 0) return;
+
+        const workers: usize = @min(self.config.getThreadCount(), units.items.len, types.Monitor.slot_count);
+        const buffers = try allocator.alloc(u8, workers * 2 * chunk_size);
+        defer allocator.free(buffers);
+        var shared: Shared = .{ .pairs = pairs, .units = units.items, .monitor = monitor, .buffers = buffers, .decided = .init(decided) };
+
+        const threads = try allocator.alloc(std.Thread, workers);
+        defer allocator.free(threads);
+        var started: usize = 0;
+        for (threads, 0..) |*t, index| {
+            t.* = std.Thread.spawn(.{}, Shared.work, .{ &shared, index }) catch break;
+            started += 1;
+        }
+        if (started == 0) {
+            shared.work(0);
+        } else if (self.progress_callback != null) {
+            // The callback is the caller's and runs on the caller's thread.
+            while (shared.finished.load(.acquire) < started) {
+                self.updateProgress(.full_hashing, shared.decided.load(.monotonic), pairs.len, null);
+                const tick: libc.timespec = .{ .sec = 0, .nsec = 100 * std.time.ns_per_ms };
+                _ = libc.nanosleep(&tick, null);
+            }
+        }
+        for (threads[0..started]) |t| t.join();
+        try checkCancelled(monitor);
     }
 
     /// Internal file entry for indexing
@@ -142,16 +194,12 @@ pub const FolderComparator = struct {
         size: u64,
     };
 
+    const Index = std.StringHashMap(IndexEntry);
+
     /// Walk directory and build index by relative path
-    fn walkAndIndex(self: *FolderComparator, base_path: []const u8) !std.StringHashMap(IndexEntry) {
-        var index = std.StringHashMap(IndexEntry).init(self.allocator);
-        errdefer {
-            var iter = index.valueIterator();
-            while (iter.next()) |entry| {
-                self.allocator.free(entry.path);
-            }
-            index.deinit();
-        }
+    fn walkAndIndex(self: *const FolderComparator, base_path: []const u8) !Index {
+        var index = Index.init(self.allocator);
+        errdefer freeIndex(self.allocator, &index);
 
         var w = walker.Walker.init(self.allocator, self.config);
         defer w.deinit();
@@ -159,55 +207,17 @@ pub const FolderComparator = struct {
         var walk_result = try w.walk(base_path);
         defer walk_result.deinit(self.allocator);
 
-        // Transfer files to index with relative paths as keys
-        // Note: walk_result.deinit() will free the original entry.path strings,
-        // so we make copies for the index
+        // walk_result owns its paths, so the index takes copies.
         for (walk_result.files.items) |entry| {
             const rel_path = walker.Walker.relativePath(base_path, entry.path);
+            if (index.contains(rel_path)) continue; // the same relative path twice: keep the first
             const rel_copy = try self.allocator.dupe(u8, rel_path);
             errdefer self.allocator.free(rel_copy);
-
-            // Keep the absolute path for later hashing
             const abs_copy = try self.allocator.dupe(u8, entry.path);
             errdefer self.allocator.free(abs_copy);
-
-            const gop = try index.getOrPut(rel_copy);
-            if (gop.found_existing) {
-                // Duplicate relative path (shouldn't happen normally)
-                self.allocator.free(rel_copy);
-                self.allocator.free(abs_copy);
-            } else {
-                gop.value_ptr.* = .{
-                    .path = abs_copy,
-                    .size = entry.size,
-                };
-            }
+            try index.put(rel_copy, .{ .path = abs_copy, .size = entry.size });
         }
-
-        // walk_result.deinit() will be called by defer and free the original paths
         return index;
-    }
-
-    /// Compare two files for identical content
-    fn compareFiles(self: *FolderComparator, path_a: []const u8, path_b: []const u8) !bool {
-        // Quick size check first using libc stat
-        const size_a = getFileSize(self.allocator, path_a) orelse return false;
-        const size_b = getFileSize(self.allocator, path_b) orelse return false;
-
-        if (size_a != size_b) {
-            return false;
-        }
-
-        // Empty files are identical
-        if (size_a == 0) {
-            return true;
-        }
-
-        // Hash both files and compare
-        const hash_a = self.file_hasher.hashFile(path_a) catch return false;
-        const hash_b = self.file_hasher.hashFile(path_b) catch return false;
-
-        return std.mem.eql(u8, &hash_a, &hash_b);
     }
 
     fn updateProgress(self: *FolderComparator, phase: types.Progress.Phase, processed: u64, total: u64, file: ?[]const u8) void {
@@ -218,14 +228,127 @@ pub const FolderComparator = struct {
 
         if (self.progress_callback) |cb| cb(&self.progress);
     }
+
+    /// The other tree's walk, run on its own thread.
+    const WalkJob = struct {
+        comparator: *const FolderComparator,
+        base: []const u8,
+        result: anyerror!Index = error.NotWalked,
+
+        fn run(self: *WalkJob) void {
+            self.result = self.comparator.walkAndIndex(self.base);
+        }
+    };
 };
 
-fn getFileSize(allocator: std.mem.Allocator, path: []const u8) ?u64 {
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return null;
-    defer allocator.free(path_z);
+/// Two files at one relative path.
+const Pair = struct {
+    rel: []const u8,
+    a: FolderComparator.IndexEntry,
+    b: FolderComparator.IndexEntry,
+    /// Set by whoever finds a difference or cannot read a range; the pair's
+    /// other ranges are then skipped.
+    differs: std.atomic.Value(bool) = .init(false),
+    /// Ranges not yet compared; the pair is decided when this reaches 0.
+    ranges_left: std.atomic.Value(u32) = .init(0),
+};
 
-    const stat_buf = pstat.stat(path_z.ptr) catch return null;
-    return stat_buf.size;
+/// Bytes [start, end) of one pair.
+const Unit = struct {
+    pair: u32,
+    start: u64,
+    end: u64,
+};
+
+const Shared = struct {
+    pairs: []Pair,
+    units: []const Unit,
+    monitor: ?*types.Monitor,
+    /// Two `chunk_size` buffers per worker.
+    buffers: []u8,
+    next: std.atomic.Value(usize) = .init(0),
+    /// Pairs whose every range has been compared or skipped.
+    decided: std.atomic.Value(u64) = .init(0),
+    /// Workers that have run out of work.
+    finished: std.atomic.Value(usize) = .init(0),
+
+    fn work(self: *Shared, index: usize) void {
+        defer _ = self.finished.fetchAdd(1, .release);
+        const mine = self.buffers[index * 2 * chunk_size ..][0 .. 2 * chunk_size];
+        const buf_a = mine[0..chunk_size];
+        const buf_b = mine[chunk_size..];
+        while (true) {
+            if (self.monitor) |m| if (m.cancelled()) return;
+            const i = self.next.fetchAdd(1, .monotonic);
+            if (i >= self.units.len) return;
+            const unit = self.units[i];
+            const pair = &self.pairs[unit.pair];
+            if (!pair.differs.load(.acquire)) {
+                if (self.monitor) |m| m.begin(index, pair.a.path);
+                const same = rangeMatches(pair, unit, buf_a, buf_b, self.monitor) catch |err| switch (err) {
+                    error.Cancelled => {
+                        if (self.monitor) |m| m.end(index);
+                        return;
+                    },
+                };
+                if (self.monitor) |m| m.end(index);
+                if (!same) pair.differs.store(true, .release);
+            }
+            if (pair.ranges_left.fetchSub(1, .acq_rel) == 1) {
+                _ = self.decided.fetchAdd(1, .monotonic);
+                if (self.monitor) |m| _ = m.done.fetchAdd(1, .release);
+            }
+        }
+    }
+};
+
+/// Do both files hold the same bytes in `unit`, and still have the size the
+/// walk saw? False on any error opening or reading either.
+fn rangeMatches(pair: *const Pair, unit: Unit, buf_a: []u8, buf_b: []u8, monitor: ?*types.Monitor) error{Cancelled}!bool {
+    var budget: hasher.Budget = .{ .monitor = monitor, .left = 2 * (unit.end - unit.start) };
+    defer budget.finish();
+    const fd_a = hasher.openRegularFile(pair.a.path) catch return false;
+    defer _ = libc.close(fd_a);
+    const fd_b = hasher.openRegularFile(pair.b.path) catch return false;
+    defer _ = libc.close(fd_b);
+    const st_a = pstat.fstat(fd_a) catch return false;
+    const st_b = pstat.fstat(fd_b) catch return false;
+    if (st_a.size != pair.a.size or st_b.size != pair.b.size) return false;
+
+    var offset = unit.start;
+    while (offset < unit.end) {
+        if (monitor) |m| if (m.cancelled()) return error.Cancelled;
+        // Another range of this pair already differs: nothing left to learn.
+        if (pair.differs.load(.monotonic)) return false;
+        const n: usize = @intCast(@min(chunk_size, unit.end - offset));
+        const got_a = hasher.preadAll(fd_a, buf_a[0..n], offset) catch return false;
+        const got_b = hasher.preadAll(fd_b, buf_b[0..n], offset) catch return false;
+        // Short: the file shrank while it was read.
+        if (got_a != n or got_b != n) return false;
+        if (!std.mem.eql(u8, buf_a[0..n], buf_b[0..n])) return false;
+        budget.add(2 * n);
+        offset += n;
+    }
+    return true;
+}
+
+fn checkCancelled(monitor: ?*types.Monitor) error{Cancelled}!void {
+    if (monitor) |m| if (m.cancelled()) return error.Cancelled;
+}
+
+fn freeIndex(allocator: std.mem.Allocator, index: *FolderComparator.Index) void {
+    var iter = index.iterator();
+    while (iter.next()) |kv| {
+        allocator.free(kv.key_ptr.*);
+        allocator.free(kv.value_ptr.path);
+    }
+    index.deinit();
+}
+
+fn appendOwned(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged([]const u8), s: []const u8) !void {
+    const copy = try allocator.dupe(u8, s);
+    errdefer allocator.free(copy);
+    try list.append(allocator, copy);
 }
 
 /// Convenience function for folder comparison
@@ -391,3 +514,131 @@ test "getSummary all identical" {
     try std.testing.expectEqual(@as(u64, 0), summary.modified_count);
     try std.testing.expect(result.isIdentical());
 }
+
+const Scratch = @import("testing_scratch.zig").Scratch;
+
+fn sortedNames(list: []const []const u8, buf: [][]const u8) [][]const u8 {
+    const out = buf[0..list.len];
+    @memcpy(out, list);
+    std.mem.sort([]const u8, out, {}, struct {
+        fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.order(u8, x, y) == .lt;
+        }
+    }.lessThan);
+    return out;
+}
+
+fn expectNames(list: []const []const u8, want: []const []const u8) !void {
+    var buf: [16][]const u8 = undefined;
+    const got = sortedNames(list, &buf);
+    try std.testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| try std.testing.expectEqualStrings(w, g);
+}
+
+test "compare sorts files into identical, modified, only in A and only in B" {
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "compare-sort");
+    defer scratch.deinit();
+    for ([_][]const u8{ "a", "b", "a/nested", "b/nested" }) |d| try scratch.makeDir(d);
+    try scratch.writeFile("a/same.txt", "hello");
+    try scratch.writeFile("b/same.txt", "hello");
+    try scratch.writeFile("a/nested/deep.txt", "deep");
+    try scratch.writeFile("b/nested/deep.txt", "deep");
+    try scratch.writeFile("a/bytes.txt", "aaaa"); // one size, other bytes
+    try scratch.writeFile("b/bytes.txt", "aaab");
+    try scratch.writeFile("a/size.txt", "short");
+    try scratch.writeFile("b/size.txt", "longer");
+    try scratch.writeFile("a/empty", "");
+    try scratch.writeFile("b/empty", "");
+    try scratch.writeFile("a/only_a.txt", "a");
+    try scratch.writeFile("b/only_b.txt", "b");
+    const a = try scratch.join("a");
+    defer allocator.free(a);
+    const b = try scratch.join("b");
+    defer allocator.free(b);
+
+    var comparator = FolderComparator.init(allocator, .{ .min_size = 0, .threads = 3 });
+    var result = try comparator.compare(a, b);
+    defer result.deinit();
+
+    try expectNames(result.identical.items, &.{ "empty", "nested/deep.txt", "same.txt" });
+    try expectNames(result.modified.items, &.{ "bytes.txt", "size.txt" });
+    try expectNames(result.only_in_a.items, &.{"only_a.txt"});
+    try expectNames(result.only_in_b.items, &.{"only_b.txt"});
+    try std.testing.expect(!result.isIdentical());
+}
+
+test "a file of many ranges is compared range by range, to its first and last byte" {
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "compare-ranges");
+    defer scratch.deinit();
+    try scratch.makeDir("a");
+    try scratch.makeDir("b");
+
+    // Ten ranges and a bit, so the last range is short.
+    var data: [10 * 4096 + 123]u8 = undefined;
+    for (&data, 0..) |*x, i| x.* = @truncate(i *% 31 +% 7);
+    try scratch.writeFile("a/same.bin", &data);
+    try scratch.writeFile("b/same.bin", &data);
+    try scratch.writeFile("a/last.bin", &data);
+    try scratch.writeFile("a/first.bin", &data);
+    data[data.len - 1] ^= 1;
+    try scratch.writeFile("b/last.bin", &data);
+    data[data.len - 1] ^= 1;
+    data[0] ^= 1;
+    try scratch.writeFile("b/first.bin", &data);
+    const a = try scratch.join("a");
+    defer allocator.free(a);
+    const b = try scratch.join("b");
+    defer allocator.free(b);
+
+    var comparator = FolderComparator.init(allocator, .{ .min_size = 0, .threads = 4 });
+    comparator.range_size = 4096;
+    var result = try comparator.compare(a, b);
+    defer result.deinit();
+
+    try expectNames(result.identical.items, &.{"same.bin"});
+    try expectNames(result.modified.items, &.{ "first.bin", "last.bin" });
+}
+
+test "a file whose size is not the one the walk saw never matches" {
+    // What a permanent folder delete relies on: a file that grew or shrank
+    // after the walk is not "identical", whatever its first bytes hold.
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "compare-stale");
+    defer scratch.deinit();
+    try scratch.writeFile("x", "same bytes");
+    try scratch.writeFile("y", "same bytes, and then some more");
+    const x = try scratch.join("x");
+    defer allocator.free(x);
+    const y = try scratch.join("y");
+    defer allocator.free(y);
+
+    var buf_a: [64]u8 = undefined;
+    var buf_b: [64]u8 = undefined;
+    // The walk saw both at 10 bytes; y has grown since.
+    const stale: Pair = .{ .rel = "f", .a = .{ .path = x, .size = 10 }, .b = .{ .path = y, .size = 10 } };
+    try std.testing.expect(!try rangeMatches(&stale, .{ .pair = 0, .start = 0, .end = 10 }, &buf_a, &buf_b, null));
+    const fresh: Pair = .{ .rel = "f", .a = .{ .path = x, .size = 10 }, .b = .{ .path = x, .size = 10 } };
+    try std.testing.expect(try rangeMatches(&fresh, .{ .pair = 0, .start = 0, .end = 10 }, &buf_a, &buf_b, null));
+}
+
+test "a cancelled comparison stops with error.Cancelled" {
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "compare-cancel");
+    defer scratch.deinit();
+    try scratch.makeDir("a");
+    try scratch.makeDir("b");
+    try scratch.writeFile("a/f", "data");
+    try scratch.writeFile("b/f", "data");
+    const a = try scratch.join("a");
+    defer allocator.free(a);
+    const b = try scratch.join("b");
+    defer allocator.free(b);
+
+    var monitor: types.Monitor = .{};
+    monitor.cancel();
+    var comparator = FolderComparator.init(allocator, .{ .min_size = 0, .monitor = &monitor });
+    try std.testing.expectError(error.Cancelled, comparator.compare(a, b));
+}
+

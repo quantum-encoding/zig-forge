@@ -217,7 +217,7 @@ fn scanFd(comptime Hasher: type, fd: c_int, read: ScanRead, size: u64, monitor: 
 }
 
 /// Fill `buf` from `offset`, short only at end of file.
-fn preadAll(fd: c_int, buf: []u8, offset: u64) !usize {
+pub fn preadAll(fd: c_int, buf: []u8, offset: u64) !usize {
     var got: usize = 0;
     while (got < buf.len) {
         const n = libc.pread(fd, buf[got..].ptr, buf.len - got, @intCast(offset + got));

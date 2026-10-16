@@ -526,10 +526,22 @@ fn runCompare(internal: *InternalContext) ?[]u8 {
     const alloc = core_alloc;
 
     if (internal.paths.items.len < 2) return null;
+    const monitor = &internal.monitor;
 
-    var cmp = FolderComparator.init(alloc, internal.config);
+    // Progress restarts; a cancel requested before the run began still counts.
+    const cancel_was_requested = monitor.cancelled();
+    monitor.reset();
+    if (cancel_was_requested) monitor.cancel();
+    // Whatever happens, the next run on this context starts un-cancelled.
+    defer monitor.cancel_requested.store(false, .release);
+
+    // The monitor carries progress (files compared, bytes read) and Cancel.
+    var config = internal.config;
+    config.monitor = monitor;
+    var cmp = FolderComparator.init(alloc, config);
     var result = cmp.compare(internal.paths.items[0], internal.paths.items[1]) catch return null;
     defer result.deinit();
+    monitor.enter(.done, 0);
 
     // Generate JSON report using Allocating writer
     var alloc_writer: std.Io.Writer.Allocating = .init(alloc);
