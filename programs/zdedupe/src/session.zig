@@ -1720,6 +1720,13 @@ pub const Session = struct {
                 report.fail(arena, item.path, reason);
                 continue;
             }
+            // Permissions before content: the comparison can read hundreds of
+            // gigabytes, and a removal that stops partway leaves the folder half
+            // gone.
+            if (removalRefusal(item.path, path_z)) |reason| {
+                report.fail(arena, item.path, reason);
+                continue;
+            }
             // Compared right now, in full: same relative paths, same bytes,
             // and nothing extra on either side, hidden files included. A
             // keeper that is itself being removed vouches for nothing.
@@ -2764,6 +2771,57 @@ fn folderRefusal(item: FolderItem, path: [*:0]const u8) ?[]const u8 {
     if (folderKind(path)) |reason| return reason;
     if (item.keepers.len == 0) return "no surviving copy was named";
     return null;
+}
+
+/// Why this account could not remove `path` and everything under it, as far
+/// as permissions tell: the folder's parent, and every folder in the tree, must
+/// let it remove entries. A folder another account owns is refused here, at
+/// the cost of a walk, not after its whole content was read and compared.
+/// Null when nothing stands in the way, and on Windows, where removal reports
+/// its own failure. Flags such as immutable files are not visible here;
+/// removal still reports those.
+fn removalRefusal(path: []const u8, path_z: [*:0]const u8) ?[]const u8 {
+    if (comptime sys.is_windows) return null;
+    var buf: [4096]u8 = undefined;
+    const parent = filters_mod.parentDir(path) orelse return null;
+    const parent_z = pathZ(&buf, parent) orelse return null;
+    if (libc.faccessat(libc.AT.FDCWD, parent_z, access_remove, 0) != 0)
+        return "permission denied: its parent folder does not let this account remove it";
+    const fd = libc.open(path_z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true }, @as(libc.mode_t, 0));
+    if (fd < 0) return null; // removal says why
+    defer _ = libc.close(fd);
+    if (!treeRemovable(fd))
+        return "permission denied: a folder inside it does not let this account remove what it holds";
+    return null;
+}
+
+/// W_OK | X_OK: create and remove entries, and reach them.
+const access_remove: c_uint = 2 | 1;
+
+/// Every folder under `dir_fd`, and it, lets this account remove entries.
+/// By descriptor and never through a link, as `removeChildren` walks.
+fn treeRemovable(dir_fd: c_int) bool {
+    if (libc.faccessat(dir_fd, ".", access_remove, 0) != 0) return false;
+    const dup_fd = libc.dup(dir_fd);
+    if (dup_fd < 0) return true; // cannot tell; removal decides
+    const dir = libc.fdopendir(dup_fd) orelse {
+        _ = libc.close(dup_fd);
+        return true;
+    };
+    defer _ = libc.closedir(dir);
+    while (libc.readdir(dir)) |entry| {
+        const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
+        const name = std.mem.span(name_ptr);
+        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+        const st = pstat.lstatAt(dir_fd, name_ptr) catch continue;
+        if (!st.isDir()) continue;
+        // A folder that cannot be opened cannot be emptied.
+        const child = libc.openat(dir_fd, name_ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true }, @as(libc.mode_t, 0));
+        if (child < 0) return false;
+        defer _ = libc.close(child);
+        if (!treeRemovable(child)) return false;
+    }
+    return true;
 }
 
 /// True if `path` is, contains, or lies inside anything in `items`. Nothing

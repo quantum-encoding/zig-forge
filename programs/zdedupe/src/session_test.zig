@@ -12,6 +12,7 @@
 //! touch the user's real Trash.
 
 const std = @import("std");
+const builtin = @import("builtin");
 /// The platform C library (std.c on Linux and macOS; see sys.zig).
 const sysc = @import("sys.zig").c;
 const lib = @import("lib.zig");
@@ -1550,6 +1551,41 @@ test "a folder goes only if it is identical to a surviving copy right now" {
     // And the results stop listing it without a rescan.
     try testing.expectEqual(@as(i64, 1), int(try parse(a, s.removedStatus()), "count"));
     try testing.expectEqual(@as(i64, 1), int(try parse(a, s.identicalSets("{\"offset\":0,\"limit\":50}")), "total"));
+}
+
+test "a folder this account cannot empty is refused before it is compared, and nothing of it goes" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    // Root may remove anything, so the refusal never happens.
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture, const s = try openDirs(gpa, "session-folder-perms");
+    defer fixture.deinit();
+    defer s.close();
+
+    // q/src can be read but not changed: q's readme could be removed, its
+    // sources could not. Removal that went ahead would leave q half deleted.
+    const src = try a.dupeSentinel(u8, try treeJoin(a, &fixture, "q/src"), 0);
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(src, 0o555));
+    defer _ = std.c.chmod(src, 0o755);
+
+    const items = try query(a, "[{{\"path\":{s},\"keepers\":[{s}],\"bytes\":1600}}]", .{
+        try jsonString(a, try treeJoin(a, &fixture, "q")),
+        try jsonString(a, try treeJoin(a, &fixture, "p")),
+    });
+    const report = try parse(a, s.deleteFolders(items, false, null, null));
+
+    try testing.expectEqual(@as(i64, 0), int(report, "deleted"));
+    try testing.expectEqual(@as(i64, 1), int(report, "failed_count"));
+    // Refused for permissions, not after a comparison.
+    try testing.expectEqual(@as(i64, 0), int(report, "skipped_changed"));
+    const failed = field(report, "failed").array.items;
+    try testing.expect(std.mem.indexOf(u8, failed[0].array.items[1].string, "does not let this account") != null);
+    try testing.expect(fixture.exists("q/readme.txt"));
+    try testing.expect(fixture.exists("q/src/util/str.c"));
 }
 
 test "a keeper that is itself being deleted vouches for nothing" {
