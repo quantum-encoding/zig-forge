@@ -143,10 +143,10 @@ pub fn openRegularFileAt(dir_fd: c_int, name: [*:0]const u8) !c_int {
 }
 
 /// Hash file using BLAKE3 (fastest, cryptographically secure)
-/// Files are hashed by blake3_tree's vector path (about 1.4x std's speed per
-/// core); `hashBytesBlake3` stays on std's, the oracle the tests hold file
-/// hashes to.
-const FileBlake3 = @import("blake3_tree.zig").Blake3;
+/// Files are hashed by blake3_tree's vector path where it is faster than
+/// std's (`blake3_tree.beats_std`: aarch64, AVX-512), by std's elsewhere.
+/// `hashBytesBlake3` stays on std's, the oracle the tests hold file hashes to.
+const FileBlake3 = if (@import("blake3_tree.zig").beats_std) @import("blake3_tree.zig").Blake3 else std.crypto.hash.Blake3;
 
 pub fn hashFileBlake3(path: []const u8, max_bytes: ?usize) !Hash {
     return hashFileWith(FileBlake3, path, max_bytes, null);

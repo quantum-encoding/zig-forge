@@ -14,6 +14,7 @@
 //! (unkeyed hashing only), and its tests hold every tree shape to std's digest.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const chunk_len: usize = 1024;
 const block_len: usize = 64;
@@ -75,9 +76,31 @@ fn compress(cv: *const Cv, block: *const [16]u32, counter: u64, len: u32, flags:
     return s;
 }
 
-/// Eight chunks at once, one per vector lane: the same compressions as
-/// `ChunkState`, so each lane's result is that chunk's chaining value.
-const lanes = 8;
+/// Several chunks at once, one per vector lane: the same compressions as
+/// `ChunkState`, so each lane's result is that chunk's chaining value. The
+/// lane count is what measured fastest per target (an M5 Max; an i7-11800H at
+/// x86's baseline, with AVX2 and with AVX-512): two vector registers per word
+/// where there are 32 of them (aarch64, AVX-512), one where SSE2's 16 would
+/// otherwise spill.
+const lanes = switch (builtin.cpu.arch) {
+    .aarch64 => 8,
+    .x86_64 => if (std.Target.x86.featureSetHas(builtin.cpu.features, .avx512f))
+        16
+    else if (std.Target.x86.featureSetHas(builtin.cpu.features, .avx2))
+        8
+    else
+        4,
+    else => 4,
+};
+
+/// Whether whole files hash faster here than with std.crypto.hash.Blake3: on
+/// aarch64 (~3.0 against 2.15 GB/s per core, M5 Max) and with AVX-512 (4.2
+/// against 3.8), not at x86's SSE2 baseline (1.6 against 1.9) or with AVX2
+/// (level). hasher.zig picks by it; the subtree paths use this file anyway,
+/// for what splitting a file across cores is worth.
+pub const beats_std = builtin.cpu.arch == .aarch64 or
+    (builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .avx512f));
+
 const V = @Vector(lanes, u32);
 
 inline fn gv(s: *[16]V, comptime a: u8, comptime b: u8, comptime c: u8, comptime d: u8, mx: V, my: V) void {
@@ -228,7 +251,7 @@ pub const Hasher = struct {
                 self.push(self.chunk.output().chainingValue());
                 self.chunk = .{ .counter = self.first_chunk + self.pushed };
             }
-            // Whole chunks with more input after them, eight at a time.
+            // Whole chunks with more input after them, `lanes` at a time.
             if (self.chunk.len() == 0 and in.len > lanes * chunk_len) {
                 for (chunkCvs(in[0 .. lanes * chunk_len], self.chunk.counter)) |cv| self.push(cv);
                 self.chunk = .{ .counter = self.first_chunk + self.pushed };
@@ -355,7 +378,7 @@ test "every length up to 40 KiB, cut into runs of 1, 2, 4, 8 and 64 chunks, matc
     while (n <= max) : (n += if (n < 3 * chunk_len) 1 else 61) {
         var want: [digest_length]u8 = undefined;
         std.crypto.hash.Blake3.hash(data[0..n], &want, .{});
-        // 64 chunks: the whole input is one run, hashed eight chunks at a time.
+        // 64 chunks: the whole input is one run, hashed `lanes` chunks at a time.
         for ([_]u64{ 1, 2, 4, 8, 64 }) |run_chunks| {
             const got = hashByRuns(data[0..n], run_chunks, &cvs);
             if (!std.mem.eql(u8, &want, &got)) {
