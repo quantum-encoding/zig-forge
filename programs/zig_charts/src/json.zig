@@ -679,6 +679,7 @@ fn renderBarFromJson(
         try series_list.append(allocator, .{
             .name = getString(s_obj, "name") orelse "Series",
             .values = try allocator.dupe(f64, values.items),
+            .color = if (s_obj.get("color")) |cv| parseColor(cv) else null,
         });
     }
 

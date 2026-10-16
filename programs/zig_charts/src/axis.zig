@@ -205,13 +205,17 @@ pub fn drawYAxis(
         );
     }
 
-    // Title (rotated)
+    // Title, turned a quarter to read bottom-to-top beside the axis: drawn
+    // level, a title as wide as the plot is tall runs off the canvas's left
+    // edge. The transform is undone straight after.
     if (config.title) |title| {
-        // For SVG, we'd need to use transform. For now, skip rotation.
+        c.translate(config.label_offset + config.title_font_size / 2, bounds.y + bounds.height / 2);
+        c.rotate(-90);
+        defer c.resetTransform();
         c.drawText(
             title,
-            config.label_offset,
-            bounds.y + bounds.height / 2,
+            0,
+            0,
             .{
                 .font_family = config.label_font_family,
                 .font_size = config.title_font_size,
