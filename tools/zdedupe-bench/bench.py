@@ -776,7 +776,7 @@ def cmd_good(args):
     base = {}
     quiet = (os.cpu_count() or 1) * 0.25  # a loaded run is no baseline
     for t in sorted({r["target"] for r in ledger}):
-        s = summarize(runs_of(b, t, ledger, max_load=quiet))
+        s = summarize(runs_of(b, t, ledger, since=args.since, max_load=quiet))
         if s["n"]:
             base[t] = {"wall_s": round(s["wall_s"], 4), "cores": round(s["cores"], 2), "n": s["n"],
                        "digest": s["digests"][0] if len(s["digests"]) == 1 else None}
@@ -879,6 +879,7 @@ def main():
     p = sub.add_parser("good")
     p.add_argument("ref", nargs="?")
     p.add_argument("--note")
+    p.add_argument("--since", help="baseline from runs at or after this ISO time only (e.g. after a cache fix)")
     p.set_defaults(fn=cmd_good)
     p = sub.add_parser("restore")
     p.add_argument("--apply", action="store_true")
