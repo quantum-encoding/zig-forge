@@ -557,6 +557,175 @@ test "an unreadable folder marks everything above it incomplete" {
     try testing.expect(!field(media, "incomplete").bool);
 }
 
+fn rootItems(s: *Session, arena: Allocator) !Value {
+    const root = try parse(arena, s.spaceChildren("{\"limit\":500}"));
+    return field(field(root, "groups").array.items[0], "items");
+}
+
+fn childItems(s: *Session, arena: Allocator, id: i64) !Value {
+    const answer = try parse(arena, s.spaceChildren(try std.fmt.allocPrint(arena, "{{\"node\":{d},\"limit\":500}}", .{id})));
+    return field(field(answer, "groups").array.items[0], "items");
+}
+
+test "what the scan left out is listed with its reason, under the folder that holds it" {
+    if (sysc.getuid() == 0) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    try fx.write("docs/locked/secret.bin", 9_000);
+    try fx.write(".ssh/id_ed25519", 400);
+    try fx.write("Pictures/Photos Library.photoslibrary/originals/a.jpg", 70_000);
+    try fx.write("Pictures/holiday.jpg", 2_000);
+    const locked = try fx.tree.joinZ("docs/locked");
+    defer testing.allocator.free(locked);
+    try testing.expectEqual(@as(c_int, 0), sysc.chmod(locked.ptr, 0));
+    defer _ = sysc.chmod(locked.ptr, 0o700);
+
+    try fx.scan();
+    var bin = try Scratch.init(testing.allocator, "space-bin");
+    defer bin.deinit();
+    var trash: FakeTrash = .{ .bin = bin.path };
+    const s = try fx.open(true);
+    defer s.close();
+
+    const skipped = field(try parse(arena, s.spaceOverview()), "skipped");
+    try testing.expect(field(skipped, "recorded").bool);
+    try testing.expectEqual(@as(i64, 1), int(skipped, "denied"));
+    try testing.expectEqual(@as(i64, 1), int(skipped, "credentials"));
+    try testing.expectEqual(@as(i64, 1), int(skipped, "app_library"));
+    try testing.expectEqual(@as(i64, 0), int(skipped, "other_volume"));
+    try testing.expectEqual(@as(i64, 0), int(skipped, "unreadable"));
+
+    const items = try rootItems(s, arena);
+    const docs_id = int(findItem(items, "docs").?, "id");
+    const pictures = findItem(items, "Pictures").?;
+    const root_id = int(field(try parse(arena, s.spaceChildren("{}")), "node"), "id");
+
+    const all = try parse(arena, s.spaceSkipped("{}"));
+    try testing.expectEqual(@as(i64, 3), int(all, "total"));
+    const listed = field(all, "items");
+    const lock = findItem(listed, "locked").?;
+    try testing.expectEqualStrings("denied", str(lock, "reason"));
+    try testing.expectEqual(docs_id, int(lock, "node"));
+    try testing.expect(field(lock, "dir").bool);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{s}/docs/locked", .{fx.tree.path}), str(lock, "path"));
+    const keys = findItem(listed, ".ssh").?;
+    try testing.expectEqualStrings("credentials", str(keys, "reason"));
+    try testing.expectEqual(root_id, int(keys, "node"));
+    const library = findItem(listed, "Photos Library.photoslibrary").?;
+    try testing.expectEqualStrings("app_library", str(library, "reason"));
+    try testing.expectEqual(int(pictures, "id"), int(library, "node"));
+
+    // Narrowed to a folder, or to a reason.
+    const in_docs = try parse(arena, s.spaceSkipped(try std.fmt.allocPrint(arena, "{{\"node\":{d}}}", .{docs_id})));
+    try testing.expectEqual(@as(i64, 1), int(in_docs, "total"));
+    const credentials = try parse(arena, s.spaceSkipped("{\"reason\":\"credentials\"}"));
+    try testing.expectEqual(@as(i64, 1), int(credentials, "total"));
+    try testing.expectEqualStrings(".ssh", str(field(credentials, "items").array.items[0], "name"));
+    const paged = try parse(arena, s.spaceSkipped("{\"limit\":1,\"offset\":1}"));
+    try testing.expectEqual(@as(i64, 3), int(paged, "total"));
+    try testing.expectEqual(@as(usize, 1), field(paged, "items").array.items.len);
+
+    // The folder holding the photo library the scan never entered stays:
+    // trashing it would take the library along unseen.
+    try testing.expect(field(pictures, "protected").bool);
+    const holiday_id = int(findItem(try childItems(s, arena, int(pictures, "id")), "holiday.jpg").?, "id");
+    const request = try std.fmt.allocPrint(arena,
+        \\{{"items":[{{"kind":"dir","id":{d}}},{{"kind":"file","id":{d}}}]}}
+    , .{ int(pictures, "id"), holiday_id });
+    const report = try parse(arena, s.spaceTrash(request, FakeTrash.callback, &trash));
+    try testing.expectEqual(@as(i64, 1), int(report, "deleted"));
+    try testing.expectEqual(@as(i64, 1), int(report, "failed_count"));
+    try testing.expect(fx.tree.exists("Pictures/Photos Library.photoslibrary/originals/a.jpg") catch false);
+    try testing.expect(!(fx.tree.exists("Pictures/holiday.jpg") catch true));
+}
+
+test "game libraries are measured as applications, and nothing holding one goes to the Trash" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    try fx.write("Games/steamapps/common/Game/data.pak", 80_000);
+    try fx.write("Games/notes.txt", 100);
+    try fx.write(".local/share/Steam/steam.sh", 3_000);
+    try fx.write(".local/bin/tool", 500);
+    try fx.scan();
+    var bin = try Scratch.init(testing.allocator, "space-bin");
+    defer bin.deinit();
+    var trash: FakeTrash = .{ .bin = bin.path };
+    const s = try fx.open(true);
+    defer s.close();
+
+    const overview = try parse(arena, s.spaceOverview());
+    try testing.expectEqual(@as(i64, tree_files.len + 4), int(overview, "files"));
+    try testing.expectEqual(@as(i64, 0), int(field(overview, "skipped"), "app_library"));
+
+    const items = try rootItems(s, arena);
+    const games = findItem(items, "Games").?;
+    try testing.expect(field(games, "protected").bool);
+    try testing.expectEqualStrings("applications", str(games, "type"));
+    const local = findItem(items, ".local").?;
+    try testing.expect(field(local, "protected").bool);
+
+    const in_games = try childItems(s, arena, int(games, "id"));
+    const steamapps = findItem(in_games, "steamapps").?;
+    try testing.expect(field(steamapps, "protected").bool);
+    const notes_id = int(findItem(in_games, "notes.txt").?, "id");
+    const common = findItem(try childItems(s, arena, int(steamapps, "id")), "common").?;
+    const game = findItem(try childItems(s, arena, int(common, "id")), "Game").?;
+    const pak = findItem(try childItems(s, arena, int(game, "id")), "data.pak").?;
+    try testing.expect(field(pak, "protected").bool);
+    const tool_dir = findItem(try childItems(s, arena, int(local, "id")), "bin").?;
+    try testing.expect(!field(tool_dir, "protected").bool);
+
+    const request = try std.fmt.allocPrint(arena,
+        \\{{"items":[{{"kind":"dir","id":{d}}},{{"kind":"dir","id":{d}}},{{"kind":"dir","id":{d}}},{{"kind":"file","id":{d}}},{{"kind":"file","id":{d}}}]}}
+    , .{ int(games, "id"), int(steamapps, "id"), int(local, "id"), int(pak, "id"), notes_id });
+    const report = try parse(arena, s.spaceTrash(request, FakeTrash.callback, &trash));
+    try testing.expectEqual(@as(i64, 1), int(report, "deleted"));
+    try testing.expectEqual(@as(i64, 4), int(report, "failed_count"));
+    try testing.expect(fx.tree.exists("Games/steamapps/common/Game/data.pak") catch false);
+    try testing.expect(fx.tree.exists(".local/share/Steam/steam.sh") catch false);
+    try testing.expect(!(fx.tree.exists("Games/notes.txt") catch true));
+}
+
+test "a store from before skips were recorded still opens, with none listed" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    try fx.write(".ssh/id_ed25519", 400);
+    try fx.scan();
+
+    // Rewrite the blob header as version 1 wrote it: 256 bytes, the rest of
+    // today's header unused.
+    const bytes = try readAll(testing.allocator, fx.store_path);
+    defer testing.allocator.free(bytes);
+    const header = std.mem.bytesToValue(@import("store.zig").Header, bytes[0..256]);
+    const at: usize = @intCast(header.space.offset);
+    std.mem.writeInt(u32, bytes[at + @offsetOf(space.BlobHeader, "version") ..][0..4], 1, .little);
+    std.mem.writeInt(u32, bytes[at + @offsetOf(space.BlobHeader, "header_size") ..][0..4], 256, .little);
+    @memset(bytes[at + 256 .. at + space.blob_header_size], 0);
+    try writeAll(fx.store_path, bytes);
+
+    const s = try fx.open(true);
+    defer s.close();
+    const overview = try parse(arena, s.spaceOverview());
+    try testing.expect(!field(field(overview, "skipped"), "recorded").bool);
+    try testing.expectEqual(@as(i64, 0), int(field(overview, "skipped"), "credentials"));
+    try testing.expectEqual(@as(i64, tree_files.len), int(overview, "files"));
+    const none = try parse(arena, s.spaceSkipped("{}"));
+    try testing.expectEqual(@as(i64, 0), int(none, "total"));
+    try testing.expect(findItem(try rootItems(s, arena), "docs") != null);
+}
+
 fn kindOf(answer: Value, key: []const u8) Value {
     for (field(answer, "kinds").array.items) |k| {
         if (std.mem.eql(u8, str(k, "key"), key)) return k;

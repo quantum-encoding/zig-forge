@@ -41,7 +41,11 @@
 //!     containment verdict.
 //!   * Entries pruned on purpose (excludes, cache dirs, hidden-when-off,
 //!     special files) do not block a verdict, but every result carries the
-//!     count so a consumer can say "identical, ignoring N entries".
+//!     count so a consumer can say "identical, ignoring N entries". Except
+//!     another app's library (a Photos library, a Steam library) and another
+//!     volume's mount point: the folder directly holding one is `incomplete`.
+//!     Neither was read, and deleting the folder as a copy would take it
+//!     along.
 //!   * Overlap relations are about regular-file content. Symlinks and empty
 //!     directories only matter to identical sets.
 //!   * No finding points at or inside version-control metadata (`.git`, `.hg`,
@@ -96,6 +100,8 @@ pub const Options = struct {
     /// A licence file present 400 times says nothing about which folders are
     /// copies of each other, and seeding is quadratic in the copy count.
     max_seed_copies: usize = 32,
+    /// Entries the walk left out (`FastWalker.skips`); see the safety rules.
+    skips: []const fast_walker.SkipRecord = &.{},
     /// Upper bound on tracked candidate pairs; past it, new pairs are ignored.
     max_candidate_pairs: usize = 2_000_000,
 };
@@ -376,6 +382,12 @@ const Analyzer = struct {
             const parent_path = parentPath(record.path) orelse continue;
             const owner = by_path.get(parent_path) orelse continue;
             try self.nodes[owner].links.append(self.scratch, @intCast(i));
+        }
+
+        for (self.options.skips) |skip| {
+            if (skip.reason != .app_library and skip.reason != .other_volume) continue;
+            const owner = by_path.get(parentPath(skip.path) orelse continue) orelse continue;
+            self.nodes[owner].own_incomplete = true;
         }
 
         try self.rankDepthFirst();

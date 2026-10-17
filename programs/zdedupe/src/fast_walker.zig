@@ -104,6 +104,45 @@ pub const LinkRecord = struct {
     target: []const u8,
 };
 
+/// Why a tree-recording walk left an entry out. The numbering is part of the
+/// disk-space store format (space.zig).
+pub const SkipReason = enum(u8) {
+    /// Could not be opened or stat'ed for a reason other than permission, or
+    /// its path is too long.
+    unreadable = 0,
+    /// Opening it was refused: no permission (EACCES, EPERM).
+    denied = 1,
+    /// macOS privacy protection refused it when the walk asked first.
+    privacy = 2,
+    /// Opened, but its listing stopped partway. Recorded against the folder
+    /// itself, which is in the tree with what was listed before the failure.
+    partial = 3,
+    /// The mount point of another volume (`one_filesystem`).
+    other_volume = 4,
+    /// Another app's library: a Photos or Music package, or a game
+    /// launcher's install or game library.
+    app_library = 5,
+    /// A credential store (`Config.credential_excludes`).
+    credentials = 6,
+    /// Left out by the host: an excluded path or name, or a folder tagged
+    /// with CACHEDIR.TAG.
+    excluded = 7,
+};
+
+pub const skip_reason_count = std.meta.fieldNames(SkipReason).len;
+
+/// An entry a tree-recording walk did not enter or record. Hidden entries
+/// (when those are off) and special files are counted in their folder's
+/// `skipped`, not recorded here.
+pub const SkipRecord = struct {
+    /// The entry; for `partial`, the folder whose listing stopped.
+    path: []const u8,
+    reason: SkipReason,
+    /// Known to be a folder (everything the walk queued, and listing entries
+    /// whose type the listing gave).
+    dir: bool,
+};
+
 /// First line of a valid CACHEDIR.TAG (https://bford.info/cachedir/).
 pub const cache_dir_signature = "Signature: 8a477f597d28d172789f06886806bc55";
 
@@ -276,6 +315,7 @@ const Worker = struct {
     dirs: std.ArrayListUnmanaged(DirRecord) = .empty,
     links: std.ArrayListUnmanaged(LinkRecord) = .empty,
     marks: std.ArrayListUnmanaged(ParentMark) = .empty,
+    skips: std.ArrayListUnmanaged(SkipRecord) = .empty,
     stats: WalkStats = .{},
     /// Scratch for the NUL-terminated paths a few syscalls need.
     path_buf: [max_path + 64]u8 = undefined,
@@ -343,6 +383,7 @@ const Worker = struct {
         if (w.isDenied(dir_path)) {
             self.stats.errors += 1;
             try self.markParent(dir_path, .incomplete);
+            try self.skip(dir_path, null, .privacy, true);
             return;
         }
 
@@ -352,12 +393,14 @@ const Worker = struct {
         if (w.exclude_paths.len > 0 and !w.isRoot(dir_path) and w.isExcludedPath(dir_path)) {
             self.stats.excluded += 1;
             try self.markParent(dir_path, .skipped);
+            try self.skip(dir_path, null, .excluded, true);
             return;
         }
 
-        if (w.skip_app_libraries and !w.isRoot(dir_path) and isAppLibraryDir(dir_path)) {
+        if (w.skip_game_libraries and !w.isRoot(dir_path) and isGameLibraryDir(dir_path)) {
             self.stats.excluded += 1;
             try self.markParent(dir_path, .skipped);
+            try self.skip(dir_path, null, .app_library, true);
             return;
         }
 
@@ -373,8 +416,11 @@ const Worker = struct {
             return error.Abandoned;
         }
         var stream = opened orelse {
+            // Read before anything else can overwrite the thread's errno.
+            const err = libc.errno(@as(c_int, -1));
             self.stats.errors += 1;
             try self.markParent(dir_path, .incomplete);
+            try self.skip(dir_path, null, if (err == .ACCES or err == .PERM) .denied else .unreadable, true);
             return;
         };
         defer stream.close();
@@ -383,6 +429,7 @@ const Worker = struct {
         if (w.exclude_cache_dirs and !w.isRoot(dir_path) and isCacheDir(dir_fd)) {
             self.stats.excluded += 1;
             try self.markParent(dir_path, .skipped);
+            try self.skip(dir_path, null, .excluded, true);
             return;
         }
 
@@ -392,11 +439,13 @@ const Worker = struct {
             const here = pstat.fstat(dir_fd) catch {
                 self.stats.errors += 1;
                 try self.markParent(dir_path, .incomplete);
+                try self.skip(dir_path, null, .unreadable, true);
                 return;
             };
             if (std.mem.indexOfScalar(u64, w.root_devs.items, here.dev) == null) {
                 self.stats.excluded += 1;
                 try self.markParent(dir_path, .skipped);
+                try self.skip(dir_path, null, .other_volume, true);
                 return;
             }
         }
@@ -409,6 +458,7 @@ const Worker = struct {
             const identity = pstat.fstat(dir_fd) catch {
                 self.stats.errors += 1;
                 try self.markParent(dir_path, .incomplete);
+                try self.skip(dir_path, null, .unreadable, true);
                 return;
             };
             if (!try w.markDirVisited(&identity)) {
@@ -416,6 +466,7 @@ const Worker = struct {
                 // there, so from here the parent looks emptier than it is.
                 self.stats.errors += 1;
                 try self.markParent(dir_path, .incomplete);
+                try self.skip(dir_path, null, .unreadable, true);
                 return;
             }
         }
@@ -431,6 +482,7 @@ const Worker = struct {
         while (true) {
             const entry = (stream.next() catch {
                 self.noteError(&record);
+                try self.skip(dir_path, null, .partial, true);
                 break;
             }) orelse break;
             entries_seen +%= 1;
@@ -450,14 +502,16 @@ const Worker = struct {
 
             const name = name_ptr[0..std.mem.len(name_ptr)];
 
-            if (w.isExcluded(name)) {
+            if (w.excludedBecause(name)) |reason| {
                 self.stats.excluded += 1;
                 record.skipped += 1;
+                try self.skip(dir_path, name, reason, entry.kind == DT_DIR);
                 continue;
             }
 
             if (dir_path.len + 1 + name.len > max_path) {
                 self.noteError(&record); // Path too long
+                try self.skip(dir_path, name, .unreadable, entry.kind == DT_DIR);
                 continue;
             }
 
@@ -470,6 +524,7 @@ const Worker = struct {
                 // makes the kernel re-walk every component of a deep path.
                 const st = pstat.lstatAt(dir_fd, name_ptr) catch {
                     self.noteError(&record);
+                    try self.skip(dir_path, name, .unreadable, false);
                     continue;
                 };
                 known = st;
@@ -484,6 +539,7 @@ const Worker = struct {
                     if (w.exclude_paths.len > 0 and w.isExcludedPath(path)) {
                         self.stats.excluded += 1;
                         record.skipped += 1;
+                        try self.skip(path, null, .excluded, false);
                         continue;
                     }
                     if (try self.addFile(path, &known.?)) found_here += 1;
@@ -553,6 +609,7 @@ const Worker = struct {
             // as unreadable rather than compare a prefix.
             if (n < 0 or @as(usize, @intCast(n)) >= target_buf.len) {
                 self.noteError(record);
+                try self.skip(full, null, .unreadable, false);
             } else {
                 try self.links.append(self.scratch(), .{
                     .path = full,
@@ -564,6 +621,7 @@ const Worker = struct {
 
         const target = pstat.stat(self.pathZ(full)) catch {
             self.noteError(record); // dangling link
+            try self.skip(full, null, .unreadable, false);
             return false;
         };
 
@@ -624,6 +682,14 @@ const Worker = struct {
         const parent = filters.parentDir(child_path) orelse return;
         try self.marks.append(self.scratch(), .{ .path = parent, .kind = kind });
     }
+
+    /// Note an entry the walk left out, for a tree-recording walk's skip
+    /// list: `path` itself, or the entry `name` inside folder `path`.
+    fn skip(self: *Worker, path: []const u8, name: ?[]const u8, reason: SkipReason, dir: bool) !void {
+        if (!self.shared.walker.record_tree) return;
+        const full = if (name) |n| try self.join(path, n) else path;
+        try self.skips.append(self.scratch(), .{ .path = full, .reason = reason, .dir = dir });
+    }
 };
 
 /// The workers of one walk and what they share, on the heap and reference
@@ -669,6 +735,7 @@ const Crew = struct {
             worker.dirs.deinit(allocator);
             worker.links.deinit(allocator);
             worker.marks.deinit(allocator);
+            worker.skips.deinit(allocator);
         }
         self.shared.pending.deinit(allocator);
         allocator.free(self.workers);
@@ -798,7 +865,9 @@ pub fn restoreMaterialize(previous: c_int) void {
     if (previous >= 0) _ = setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, previous);
 }
 
-fn isAppLibraryDir(dir_path: []const u8) bool {
+/// A game launcher's install or game library (`Config.app_library_dirs`),
+/// by where the folder sits.
+pub fn isGameLibraryDir(dir_path: []const u8) bool {
     for (types.Config.app_library_dirs) |suffix| {
         if (std.mem.endsWith(u8, dir_path, suffix)) return true;
     }
@@ -826,6 +895,8 @@ pub const FastWalker = struct {
     one_filesystem: bool = false,
     /// Prune entries named like another app's library package.
     skip_app_libraries: bool = false,
+    /// Prune game launcher installs and game libraries.
+    skip_game_libraries: bool = false,
     /// Also record dirs, unfollowed symlinks and extra hard links.
     record_tree: bool = false,
     /// macOS: never trigger a download of a cloud placeholder while walking
@@ -845,6 +916,8 @@ pub const FastWalker = struct {
     files: std.ArrayListUnmanaged(types.FileEntry) = .empty,
     dirs: std.ArrayListUnmanaged(DirRecord) = .empty,
     links: std.ArrayListUnmanaged(LinkRecord) = .empty,
+    /// Tree-recording walks: every entry left out, and why. Order unspecified.
+    skips: std.ArrayListUnmanaged(SkipRecord) = .empty,
     stats: WalkStats = .{},
 
     storage: StringStorage = .{},
@@ -871,6 +944,7 @@ pub const FastWalker = struct {
         self.files.deinit(self.allocator);
         self.dirs.deinit(self.allocator);
         self.links.deinit(self.allocator);
+        self.skips.deinit(self.allocator);
         self.marks.deinit(self.allocator);
         self.roots.deinit(self.allocator);
         self.root_devs.deinit(self.allocator);
@@ -938,8 +1012,15 @@ pub const FastWalker = struct {
         self.one_filesystem = one;
     }
 
+    /// Another app's library packages and game libraries both.
     pub fn setSkipAppLibraries(self: *FastWalker, skip: bool) void {
         self.skip_app_libraries = skip;
+        self.skip_game_libraries = skip;
+    }
+
+    /// Game libraries alone, after `setSkipAppLibraries`.
+    pub fn setSkipGameLibraries(self: *FastWalker, skip: bool) void {
+        self.skip_game_libraries = skip;
     }
 
     /// Record directories, unfollowed symlinks and extra hard links alongside
@@ -1261,6 +1342,7 @@ pub const FastWalker = struct {
             worker.dirs.deinit(self.allocator);
             worker.links.deinit(self.allocator);
             worker.marks.deinit(self.allocator);
+            worker.skips.deinit(self.allocator);
         }
         // The arena first: if anything below fails, the strings are still
         // owned (and later freed) by the walker.
@@ -1291,6 +1373,7 @@ pub const FastWalker = struct {
         try self.dirs.appendSlice(self.allocator, worker.dirs.items);
         try self.links.appendSlice(self.allocator, worker.links.items);
         try self.marks.appendSlice(self.allocator, worker.marks.items);
+        try self.skips.appendSlice(self.allocator, worker.skips.items);
     }
 
     /// Resolve everything that could not be decided while the walk was
@@ -1410,17 +1493,23 @@ pub const FastWalker = struct {
         return !result.found_existing;
     }
 
-    fn isExcluded(self: *const FastWalker, name: []const u8) bool {
+    /// Why an entry called `name` is pruned, or null when it is not.
+    fn excludedBecause(self: *const FastWalker, name: []const u8) ?SkipReason {
         for (self.excludes) |excluded| {
             // zig-lens-ignore: EQL-FOR-SECRETS file names, not secrets
-            if (std.mem.eql(u8, excluded, name)) return true;
+            if (!std.mem.eql(u8, excluded, name)) continue;
+            for (types.Config.credential_excludes) |credential| {
+                // zig-lens-ignore: EQL-FOR-SECRETS file names, not secrets
+                if (std.mem.eql(u8, credential, name)) return .credentials;
+            }
+            return .excluded;
         }
         if (self.skip_app_libraries) {
             for (types.Config.app_library_suffixes) |suffix| {
-                if (std.ascii.endsWithIgnoreCase(name, suffix)) return true;
+                if (std.ascii.endsWithIgnoreCase(name, suffix)) return .app_library;
             }
         }
-        return false;
+        return null;
     }
 
     /// Scan roots are never pruned, whatever they are called or contain: the
@@ -1593,10 +1682,18 @@ test "an excluded path skips that folder with its contents, or that one file" {
     var fw = FastWalker.init(std.testing.allocator);
     defer fw.deinit();
     fw.setExcludePaths(&.{ folder, file });
+    fw.enableTreeRecording();
     try fw.walk(scratch.path);
     try fw.finish();
     try std.testing.expectEqual(@as(usize, 1), fw.files.items.len);
     try std.testing.expectEqual(@as(u64, 2), fw.stats.excluded);
+    // Each is recorded, with why, for a host to show.
+    try std.testing.expectEqual(@as(usize, 2), fw.skips.items.len);
+    for (fw.skips.items) |skip| {
+        try std.testing.expectEqual(SkipReason.excluded, skip.reason);
+        try std.testing.expect(std.mem.eql(u8, skip.path, folder) == skip.dir);
+        try std.testing.expect(std.mem.eql(u8, skip.path, folder) or std.mem.eql(u8, skip.path, file));
+    }
 }
 
 fn cancelAfter(monitor: *types.Monitor, opens_hung: usize) void {

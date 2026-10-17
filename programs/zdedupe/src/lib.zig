@@ -461,9 +461,10 @@ fn runDuplicateScan(
 }
 
 /// A disk-space scan: walk, aggregate, write the store. The walk keeps the
-/// duplicate scan's scoping (same volume, app libraries and Steam skipped,
+/// duplicate scan's scoping (same volume, app library packages skipped,
 /// credential stores and the host's own excludes never entered, hidden files as
-/// configured) but not the default excludes: those are build output and
+/// configured) but enters game libraries, which only a duplicate scan has to
+/// keep out of, and ignores the default excludes: those are build output and
 /// dependency folders, noise to a duplicate finder and exactly what a
 /// disk-space view has to show.
 fn runSpaceScan(internal: *InternalContext, out_path: []const u8) RunStatus {
@@ -719,6 +720,12 @@ pub export fn zdedupe_results_space_largest(r: ?*ZDedupeResults, query_json: ?[*
     const s = asSession(r) orelse return null;
     const query = query_json orelse return null;
     return (s.spaceLargest(std.mem.span(query)) orelse return null).ptr;
+}
+
+pub export fn zdedupe_results_space_skipped(r: ?*ZDedupeResults, query_json: ?[*:0]const u8) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const query = query_json orelse return null;
+    return (s.spaceSkipped(std.mem.span(query)) orelse return null).ptr;
 }
 
 pub export fn zdedupe_results_space_suggest(r: ?*ZDedupeResults, query_json: ?[*:0]const u8) ?[*:0]const u8 {

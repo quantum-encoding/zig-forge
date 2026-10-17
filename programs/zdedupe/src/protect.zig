@@ -131,10 +131,13 @@ pub const Protection = struct {
     }
 
     /// True when deleting the folder `dir` would take a protected location
-    /// with it: the folder is protected, or a protected root lies inside it.
-    /// Repository stores and packages inside a folder do not count — deleting
-    /// a whole backup copy of a project, `.git` and all, is the point of the
-    /// folder view.
+    /// with it: the folder is protected, or a protected root lies inside it
+    /// (a system root, the home folder, a per-user root, a game library where
+    /// it sits in the home folder, a root the user added). Repository stores
+    /// and packages inside a folder do not count — deleting a whole backup
+    /// copy of a project, `.git` and all, is the point of the folder view. A
+    /// game library elsewhere (`steamapps` on another drive) can only be seen
+    /// in a scanned tree, which marks the folders above it.
     pub fn guardsFolder(self: *const Protection, dir: []const u8) bool {
         if (self.protects(dir)) return true;
         for (system_roots) |root| {
@@ -150,6 +153,12 @@ pub const Protection = struct {
         }
         if (self.home) |home| {
             if (filters.isAtOrUnder(home, dir)) return true;
+            for (home_roots) |root| {
+                if (holdsBelowHome(home, root, dir)) return true;
+            }
+            for (types.Config.app_library_dirs) |dirs| {
+                if (holdsBelowHome(home, dirs[1..], dir)) return true;
+            }
         }
         for (self.user) |root| {
             if (filters.isAtOrUnder(root, dir)) return true;
@@ -157,6 +166,12 @@ pub const Protection = struct {
         return false;
     }
 };
+
+/// `home/rel` lies at or below `dir`, a folder inside the home folder.
+fn holdsBelowHome(home: []const u8, rel: []const u8, dir: []const u8) bool {
+    if (dir.len <= home.len + 1 or !filters.isAtOrUnder(dir, home)) return false;
+    return filters.isAtOrUnder(rel, dir[home.len + 1 ..]);
+}
 
 /// The part of a drive path after its letter: `C:/Windows/x` -> `/Windows/x`,
 /// `C:/` -> `/`. Null for anything else.
@@ -173,13 +188,13 @@ fn atOrUnderIgnoreCase(path: []const u8, base_in: []const u8) bool {
     return path.len == base.len or path[base.len] == '/';
 }
 
-/// `dirs` (which starts with a slash) appears in `path` as whole components
-/// followed by more path: `/g/steamapps/common/x` contains `/steamapps`.
+/// `dirs` (which starts with a slash) appears in `path` as whole components:
+/// `/g/steamapps/common/x` and `/g/steamapps` both contain `/steamapps`.
 fn containsDirs(path: []const u8, dirs: []const u8) bool {
     var from: usize = 0;
     while (std.mem.indexOfPos(u8, path, from, dirs)) |at| {
         const end = at + dirs.len;
-        if (end < path.len and path[end] == '/') return true;
+        if (end == path.len or path[end] == '/') return true;
         from = at + 1;
     }
     return false;
@@ -244,6 +259,9 @@ test "repository stores and packages anywhere" {
     try testing.expect(p.protects("/home/u/Downloads/Tool.app/Contents/MacOS/tool"));
     try testing.expect(p.protects("/Volumes/x/Pics.photoslibrary/originals/a.jpg"));
     try testing.expect(p.protects("/mnt/Games/steamapps/common/g/data.pak"));
+    try testing.expect(p.protects("/mnt/Games/steamapps"));
+    try testing.expect(p.protects("/home/u/.local/share/Steam"));
+    try testing.expect(!p.protects("/mnt/Games"));
     // The file's own name is not a package, and look-alikes are not stores.
     try testing.expect(!p.protects("/home/u/Downloads/Tool.app"));
     try testing.expect(!p.protects("/home/u/proj/.gitignore"));
@@ -268,6 +286,20 @@ test "a folder that holds a protected root is guarded" {
     try testing.expect(!p.guardsFolder("/Users/u/work/proj-backup"));
     // A whole project copy, repository included, is a folder anyone may drop.
     try testing.expect(!p.guardsFolder("/Users/u/old/proj"));
+}
+
+test "a folder holding a per-user root or a game library in the home folder is guarded" {
+    const p: Protection = .{ .home = "/home/u" };
+    try testing.expect(p.guardsFolder("/home/u/.local"));
+    try testing.expect(p.guardsFolder("/home/u/.local/share"));
+    try testing.expect(p.guardsFolder("/home/u/.local/share/Steam"));
+    try testing.expect(p.guardsFolder("/home/u/.var"));
+    try testing.expect(!p.guardsFolder("/home/u/.local/bin"));
+    try testing.expect(!p.guardsFolder("/home/u/.localstuff"));
+    try testing.expect(!p.guardsFolder("/home/u/Documents"));
+    // Only by path where the home folder puts it; elsewhere the scanned tree
+    // says what a folder holds.
+    try testing.expect(!p.guardsFolder("/mnt/Games"));
 }
 
 test "Windows system locations are protected on every drive, whatever the case" {

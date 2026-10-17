@@ -56,6 +56,9 @@ const libc = @import("sys.zig").c;
 
 const Allocator = std.mem.Allocator;
 
+pub const SkipReason = fast_walker.SkipReason;
+pub const skip_reason_count = fast_walker.skip_reason_count;
+
 // ===========================================================================
 // Categories
 // ===========================================================================
@@ -196,6 +199,7 @@ fn contextOf(parent: Context, path: []const u8, name: []const u8, parent_name: [
         if (std.mem.eql(u8, name, dir)) return .code;
     }
     if (std.mem.eql(u8, path, "/Applications")) return .applications;
+    if (fast_walker.isGameLibraryDir(path)) return .applications;
     for (system_roots) |root| {
         if (filters.isAtOrUnder(path, root)) return .system;
     }
@@ -244,6 +248,10 @@ pub fn scanToStore(gpa: Allocator, config: ScanConfig, paths: []const []const u8
     fw.setIncludeHidden(config.include_hidden);
     fw.setOneFilesystem(config.one_filesystem);
     fw.setSkipAppLibraries(config.skip_app_libraries);
+    // Game libraries are measured: they are often the largest thing in a
+    // home folder, and this scan only reads. Protection keeps them, and every
+    // folder holding one, out of the Trash.
+    fw.setSkipGameLibraries(false);
     fw.setThreads(config.threads);
     // Everything a folder holds, each inode once, links never followed, and
     // nothing in the cloud pulled down to be looked at.
@@ -289,6 +297,7 @@ pub fn scanToStore(gpa: Allocator, config: ScanConfig, paths: []const []const u8
     var tree = try build(gpa, .{
         .files = fw.files.items,
         .dirs = fw.dirs.items,
+        .skips = fw.skips.items,
         .excluded = fw.stats.excluded,
         .errors = fw.stats.errors,
         .volume_of = if (roots.len > 0) roots[0] else null,
@@ -426,8 +435,20 @@ const Node = struct {
     context: Context,
     incomplete: bool,
     subtree_incomplete: bool,
+    /// See `dir_flag_holds_guarded`.
+    holds_guarded: bool = false,
     skipped: u32,
     agg: Agg = .{},
+};
+
+/// An entry the walk left out, placed in the tree.
+pub const SkipNode = struct {
+    /// The folder holding it; for `partial`, the folder itself.
+    dir: u32,
+    /// Empty for `partial`. Borrows the walker's record.
+    name: []const u8,
+    reason: SkipReason,
+    is_dir: bool,
 };
 
 /// The scanned tree, ready to be written. Borrows the walker's records.
@@ -444,11 +465,15 @@ pub const Tree = struct {
     file_cat: []Category,
     /// File positions, largest first.
     top: []u32,
+    /// By folder, then name; at most `skips_per_reason` of each reason.
+    skips: []SkipNode,
+    skip_counts: [max_skip_reasons]u64,
     totals: Totals,
     volume: Volume,
 
     pub fn deinit(self: *Tree) void {
         const gpa = self.gpa;
+        gpa.free(self.skips);
         gpa.free(self.nodes);
         gpa.free(self.file_order);
         gpa.free(self.file_dir);
@@ -485,6 +510,7 @@ fn parentPath(path: []const u8) ?[]const u8 {
 pub const BuildInput = struct {
     files: []const types.FileEntry,
     dirs: []const fast_walker.DirRecord,
+    skips: []const fast_walker.SkipRecord = &.{},
     excluded: u64 = 0,
     errors: u64 = 0,
     /// The first scan root, for the volume figures.
@@ -554,6 +580,9 @@ pub fn build(gpa: Allocator, input: BuildInput) !Tree {
         nodes[p].subtree_end = @max(nodes[p].subtree_end, nodes[i].subtree_end);
         nodes[p].child_dirs += 1;
     }
+
+    const placed_skips = try placeSkips(gpa, input, nodes, &by_path);
+    errdefer gpa.free(placed_skips.skips);
 
     // Files, grouped by folder (counting sort), then largest first within one.
     var placed: usize = 0;
@@ -643,6 +672,11 @@ pub fn build(gpa: Allocator, input: BuildInput) !Tree {
         child.dirs += 1;
         nodes[p].agg.add(child);
         if (nodes[i].subtree_incomplete) nodes[p].subtree_incomplete = true;
+        // A game library guards its parent, and whatever guards a folder
+        // guards every folder above it.
+        if (nodes[i].holds_guarded or fast_walker.isGameLibraryDir(input.dirs[nodes[i].source].path)) {
+            nodes[p].holds_guarded = true;
+        }
     }
 
     // The largest files anywhere.
@@ -669,9 +703,64 @@ pub fn build(gpa: Allocator, input: BuildInput) !Tree {
         .file_dir = file_dir,
         .file_cat = file_cat,
         .top = top,
+        .skips = placed_skips.skips,
+        .skip_counts = placed_skips.counts,
         .totals = totals,
         .volume = volume,
     };
+}
+
+const PlacedSkips = struct { skips: []SkipNode, counts: [max_skip_reasons]u64 };
+
+/// The walk's skip records against the tree: each under the folder that
+/// holds it, sorted, at most `skips_per_reason` of a reason kept. A folder
+/// holding another app's library or another volume is marked
+/// `holds_guarded`. A record outside the tree (a scan root that could not be
+/// read, which `failed_paths` counts) is dropped.
+fn placeSkips(
+    gpa: Allocator,
+    input: BuildInput,
+    nodes: []Node,
+    by_path: *const std.StringHashMapUnmanaged(u32),
+) !PlacedSkips {
+    var all: std.ArrayListUnmanaged(SkipNode) = .empty;
+    defer all.deinit(gpa);
+    try all.ensureTotalCapacity(gpa, input.skips.len);
+    for (input.skips) |record| {
+        const placed: SkipNode = if (record.reason == .partial) .{
+            .dir = by_path.get(record.path) orelse continue,
+            .name = "",
+            .reason = record.reason,
+            .is_dir = true,
+        } else .{
+            .dir = by_path.get(parentPath(record.path) orelse continue) orelse continue,
+            .name = baseName(record.path),
+            .reason = record.reason,
+            .is_dir = record.dir,
+        };
+        if (placed.reason == .app_library or placed.reason == .other_volume) {
+            nodes[placed.dir].holds_guarded = true;
+        }
+        all.appendAssumeCapacity(placed);
+    }
+    std.sort.pdq(SkipNode, all.items, {}, struct {
+        fn less(_: void, a: SkipNode, b: SkipNode) bool {
+            if (a.dir != b.dir) return a.dir < b.dir;
+            if (a.reason != b.reason) return @intFromEnum(a.reason) < @intFromEnum(b.reason);
+            return std.mem.order(u8, a.name, b.name) == .lt;
+        }
+    }.less);
+
+    var counts: [max_skip_reasons]u64 = @splat(0);
+    var kept: usize = 0;
+    for (all.items) |skip| {
+        const reason = @intFromEnum(skip.reason);
+        counts[reason] += 1;
+        if (counts[reason] > skips_per_reason) continue;
+        all.items[kept] = skip;
+        kept += 1;
+    }
+    return .{ .skips = try gpa.dupe(SkipNode, all.items[0..kept]), .counts = counts };
 }
 
 /// A bounded min-heap that keeps the `items.len` largest keys offered. Ties
@@ -854,15 +943,25 @@ fn zOf(buf: *[4096]u8, path: []const u8) ?[*:0]const u8 {
 // Behind `store.Header.space`: offsets inside are relative to the blob's
 // first byte, every section 8-byte aligned.
 //
-//     BlobHeader (256 bytes)
+//     BlobHeader (336 bytes; 256 in version 1)
 //     DIRS     DirRecord[]    preorder
 //     FILES    FileRecord[]   grouped by folder in DIRS order, largest first
 //     TOP      u64[]          file indices, largest first (<= top_capacity)
-//     STRINGS  u8[]           names: folders, then files, then the mount point
+//     SKIPS    SkipRecord[]   by folder in DIRS order, then name (version 2)
+//     STRINGS  u8[]           names: folders, then files, then the mount point,
+//                             then skipped entries
+//
+// Version 1 has no SKIPS and no skip counts; it still reads, with none
+// recorded.
 
 pub const blob_magic = "ZDSPACE1".*;
-pub const blob_version: u32 = 1;
-pub const blob_header_size: usize = 256;
+pub const blob_version: u32 = 2;
+pub const blob_header_size: usize = 336;
+const blob_v1_header_size: usize = 256;
+
+/// Skipped entries kept per reason. A user's excluded name can match tens of
+/// thousands of folders; the counts stay exact.
+pub const skips_per_reason: usize = 1000;
 
 pub const Section = store.Section;
 
@@ -891,10 +990,23 @@ pub const BlobHeader = extern struct {
     mount_len: u32 = 0,
     _pad: u32 = 0,
     cat_files: [category_count]u64 = @splat(0),
+    // Version 2.
+    skips: Section = .{},
+    /// Entries left out, by `SkipReason`: every one, also past the
+    /// `skips_per_reason` that SKIPS keeps.
+    skip_counts: [max_skip_reasons]u64 = @splat(0),
 };
+
+/// Slots for skip counts in the header; `SkipReason` uses the first
+/// `skip_reason_count`.
+const max_skip_reasons = 8;
 
 pub const dir_flag_incomplete: u32 = 1 << 0;
 pub const dir_flag_subtree_incomplete: u32 = 1 << 1;
+/// Something strictly below the folder must never go to the Trash and is not
+/// a protected location by its path alone: a game library, another app's
+/// library package the scan left out, or another volume's mount point.
+pub const dir_flag_holds_guarded: u32 = 1 << 2;
 
 pub const DirRecord = extern struct {
     name_offset: u64,
@@ -958,10 +1070,30 @@ pub const FileRecord = extern struct {
     }
 };
 
+pub const skip_flag_dir: u8 = 1 << 0;
+
+/// An entry the scan left out, inside folder `dir`; a `partial` record is the
+/// folder `dir` itself, with no name.
+pub const SkipRecord = extern struct {
+    name_offset: u64,
+    name_len: u32,
+    dir: u32,
+    reason: u8,
+    flags: u8,
+    _pad: [6]u8 = @splat(0),
+
+    pub fn skipReason(self: *const SkipRecord) SkipReason {
+        return std.enums.fromInt(SkipReason, self.reason) orelse .unreadable;
+    }
+};
+
 comptime {
     std.debug.assert(@sizeOf(BlobHeader) == blob_header_size);
+    std.debug.assert(@offsetOf(BlobHeader, "skips") == blob_v1_header_size);
     std.debug.assert(@sizeOf(DirRecord) == 144);
     std.debug.assert(@sizeOf(FileRecord) == 40);
+    std.debug.assert(@sizeOf(SkipRecord) == 24);
+    std.debug.assert(skip_reason_count <= max_skip_reasons);
 }
 
 /// Append the tree to `out` as a blob; returns its (offset, length).
@@ -1010,7 +1142,8 @@ pub fn writeBlob(out: *store.FileWriter, tree: *const Tree) store.WriteError!Sec
             .direct_files = node.direct_files,
             .skipped = node.skipped,
             .flags = (if (node.incomplete) dir_flag_incomplete else 0) |
-                (if (node.subtree_incomplete) dir_flag_subtree_incomplete else 0),
+                (if (node.subtree_incomplete) dir_flag_subtree_incomplete else 0) |
+                (if (node.holds_guarded) dir_flag_holds_guarded else 0),
         }));
         names += name_len;
     }
@@ -1042,14 +1175,31 @@ pub fn writeBlob(out: *store.FileWriter, tree: *const Tree) store.WriteError!Sec
         try out.write(std.mem.asBytes(&value));
     }
 
+    header.mount_offset = names;
+    header.mount_len = std.math.cast(u32, tree.volume.mount.len) orelse return error.StringTooLong;
+    names += tree.volume.mount.len;
+
+    try out.alignTo(8);
+    header.skips = .{ .offset = out.offset - start, .count = tree.skips.len };
+    header.skip_counts = tree.skip_counts;
+    for (tree.skips) |*skip| {
+        const name_len = std.math.cast(u32, skip.name.len) orelse return error.StringTooLong;
+        try out.write(std.mem.asBytes(&SkipRecord{
+            .name_offset = names,
+            .name_len = name_len,
+            .dir = skip.dir,
+            .reason = @intFromEnum(skip.reason),
+            .flags = if (skip.is_dir) skip_flag_dir else 0,
+        }));
+        names += name_len;
+    }
+
     try out.alignTo(8);
     header.strings.offset = out.offset - start;
     for (0..tree.nodes.len) |i| try out.write(tree.nameOf(i));
     for (tree.file_order) |f| try out.write(baseName(tree.files[f].path));
-    header.mount_offset = names;
-    header.mount_len = std.math.cast(u32, tree.volume.mount.len) orelse return error.StringTooLong;
     try out.write(tree.volume.mount);
-    names += tree.volume.mount.len;
+    for (tree.skips) |*skip| try out.write(skip.name);
     header.strings.count = names;
 
     const length = out.offset - start;
@@ -1078,23 +1228,39 @@ pub const Reader = struct {
     /// before children, subtree runs nested, file runs contiguous), so no
     /// traversal below can loop or index out of range.
     pub fn init(bytes: []const u8) ReadError!Reader {
-        if (bytes.len < blob_header_size) return error.Invalid;
-        const header = std.mem.bytesToValue(BlobHeader, bytes[0..blob_header_size]);
+        if (bytes.len < blob_v1_header_size) return error.Invalid;
+        // The version 1 prefix first: it says how much header there is.
+        var header: BlobHeader = .{};
+        @memcpy(std.mem.asBytes(&header)[0..blob_v1_header_size], bytes[0..blob_v1_header_size]);
         if (!std.mem.eql(u8, &header.magic, &blob_magic)) return error.Invalid;
-        if (header.version != blob_version or header.header_size != blob_header_size) return error.Invalid;
+        const header_size: usize = switch (header.version) {
+            1 => blob_v1_header_size,
+            blob_version => blob_header_size,
+            else => return error.Invalid,
+        };
+        if (header.header_size != header_size or bytes.len < header_size) return error.Invalid;
+        if (header.version == 1) {
+            header.skips = .{};
+            header.skip_counts = @splat(0);
+        } else {
+            header = std.mem.bytesToValue(BlobHeader, bytes[0..blob_header_size]);
+        }
         const sections = [_]struct { Section, usize }{
             .{ header.dirs, @sizeOf(DirRecord) },
             .{ header.files, @sizeOf(FileRecord) },
             .{ header.top, @sizeOf(u64) },
+            .{ header.skips, @sizeOf(SkipRecord) },
             .{ header.strings, 1 },
         };
         for (sections) |entry| {
             const section, const size = entry;
+            // A version 1 blob has no SKIPS: an all-zero section.
+            if (section.offset == 0 and section.count == 0) continue;
             const offset = std.math.cast(usize, section.offset) orelse return error.Invalid;
             const count = std.math.cast(usize, section.count) orelse return error.Invalid;
             const len = std.math.mul(usize, count, size) catch return error.Invalid;
             const end = std.math.add(usize, offset, len) catch return error.Invalid;
-            if (offset < blob_header_size or offset % 8 != 0 or end > bytes.len) return error.Invalid;
+            if (offset < header_size or offset % 8 != 0 or end > bytes.len) return error.Invalid;
         }
         const self: Reader = .{ .bytes = bytes, .header = header };
         if (header.dirs.count >= no_parent) return error.Invalid;
@@ -1115,7 +1281,31 @@ pub const Reader = struct {
         for (0..self.topCount()) |i| {
             if (try self.topFile(i) >= header.files.count) return error.Invalid;
         }
+        var previous: u32 = 0;
+        for (0..self.skipCount()) |i| {
+            const entry = try self.skip(i);
+            // Sorted by folder, which `View.skippedEntries` relies on to scope.
+            if (entry.dir < previous) return error.Invalid;
+            previous = entry.dir;
+        }
         return self;
+    }
+
+    pub fn skipCount(self: *const Reader) u64 {
+        return self.header.skips.count;
+    }
+
+    pub fn skip(self: *const Reader, i: u64) ReadError!SkipRecord {
+        const s = try self.record(self.header.skips, SkipRecord, i);
+        if (s.dir >= self.header.dirs.count) return error.OutOfRange;
+        return s;
+    }
+
+    /// Exact path bytes of skipped entry `s`.
+    pub fn skipPath(self: *const Reader, arena: Allocator, s: *const SkipRecord) ![]u8 {
+        const dir_path = try self.dirPath(arena, s.dir);
+        if (s.name_len == 0) return dir_path;
+        return joinReversed(arena, &.{dir_path}, try self.string(s.name_offset, s.name_len));
     }
 
     pub fn dirCount(self: *const Reader) u32 {
@@ -1504,6 +1694,16 @@ pub const LargestQuery = struct {
     limit: usize = 100,
 };
 
+pub const SkippedQuery = struct {
+    node: ?u32 = null,
+    path: ?[]const u8 = null,
+    reason: ?SkipReason = null,
+    limit: usize = 100,
+    offset: usize = 0,
+};
+
+pub const max_skipped_limit: usize = 500;
+
 pub const SuggestQuery = struct {
     /// Folders and files are suggested from below this folder (null with no
     /// `path`: every scan root); the folder itself is never one.
@@ -1627,6 +1827,13 @@ pub const View = struct {
         return agg;
     }
 
+    /// True when `zdedupe_results_space_trash` refuses folder `rec` at `path`:
+    /// it is, or holds, a protected location, or holds something the scan
+    /// marked (`dir_flag_holds_guarded`).
+    pub fn folderGuarded(self: *const View, rec: *const DirRecord, path: []const u8) bool {
+        return rec.flags & dir_flag_holds_guarded != 0 or self.guard.guardsFolder(path);
+    }
+
     /// Every root together.
     pub fn allAgg(self: *const View) !Agg {
         var agg: Agg = .{};
@@ -1747,7 +1954,7 @@ pub const View = struct {
         try json.objectField("hard_linked");
         try json.write(false);
         try json.objectField("protected");
-        try json.write(self.guard.guardsFolder(path));
+        try json.write(self.folderGuarded(rec, path));
         try json.objectField("root");
         try json.write(rec.parent == no_parent);
         if (nest) |n| {
@@ -2222,7 +2429,7 @@ pub const View = struct {
         const rec = try self.r.dir(d);
         const bytes = self.dirAgg(d, &rec).bytes;
         if (bytes == 0) return;
-        if (self.guard.guardsFolder(try self.r.dirPath(self.arena, d))) return;
+        if (self.folderGuarded(&rec, try self.r.dirPath(self.arena, d))) return;
         found.offer(bytes, 2 * @as(u64, d));
     }
 
@@ -2375,9 +2582,81 @@ pub const View = struct {
             try json.objectField(field[0]);
             try json.write(field[1]);
         }
+        try json.objectField("skipped");
+        try json.beginObject();
+        try json.objectField("recorded");
+        try json.write(h.version >= 2);
+        inline for (comptime std.meta.fieldNames(SkipReason), 0..) |name, i| {
+            try json.objectField(name);
+            try json.write(h.skip_counts[i]);
+        }
+        try json.endObject();
         try json.objectField("types");
         try writeTypes(json, all, cat_files);
         try json.endObject();
+    }
+
+    // --- skipped -------------------------------------------------------------
+
+    /// What the scan left out at or below a folder (everywhere, without
+    /// one): by folder in tree order, then reason, then name. Entries inside
+    /// a folder removed since are left out.
+    pub fn skippedEntries(self: *const View, json: *std.json.Stringify, query: SkippedQuery) !void {
+        const dir = try self.resolve(query.node, query.path);
+        const limit = @min(query.limit, max_skipped_limit);
+        const count = self.r.skipCount();
+
+        var from: u64 = 0;
+        var end: u64 = count;
+        if (dir) |d| {
+            const rec = try self.r.dir(d);
+            from = try self.firstSkipAt(d);
+            end = try self.firstSkipAt(rec.subtree_end);
+        }
+
+        try json.beginObject();
+        try json.objectField("items");
+        try json.beginArray();
+        var total: u64 = 0;
+        var shown: usize = 0;
+        var i = from;
+        while (i < end) : (i += 1) {
+            const s = try self.r.skip(i);
+            if (query.reason) |want| if (s.skipReason() != want) continue;
+            if (self.removed.dirRemoved(s.dir)) continue;
+            total += 1;
+            if (total <= query.offset or shown >= limit) continue;
+            shown += 1;
+            try json.beginObject();
+            try json.objectField("reason");
+            try json.write(@tagName(s.skipReason()));
+            try json.objectField("path");
+            try json.write(try session_mod.lossy(self.arena, try self.r.skipPath(self.arena, &s)));
+            try json.objectField("name");
+            try json.write(try session_mod.lossy(self.arena, try self.r.string(s.name_offset, s.name_len)));
+            try json.objectField("node");
+            try json.write(s.dir);
+            try json.objectField("dir");
+            try json.write(s.flags & skip_flag_dir != 0);
+            try json.endObject();
+        }
+        try json.endArray();
+        try json.objectField("total");
+        try json.write(total);
+        try json.objectField("offset");
+        try json.write(query.offset);
+        try json.endObject();
+    }
+
+    /// The first skip record whose folder is at or after `d` in tree order.
+    fn firstSkipAt(self: *const View, d: u64) !u64 {
+        var lo: u64 = 0;
+        var hi: u64 = self.r.skipCount();
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if ((try self.r.skip(mid)).dir < d) lo = mid + 1 else hi = mid;
+        }
+        return lo;
     }
 };
 

@@ -2228,6 +2228,22 @@ pub const Session = struct {
         return self.finishJson(&out);
     }
 
+    /// What the scan left out, and why.
+    pub fn spaceSkipped(self: *Session, query_json: []const u8) ?[:0]const u8 {
+        const arena = self.beginCall();
+        const query = std.json.parseFromSliceLeaky(space_mod.SkippedQuery, arena, query_json, .{
+            .ignore_unknown_fields = true,
+        }) catch {
+            self.fail("skipped-entries query is not valid JSON", .{});
+            return null;
+        };
+        const view = self.spaceView(arena) orelse return null;
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        view.skippedEntries(&json, query) catch |err| return self.spaceFailed(err);
+        return self.finishJson(&out);
+    }
+
     /// What could usually go: build output, cache entries, unfinished
     /// downloads, large untouched files.
     pub fn spaceSuggest(self: *Session, query_json: []const u8) ?[:0]const u8 {
@@ -2355,7 +2371,7 @@ pub const Session = struct {
                 report.fail(arena, path, "is a scanned folder; remove what is inside it instead");
                 continue;
             }
-            if (guard.guardsFolder(path)) {
+            if (view.folderGuarded(&rec, path)) {
                 report.fail(arena, path, "is, or holds, a protected location");
                 continue;
             }

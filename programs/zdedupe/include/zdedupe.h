@@ -158,7 +158,11 @@ void zdedupe_set_one_filesystem(zdedupe_ctx* ctx, bool one);
  * ~/.var/app/com.valvesoftware.Steam, ~/Library/Application Support/Steam).
  * Steam checks game files against its manifests, so deleting a "duplicate"
  * there re-downloads or breaks a game. A scan root is never skipped. Applies
- * to duplicate scans; a folder comparison compares everything it is given.
+ * to duplicate scans; a folder comparison compares everything it is given,
+ * and a disk-space scan measures game libraries (they stay protected) while
+ * still leaving the packages out. A folder directly holding one of these, or
+ * another volume's mount point, is incomplete to folder analysis: never part
+ * of an identical set, since deleting it would take the library along.
  */
 void zdedupe_set_skip_app_libraries(zdedupe_ctx* ctx, bool skip);
 
@@ -289,10 +293,12 @@ void zdedupe_cancel(zdedupe_ctx* ctx);
  *
  * In ZDEDUPE_MODE_DISK_SPACE the store holds the scanned folder tree instead
  * of duplicate groups (read it with the zdedupe_results_space_* calls). The
- * walk keeps the duplicate scan's scoping - same volume, app libraries and
- * Steam skipped, credential excludes and added excludes honoured, hidden
- * files as set - but ignores zdedupe_use_default_excludes: build output and
- * dependency folders are exactly what a disk-space view has to show. It opens
+ * walk keeps the duplicate scan's scoping - same volume, app library packages
+ * skipped, credential excludes and added excludes honoured, hidden files as
+ * set - but walks game libraries (Steam), which are protected, and ignores
+ * zdedupe_use_default_excludes: build output and dependency folders are
+ * exactly what a disk-space view has to show. Everything it leaves out is
+ * recorded with the reason (zdedupe_results_space_skipped). It opens
  * no file, never follows a symlink, and on macOS never makes the system
  * download an iCloud placeholder (a folder that is only in the cloud is
  * reported unreadable). Scanning "/" on macOS also covers the Data volume
@@ -908,9 +914,30 @@ int zdedupe_results_export(zdedupe_results* r, const char* format, const char* p
  * The scan as a whole -> SpaceOverview: roots, volume (mount, total, free,
  * available - as scanned; on macOS the APFS container's figures), totals
  * (files, dirs, bytes, logical, cloud-only files, hard links, excluded
- * entries, errors, unreadable folders), bytes and files per type.
+ * entries, errors, unreadable folders), bytes and files per type, and
+ * "skipped": how many entries the scan left out, per reason (see
+ * zdedupe_results_space_skipped), with "recorded" false for a store written
+ * before the reasons were kept.
  */
 const char* zdedupe_results_space_overview(zdedupe_results* r);
+
+/**
+ * What the scan left out, and why -> SpaceSkipped. Query (SpaceSkippedQuery):
+ *   { "node"|"path" as above, "reason": null | reason, "limit": 100 (<= 500),
+ *     "offset": 0 }
+ * Reasons: "denied" (no permission), "privacy" (macOS privacy protection
+ * refused it), "unreadable" (any other failure, or a path too long),
+ * "partial" (the folder itself, whose listing stopped partway),
+ * "other_volume" (a mount point), "app_library" (a Photos or Music library
+ * package), "credentials" (a credential store), "excluded" (an excluded path
+ * or name). Each item: { reason, path, name, node (the folder in these
+ * results that holds it; for "partial" the folder itself), dir }. Items come
+ * by folder in tree order, then reason, then name, at or below the queried
+ * folder (everywhere without one); "total" counts every match, of which the
+ * store keeps at most 1000 per reason (the overview's counts stay exact).
+ * Entries inside a folder removed since are left out.
+ */
+const char* zdedupe_results_space_skipped(zdedupe_results* r, const char* query_json);
 
 /**
  * One folder's contents -> SpaceChildren. Query (SpaceChildrenQuery):
@@ -983,8 +1010,9 @@ const char* zdedupe_results_space_history(zdedupe_results* r, const char* histor
  * (at most 10,000). Each is checked first: a file must still be a regular
  * file with the scanned size and modification time (else skipped_changed); a
  * folder must still be a folder, not a link; nothing that is, or holds, a
- * protected location goes (zdedupe_results_protected), and a scan root never
- * goes whole. Anything inside a folder that goes is left to it. Blocks until
+ * protected location goes (zdedupe_results_protected), nor a folder holding
+ * a game library, an app library the scan left out, or another volume's
+ * mount point, and a scan root never goes whole. Anything inside a folder that goes is left to it. Blocks until
  * done; progress and cancel as for zdedupe_results_delete. Returns a
  * DeleteReport; freed_bytes counts space on disk, and 0 for a file with other
  * hard links (they keep its blocks). What went joins the removed overlay, so

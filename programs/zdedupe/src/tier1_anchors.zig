@@ -826,6 +826,32 @@ test "excluded names and tagged cache dirs are ignored, counted, and need a vali
     for (set.dirs) |dir| try testing.expectEqual(@as(u64, 1), dir.skipped_entries);
 }
 
+test "a folder holding another app's library is never a copy: the library would go with it" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "dirs-app-library");
+    defer scratch.deinit();
+
+    inline for (.{ "p", "q", "r" }) |root| try buildProject(&scratch, root);
+
+    // Both libraries are left out unread, so p and r would otherwise match q
+    // "ignoring 1 entry", and deleting either would delete its library.
+    try scratch.makeDir("p/Photos Library.photoslibrary");
+    try scratch.writeFile("p/Photos Library.photoslibrary/database.db", "photos\n");
+    try scratch.makeDir("r/steamapps");
+    try scratch.writeFile("r/steamapps/game.pak", "game\n");
+
+    var finder = dedupe.DupeFinder.init(allocator, .{
+        .analyze_dirs = true,
+        .skip_app_libraries = true,
+    });
+    defer finder.deinit();
+    const analysis = try scanDirs(&finder, &scratch);
+
+    try testing.expect(setWith(analysis, &scratch, "p") == null);
+    try testing.expect(setWith(analysis, &scratch, "r") == null);
+    try testing.expect(analysis.dirs_incomplete >= 2);
+}
+
 test "excludes prune the file-level scan too, but never a scan root" {
     const allocator = testing.allocator;
     var scratch = try Scratch.init(allocator, "excludes-files");

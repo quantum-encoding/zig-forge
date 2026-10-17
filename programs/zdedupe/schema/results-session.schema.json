@@ -889,6 +889,25 @@
       }
     },
 
+    "SpaceSkipReason": {
+      "description": "Why a disk-space scan left an entry out. denied: no permission. privacy: macOS privacy protection refused it. unreadable: any other failure to open or stat it, or a path too long. partial: the folder itself, whose listing stopped partway (what came before is counted). other_volume: a mount point of another volume. app_library: another app's library package (Photos, Music). credentials: a credential store (Skip credentials and keys). excluded: an excluded path or name.",
+      "type": "string",
+      "enum": ["unreadable", "denied", "privacy", "partial", "other_volume", "app_library", "credentials", "excluded"]
+    },
+
+    "SpaceSkippedQuery": {
+      "description": "Query for zdedupe_results_space_skipped. node or path scopes the list to a folder and everything below it; neither means the whole scan.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "node": { "type": ["integer", "null"], "minimum": 0, "default": null },
+        "path": { "type": ["string", "null"], "default": null },
+        "reason": { "oneOf": [{ "$ref": "#/$defs/SpaceSkipReason" }, { "type": "null" }], "default": null },
+        "limit": { "type": "integer", "minimum": 0, "maximum": 500, "default": 100, "description": "Clamped to 500." },
+        "offset": { "type": "integer", "minimum": 0, "default": 0 }
+      }
+    },
+
     "SpaceNode": {
       "description": "One folder or file in a disk-space answer, or (kind 'all', id null) every scan root together. bytes is space on disk (allocated blocks: a cloud placeholder counts ~0, a sparse file what it occupies); logical is the apparent size. Every inode counts once: of several hard links the lexicographically smallest path holds the bytes. Folder figures are the whole subtree's, corrected for everything removed since the scan.",
       "type": "object",
@@ -926,7 +945,7 @@
           "type": "boolean"
         },
         "protected": {
-          "description": "zdedupe_results_space_trash would refuse it: a protected location, or a folder holding one.",
+          "description": "zdedupe_results_space_trash would refuse it: a protected location, a folder holding one, or a folder holding a game library, an app library the scan left out, or another volume's mount point.",
           "type": "boolean"
         },
         "root": { "type": "boolean", "description": "A scan root; never trashed whole." },
@@ -1043,11 +1062,37 @@
       }
     },
 
+    "SpaceSkip": {
+      "description": "One entry a disk-space scan left out.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason", "path", "name", "node", "dir"],
+      "properties": {
+        "reason": { "$ref": "#/$defs/SpaceSkipReason" },
+        "path": { "type": "string" },
+        "name": { "type": "string", "description": "Empty for partial." },
+        "node": { "type": "integer", "minimum": 0, "description": "The folder in these results that holds it (for partial, the folder itself): a SpaceNode id to open." },
+        "dir": { "type": "boolean", "description": "Known to be a folder." }
+      }
+    },
+
+    "SpaceSkipped": {
+      "description": "Response of zdedupe_results_space_skipped: by folder in tree order, then reason, then name. total counts every match the store kept (at most 1000 per reason; SpaceOverview.skipped has the exact counts); items are the page from offset. Entries inside a folder removed since are left out.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "total", "offset"],
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/$defs/SpaceSkip" } },
+        "total": { "type": "integer", "minimum": 0 },
+        "offset": { "type": "integer", "minimum": 0 }
+      }
+    },
+
     "SpaceOverview": {
       "description": "Response of zdedupe_results_space_overview. volume is as scanned (on macOS the APFS container's figures, as Finder shows them). files/dirs/bytes/logical/dataless_files and types are corrected for what was removed since; the rest are the scan's own counters.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["roots", "generated_at", "scan_time_ns", "volume", "files", "dirs", "bytes", "logical", "dataless_files", "dataless_logical", "hard_links", "excluded", "errors", "incomplete_dirs", "removed_count", "removed_bytes", "types"],
+      "required": ["roots", "generated_at", "scan_time_ns", "volume", "files", "dirs", "bytes", "logical", "dataless_files", "dataless_logical", "hard_links", "excluded", "errors", "incomplete_dirs", "removed_count", "removed_bytes", "skipped", "types"],
       "properties": {
         "roots": { "type": "array", "items": { "type": "string" } },
         "generated_at": { "$ref": "#/$defs/EpochMillis" },
@@ -1075,6 +1120,23 @@
         "incomplete_dirs": { "type": "integer", "minimum": 0, "description": "Folders with something directly inside that could not be read." },
         "removed_count": { "type": "integer", "minimum": 0 },
         "removed_bytes": { "$ref": "#/$defs/ByteCount" },
+        "skipped": {
+          "description": "Entries the scan left out, per reason (SpaceSkipReason): every one, also past what zdedupe_results_space_skipped lists. recorded is false for a store written before the reasons were kept, whose counts are all 0.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["recorded", "unreadable", "denied", "privacy", "partial", "other_volume", "app_library", "credentials", "excluded"],
+          "properties": {
+            "recorded": { "type": "boolean" },
+            "unreadable": { "type": "integer", "minimum": 0 },
+            "denied": { "type": "integer", "minimum": 0 },
+            "privacy": { "type": "integer", "minimum": 0 },
+            "partial": { "type": "integer", "minimum": 0 },
+            "other_volume": { "type": "integer", "minimum": 0 },
+            "app_library": { "type": "integer", "minimum": 0 },
+            "credentials": { "type": "integer", "minimum": 0 },
+            "excluded": { "type": "integer", "minimum": 0 }
+          }
+        },
         "types": { "type": "array", "items": { "$ref": "#/$defs/SpaceTypeTotal" } }
       }
     },

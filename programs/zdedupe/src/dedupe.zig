@@ -230,7 +230,7 @@ pub const DupeFinder = struct {
                 fw.dirs.items,
                 fw.links.items,
                 self.config.hash_algorithm,
-                .{},
+                .{ .skips = fw.skips.items },
             );
         }
 
