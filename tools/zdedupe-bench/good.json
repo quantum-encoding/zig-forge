@@ -1,45 +1,39 @@
 {
-  "commit": "108690839bbb5979c1fbe05841b427929660ff09",
-  "source_id": "6abdd2360892a8b9e65ac965690d37120f587c21d2acd49daccf41ec7d89124e",
+  "commit": "3cf03612b7049b2fac85fff468afe547356d17bc",
+  "source_id": "4842d04e8a2f4f06b885f7c026c1771ede7930be7abcc30b69004e1b6abeaa85",
   "toolchain": "zig 0.17.0 + zig-0.17.0-ios-nullfile.patch sha256:56ace2b887defd50bb1ac7f929964689cbeaddccec3d10e12ca19e907c0ea79c",
-  "marked_at": "2026-10-16T19:09:28Z",
-  "marked_on": "qe-ltd-m5",
-  "note": "file hashing by blake3_tree vector BLAKE3 (medium full-hash -9%); permanent file delete reads its files on every core (delete phase 0.935s/1c -> 0.078s/14c). Results identical on every fixture",
+  "marked_at": "2026-10-17T04:48:46Z",
+  "marked_on": "quantum-encoding-ltd",
+  "note": "faster duplicate-group building and folder overlaps (home analyze 3.06s -> 2.26s on this i7, 2.01s -> 1.29s on the M5); x86 files hash with std BLAKE3, blake3_tree lanes per target: small -18%, medium -31%, big -20%, delete -26% here",
   "baselines": {
-    "qe-ltd-m5": {
+    "quantum-encoding-ltd": {
       "big": {
-        "wall_s": 0.1732,
-        "cores": 13.09,
+        "wall_s": 0.5005,
+        "cores": 14.91,
         "n": 3,
         "digest": "a2aa6d6afa8d5d84"
       },
-      "clones": {
-        "wall_s": 0.0756,
-        "cores": 9.15,
-        "n": 3,
-        "digest": "7ea8b866fa2ba71d"
-      },
       "compare": {
-        "wall_s": 0.8786,
-        "cores": 15.57,
-        "n": 3,
+        "wall_s": 9.556,
+        "cores": 0.18,
+        "n": 6,
         "digest": "f00b8efaf9679480"
       },
       "delete": {
-        "wall_s": 0.3684,
-        "cores": 7.54,
-        "n": 6,
-        "digest": "1246a2868cc14e0e"
+        "wall_s": 0.611,
+        "cores": 13.44,
+        "n": 3,
+        "digest": null
       },
       "medium": {
-        "wall_s": 0.1495,
-        "cores": 11.24,
+        "wall_s": 0.343,
+        "cores": 13.15,
         "n": 3,
         "digest": "8051b7be80da1632"
       },
       "small": {
-        "wall_s": 1.3682,
-        "cores": 15.72,
+        "wall_s": 0.2801,
+        "cores": 11.73,
         "n": 3,
         "digest": "4389fc1b1d77531e"
       }
