@@ -471,6 +471,22 @@ def wait_quiet(args):
     return round(time.time() - t0, 1)
 
 
+def prime_cache(root):
+    """Read every file under `root` once, in order. The warm-up scan alone can leave
+    a fixture partly uncached (seen on Linux: Compare's parallel range reads did not
+    bring back pages another target had pushed out, and each run then read them from
+    the disk), and the timings are meant to be of a warm cache."""
+    buf = bytearray(4 << 20)
+    for dirpath, _, names in os.walk(root):
+        for n in names:
+            try:
+                with open(os.path.join(dirpath, n), "rb", buffering=0) as f:
+                    while f.readinto(buf):
+                        pass
+            except OSError:
+                pass
+
+
 def run_one(b, name, spec, round_no, args):
     waited = wait_quiet(args)
     rundir = Path(tempfile.mkdtemp(dir=HOME / "runs"))
@@ -590,6 +606,8 @@ def cmd_run(args):
             print(f"bench: {t}: not on this platform", file=sys.stderr)
             continue
         print(f"\n== {t}: {spec['desc']}")
+        if t in TARGETS and not spec.get("copy"):
+            prime_cache(spec["root"])
         run_one(builds[0], t, spec, -1, args)  # warm-up: page cache, directory caches; not recorded
         for i in range(args.runs):
             order = builds[i % len(builds):] + builds[:i % len(builds)]
