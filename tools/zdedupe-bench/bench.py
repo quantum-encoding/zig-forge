@@ -465,7 +465,9 @@ def wait_quiet(args):
             told = True
         time.sleep(5)
     if os.getloadavg()[0] > args.quiet:
-        print(f"bench: load still {os.getloadavg()[0]:.1f} after {args.quiet_wait:.0f}s; running anyway", file=sys.stderr)
+        # A run under this load would only be left out of every verdict later.
+        die(f"load still {os.getloadavg()[0]:.1f} after {args.quiet_wait:.0f}s of waiting for < {args.quiet}; "
+            "stopped (the runs recorded so far stay)")
     return round(time.time() - t0, 1)
 
 
@@ -839,7 +841,8 @@ def main():
     p.add_argument("--dirs", action="store_true", help="duplicate scans also analyze folders")
     p.add_argument("--detached", action="store_true", help="run each scan as a launchd job, outside this process tree (macOS)")
     p.add_argument("--quiet", type=float, metavar="LOAD", help="before each run, wait for the 1-minute load average to fall under LOAD")
-    p.add_argument("--quiet-wait", type=float, default=900, help="longest wait for --quiet, in seconds (default 900)")
+    p.add_argument("--quiet-wait", type=float, default=900,
+                   help="longest wait for --quiet, in seconds (default 900); past it the bench stops")
     p.set_defaults(fn=cmd_run)
     p = sub.add_parser("compare")
     p.add_argument("a")
