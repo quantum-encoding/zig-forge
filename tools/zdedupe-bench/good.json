@@ -2,38 +2,38 @@
   "commit": "3cf03612b7049b2fac85fff468afe547356d17bc",
   "source_id": "4842d04e8a2f4f06b885f7c026c1771ede7930be7abcc30b69004e1b6abeaa85",
   "toolchain": "zig 0.17.0 + zig-0.17.0-ios-nullfile.patch sha256:56ace2b887defd50bb1ac7f929964689cbeaddccec3d10e12ca19e907c0ea79c",
-  "marked_at": "2026-10-17T04:48:46Z",
+  "marked_at": "2026-10-17T04:53:04Z",
   "marked_on": "quantum-encoding-ltd",
-  "note": "faster duplicate-group building and folder overlaps (home analyze 3.06s -> 2.26s on this i7, 2.01s -> 1.29s on the M5); x86 files hash with std BLAKE3, blake3_tree lanes per target: small -18%, medium -31%, big -20%, delete -26% here",
+  "note": "faster duplicate-group building and folder overlaps (home analyze 3.06s -> 2.26s on this i7, 2.01s -> 1.29s on the M5); x86 files hash with std BLAKE3, blake3_tree lanes per target. Baselined from cache-primed runs",
   "baselines": {
     "quantum-encoding-ltd": {
       "big": {
-        "wall_s": 0.5005,
-        "cores": 14.91,
+        "wall_s": 0.5432,
+        "cores": 13.64,
         "n": 3,
         "digest": "a2aa6d6afa8d5d84"
       },
       "compare": {
-        "wall_s": 9.556,
-        "cores": 0.18,
-        "n": 6,
+        "wall_s": 0.3983,
+        "cores": 13.61,
+        "n": 3,
         "digest": "f00b8efaf9679480"
       },
       "delete": {
-        "wall_s": 0.611,
-        "cores": 13.44,
+        "wall_s": 0.6112,
+        "cores": 13.46,
         "n": 3,
-        "digest": null
+        "digest": "1246a2868cc14e0e"
       },
       "medium": {
-        "wall_s": 0.343,
-        "cores": 13.15,
+        "wall_s": 0.3401,
+        "cores": 13.39,
         "n": 3,
         "digest": "8051b7be80da1632"
       },
       "small": {
-        "wall_s": 0.2801,
-        "cores": 11.73,
+        "wall_s": 0.288,
+        "cores": 11.88,
         "n": 3,
         "digest": "4389fc1b1d77531e"
       }
