@@ -136,6 +136,24 @@ pub const Scratch = struct {
         if (libc.symlink(target_z.ptr, link.ptr) != 0) return error.SymlinkFailed;
     }
 
+    /// A junction at `link_sub_path` to the folder `target` (absolute), made
+    /// as Windows users make them (`mklink /J`). Windows only.
+    pub fn junction(self: *const Scratch, target: []const u8, link_sub_path: []const u8) !void {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        const link = try self.join(link_sub_path);
+        defer self.allocator.free(link);
+        const link_w = try backslashed(self.allocator, link);
+        defer self.allocator.free(link_w);
+        const target_w = try backslashed(self.allocator, target);
+        defer self.allocator.free(target_w);
+        const r = try std.process.run(self.allocator, std.testing.io, .{
+            .argv = &.{ "cmd.exe", "/c", "mklink", "/J", link_w, target_w },
+        });
+        defer self.allocator.free(r.stdout);
+        defer self.allocator.free(r.stderr);
+        if (!r.term.success()) return error.JunctionFailed;
+    }
+
     pub fn hardLink(self: *const Scratch, existing_sub_path: []const u8, new_sub_path: []const u8) !void {
         const existing = try self.joinZ(existing_sub_path);
         defer self.allocator.free(existing);
@@ -152,6 +170,15 @@ pub const Scratch = struct {
         return true;
     }
 };
+
+/// `path` with Windows separators, for cmd.exe. Caller frees.
+fn backslashed(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const out = try allocator.dupe(u8, path);
+    for (out) |*c| {
+        if (c.* == '/') c.* = '\\';
+    }
+    return out;
+}
 
 /// Where `init` makes fixtures; see there. Creates it when missing.
 fn fixtureBase(buf: *[1024]u8) ![]const u8 {
