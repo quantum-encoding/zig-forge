@@ -64,6 +64,9 @@ pub const DupeFinder = struct {
     /// Owns every path in `files` (taken over from the walker), so each path
     /// exists once. Empty until a scan has collected files.
     path_storage: fast_walker.StringStorage,
+    /// Entries a directory-analysis walk left out, and why (taken over from
+    /// the walker; paths live in `path_storage`). Empty otherwise.
+    skips: std.ArrayListUnmanaged(fast_walker.SkipRecord),
 
     pub fn init(allocator: std.mem.Allocator, config: types.Config) DupeFinder {
         return .{
@@ -85,12 +88,14 @@ pub const DupeFinder = struct {
             .failed_paths = 0,
             .dir_analysis = null,
             .path_storage = .{},
+            .skips = .empty,
         };
     }
 
     pub fn deinit(self: *DupeFinder) void {
         // Paths are borrowed from `path_storage`; there is nothing per file to free.
         self.files.deinit(self.allocator);
+        self.skips.deinit(self.allocator);
         self.path_storage.deinit(self.allocator);
 
         for (self.groups.items) |*g| {
@@ -169,6 +174,8 @@ pub const DupeFinder = struct {
         self.files.deinit(self.allocator);
         self.files = fw.takeFiles();
         self.path_storage = fw.takeStrings();
+        self.skips = fw.skips;
+        fw.skips = .empty;
 
         self.summary.excluded_entries = fw.stats.excluded;
         self.summary.bytes_scanned = fw.stats.total_size;
@@ -230,7 +237,7 @@ pub const DupeFinder = struct {
                 fw.dirs.items,
                 fw.links.items,
                 self.config.hash_algorithm,
-                .{ .skips = fw.skips.items },
+                .{ .skips = self.skips.items },
             );
         }
 
@@ -245,6 +252,11 @@ pub const DupeFinder = struct {
     /// Directory-level results, or null unless `config.analyze_dirs` was set.
     pub fn getDirAnalysis(self: *const DupeFinder) ?*const dirs.Analysis {
         return if (self.dir_analysis) |*analysis| analysis else null;
+    }
+
+    /// What a directory-analysis scan left out, and why; empty otherwise.
+    pub fn getSkips(self: *const DupeFinder) []const fast_walker.SkipRecord {
+        return self.skips.items;
     }
 
     /// Number of input paths that could not be walked at all.

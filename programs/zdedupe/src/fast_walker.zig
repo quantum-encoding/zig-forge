@@ -146,6 +146,42 @@ pub const SkipRecord = struct {
 /// First line of a valid CACHEDIR.TAG (https://bford.info/cachedir/).
 pub const cache_dir_signature = "Signature: 8a477f597d28d172789f06886806bc55";
 
+/// True if the directory holds a valid CACHEDIR.TAG. The tag must be a
+/// regular file starting with the fixed signature; its mere presence is
+/// not enough (that is the spec, and it stops an empty file of that name
+/// from hiding a directory from the scan).
+/// Looked up relative to the open directory: one name to resolve, and a
+/// miss (nearly every directory) is answered from the name cache.
+pub fn hasCacheDirTag(dir_fd: c_int) bool {
+    // NOFOLLOW + NONBLOCK: never chase a link out of the tree, never hang
+    // on a FIFO someone named CACHEDIR.TAG.
+    const fd = libc.openat(
+        dir_fd,
+        "CACHEDIR.TAG",
+        .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .NOFOLLOW = true, .CLOEXEC = true },
+        @as(libc.mode_t, 0),
+    );
+    if (fd < 0) return false;
+    defer _ = libc.close(fd);
+
+    const st = pstat.fstat(fd) catch return false;
+    if (!st.isFile()) return false;
+
+    var buf: [cache_dir_signature.len]u8 = undefined;
+    var got: usize = 0;
+    while (got < buf.len) {
+        const n = libc.read(fd, buf[got..].ptr, buf.len - got);
+        if (n == 0) break;
+        if (n < 0) {
+            if (libc.errno(n) == .INTR) continue;
+            return false;
+        }
+        got += @intCast(n);
+    }
+    // zig-lens-ignore: EQL-FOR-SECRETS public file-format magic
+    return got == buf.len and std.mem.eql(u8, &buf, cache_dir_signature);
+}
+
 /// Fast walker statistics
 pub const WalkStats = struct {
     /// Distinct files (extra hard links not counted). Final after `finish()`.
@@ -426,7 +462,7 @@ const Worker = struct {
         defer stream.close();
         const dir_fd = stream.fd();
 
-        if (w.exclude_cache_dirs and !w.isRoot(dir_path) and isCacheDir(dir_fd)) {
+        if (w.exclude_cache_dirs and !w.isRoot(dir_path) and hasCacheDirTag(dir_fd)) {
             self.stats.excluded += 1;
             try self.markParent(dir_path, .skipped);
             try self.skip(dir_path, null, .excluded, true);
@@ -634,42 +670,6 @@ const Worker = struct {
 
         record.skipped += 1;
         return false;
-    }
-
-    /// True if the directory holds a valid CACHEDIR.TAG. The tag must be a
-    /// regular file starting with the fixed signature; its mere presence is
-    /// not enough (that is the spec, and it stops an empty file of that name
-    /// from hiding a directory from the scan).
-    /// Looked up relative to the open directory: one name to resolve, and a
-    /// miss (nearly every directory) is answered from the name cache.
-    fn isCacheDir(dir_fd: c_int) bool {
-        // NOFOLLOW + NONBLOCK: never chase a link out of the tree, never hang
-        // on a FIFO someone named CACHEDIR.TAG.
-        const fd = libc.openat(
-            dir_fd,
-            "CACHEDIR.TAG",
-            .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .NOFOLLOW = true, .CLOEXEC = true },
-            @as(libc.mode_t, 0),
-        );
-        if (fd < 0) return false;
-        defer _ = libc.close(fd);
-
-        const st = pstat.fstat(fd) catch return false;
-        if (!st.isFile()) return false;
-
-        var buf: [cache_dir_signature.len]u8 = undefined;
-        var got: usize = 0;
-        while (got < buf.len) {
-            const n = libc.read(fd, buf[got..].ptr, buf.len - got);
-            if (n == 0) break;
-            if (n < 0) {
-                if (libc.errno(n) == .INTR) continue;
-                return false;
-            }
-            got += @intCast(n);
-        }
-        // zig-lens-ignore: EQL-FOR-SECRETS public file-format magic
-        return got == buf.len and std.mem.eql(u8, &buf, cache_dir_signature);
     }
 
     fn noteError(self: *Worker, record: *DirRecord) void {

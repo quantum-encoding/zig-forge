@@ -31,6 +31,13 @@ pub const Stat = struct {
     mode: u32,
     size: u64,
     mtime_sec: i64,
+    /// Last status change (content, owner, mode, links, or a timestamp set
+    /// by hand), which unlike the modification time no program can set
+    /// back. 0 where the backend does not report it: Windows, and the bulk
+    /// directory listing (dirstream.zig).
+    ctime_sec: i64 = 0,
+    /// Owner's user id; 0 on Windows.
+    uid: u32 = 0,
     /// Hard-link count, or 0 if the filesystem did not report one. A file with
     /// exactly one link cannot be a hard link of anything, which lets a walker
     /// skip inode tracking for the overwhelming majority of files.
@@ -102,11 +109,13 @@ const StatxTimestamp = extern struct { sec: i64, nsec: u32, __pad: i32 };
 const STATX_TYPE: u32 = 0x001;
 const STATX_MODE: u32 = 0x002;
 const STATX_NLINK: u32 = 0x004;
+const STATX_UID: u32 = 0x008;
 const STATX_MTIME: u32 = 0x040;
+const STATX_CTIME: u32 = 0x080;
 const STATX_INO: u32 = 0x100;
 const STATX_SIZE: u32 = 0x200;
 const STATX_BLOCKS: u32 = 0x400;
-const STATX_NEEDED: u32 = STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_MTIME | STATX_INO | STATX_SIZE | STATX_BLOCKS;
+const STATX_NEEDED: u32 = STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_UID | STATX_MTIME | STATX_CTIME | STATX_INO | STATX_SIZE | STATX_BLOCKS;
 
 const AT_FDCWD: c_int = -100;
 const AT_SYMLINK_NOFOLLOW: c_int = 0x100;
@@ -124,6 +133,8 @@ fn statxTo(stx: *const Statx) Stat {
         .mode = stx.stx_mode,
         .size = stx.stx_size,
         .mtime_sec = stx.stx_mtime.sec,
+        .ctime_sec = if (stx.stx_mask & STATX_CTIME != 0) stx.stx_ctime.sec else 0,
+        .uid = stx.stx_uid,
         // Only trust the count if the filesystem says it filled it in.
         .nlink = if (stx.stx_mask & STATX_NLINK != 0) stx.stx_nlink else 0,
         .allocated = if (stx.stx_mask & STATX_BLOCKS != 0) stx.stx_blocks *| 512 else 0,
@@ -175,6 +186,8 @@ fn cStatTo(st: *const std.c.Stat) Stat {
         // panic, and let the size filter drop it.
         .size = if (st.size > 0) @intCast(st.size) else 0,
         .mtime_sec = st.mtime().sec,
+        .ctime_sec = st.ctime().sec,
+        .uid = st.uid,
         .nlink = std.math.cast(u32, st.nlink) orelse 0,
         .allocated = if (st.blocks > 0) @as(u64, @intCast(st.blocks)) *| 512 else 0,
         .dataless = st.flags & SF_DATALESS != 0,

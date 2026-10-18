@@ -4,6 +4,7 @@
 //!   zdedupe [OPTIONS] <PATHS...>           Find duplicates in paths
 //!   zdedupe compare <FOLDER_A> <FOLDER_B>  Compare two folders
 //!   zdedupe scan <PATH>                    Fast scan (benchmark mode)
+//!   zdedupe clean [OPTIONS] <ROOTS...>     Build leftovers (see `zdedupe clean --help`)
 //!
 //! Options:
 //!   -h, --help             Show this help
@@ -29,6 +30,7 @@ const compare = @import("compare.zig");
 const report = @import("report.zig");
 const fast_walker = @import("fast_walker.zig");
 const store = @import("store.zig");
+const clean = @import("clean.zig");
 const Io = std.Io;
 
 const VERSION = "0.1.0";
@@ -36,13 +38,13 @@ const VERSION = "0.1.0";
 pub fn main(init: std.process.Init) void {
     const allocator = init.gpa;
 
-    runMain(allocator, init.minimal.args) catch |err| {
+    runMain(allocator, init.io, init.minimal.args) catch |err| {
         std.debug.print("Error: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
 }
 
-fn runMain(allocator: std.mem.Allocator, minimal_args: anytype) !void {
+fn runMain(allocator: std.mem.Allocator, io: Io, minimal_args: anytype) !void {
     // Parse arguments
     var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
     defer args_list.deinit(allocator);
@@ -51,6 +53,9 @@ fn runMain(allocator: std.mem.Allocator, minimal_args: anytype) !void {
         try args_list.append(allocator, arg);
     }
     const args = args_list.items;
+
+    // `clean` has options of its own.
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "clean")) return runClean(allocator, io, args[2..]);
 
     var opts = Options{};
     var paths: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -403,6 +408,125 @@ fn runFastScan(allocator: std.mem.Allocator, path: []const u8, opts: Options) !v
     });
 }
 
+fn runClean(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void {
+    var roots: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer roots.deinit(allocator);
+    var main_roots: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer main_roots.deinit(allocator);
+    var json = false;
+    var move = false;
+    var older: i64 = clean.default_older_s;
+    var threads: u32 = 0;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            printCleanHelp();
+            return;
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
+        } else if (std.mem.eql(u8, arg, "--trash")) {
+            move = true;
+        } else if (std.mem.eql(u8, arg, "--older")) {
+            i += 1;
+            if (i >= args.len) fatal("Missing argument for --older");
+            older = clean.parseAge(args[i]) orelse fatal("--older takes an age such as 30m, 24h or 3d");
+            if (older < clean.min_older_s) fatal("--older must be at least 10m: a build still writing is never moved");
+        } else if (std.mem.eql(u8, arg, "--main-roots")) {
+            i += 1;
+            if (i >= args.len) fatal("Missing argument for --main-roots");
+            var parts = std.mem.tokenizeScalar(u8, args[i], ':');
+            while (parts.next()) |part| try main_roots.append(allocator, part);
+        } else if (std.mem.eql(u8, arg, "-j") or std.mem.eql(u8, arg, "--threads")) {
+            i += 1;
+            if (i >= args.len) fatal("Missing argument for --threads");
+            threads = std.fmt.parseInt(u32, args[i], 10) catch fatal("Invalid thread count");
+        } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1) {
+            std.debug.print("Unknown option for clean: {s}\n", .{arg});
+            fatal("Use zdedupe clean --help for usage information");
+        } else {
+            try roots.append(allocator, arg);
+        }
+    }
+    if (roots.items.len == 0) {
+        printCleanHelp();
+        std.process.exit(1);
+    }
+
+    var result = try clean.run(allocator, io, .{
+        .roots = roots.items,
+        .main_roots = main_roots.items,
+        .older_s = older,
+        .threads = threads,
+    }, move);
+    defer result.deinit();
+
+    var out: Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    if (json) try clean.writeJson(allocator, &result, &out.writer) else try clean.writeText(&result, &out.writer);
+    writeStdout(out.writer.buffered());
+
+    var scanned: usize = 0;
+    for (result.roots) |r| {
+        if (r.err == null) scanned += 1;
+    }
+    if (scanned == 0) std.process.exit(1);
+}
+
+fn writeStdout(bytes: []const u8) void {
+    const io = Io.Threaded.global_single_threaded.io();
+    const stdout = Io.File.stdout();
+    var buf: [8192]u8 = undefined;
+    var writer = stdout.writerStreaming(io, &buf);
+    writer.interface.writeAll(bytes) catch {};
+    writer.interface.flush() catch {};
+}
+
+fn printCleanHelp() void {
+    writeStdout(
+        \\zdedupe clean - build leftovers: where they are, whose they are, what can go
+        \\
+        \\USAGE:
+        \\  zdedupe clean [--json] [--trash] [--older AGE] [--main-roots DIR]... <ROOTS...>
+        \\
+        \\Reports, for every build-output folder under ROOTS, its size on disk, file
+        \\count, newest modification, kind and project; the sets of identical build
+        \\folders and what keeping one copy of each would free; and for every project
+        \\(a checkout, or the folder owning a build folder) where its main code lives
+        \\and a verdict: main_has_everything, or has_unique_work with the reasons.
+        \\
+        \\Build output is what the core's Disk Space suggestions call build output:
+        \\node_modules, bower_components, .zig-cache, zig-cache, zig-out, DerivedData,
+        \\__pycache__, .next, .nuxt, .svelte-kit, .turbo, .parcel-cache, .tox,
+        \\.mypy_cache, .pytest_cache, .ruff_cache; target beside Cargo.toml or
+        \\pom.xml; .build beside Package.swift; and any folder with a valid
+        \\CACHEDIR.TAG. Nothing else is ever moved, and whole project copies never.
+        \\
+        \\OPTIONS:
+        \\  --json             The JSON document (schema zdedupe-clean/1, README)
+        \\  --trash            Move eligible build folders to the Trash: below a root
+        \\                     (never a root), not protected, not inside .git, read
+        \\                     completely, and nothing in them modified or changed
+        \\                     for AGE. Each is checked again just before it moves.
+        \\                     Never deletes anything permanently.
+        \\  --older AGE        30m, 24h, 3d, 2w (default 24h, at least 10m)
+        \\  --main-roots DIR   Where main checkouts live, searched 4 levels deep for
+        \\                     repos with the same origin (repeatable, or DIR:DIR;
+        \\                     default ~/work)
+        \\  -j, --threads N    Walk and hash threads (0 = auto)
+        \\
+        \\Without --trash nothing is changed; the report says what --trash would move.
+        \\Exit status is 1 when no root could be scanned.
+        \\
+        \\EXAMPLES:
+        \\  zdedupe clean /private/tmp/claude-502 ~/.baton/scratch
+        \\  zdedupe clean --json ~/work/app/.claude/worktrees > clean.json
+        \\  zdedupe clean --trash --older 3d ~/.baton/scratch
+        \\
+    );
+}
+
 fn parseFormat(s: []const u8) ?types.ReportFormat {
     if (std.mem.eql(u8, s, "text")) return .text;
     if (std.mem.eql(u8, s, "json")) return .json;
@@ -421,6 +545,8 @@ fn printHelp() void {
         \\USAGE:
         \\  zdedupe [OPTIONS] <PATHS...>           Find duplicates in paths
         \\  zdedupe [OPTIONS] compare <A> <B>      Compare two folders
+        \\  zdedupe clean [OPTIONS] <ROOTS...>     Build leftovers: report, or --trash
+        \\                                         (zdedupe clean --help)
         \\
         \\OPTIONS:
         \\  -h, --help             Show this help

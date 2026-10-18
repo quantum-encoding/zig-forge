@@ -24,6 +24,7 @@ The walk is parallel (`src/fast_walker.zig`): a pool of workers pulls directorie
 zdedupe [OPTIONS] <PATHS...>           Find duplicates in paths
 zdedupe compare <FOLDER_A> <FOLDER_B>  Compare two folders
 zdedupe scan <PATH>                    Fast scan (benchmark mode)
+zdedupe clean [OPTIONS] <ROOTS...>     Build leftovers (see "zdedupe clean" below)
 
 -f, --format FORMAT    text | json | html          (default: text)
 -o, --output FILE      write report to file        (default: stdout)
@@ -40,6 +41,165 @@ zdedupe scan <PATH>                    Fast scan (benchmark mode)
 ```
 
 With `--dirs`, `--min-size`/`--max-size` filter the reported file groups only (the walk must see every file, or a directory could pass for a copy because the file that differs was outside the window), and symlinks are compared by target rather than followed.
+
+## zdedupe clean
+
+Build output piles up wherever agents and people build: scratch copies of a
+project, worktrees, `/tmp`. `zdedupe clean` finds it, says whose it is and
+whether that project's work is safe elsewhere, and on request moves the stale
+build output to the Trash.
+
+```
+zdedupe clean [--json] [--trash] [--older AGE] [--main-roots DIR]... [-j N] <ROOTS...>
+
+--json             the JSON document below instead of the text report
+--trash            move eligible build folders to the Trash (never a permanent delete)
+--older AGE        how long nothing in a folder may have changed: 30m, 24h, 3d, 2w
+                   (default 24h, at least 10m)
+--main-roots DIR   where main checkouts live (repeatable, or DIR:DIR; default ~/work)
+-j, --threads N    walk and hash threads (0 = auto)
+```
+
+Without `--trash` nothing on disk changes, and the report says what `--trash`
+would move. Exit status 1 means no root could be scanned.
+
+**Build output** is the core's own definition, the one Disk Space suggests
+from (`src/space.zig`): a folder named `node_modules`, `bower_components`,
+`.zig-cache`, `zig-cache`, `zig-out`, `DerivedData`, `__pycache__`, `.next`,
+`.nuxt`, `.svelte-kit`, `.turbo`, `.parcel-cache`, `.tox`, `.mypy_cache`,
+`.pytest_cache` or `.ruff_cache`; `target` beside `Cargo.toml` or `pom.xml`;
+`.build` beside `Package.swift`; and any folder carrying a valid CACHEDIR.TAG.
+Roots are resolved to their real path. The walk stays on the roots'
+filesystems, never follows a link, never enters `.git` / `.hg` / `.svn` /
+`.bzr` or a credential store (`Config.credential_excludes`), and does not look
+for build output inside build output. A root is the scope, never a finding.
+
+**Identical copies** are found by content with the directory analysis
+(`src/dirs.zig`) over the build folders: names, bytes and links all match, and
+a folder with anything unreadable in it is never a copy.
+
+**Projects.** A build folder's project is the nearest folder above it, up to
+its root, holding `.git` or a manifest (`package.json`, `Cargo.toml`,
+`build.zig`, `Package.swift`, `pyproject.toml`, `setup.py`, `go.mod`,
+`pom.xml`, `build.gradle(.kts)`, `Gemfile`, `composer.json`, `deno.json`,
+`CMakeLists.txt`, `meson.build`, `mix.exs`, `pubspec.yaml`). Every checkout
+under a root, and every outermost project, is reported too, build output or
+not. For each, git (run read-only: `--no-optional-locks`,
+`core.fsmonitor=false`, nothing fetched) says the checkout's toplevel, origin
+(credentials removed), branch, HEAD, whether it is a linked worktree and of
+which repository, the main checkouts of the same origin under the main roots
+(4 levels deep; `git@host:a/b.git`, `ssh://` and `https://` spellings are one
+origin), uncommitted entries (untracked included) and commits on no
+remote-tracking ref. The verdict:
+
+- `main_has_everything`: nothing uncommitted, no stash, and every commit on
+  its branches is on a remote-tracking ref or in a main checkout's current
+  branch. A linked worktree is judged by its HEAD alone (its other branches
+  live in the main repository).
+- `has_unique_work`, with the reasons. Also every folder git cannot vouch
+  for: not in a repository, ignored by the repository around it, or a
+  worktree whose repository is gone.
+
+With no `git` the report says so and gives no verdicts.
+
+**What `--trash` moves**: only build folders, only to the Trash, and only
+those that lie below a root (never a root), are not and do not hold a
+protected location (`src/protect.zig`, applied to the real path, so on macOS
+everything under `/private`, `/tmp` included, stays), are not inside a
+version-control store, were read completely, and in which nothing, folders
+included, was modified *or had its status changed* for `--older`. The status
+change time is set by the system, so a tool that restores old modification
+times while unpacking still counts as fresh. Immediately before each move the
+folder is checked again: the same folder (device and inode, not a link), still
+build output by the same rule (manifest or tag still there), still old enough,
+nothing in it on another filesystem. The Trash is NSFileManager's on macOS
+(`src/trash.zig`, through the Objective-C runtime) and the freedesktop Trash
+on Linux (`files/` + `info/*.trashinfo` on the item's own filesystem, never a
+copy across filesystems); Windows reports it as unsupported. Whole project
+copies are never moved: they are reported with their verdict.
+
+### JSON (`--json`, schema `zdedupe-clean/1`)
+
+Times are seconds since the epoch; sizes are bytes; `bytes` is space on disk
+(allocated blocks, each inode once), `logical_bytes` the apparent size. Paths
+are UTF-8 (an invalid byte sequence becomes U+FFFD). Arrays are ordered as
+stated. A new field may appear in any object; a field changing meaning or
+going away changes `schema`.
+
+```
+{
+  "schema": "zdedupe-clean/1",
+  "generated_at": 1792226400,
+  "older_than_s": 86400,
+  "git": { "available": true, "version": "git version 2.55.0" },
+  "main_roots": ["/Users/me/work"],
+  "roots": [{
+    "path": "/private/tmp/scratch",      // real path
+    "given": "/tmp/scratch",
+    "error": null,                       // or why it was not scanned
+    "build_dirs": 4, "bytes": 3800000000, "files": 9900,
+    "unreadable": 0,                     // entries the walk could not read
+    "left_out": 2                        // credential stores, app libraries, other volumes
+  }],
+  "build_dirs": [{                       // largest first
+    "path": "/private/tmp/scratch/app/node_modules",
+    "kind": "node_modules",              // the folder's name
+    "rule": "name",                      // "name" | "beside_manifest" | "cachedir_tag"
+    "root": "/private/tmp/scratch",
+    "project": "/private/tmp/scratch/app",   // or null
+    "bytes": 210000000, "logical_bytes": 190000000, "files": 3377,
+    "hardlinked_bytes": 0,               // freed only if every other link goes too
+    "newest_mtime": 1792160000,          // newest file modification, or null (no files)
+    "complete": true,                    // false: something inside could not be read
+    "duplicate_set": 0,                  // index into duplicate_sets, or null
+    "trash": {
+      "eligible": false,                 // what --trash would do now
+      "refusal": "is, or holds, a protected location",   // or null
+      "newest_change": 1792160587        // newest mtime or ctime of anything inside, the folder included
+    }
+  }],
+  "duplicate_sets": [{                   // most reclaimable first
+    "kind": "node_modules",              // or "mixed"
+    "copies": 3, "bytes_each": 210000000, "files_each": 3377,
+    "reclaimable": 420000000,            // freed by keeping only the largest copy (an upper
+                                         // bound: APFS clones share blocks unreported)
+    "paths": ["...", "...", "..."]       // sorted
+  }],
+  "projects": [{                         // most build output first
+    "path": "/private/tmp/scratch/app",
+    "root": "/private/tmp/scratch",
+    "markers": [".git", "package.json"],
+    "build_dirs": 1, "build_bytes": 210000000,
+    "verdict": "has_unique_work",        // "main_has_everything" | "has_unique_work" | null (no git)
+    "reasons": ["2 uncommitted changes (modified, staged or untracked)"],
+    "ignored_by": null,                  // the repository that ignores this folder, if one does
+    "git": {                             // null when not in a checkout
+      "toplevel": "/private/tmp/scratch/app",
+      "origin": "git@github.com:acme/app.git",   // credentials removed
+      "origin_key": "github.com/acme/app",
+      "branch": "main",                  // null when detached
+      "head": "4f1c...",                 // null with no commits
+      "linked_worktree": false,
+      "main_repository": null,           // a linked worktree's repository
+      "main_checkouts": ["/Users/me/work/app"],
+      "is_main_checkout": false,
+      "remotes": 1,
+      "uncommitted": 2,
+      "unpushed_commits": 0,             // on its branches (a worktree: its HEAD), on no remote-tracking ref
+      "stashes": 0,                      // null for a linked worktree (they are its repository's)
+      "head_on_remote": true,
+      "head_in_main": true,              // null with no main checkout
+      "unique_branches": [{ "name": "feature", "commits": 3 }]   // on no remote and in no main checkout
+    }
+  }],
+  "totals": { "build_dirs": 4, "bytes": 3800000000, "files": 9900,
+              "duplicate_reclaimable": 420000000, "eligible": 0, "eligible_bytes": 0 },
+  "trash": null                          // with --trash:
+  // { "moved":   [{ "path": "...", "bytes": 1, "trashed_as": "/Users/me/.Trash/node_modules" }],
+  //   "skipped": [{ "path": "...", "bytes": 1, "reason": "changed too recently (see newest_change)" }],
+  //   "bytes_moved": 1 }
+}
+```
 
 ## Library / FFI
 

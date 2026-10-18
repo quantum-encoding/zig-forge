@@ -145,6 +145,14 @@ pub const Scratch = struct {
     }
 };
 
+/// Remove `path` and everything below it, never following a link; for
+/// fixtures a test moved out of its scratch directory.
+pub fn removeTree(allocator: std.mem.Allocator, path: []const u8) void {
+    const z = allocator.dupeSentinel(u8, path, 0) catch return;
+    defer allocator.free(z);
+    deleteTree(allocator, z) catch {};
+}
+
 /// Recursive delete. Uses lstat (never stat), so a symlink to a directory is
 /// unlinked rather than followed — otherwise cleaning up the symlink-cycle
 /// fixture would delete whatever the link pointed at.

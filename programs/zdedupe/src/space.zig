@@ -1727,7 +1727,7 @@ pub const SuggestKind = enum { build_output, caches, partial_downloads, stale_la
 pub const max_suggest: usize = 200;
 
 /// Build output and dependency stores a project's tooling recreates.
-const build_dirs = [_][]const u8{
+pub const build_dirs = [_][]const u8{
     "node_modules", "bower_components", ".zig-cache",    "zig-cache",     "zig-out",
     "DerivedData",  "__pycache__",      ".next",         ".nuxt",         ".svelte-kit",
     ".turbo",       ".parcel-cache",    ".tox",          ".mypy_cache",   ".pytest_cache",
@@ -1736,10 +1736,27 @@ const build_dirs = [_][]const u8{
 
 /// Build folders whose name is too common to trust alone: each counts only
 /// beside a manifest of the tool that writes it.
-const build_dirs_beside = [_]struct { name: []const u8, manifests: []const []const u8 }{
+pub const build_dirs_beside = [_]struct { name: []const u8, manifests: []const []const u8 }{
     .{ .name = "target", .manifests = &.{ "Cargo.toml", "pom.xml" } },
     .{ .name = ".build", .manifests = &.{"Package.swift"} },
 };
+
+/// A folder called `name` is build output wherever it is.
+pub fn isBuildDirName(name: []const u8) bool {
+    // zig-lens-ignore: EQL-FOR-SECRETS directory names, not secrets
+    for (build_dirs) |b| if (std.mem.eql(u8, name, b)) return true;
+    return false;
+}
+
+/// The manifests one of which must sit beside a folder called `name` for it
+/// to be build output, or null when the name is not one of those.
+pub fn buildDirManifests(name: []const u8) ?[]const []const u8 {
+    for (build_dirs_beside) |b| {
+        // zig-lens-ignore: EQL-FOR-SECRETS directory names, not secrets
+        if (std.mem.eql(u8, name, b.name)) return b.manifests;
+    }
+    return null;
+}
 
 /// Cache roots. They are suggested entry by entry, not whole: all of
 /// ~/.cache is too coarse a choice, and one entry is often most of it.
@@ -2392,13 +2409,12 @@ pub const View = struct {
     /// for the ambiguous names, its parent.
     fn claimOf(self: *const View, rec: *const DirRecord) !?Claim {
         const name = try self.r.dirName(rec);
+        if (isBuildDirName(name)) return .build;
         // zig-lens-ignore: EQL-FOR-SECRETS directory names, not secrets
-        for (build_dirs) |b| if (std.mem.eql(u8, name, b)) return .build;
         for (cache_dirs) |c| if (std.mem.eql(u8, name, c)) return .cache;
         if (rec.parent == no_parent) return null;
-        for (build_dirs_beside) |b| {
-            if (!std.mem.eql(u8, name, b.name)) continue;
-            for (b.manifests) |m| {
+        if (buildDirManifests(name)) |manifests| {
+            for (manifests) |m| {
                 if (try self.r.directFileNamed(rec.parent, m) != null) return .build;
             }
         }

@@ -311,7 +311,7 @@ fn pathZ(buf: *[4096]u8, path: []const u8) ?[*:0]const u8 {
 /// From the user database first: inside the macOS App Sandbox `$HOME` is the
 /// app's container, and protecting the container's `Library` would leave the
 /// real one unprotected. `$HOME` is the fallback where the database has none.
-fn userHome() ?[]const u8 {
+pub fn userHome() ?[]const u8 {
     if (libc.getpwuid(libc.getuid())) |pw| {
         if (pw.dir) |dir| {
             const home = std.mem.span(dir);
