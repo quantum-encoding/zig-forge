@@ -27,6 +27,7 @@
 const std = @import("std");
 const windows = std.os.windows;
 const unicode = std.unicode;
+const reparse = @import("reparse.zig");
 
 const HANDLE = windows.HANDLE;
 const INVALID_HANDLE_VALUE = windows.INVALID_HANDLE_VALUE;
@@ -624,10 +625,11 @@ pub fn pread(fd: c_int, buf: [*]u8, n: usize, offset: i64) isize {
 const FSCTL_GET_REPARSE_POINT: DWORD = 0x000900A8;
 const MAXIMUM_REPARSE_DATA_BUFFER_SIZE = 16 * 1024;
 
-/// Where a symlink or junction points, as stored (its print name, else its
-/// substitute name without the `\\??\\` prefix), in the core's path form.
-/// Links are never followed on Windows; the target still matters because it
-/// is part of a folder's identity. -1 with INVAL for anything but a link.
+/// Where a link points, in the core's path form: a symlink's or junction's
+/// target as stored (its print name, else its substitute name without the
+/// `\\??\\` prefix), an app execution alias's executable. Links are never
+/// followed on Windows; the target still matters because it is part of a
+/// folder's identity. -1 with INVAL for anything but a link.
 pub fn readlink(path: [*:0]const u8, buf: [*]u8, size: usize) isize {
     const w = toWide(&wide_buf, std.mem.span(path)) orelse return failWith(.NAMETOOLONG);
     const h = CreateFileW(w, FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, null, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, null);
@@ -641,6 +643,11 @@ pub fn readlink(path: [*:0]const u8, buf: [*]u8, size: usize) isize {
         return failWith(if (err == 4390) .INVAL else mapWin32(err));
     }
     const tag = std.mem.readInt(u32, data[0..4], .little);
+    var name16: [MAXIMUM_REPARSE_DATA_BUFFER_SIZE / 2]WCHAR = undefined;
+    if (tag == IO_REPARSE_TAG_APPEXECLINK) {
+        const exe = reparse.appExecLinkExe(data[0..got], &name16) orelse return failWith(.INVAL);
+        return linkTarget(exe, buf, size);
+    }
     // SymbolicLinkReparseBuffer has a Flags word before the names;
     // MountPointReparseBuffer does not.
     const names_at: usize = switch (tag) {
@@ -656,10 +663,15 @@ pub fn readlink(path: [*:0]const u8, buf: [*]u8, size: usize) isize {
     const off = names_at + @as(usize, if (use_print) print_off else sub_off);
     const len = @as(usize, if (use_print) print_len else sub_len);
     if (off + len > got) return failWith(.INVAL);
-    var name16: [MAXIMUM_REPARSE_DATA_BUFFER_SIZE / 2]WCHAR = undefined;
     const units = len / 2;
     for (0..units) |i| name16[i] = std.mem.readInt(u16, data[off + 2 * i ..][0..2], .little);
-    var target = name16[0..units];
+    return linkTarget(name16[0..units], buf, size);
+}
+
+/// A link target into `buf` in the core's path form: WTF-8, forward slashes,
+/// an upper-case drive letter, without the `\\??\\` prefix.
+fn linkTarget(stored: []const WCHAR, buf: [*]u8, size: usize) isize {
+    var target = stored;
     const nt_prefix = [_]WCHAR{ '\\', '?', '?', '\\' };
     if (std.mem.startsWith(WCHAR, target, &nt_prefix)) target = target[nt_prefix.len..];
     if (target.len * 3 > size) return failWith(.NAMETOOLONG);

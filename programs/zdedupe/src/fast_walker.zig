@@ -1799,3 +1799,30 @@ test "a guarded folder refused when first asked is recorded and skipped, not ask
     try std.testing.expectEqual(@as(u64, 1), walker.stats.files_found);
     try std.testing.expect(walker.stats.errors >= 1);
 }
+
+test "Windows: app execution aliases are recorded as links to their executable, not as unreadable" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const local = libc.getenv("LOCALAPPDATA") orelse return error.SkipZigTest;
+    const root = try std.fmt.allocPrint(std.testing.allocator, "{s}/Microsoft/WindowsApps", .{std.mem.span(local)});
+    defer std.testing.allocator.free(root);
+
+    var walker = FastWalker.init(std.testing.allocator);
+    defer walker.deinit();
+    walker.enableTreeRecording();
+    try walker.walk(root);
+    try walker.finish();
+    if (walker.stats.dirs_traversed == 0) return error.SkipZigTest;
+
+    var aliases: usize = 0;
+    for (walker.links.items) |link| {
+        if (std.ascii.endsWithIgnoreCase(link.target, ".exe")) aliases += 1;
+    }
+    for (walker.skips.items) |skip| {
+        if (skip.reason == .unreadable and std.ascii.endsWithIgnoreCase(skip.path, ".exe")) {
+            std.debug.print("alias recorded as unreadable: {s}\n", .{skip.path});
+            return error.TestUnexpectedResult;
+        }
+    }
+    // A machine with no Store apps has no aliases to check.
+    if (aliases == 0) return error.SkipZigTest;
+}

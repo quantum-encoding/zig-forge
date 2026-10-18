@@ -132,6 +132,7 @@ pub fn build(b: *std.Build) void {
         "src/types.zig",
         "src/hasher.zig",
         "src/pstat.zig",
+        "src/reparse.zig",
         "src/testing_scratch.zig",
         "src/walker.zig",
         "src/dirstream.zig",
