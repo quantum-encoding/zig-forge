@@ -8,7 +8,7 @@
 //!     Disk Space suggests from and protect.zig's temp-area exception asks: a
 //!     folder by its name, a `target` or `.build` beside its manifest, a Zig
 //!     cache or an Xcode derived-data folder by its layout, or any folder
-//!     carrying a valid CACHEDIR.TAG. The walk stays on the roots'
+//!     carrying a valid CACHEDIR.TAG that is not a Python virtual environment. The walk stays on the roots'
 //!     filesystems, never follows a link, never enters a version-control store
 //!     or a credential store, and does not look for build output inside build
 //!     output. A root is the scope, never a finding.
@@ -262,7 +262,10 @@ pub fn scan(gpa: Allocator, io: Io, opts: Options) !Report {
         fw.setSizeFilter(0, 0);
         fw.disableHardLinkDetection();
         fw.setNoMaterialize(true);
-        fw.setExcludeCacheDirs(true);
+        // Tagged folders are entered: a tag alone is not the rule (a tagged
+        // Python virtual environment is not build output, and what is inside
+        // one may be), so each is judged on disk below.
+        fw.setExcludeCacheDirs(false);
         fw.setExcludes(&walk_excludes);
         fw.setThreads(opts.threads);
         for (report.roots) |*root| {
@@ -275,8 +278,13 @@ pub fn scan(gpa: Allocator, io: Io, opts: Options) !Report {
         try fw.finish();
 
         for (fw.files.items) |f| {
-            const bit = manifestBit(filters.baseName(f.path)) orelse continue;
+            const name = filters.baseName(f.path);
             const parent = filters.parentDir(f.path) orelse continue;
+            // zig-lens-ignore: EQL-FOR-SECRETS file names, not secrets
+            if (std.mem.eql(u8, name, "CACHEDIR.TAG") and buildrule.onDisk(parent) == .cachedir_tag) {
+                try candidates.append(a, .{ .path = try a.dupe(u8, parent), .rule = .cachedir_tag });
+            }
+            const bit = manifestBit(name) orelse continue;
             try markDir(a, &markers, parent, bit);
         }
         for (fw.skips.items) |s| {
@@ -288,9 +296,6 @@ pub fn scan(gpa: Allocator, io: Io, opts: Options) !Report {
                         try markDir(a, &markers, filters.parentDir(s.path) orelse continue, vcs_bit);
                     } else if (buildrule.isName(name)) {
                         try candidates.append(a, .{ .path = try a.dupe(u8, s.path), .rule = .name });
-                    } else {
-                        // No name the walk prunes: pruned for its CACHEDIR.TAG.
-                        try candidates.append(a, .{ .path = try a.dupe(u8, s.path), .rule = .cachedir_tag });
                     }
                 },
                 .credentials, .other_volume, .app_library => report.roots[root].left_out += 1,
@@ -1785,6 +1790,41 @@ test "clean --trash never moves a build folder reached through a link" {
     try testing.expect(std.mem.indexOf(u8, report.trash.?.skipped[0].reason, "link") != null);
     try testing.expect(try f.scratch.exists("elsewhere/node_modules/y.js"));
     try testing.expect(try f.scratch.exists("scan/app-moved/node_modules/x.js"));
+}
+
+test "clean leaves a tagged Python virtual environment alone, and finds the build output inside it" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var f = try Fixture.init(a, "clean-venv");
+    defer f.deinit();
+    for ([_][]const u8{ "proj", "proj/.venv", "proj/.venv/lib", "proj/.venv/lib/pkg", "proj/.venv/lib/pkg/__pycache__", "proj/cache" }) |d| try f.scratch.makeDir(d);
+    try f.scratch.writeFile("proj/pyproject.toml", "");
+    try f.scratch.writeFile("proj/.venv/pyvenv.cfg", "home = /usr\n");
+    try f.scratch.writeFile("proj/.venv/CACHEDIR.TAG", fast_walker.cache_dir_signature ++ "\n");
+    try f.scratch.writeFile("proj/.venv/lib/pkg/mod.py", "x = 1\n");
+    try f.scratch.writeFile("proj/.venv/lib/pkg/__pycache__/mod.pyc", "bytecode");
+    // A tagged cache beside it is still build output.
+    try f.scratch.writeFile("proj/cache/CACHEDIR.TAG", fast_walker.cache_dir_signature ++ "\n");
+    try f.scratch.writeFile("proj/cache/blob", "cached");
+
+    var report = try run(testing.allocator, testing.io, .{
+        .roots = &.{f.real},
+        .main_roots = &.{f.path(a, "none")},
+        .guard_fn = Fixture.guard,
+        .guard_ctx = &f,
+        .git_exe = "/nonexistent/zdedupe/git",
+        .trash_fn = fakeTrash,
+        .now = realtimeSeconds() + 2 * std.time.s_per_day,
+    }, true);
+    defer report.deinit();
+    try testing.expect(find(&report, &f, a, "proj/.venv") == null);
+    try testing.expectEqual(Rule.cachedir_tag, find(&report, &f, a, "proj/cache").?.rule);
+    try testing.expectEqual(Rule.name, find(&report, &f, a, "proj/.venv/lib/pkg/__pycache__").?.rule);
+    try testing.expectEqual(@as(usize, 2), report.build_dirs.len);
+    // Its own files stay; only the build output inside it may go.
+    try testing.expect(try f.scratch.exists("proj/.venv/lib/pkg/mod.py"));
+    try testing.expect(try f.scratch.exists("proj/.venv/pyvenv.cfg"));
 }
 
 test "clean never takes a root, and reports a root inside another once" {

@@ -72,7 +72,10 @@ named `node_modules`, `bower_components`, `.zig-cache`, `zig-cache`,
 `Package.swift`; whatever it is called, a Zig cache (folders `h/`, `o/`,
 `tmp/` and `z/`) or an Xcode derived-data folder (`info.plist`, `Build/`,
 `Logs/`, and `Index.noindex/` or `ModuleCache.noindex/`); and any folder
-carrying a valid CACHEDIR.TAG. A layout is judged from the folder's own
+carrying a valid CACHEDIR.TAG, except a Python virtual environment
+(`pyvenv.cfg` directly inside: uv tags them, but people install into them by
+hand). The walk enters tagged folders, so build output inside a virtual
+environment is still found. A layout is judged from the folder's own
 entries, a few stats and nothing read, and asks for names no project uses
 together.
 Roots are resolved to their real path. The walk stays on the roots'

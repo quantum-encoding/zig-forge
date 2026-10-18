@@ -1005,7 +1005,8 @@ const char* zdedupe_results_space_largest(zdedupe_results* r, const char* query_
  * only beside Cargo.toml or pom.xml, .build only beside Package.swift; under
  * any name a Zig cache (h/ o/ tmp/ z/), an Xcode derived-data folder
  * (info.plist, Build/, Logs/, Index.noindex/ or ModuleCache.noindex/) or a
- * folder with a valid CACHEDIR.TAG: the shared rule, src/buildrule.zig),
+ * folder with a valid CACHEDIR.TAG that is not a Python virtual environment
+ * (pyvenv.cfg): the shared rule, src/buildrule.zig),
  * caches (each entry of ~/.cache, ~/Library/Caches, .npm, .pnpm-store,
  * ~/.cargo/registry, ~/.gradle/caches), partial_downloads (.part, .partial,
  * .crdownload, .incomplete, .opdownload, .!qB; 1 MiB or more, below which a

@@ -15,7 +15,11 @@
 //!     the right kind at once, among them names no project uses (`tmp`
 //!     beside `h`, `o` and `z`; an `.noindex` folder), and is judged from the
 //!     folder's own listing: a few stats, nothing read;
-//!   * it holds a valid CACHEDIR.TAG (`fast_walker.hasCacheDirTag`).
+//!   * it holds a valid CACHEDIR.TAG (`fast_walker.hasCacheDirTag`), unless it
+//!     is a Python virtual environment (`venv_marker` directly inside it):
+//!     uv tags those, but people install into one by hand, so nothing
+//!     recreates it. Any entry by that name counts, which only ever keeps
+//!     more.
 //!
 //! The rule is asked of three kinds of evidence: the disk itself (`onDisk`,
 //! `DiskRule`), a disk-space store (space.zig), and a walk's own records
@@ -45,6 +49,9 @@ pub const beside = [_]struct { name: []const u8, manifests: []const []const u8 }
     .{ .name = "target", .manifests = &.{ "Cargo.toml", "pom.xml" } },
     .{ .name = ".build", .manifests = &.{"Package.swift"} },
 };
+
+/// Directly inside a Python virtual environment; see the module doc.
+pub const venv_marker = "pyvenv.cfg";
 
 /// Which part of the rule recognised a folder. The names are part of the
 /// `zdedupe clean` JSON.
@@ -202,6 +209,7 @@ fn ruleOfFolder(path: []const u8, z: [:0]const u8) ?Rule {
     if (shapeOf(DiskProbe{ .dir = path })) |rule| return rule;
     // Nearly every folder has no tag: one stat says so before anything is opened.
     if (!(DiskProbe{ .dir = path }).hasFile("CACHEDIR.TAG")) return null;
+    if ((DiskProbe{ .dir = path }).child(venv_marker) != null) return null;
     const fd = libc.open(z.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(libc.mode_t, 0));
     if (fd < 0) return null;
     defer _ = libc.close(fd);
@@ -352,6 +360,30 @@ test "a tagged folder by any name; an empty tag file is not a tag" {
     try s.writeFile("cache/CACHEDIR.TAG", fast_walker.cache_dir_signature ++ "\n");
     try testing.expectEqual(@as(?Rule, .cachedir_tag), try ruleAt(&s, "cache"));
     try testing.expectEqual(@as(?Rule, null), try ruleAt(&s, "notes"));
+}
+
+test "a tagged Python virtual environment is not build output; near misses still are" {
+    var s = try Scratch.init(testing.allocator, "buildrule-venv");
+    defer s.deinit();
+    const tag = fast_walker.cache_dir_signature ++ "\n";
+    // uv's .venv: tagged, pyvenv.cfg beside the tag.
+    try mk(&s, &.{ ".venv", ".venv/lib", ".venv/bin" }, &.{".venv/pyvenv.cfg"});
+    try s.writeFile(".venv/CACHEDIR.TAG", tag);
+    try testing.expectEqual(@as(?Rule, null), try ruleAt(&s, ".venv"));
+    // Any entry by that name counts, a folder or a link too: that only keeps more.
+    try mk(&s, &.{ "env-dir", "env-dir/pyvenv.cfg" }, &.{});
+    try s.writeFile("env-dir/CACHEDIR.TAG", tag);
+    try testing.expectEqual(@as(?Rule, null), try ruleAt(&s, "env-dir"));
+    // Near misses, still build output: the marker deeper down, or a name like it.
+    try mk(&s, &.{ "deeper", "deeper/bin" }, &.{"deeper/bin/pyvenv.cfg"});
+    try s.writeFile("deeper/CACHEDIR.TAG", tag);
+    try testing.expectEqual(@as(?Rule, .cachedir_tag), try ruleAt(&s, "deeper"));
+    try mk(&s, &.{"backup"}, &.{"backup/pyvenv.cfg.bak"});
+    try s.writeFile("backup/CACHEDIR.TAG", tag);
+    try testing.expectEqual(@as(?Rule, .cachedir_tag), try ruleAt(&s, "backup"));
+    // A venv without a tag was never build output.
+    try mk(&s, &.{"plain-venv"}, &.{"plain-venv/pyvenv.cfg"});
+    try testing.expectEqual(@as(?Rule, null), try ruleAt(&s, "plain-venv"));
 }
 
 test "a listing gathered once answers the same as the disk" {

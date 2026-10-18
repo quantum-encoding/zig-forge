@@ -849,7 +849,7 @@ test "suggestions: build output, cache entries, unfinished downloads, large unto
     try testing.expectEqual(@as(i64, 0), int(kindOf(scoped, "build_output"), "count"));
 }
 
-test "suggestions know a Zig cache, Xcode derived data and a tagged cache, not a near miss" {
+test "suggestions know a Zig cache, Xcode derived data and a tagged cache, not a near miss or a virtual environment" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -876,6 +876,12 @@ test "suggestions know a Zig cache, Xcode derived data and a tagged cache, not a
     try fx.tree.writeFile("work/blobs/CACHEDIR.TAG", "Signature: 8a477f597d28d172789f06886806bc55\n");
     try fx.write("work/notes/todo", 10);
     try fx.tree.writeFile("work/notes/CACHEDIR.TAG", "");
+    // A Python virtual environment uv tagged: not build output, though what
+    // is inside it may be.
+    try fx.write("work/.venv/pyvenv.cfg", 40);
+    try fx.tree.writeFile("work/.venv/CACHEDIR.TAG", "Signature: 8a477f597d28d172789f06886806bc55\n");
+    try fx.write("work/.venv/lib/pkg/mod.py", 2_000);
+    try fx.write("work/.venv/lib/pkg/__pycache__/mod.pyc", 3_000);
     try fx.scan();
     const s = try fx.open(true);
     defer s.close();
@@ -889,7 +895,10 @@ test "suggestions know a Zig cache, Xcode derived data and a tagged cache, not a
     try testing.expect(findItem(items, "MyApp") == null);
     try testing.expect(findItem(items, "blobs") != null);
     try testing.expect(findItem(items, "notes") == null);
-    try testing.expectEqual(@as(usize, 4), items.array.items.len);
+    try testing.expect(findItem(items, ".venv") == null);
+    const pyc = findItem(items, "__pycache__") orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.endsWith(u8, str(pyc, "path"), "/.venv/lib/pkg/__pycache__"));
+    try testing.expectEqual(@as(usize, 5), items.array.items.len);
 }
 
 test "temp areas: build output there is suggested and goes to the Trash, the rest stays protected" {

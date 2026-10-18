@@ -502,8 +502,9 @@ fn printCleanHelp() void {
         \\.mypy_cache, .pytest_cache, .ruff_cache; target beside Cargo.toml or
         \\pom.xml; .build beside Package.swift; under any name, a Zig cache (h/ o/
         \\tmp/ z/) or Xcode derived data (info.plist, Build/, Logs/, *.noindex/);
-        \\and any folder with a valid CACHEDIR.TAG. Nothing else is ever moved, and
-        \\whole project copies never.
+        \\and any folder with a valid CACHEDIR.TAG, except a Python virtual
+        \\environment (pyvenv.cfg). Nothing else is ever moved, and whole project
+        \\copies never.
         \\
         \\OPTIONS:
         \\  --json             The JSON document (schema zdedupe-clean/1, README)
