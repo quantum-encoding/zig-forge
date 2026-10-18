@@ -1512,6 +1512,8 @@ test "clean finds build output by the core's rule, and copies of it by content" 
 }
 
 test "clean --trash moves only old, unprotected build output under a root, rechecked just before" {
+    // --trash and its age check are unsupported on Windows (newestChange).
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -1585,6 +1587,8 @@ test "clean --trash moves only old, unprotected build output under a root, reche
 }
 
 test "clean --older: a just-built folder stays, measured by status changes too" {
+    // --trash and its age check are unsupported on Windows (newestChange).
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -1756,6 +1760,8 @@ test "clean with the core's protection: build output in a temp area may go, the 
 }
 
 test "clean --trash never moves a build folder reached through a link" {
+    // --trash and its age check are unsupported on Windows (newestChange).
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();

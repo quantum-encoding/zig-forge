@@ -1616,15 +1616,41 @@ test "a keeper that is itself being deleted vouches for nothing" {
 // Delete targets are acted on as given: a link is refused, never followed
 // ---------------------------------------------------------------------------
 
-/// `rename(from, to)` inside the fixture's tree, then `to_link` -> `target`.
-fn swapForLink(arena: Allocator, fixture: *const Fixture, name: []const u8, moved_to: []const u8, target: []const u8) !void {
+/// The folder links a test is run with: a symbolic link everywhere, and on
+/// Windows a junction too, the kind its users actually have.
+const LinkKind = enum { symlink, junction };
+
+/// A `kind` link at `name` in the tree to the folder `target` (absolute).
+fn dirLink(fixture: *const Fixture, kind: LinkKind, target: []const u8, name: []const u8) !void {
+    switch (kind) {
+        .symlink => try fixture.tree.symLink(target, name),
+        .junction => try fixture.tree.junction(target, name),
+    }
+}
+
+/// `rename(name, moved_to)` inside the fixture's tree, then a `kind` link at
+/// `name` to `target`.
+fn swapForLink(arena: Allocator, fixture: *const Fixture, kind: LinkKind, name: []const u8, moved_to: []const u8, target: []const u8) !void {
     const from = try arena.dupeSentinel(u8, try treeJoin(arena, fixture, name), 0);
     const to = try arena.dupeSentinel(u8, try treeJoin(arena, fixture, moved_to), 0);
     try testing.expectEqual(@as(c_int, 0), rename(from.ptr, to.ptr));
-    try fixture.tree.symLink(try treeJoin(arena, fixture, target), name);
+    try dirLink(fixture, kind, try treeJoin(arena, fixture, target), name);
+}
+
+fn windowsOnly() !void {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 }
 
 test "a folder delete naming a link to a verified copy is refused, permanently and to the Trash" {
+    try linkAsItem(.symlink);
+}
+
+test "a folder delete naming a link to a verified copy is refused, permanently and to the Trash, with a junction (Windows)" {
+    try windowsOnly();
+    try linkAsItem(.junction);
+}
+
+fn linkAsItem(kind: LinkKind) !void {
     const gpa = testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -1633,7 +1659,7 @@ test "a folder delete naming a link to a verified copy is refused, permanently a
     defer fixture.deinit();
     defer s.close();
     // alias -> q, by absolute path; q is identical to p.
-    try fixture.tree.symLink(try treeJoin(a, &fixture, "q"), "alias");
+    try dirLink(&fixture, kind, try treeJoin(a, &fixture, "q"), "alias");
     const items = try query(a, "[{{\"path\":{s},\"keepers\":[{s}],\"bytes\":100}}]", .{
         try jsonString(a, try treeJoin(a, &fixture, "alias")),
         try jsonString(a, try treeJoin(a, &fixture, "p")),
@@ -1655,6 +1681,15 @@ test "a folder delete naming a link to a verified copy is refused, permanently a
 }
 
 test "a keeper that is the folder being deleted, through a link, vouches for nothing" {
+    try linkAsKeeper(.symlink);
+}
+
+test "a keeper that is the folder being deleted, through a link, vouches for nothing, with a junction (Windows)" {
+    try windowsOnly();
+    try linkAsKeeper(.junction);
+}
+
+fn linkAsKeeper(kind: LinkKind) !void {
     const gpa = testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -1663,7 +1698,7 @@ test "a keeper that is the folder being deleted, through a link, vouches for not
     defer fixture.deinit();
     defer s.close();
     // A keeper named as a link to q itself.
-    try fixture.tree.symLink(try treeJoin(a, &fixture, "q"), "same-as-q");
+    try dirLink(&fixture, kind, try treeJoin(a, &fixture, "q"), "same-as-q");
     const by_link = try query(a, "[{{\"path\":{s},\"keepers\":[{s}],\"bytes\":100}}]", .{
         try jsonString(a, try treeJoin(a, &fixture, "q")),
         try jsonString(a, try treeJoin(a, &fixture, "same-as-q")),
@@ -1673,7 +1708,7 @@ test "a keeper that is the folder being deleted, through a link, vouches for not
     try testing.expect(fixture.exists("q/readme.txt"));
 
     // The scan's own keeper, replaced after the scan by a link to q.
-    try swapForLink(a, &fixture, "p", "p-moved", "q");
+    try swapForLink(a, &fixture, kind, "p", "p-moved", "q");
     const swapped = try query(a, "[{{\"path\":{s},\"keepers\":[{s}],\"bytes\":100}}]", .{
         try jsonString(a, try treeJoin(a, &fixture, "q")),
         try jsonString(a, try treeJoin(a, &fixture, "p")),
@@ -1684,6 +1719,15 @@ test "a keeper that is the folder being deleted, through a link, vouches for not
 }
 
 test "a folder reached through a linked parent is not deleted, permanently or to the Trash" {
+    try linkAsParent(.symlink);
+}
+
+test "a folder reached through a linked parent is not deleted, permanently or to the Trash, with a junction (Windows)" {
+    try windowsOnly();
+    try linkAsParent(.junction);
+}
+
+fn linkAsParent(kind: LinkKind) !void {
     const gpa = testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -1692,7 +1736,7 @@ test "a folder reached through a linked parent is not deleted, permanently or to
     defer fixture.deinit();
     defer s.close();
     // via -> the tree itself: via/q is q, spelled through a link.
-    try fixture.tree.symLink(fixture.tree.path, "via");
+    try dirLink(&fixture, kind, fixture.tree.path, "via");
     const items = try query(a, "[{{\"path\":{s},\"keepers\":[{s}],\"bytes\":100}}]", .{
         try jsonString(a, try treeJoin(a, &fixture, "via/q")),
         try jsonString(a, try treeJoin(a, &fixture, "p")),
@@ -1711,6 +1755,15 @@ test "a folder reached through a linked parent is not deleted, permanently or to
 }
 
 test "a file delete through a folder replaced by a link to the survivor's never takes the survivor" {
+    try linkToSurvivor(.symlink);
+}
+
+test "a file delete through a folder replaced by a link to the survivor's never takes the survivor, with a junction (Windows)" {
+    try windowsOnly();
+    try linkToSurvivor(.junction);
+}
+
+fn linkToSurvivor(kind: LinkKind) !void {
     const gpa = testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -1728,7 +1781,7 @@ test "a file delete through a folder replaced by a link to the survivor's never 
         defer s.close();
         // After the scan, b becomes a link to a: b/dup.bin is a/dup.bin, the
         // copy the rule keeps.
-        try swapForLink(a, &fixture, "b", "b-moved", "a");
+        try swapForLink(a, &fixture, kind, "b", "b-moved", "a");
 
         var bin = try Scratch.init(gpa, "session-link-bin");
         defer bin.deinit();
@@ -1746,6 +1799,15 @@ test "a file delete through a folder replaced by a link to the survivor's never 
 }
 
 test "links, relative paths and missing keepers are refused" {
+    try linksAndRelativePaths(.symlink);
+}
+
+test "links, relative paths and missing keepers are refused, with a junction (Windows)" {
+    try windowsOnly();
+    try linksAndRelativePaths(.junction);
+}
+
+fn linksAndRelativePaths(kind: LinkKind) !void {
     const gpa = testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -1755,7 +1817,11 @@ test "links, relative paths and missing keepers are refused" {
     defer fixture.deinit();
     defer s.close();
 
-    try fixture.tree.symLink("q", "alias");
+    // A symbolic link keeps its relative target; a junction needs an absolute one.
+    switch (kind) {
+        .symlink => try fixture.tree.symLink("q", "alias"),
+        .junction => try fixture.tree.junction(try treeJoin(a, &fixture, "q"), "alias"),
+    }
 
     const items = try query(a,
         \\[{{"path":{s},"keepers":[{s}]}},

@@ -1077,14 +1077,32 @@ test "a root given through a link into a system tree is protected under its real
     try testing.expectEqual(@as(usize, 0), recorder.asked);
 }
 
-fn swapForLink(arena: Allocator, tree: *const Scratch, name: []const u8, moved_to: []const u8, target: []const u8) !void {
+/// Folder links: a symbolic link everywhere, and on Windows a junction too.
+const LinkKind = enum { symlink, junction };
+
+/// `rename(name, moved_to)` inside `tree`, then a `kind` link at `name` to
+/// `target` (inside the tree too).
+fn swapForLink(arena: Allocator, tree: *const Scratch, kind: LinkKind, name: []const u8, moved_to: []const u8, target: []const u8) !void {
     const from = try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ tree.path, name }, 0);
     const to = try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ tree.path, moved_to }, 0);
     try testing.expectEqual(@as(c_int, 0), rename(from.ptr, to.ptr));
-    try tree.symLink(try std.fmt.allocPrint(arena, "{s}/{s}", .{ tree.path, target }), name);
+    const abs = try std.fmt.allocPrint(arena, "{s}/{s}", .{ tree.path, target });
+    switch (kind) {
+        .symlink => try tree.symLink(abs, name),
+        .junction => try tree.junction(abs, name),
+    }
 }
 
 test "the space Trash never acts through a link: a folder or file replaced by one, or below one" {
+    try spaceTrashThroughLinks(.symlink);
+}
+
+test "the space Trash never acts through a link, with junctions (Windows)" {
+    if (comptime @import("builtin").os.tag != .windows) return error.SkipZigTest;
+    try spaceTrashThroughLinks(.junction);
+}
+
+fn spaceTrashThroughLinks(kind: LinkKind) !void {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -1116,10 +1134,11 @@ test "the space Trash never acts through a link: a folder or file replaced by on
 
     // After the scan: media and archive.zip become links to elsewhere's
     // things, and docs and proj become links to elsewhere itself.
-    try swapForLink(arena, &fx.tree, "media", "media-moved", "elsewhere");
-    try swapForLink(arena, &fx.tree, "archive.zip", "archive-moved.zip", "elsewhere/a.pdf");
-    try swapForLink(arena, &fx.tree, "docs", "docs-moved", "elsewhere");
-    try swapForLink(arena, &fx.tree, "proj", "proj-moved", "elsewhere");
+    try swapForLink(arena, &fx.tree, kind, "media", "media-moved", "elsewhere");
+    // A junction cannot lead to a file: the file stays a symbolic link.
+    try swapForLink(arena, &fx.tree, .symlink, "archive.zip", "archive-moved.zip", "elsewhere/a.pdf");
+    try swapForLink(arena, &fx.tree, kind, "docs", "docs-moved", "elsewhere");
+    try swapForLink(arena, &fx.tree, kind, "proj", "proj-moved", "elsewhere");
 
     var recorder: RecordingTrash = .{};
     const request = try std.fmt.allocPrint(arena,
