@@ -710,6 +710,15 @@ typedef int (*zdedupe_trash_fn)(void* user, const char* const* paths, size_t cou
  * zdedupe_results_set_protected) fails with "is in a protected location",
  * whether a rule or a hand put it there.
  *
+ * Links: every delete in the session (files here, folders in
+ * zdedupe_results_delete_folders, the space Trash) acts on a path only as
+ * given. A target, a surviving copy or a folder keeper must be named by its
+ * own real path: a link as the item itself, or a link in any folder above it
+ * (one that replaced a folder after the scan included), is refused before
+ * anything is compared or moved ("is reached through a link ..."), and never
+ * vouches as the copy that survives. Results carry real paths, so requests
+ * built from them pass.
+ *
  * Report: { "deleted": N, "freed_bytes": B, "skipped_changed": N,
  *           "failed_count": N, "failed": [["/path","reason"], ...] (<= 20),
  *           "cancelled": bool, "needs_rescan": bool }

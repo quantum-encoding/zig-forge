@@ -1772,6 +1772,13 @@ pub const Session = struct {
                 report.fail(arena, item.path, "path is too long");
                 continue;
             };
+            // Before anything else, protection included (it matches the path
+            // as spelled): a folder reached through a link is not the folder
+            // the path names. A link as the folder itself is refused below.
+            if (filters_mod.isAbsolute(item.path) and !realpath.parentIsReal(item.path)) {
+                report.fail(arena, item.path, through_link);
+                continue;
+            }
             if (guard.guardsFolder(item.path)) {
                 report.fail(arena, item.path, "is, or holds, a protected location");
                 continue;
@@ -1811,6 +1818,9 @@ pub const Session = struct {
             // keeper that is itself being removed vouches for nothing.
             const verified = for (item.keepers) |keeper| {
                 if (touchedByAny(keeper, items)) continue;
+                // Only a real folder named by its own path vouches: never a
+                // link, which could lead back to the folder being removed.
+                if (!realpath.isReal(keeper)) continue;
                 if (foldersIdentical(self.gpa, item.path, keeper)) break true;
             } else false;
             if (!verified) {
@@ -2135,6 +2145,8 @@ pub const Session = struct {
         for (0..group.file_count) |f| {
             if (std.mem.indexOfScalar(u32, targets, @intCast(f)) != null) continue;
             const file = try self.reader.groupFile(group, f);
+            // A survivor reached through a link may be one of the targets.
+            if (!realpath.parentIsReal(file.path)) continue;
             if (stillACopy(file.path, group.size, file.mtime, &group.hash, verify, prehashed)) {
                 has_survivor = true;
                 break;
@@ -2149,6 +2161,10 @@ pub const Session = struct {
             const file = try self.reader.groupFile(group, f);
             // Whatever put it here — a hand-ticked file, a rule — a protected
             // copy is never deleted.
+            if (!realpath.parentIsReal(file.path)) {
+                report.fail(arena, file.path, through_link);
+                continue;
+            }
             if (guard.protects(file.path)) {
                 report.fail(arena, file.path, "is in a protected location");
                 continue;
@@ -2441,6 +2457,11 @@ pub const Session = struct {
                 report.fail(arena, path, "is a scanned folder; remove what is inside it instead");
                 continue;
             }
+            if (!realpath.parentIsReal(path)) {
+                report.skipped_changed += 1;
+                report.fail(arena, path, through_link);
+                continue;
+            }
             if (view.folderGuarded(&rec, path)) {
                 report.fail(arena, path, "is, or holds, a protected location");
                 continue;
@@ -2504,6 +2525,11 @@ pub const Session = struct {
                     const path = try r.filePath(arena, item.id);
                     if (view.removed.fileRemoved(item.id)) {
                         report.fail(arena, path, "already removed");
+                        continue;
+                    }
+                    if (!realpath.parentIsReal(path)) {
+                        report.skipped_changed += 1;
+                        report.fail(arena, path, through_link);
                         continue;
                     }
                     if (guard.protects(path)) {
@@ -2906,6 +2932,10 @@ const FacetCounter = struct {
 
 /// Why `path` must not be trashed without even looking at it. Null means it
 /// is a real directory.
+/// Why a target is refused when a folder above it is a link (or gone): the
+/// entry the request names is not the one the path reaches.
+const through_link = "is reached through a link (or a folder above it changed since the scan)";
+
 fn folderKind(path: [*:0]const u8) ?[]const u8 {
     const st = pstat.lstat(path) catch return "cannot be read";
     if (!st.isDir()) return "not a real folder (a link or a file)";

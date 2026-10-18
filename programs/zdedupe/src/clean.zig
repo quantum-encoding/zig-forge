@@ -734,6 +734,9 @@ fn checkFolder(gpa: Allocator, opts: Options, now: i64, b: *const BuildDir) Chec
     const age = newestChange(arena_state.allocator(), b.path, b.dev, b.ino);
     check.newest_change = age.newest;
     check.refusal = refusal: {
+        // Named by its own path: a folder reached through a link is not the
+        // one that was found, and protection matched the path as spelled.
+        if (!realpath.isReal(b.path)) break :refusal "is a link, or is reached through one";
         if (opts.guard_fn(opts.guard_ctx, b.path)) break :refusal "is, or holds, a protected location";
         if (insideVcs(b.path)) break :refusal "is inside a version-control store";
         if (!b.complete) break :refusal "parts of it could not be read";
@@ -1745,6 +1748,43 @@ test "clean with the core's protection: build output in a temp area may go, the 
     try testing.expect(!try s.exists("zc"));
     try testing.expect(try s.exists("app/src/main.js"));
     try testing.expect(try s.exists("app/package.json"));
+}
+
+test "clean --trash never moves a build folder reached through a link" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var f = try Fixture.init(a, "clean-link-parent");
+    defer f.deinit();
+    // The root is `scan`; `elsewhere` lies outside it.
+    for ([_][]const u8{ "scan", "scan/app", "scan/app/node_modules", "elsewhere", "elsewhere/node_modules" }) |d| try f.scratch.makeDir(d);
+    try f.scratch.writeFile("scan/app/package.json", "{}");
+    try f.scratch.writeFile("scan/app/node_modules/x.js", "x");
+    try f.scratch.writeFile("elsewhere/node_modules/y.js", "y");
+    const opts: Options = .{
+        .roots = &.{f.path(a, "scan")},
+        .main_roots = &.{f.path(a, "none")},
+        .guard_fn = Fixture.guard,
+        .guard_ctx = &f,
+        .git_exe = "/nonexistent/zdedupe/git",
+        .trash_fn = fakeTrash,
+        .now = realtimeSeconds() + 2 * std.time.s_per_day,
+    };
+    var report = try scan(testing.allocator, testing.io, opts);
+    defer report.deinit();
+    try testing.expectEqual(@as(usize, 1), report.build_dirs.len);
+    try testing.expect(find(&report, &f, a, "scan/app/node_modules").?.trash.eligible);
+    // After the scan, app becomes a link to elsewhere, outside the root:
+    // scan/app/node_modules is now elsewhere's.
+    const app = try a.dupeSentinel(u8, f.path(a, "scan/app"), 0);
+    const app_moved = try a.dupeSentinel(u8, f.path(a, "scan/app-moved"), 0);
+    try testing.expectEqual(@as(c_int, 0), libc.rename(app.ptr, app_moved.ptr));
+    try f.scratch.symLink(f.path(a, "elsewhere"), "scan/app");
+    try trashEligible(testing.allocator, &report, opts);
+    try testing.expectEqual(@as(usize, 0), report.trash.?.moved.len);
+    try testing.expect(std.mem.indexOf(u8, report.trash.?.skipped[0].reason, "link") != null);
+    try testing.expect(try f.scratch.exists("elsewhere/node_modules/y.js"));
+    try testing.expect(try f.scratch.exists("scan/app-moved/node_modules/x.js"));
 }
 
 test "clean never takes a root, and reports a root inside another once" {

@@ -218,6 +218,11 @@ Semantics (`bulk.rs run_delete`, `still_a_copy`, `deletable`):
   the same group's targets before any judgement.
 - `total` = planned targets, set before anything is deleted; `done`
   advances per group; cancel is checked per group.
+- Links: a target, a survivor, a folder to remove or its keeper must be
+  named by its own real path. A link as the item, or in any folder above it
+  (a folder replaced by a link after the scan included), is refused before
+  anything is read, compared or moved, and never stands in as the copy that
+  survives. The same holds for folder deletes and the space Trash.
 - Verify: `lstat` on the exact bytes; must be a regular file (a symlink
   standing where a file was is not a copy) of the group's size; then
   metadata (mtime seconds equal) or content (`hash_file` equals the group's

@@ -1612,6 +1612,139 @@ test "a keeper that is itself being deleted vouches for nothing" {
     try testing.expectEqual(@as(i64, 2), int(report, "skipped_changed"));
 }
 
+// ---------------------------------------------------------------------------
+// Delete targets are acted on as given: a link is refused, never followed
+// ---------------------------------------------------------------------------
+
+/// `rename(from, to)` inside the fixture's tree, then `to_link` -> `target`.
+fn swapForLink(arena: Allocator, fixture: *const Fixture, name: []const u8, moved_to: []const u8, target: []const u8) !void {
+    const from = try arena.dupeSentinel(u8, try treeJoin(arena, fixture, name), 0);
+    const to = try arena.dupeSentinel(u8, try treeJoin(arena, fixture, moved_to), 0);
+    try testing.expectEqual(@as(c_int, 0), rename(from.ptr, to.ptr));
+    try fixture.tree.symLink(try treeJoin(arena, fixture, target), name);
+}
+
+test "a folder delete naming a link to a verified copy is refused, permanently and to the Trash" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture, const s = try openDirs(gpa, "session-folder-link-item");
+    defer fixture.deinit();
+    defer s.close();
+    // alias -> q, by absolute path; q is identical to p.
+    try fixture.tree.symLink(try treeJoin(a, &fixture, "q"), "alias");
+    const items = try query(a, "[{{\"path\":{s},\"keepers\":[{s}],\"bytes\":100}}]", .{
+        try jsonString(a, try treeJoin(a, &fixture, "alias")),
+        try jsonString(a, try treeJoin(a, &fixture, "p")),
+    });
+
+    const permanent = try parse(a, s.deleteFolders(items, false, null, null));
+    try testing.expectEqual(@as(i64, 0), int(permanent, "deleted"));
+    try testing.expectEqual(@as(i64, 1), int(permanent, "failed_count"));
+    try testing.expect(fixture.exists("q/readme.txt") and fixture.exists("alias") and fixture.exists("p"));
+
+    var bin = try Scratch.init(gpa, "session-link-bin");
+    defer bin.deinit();
+    var trash: FakeTrash = .{ .gpa = gpa, .bin = bin.path };
+    defer trash.deinit();
+    const to_trash = try parse(a, s.deleteFolders(items, true, FakeTrash.callback, &trash));
+    try testing.expectEqual(@as(i64, 0), int(to_trash, "deleted"));
+    try testing.expectEqual(@as(usize, 0), trash.calls);
+    try testing.expect(fixture.exists("q/readme.txt") and fixture.exists("alias"));
+}
+
+test "a keeper that is the folder being deleted, through a link, vouches for nothing" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture, const s = try openDirs(gpa, "session-folder-link-keeper");
+    defer fixture.deinit();
+    defer s.close();
+    // A keeper named as a link to q itself.
+    try fixture.tree.symLink(try treeJoin(a, &fixture, "q"), "same-as-q");
+    const by_link = try query(a, "[{{\"path\":{s},\"keepers\":[{s}],\"bytes\":100}}]", .{
+        try jsonString(a, try treeJoin(a, &fixture, "q")),
+        try jsonString(a, try treeJoin(a, &fixture, "same-as-q")),
+    });
+    const r1 = try parse(a, s.deleteFolders(by_link, false, null, null));
+    try testing.expectEqual(@as(i64, 0), int(r1, "deleted"));
+    try testing.expect(fixture.exists("q/readme.txt"));
+
+    // The scan's own keeper, replaced after the scan by a link to q.
+    try swapForLink(a, &fixture, "p", "p-moved", "q");
+    const swapped = try query(a, "[{{\"path\":{s},\"keepers\":[{s}],\"bytes\":100}}]", .{
+        try jsonString(a, try treeJoin(a, &fixture, "q")),
+        try jsonString(a, try treeJoin(a, &fixture, "p")),
+    });
+    const r2 = try parse(a, s.deleteFolders(swapped, false, null, null));
+    try testing.expectEqual(@as(i64, 0), int(r2, "deleted"));
+    try testing.expect(fixture.exists("q/readme.txt") and fixture.exists("p-moved/readme.txt"));
+}
+
+test "a folder reached through a linked parent is not deleted, permanently or to the Trash" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture, const s = try openDirs(gpa, "session-folder-link-parent");
+    defer fixture.deinit();
+    defer s.close();
+    // via -> the tree itself: via/q is q, spelled through a link.
+    try fixture.tree.symLink(fixture.tree.path, "via");
+    const items = try query(a, "[{{\"path\":{s},\"keepers\":[{s}],\"bytes\":100}}]", .{
+        try jsonString(a, try treeJoin(a, &fixture, "via/q")),
+        try jsonString(a, try treeJoin(a, &fixture, "p")),
+    });
+    const permanent = try parse(a, s.deleteFolders(items, false, null, null));
+    try testing.expectEqual(@as(i64, 0), int(permanent, "deleted"));
+    try testing.expect(fixture.exists("q/readme.txt"));
+    var bin = try Scratch.init(gpa, "session-link-bin");
+    defer bin.deinit();
+    var trash: FakeTrash = .{ .gpa = gpa, .bin = bin.path };
+    defer trash.deinit();
+    const to_trash = try parse(a, s.deleteFolders(items, true, FakeTrash.callback, &trash));
+    try testing.expectEqual(@as(i64, 0), int(to_trash, "deleted"));
+    try testing.expectEqual(@as(usize, 0), trash.calls);
+    try testing.expect(fixture.exists("q/readme.txt"));
+}
+
+test "a file delete through a folder replaced by a link to the survivor's never takes the survivor" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |use_trash| {
+        var fixture = try Fixture.init(gpa, "session-file-link-parent", &bulk_tree);
+        defer fixture.deinit();
+        // One modification time for every copy, so a/dup.bin stands in for
+        // b/dup.bin by metadata as well as by content.
+        for ([_][]const u8{ "a/dup.bin", "b/dup.bin", "c/dup.bin", "a/other.bin", "b/other.bin" }) |rel| {
+            try setMtime(try a.dupeSentinel(u8, try treeJoin(a, &fixture, rel), 0), 1_700_000_000);
+        }
+        try fixture.scan();
+        var s = try fixture.open(null);
+        defer s.close();
+        // After the scan, b becomes a link to a: b/dup.bin is a/dup.bin, the
+        // copy the rule keeps.
+        try swapForLink(a, &fixture, "b", "b-moved", "a");
+
+        var bin = try Scratch.init(gpa, "session-link-bin");
+        defer bin.deinit();
+        var trash: FakeTrash = .{ .gpa = gpa, .bin = bin.path };
+        defer trash.deinit();
+        const report = if (use_trash)
+            try parse(a, s.delete("{\"rule\":{\"filters\":{}}}", true, FakeTrash.callback, &trash))
+        else
+            try parse(a, s.delete("{\"rule\":{\"filters\":{}}}", false, null, null));
+        _ = report;
+        try testing.expect(fixture.exists("a/dup.bin"));
+        try testing.expect(fixture.exists("a/other.bin"));
+        try testing.expect(fixture.exists("b-moved/dup.bin") and fixture.exists("b-moved/other.bin"));
+    }
+}
+
 test "links, relative paths and missing keepers are refused" {
     const gpa = testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);

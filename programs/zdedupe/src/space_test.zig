@@ -124,6 +124,9 @@ const setenv = if (@import("builtin").os.tag == .windows) sysc.setenv else struc
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 }.setenv;
 const rename = @import("sys.zig").c.rename;
+const utimes = if (@import("builtin").os.tag == .windows) sysc.utimes else struct {
+    extern "c" fn utimes(path: [*:0]const u8, times: ?*const [2]sysc.timeval) c_int;
+}.utimes;
 
 fn parse(arena: Allocator, json: ?[:0]const u8) !Value {
     const text = json orelse return error.CallFailed;
@@ -1063,4 +1066,60 @@ test "a root given through a link into a system tree is protected under its real
     const report = try parse(arena, s.spaceTrash(request.items, RecordingTrash.callback, &recorder));
     try testing.expectEqual(@as(i64, 0), int(report, "deleted"));
     try testing.expectEqual(@as(usize, 0), recorder.asked);
+}
+
+fn swapForLink(arena: Allocator, tree: *const Scratch, name: []const u8, moved_to: []const u8, target: []const u8) !void {
+    const from = try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ tree.path, name }, 0);
+    const to = try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ tree.path, moved_to }, 0);
+    try testing.expectEqual(@as(c_int, 0), rename(from.ptr, to.ptr));
+    try tree.symLink(try std.fmt.allocPrint(arena, "{s}/{s}", .{ tree.path, target }), name);
+}
+
+test "the space Trash never acts through a link: a folder or file replaced by one, or below one" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    // A second home for what the links will lead to: same names, same sizes.
+    try fx.write("elsewhere/a.pdf", 20_000);
+    try fx.write("elsewhere/node_modules/pkg/index.js", 5_000);
+    try fx.scan();
+    const s = try fx.open(true);
+    defer s.close();
+
+    const root = try parse(arena, s.spaceChildren("{\"limit\":500}"));
+    const items = field(field(root, "groups").array.items[0], "items");
+    const archive_id = int(findItem(items, "archive.zip").?, "id");
+    const media_id = int(findItem(items, "media").?, "id");
+    const docs = try parse(arena, s.spaceChildren(try std.fmt.allocPrint(arena, "{{\"node\":{d}}}", .{int(findItem(items, "docs").?, "id")})));
+    const pdf = findItem(field(field(docs, "groups").array.items[0], "items"), "a.pdf").?;
+    const proj = try parse(arena, s.spaceChildren(try std.fmt.allocPrint(arena, "{{\"node\":{d}}}", .{int(findItem(items, "proj").?, "id")})));
+    const nm_id = int(findItem(field(field(proj, "groups").array.items[0], "items"), "node_modules").?, "id");
+
+    // elsewhere/a.pdf gets docs/a.pdf's modification time, so only the
+    // path tells them apart.
+    const pdf_path = try std.fmt.allocPrintSentinel(arena, "{s}/docs/a.pdf", .{fx.tree.path}, 0);
+    const st = try pstat.lstat(pdf_path.ptr);
+    const other_pdf = try std.fmt.allocPrintSentinel(arena, "{s}/elsewhere/a.pdf", .{fx.tree.path}, 0);
+    const times = [2]sysc.timeval{ .{ .sec = st.mtime_sec, .usec = 0 }, .{ .sec = st.mtime_sec, .usec = 0 } };
+    try testing.expectEqual(@as(c_int, 0), utimes(other_pdf.ptr, &times));
+
+    // After the scan: media and archive.zip become links to elsewhere's
+    // things, and docs and proj become links to elsewhere itself.
+    try swapForLink(arena, &fx.tree, "media", "media-moved", "elsewhere");
+    try swapForLink(arena, &fx.tree, "archive.zip", "archive-moved.zip", "elsewhere/a.pdf");
+    try swapForLink(arena, &fx.tree, "docs", "docs-moved", "elsewhere");
+    try swapForLink(arena, &fx.tree, "proj", "proj-moved", "elsewhere");
+
+    var recorder: RecordingTrash = .{};
+    const request = try std.fmt.allocPrint(arena,
+        \\{{"items":[{{"kind":"dir","id":{d}}},{{"kind":"file","id":{d}}},{{"kind":"file","id":{d}}},{{"kind":"dir","id":{d}}}]}}
+    , .{ media_id, archive_id, int(pdf, "id"), nm_id });
+    const report = try parse(arena, s.spaceTrash(request, RecordingTrash.callback, &recorder));
+    try testing.expectEqual(@as(i64, 0), int(report, "deleted"));
+    try testing.expectEqual(@as(i64, 4), int(report, "failed_count"));
+    try testing.expectEqual(@as(usize, 0), recorder.asked);
+    try testing.expect(fx.tree.exists("elsewhere/a.pdf") catch false);
+    try testing.expect(fx.tree.exists("elsewhere/node_modules/pkg/index.js") catch false);
 }

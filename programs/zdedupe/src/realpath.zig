@@ -55,6 +55,35 @@ pub fn freeAll(gpa: Allocator, paths: []const []u8) void {
     gpa.free(paths);
 }
 
+// ---------------------------------------------------------------------------
+// Delete targets: acted on as given, never through a link
+// ---------------------------------------------------------------------------
+//
+// Resolving is for scanning and matching. Whatever is deleted, trashed or
+// trusted as the copy that survives must be named by its own real path, so
+// the entry acted on is the one the request names and every rule matched
+// against that path (protection above all) saw where it really is. These are
+// asked immediately before each action, never remembered.
+
+/// Every folder above `path` is a real folder reached through no link (and
+/// exists). Its last component is the caller's to check (`lstat`), which
+/// tells a link there apart from a missing entry.
+pub fn parentIsReal(path: []const u8) bool {
+    const parent = filters.parentDir(path) orelse return true;
+    return isReal(parent);
+}
+
+/// `path` exists and is its own real path: no link anywhere in it.
+pub fn isReal(path: []const u8) bool {
+    var in_buf: [sys.c.PATH_MAX]u8 = undefined;
+    if (path.len >= in_buf.len) return false;
+    @memcpy(in_buf[0..path.len], path);
+    in_buf[path.len] = 0;
+    var out_buf: [sys.c.PATH_MAX]u8 = undefined;
+    const resolved = sys.c.realpath(@ptrCast(&in_buf), &out_buf) orelse return false;
+    return std.mem.eql(u8, filters.trimSep(std.mem.span(resolved)), filters.trimSep(path));
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -80,4 +109,24 @@ test "a link resolves to what it names; a missing path is kept as given" {
     const kept = try orGiven(testing.allocator, "/nonexistent/zdedupe/x");
     defer testing.allocator.free(kept);
     try testing.expectEqualStrings("/nonexistent/zdedupe/x", kept);
+}
+
+test "a path through a link is not its own real path" {
+    var s = try Scratch.init(testing.allocator, "realpath-exact");
+    defer s.deinit();
+    try s.makeDir("real");
+    try s.writeFile("real/f", "x");
+    try s.symLink("real", "link");
+    const real_f = try s.join("real/f");
+    defer testing.allocator.free(real_f);
+    const via = try s.join("link/f");
+    defer testing.allocator.free(via);
+    const link = try s.join("link");
+    defer testing.allocator.free(link);
+    try testing.expect(isReal(real_f) and parentIsReal(real_f));
+    try testing.expect(!isReal(via) and !parentIsReal(via));
+    // The link itself: its parent is real, it is not.
+    try testing.expect(parentIsReal(link) and !isReal(link));
+    try testing.expect(!isReal("/nonexistent/zdedupe/x"));
+    try testing.expect(parentIsReal("/"));
 }
