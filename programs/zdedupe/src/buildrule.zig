@@ -381,7 +381,7 @@ test "places for the temp-area exception, remembered until reset" {
 
 test "on disk in $TMPDIR: build output may go, a path through a link may not" {
     if (comptime !@import("builtin").os.tag.isDarwin()) return error.SkipZigTest;
-    var s = try Scratch.init(testing.allocator, "buildrule-temp");
+    var s = try Scratch.initTemp(testing.allocator, "buildrule-temp");
     defer s.deinit();
     try mk(&s, &.{ "x", "y", "y/node_modules", "app", "app/node_modules" }, &.{ "y/node_modules/a.js", "app/node_modules/b.js", "app/main.js" });
     try s.symLink("../y", "x/lnk");

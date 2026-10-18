@@ -53,6 +53,7 @@ const session_mod = @import("session.zig");
 const pstat = @import("pstat.zig");
 const dedupe = @import("dedupe.zig");
 const buildrule = @import("buildrule.zig");
+const realpath = @import("realpath.zig");
 const libc = @import("sys.zig").c;
 
 const Allocator = std.mem.Allocator;
@@ -263,8 +264,9 @@ pub fn scanToStore(gpa: Allocator, config: ScanConfig, paths: []const []const u8
     fw.setNoMaterialize(true);
     fw.setExcludes(config.excludes);
 
+    // By their real paths, as a duplicate scan walks them.
     const roots = try dedupe.coveringRootsOf(gpa, paths);
-    defer gpa.free(roots);
+    defer realpath.freeAll(gpa, roots);
 
     // macOS `/` is the sealed system volume; the user's data lives on the Data
     // volume, joined in by firmlinks (/Users, /Applications, /private, ...).
@@ -272,7 +274,9 @@ pub fn scanToStore(gpa: Allocator, config: ScanConfig, paths: []const []const u8
     // mount point is left out so nothing is counted twice.
     var exclude_paths: std.ArrayListUnmanaged([]const u8) = .empty;
     defer exclude_paths.deinit(gpa);
-    try exclude_paths.appendSlice(gpa, config.exclude_paths);
+    const real_excludes = try realpath.allOrGiven(gpa, config.exclude_paths);
+    defer realpath.freeAll(gpa, real_excludes);
+    for (real_excludes) |p| try exclude_paths.append(gpa, p);
     if (comptime builtin.os.tag == .macos) {
         for (roots) |root| {
             if (!std.mem.eql(u8, root, "/")) continue;

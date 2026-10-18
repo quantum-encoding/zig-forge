@@ -170,6 +170,13 @@ adds its own with `zdedupe_results_set_protected` and lists them all with
 under `delete_only_under`; elsewhere a system copy does not make a project's
 own copy expendable. Code: `src/keep.zig`, `src/protect.zig`.
 
+Paths are real paths. A scan walks each root by its real path (links
+resolved), so results and stores carry real paths, and the session resolves
+what a host names the same way: the roots given at open, the home folder and
+the host's protected roots (each matched both as given and by its real path).
+A root reached through a link therefore gets the same protection as the
+folder it names.
+
 One exception: inside a temp area (macOS `/private/tmp` and the account's
 `/private/var/folders/<a>/<b>/T`, Linux `/tmp` and `/var/tmp`, Windows
 `%TEMP%`), build output is not protected by where it is: a folder the shared

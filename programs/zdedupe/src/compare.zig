@@ -24,6 +24,7 @@ const hasher = @import("hasher.zig");
 const walker = @import("walker.zig");
 const fast_walker = @import("fast_walker.zig");
 const libc = @import("sys.zig").c;
+const realpath = @import("realpath.zig");
 
 // Stat comes from pstat.zig: std.c ($INODE64-correct) on Darwin, statx on Linux.
 const pstat = @import("pstat.zig");
@@ -69,9 +70,14 @@ pub const FolderComparator = struct {
 
     /// Compare two folders. With `config.monitor`, reports progress through it
     /// and stops with error.Cancelled when it is cancelled.
-    pub fn compare(self: *FolderComparator, folder_a: []const u8, folder_b: []const u8) !types.CompareResult {
+    pub fn compare(self: *FolderComparator, given_a: []const u8, given_b: []const u8) !types.CompareResult {
         const allocator = self.allocator;
         const monitor = self.config.monitor;
+        // Both sides by their real paths, as every scan walks its roots.
+        const folder_a = try realpath.orGiven(allocator, given_a);
+        defer allocator.free(folder_a);
+        const folder_b = try realpath.orGiven(allocator, given_b);
+        defer allocator.free(folder_b);
         var result = try types.CompareResult.init(allocator, folder_a, folder_b);
         errdefer result.deinit();
 
@@ -655,3 +661,26 @@ test "a cancelled comparison stops with error.Cancelled" {
     try std.testing.expectError(error.Cancelled, comparator.compare(a, b));
 }
 
+
+test "a folder given through a link is compared, and reported, by its real path" {
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "compare-link");
+    defer scratch.deinit();
+    for ([_][]const u8{ "a", "b" }) |d| try scratch.makeDir(d);
+    try scratch.writeFile("a/same.txt", "hello");
+    try scratch.writeFile("b/same.txt", "hello");
+    try scratch.symLink("a", "via-link");
+    const link = try scratch.join("via-link");
+    defer allocator.free(link);
+    const a = try scratch.join("a");
+    defer allocator.free(a);
+    const b = try scratch.join("b");
+    defer allocator.free(b);
+
+    var comparator = FolderComparator.init(allocator, .{ .min_size = 0, .threads = 2 });
+    var result = try comparator.compare(link, b);
+    defer result.deinit();
+    try std.testing.expectEqualStrings(a, result.folder_a);
+    try expectNames(result.identical.items, &.{"same.txt"});
+    try std.testing.expect(result.isIdentical());
+}

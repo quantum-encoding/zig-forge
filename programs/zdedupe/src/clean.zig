@@ -44,6 +44,7 @@ const types = @import("types.zig");
 const fast_walker = @import("fast_walker.zig");
 const dedupe = @import("dedupe.zig");
 const buildrule = @import("buildrule.zig");
+const realpath = @import("realpath.zig");
 const protect = @import("protect.zig");
 const filters = @import("filters.zig");
 const pstat = @import("pstat.zig");
@@ -222,7 +223,10 @@ pub const Options = struct {
 /// protect.zig, with the real home folder from the user database and the
 /// build-output rule on disk for its temp-area exception.
 pub fn protectedByCore(_: ?*const anyopaque, path: []const u8) bool {
-    const home = if (session.userHome()) |h| filters.trimSep(h) else null;
+    // The home folder by its real path, as the roots and findings are.
+    var buf: [8192]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const home = if (session.userHome()) |h| (realpath.of(fba.allocator(), filters.trimSep(h)) catch null) orelse filters.trimSep(h) else null;
     const guard: protect.Protection = .{ .home = home, .build_output = buildrule.on_disk };
     return guard.guardsFolder(path);
 }
@@ -1335,6 +1339,12 @@ const Fixture = struct {
         return .{ .scratch = scratch, .real = gitinfo.realPath(arena, scratch.path).? };
     }
 
+    /// In the operating system's temporary folder: a temp area.
+    fn initTemp(arena: Allocator, label: []const u8) !Fixture {
+        const scratch = try Scratch.initTemp(testing.allocator, label);
+        return .{ .scratch = scratch, .real = gitinfo.realPath(arena, scratch.path).? };
+    }
+
     fn deinit(self: *Fixture) void {
         self.scratch.deinit();
     }
@@ -1702,7 +1712,7 @@ test "clean with the core's protection: build output in a temp area may go, the 
     const a = arena_state.allocator();
     // The scratch tree is in $TMPDIR, by its real path: on macOS
     // /private/var/folders/<a>/<b>/T, a temp area inside protected /private.
-    var f = try Fixture.init(a, "clean-temp");
+    var f = try Fixture.initTemp(a, "clean-temp");
     defer f.deinit();
     const s = &f.scratch;
     for ([_][]const u8{ "app", "app/node_modules", "app/node_modules/pkg", "app/src", "zc", "zc/h", "zc/o", "zc/tmp", "zc/z" }) |d| try s.makeDir(d);

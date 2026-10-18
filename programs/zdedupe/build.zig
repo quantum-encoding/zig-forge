@@ -130,6 +130,7 @@ pub fn build(b: *std.Build) void {
     // Test each module
     const test_modules = [_][]const u8{
         "src/types.zig",
+        "src/realpath.zig",
         "src/hasher.zig",
         "src/pstat.zig",
         "src/reparse.zig",

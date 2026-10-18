@@ -40,10 +40,15 @@ const Fixture = struct {
     store_path: [:0]u8,
 
     fn init(gpa: Allocator) !Fixture {
-        // Scratch trees default to $TMPDIR, which on macOS is under /var — a
-        // system tree, where every file would be categorised `system`.
-        if (@import("builtin").os.tag != .windows) _ = setenv("TMPDIR", "/tmp", 1);
-        var tree = try Scratch.init(gpa, "space");
+        return initIn(gpa, false);
+    }
+
+    /// `temp`: the tree in the operating system's temporary folder (on macOS
+    /// /private/tmp, a temp area inside the protected /private tree), not
+    /// where test fixtures normally live.
+    fn initIn(gpa: Allocator, temp: bool) !Fixture {
+        if (temp and @import("builtin").os.tag != .windows) _ = setenv("TMPDIR", "/tmp", 1);
+        var tree = if (temp) try Scratch.initTemp(gpa, "space") else try Scratch.init(gpa, "space");
         errdefer tree.deinit();
         var out = try Scratch.init(gpa, "space-store");
         errdefer out.deinit();
@@ -885,10 +890,11 @@ test "suggestions know a Zig cache, Xcode derived data and a tagged cache, not a
 }
 
 test "temp areas: build output there is suggested and goes to the Trash, the rest stays protected" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var fx = try Fixture.init(testing.allocator);
+    var fx = try Fixture.initIn(testing.allocator, true);
     defer fx.deinit();
     try fx.write("zc/h/manifest.txt", 1_000);
     try fx.write("zc/o/abc/libx.a", 9_000);
@@ -943,4 +949,118 @@ test "temp areas: build output there is suggested and goes to the Trash, the res
     } else {
         try testing.expectEqual(@as(i64, 4), int(report, "deleted"));
     }
+}
+
+/// A Trash that records what it was asked to take and moves nothing.
+const RecordingTrash = struct {
+    asked: usize = 0,
+
+    fn callback(user: ?*anyopaque, paths: [*]const [*:0]const u8, count: usize, err_out: [*]u8, err_cap: usize) callconv(.c) c_int {
+        _ = paths;
+        _ = err_out;
+        _ = err_cap;
+        const self: *RecordingTrash = @ptrCast(@alignCast(user.?));
+        self.asked += count;
+        return 0;
+    }
+};
+
+fn realOf(arena: Allocator, path: [*:0]const u8) ![]const u8 {
+    var buf: [sysc.PATH_MAX]u8 = undefined;
+    const r = sysc.realpath(path, &buf) orelse return error.TestUnexpectedResult;
+    return arena.dupe(u8, std.mem.span(r));
+}
+
+test "a root given through a link is scanned, protected and reported by its real path" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    var links = try Scratch.init(testing.allocator, "space-links");
+    defer links.deinit();
+    try links.symLink(fx.tree.path, "tree-link");
+    const via = try links.joinZ("tree-link");
+    defer testing.allocator.free(via);
+
+    try fx.scanAt(via);
+    const s = try fx.openAt(via);
+    defer s.close();
+    const overview = try parse(arena, s.spaceOverview());
+    try testing.expectEqualStrings(fx.tree.path, field(overview, "roots").array.items[0].string);
+
+    // The host protects one folder by its real path and one by the link's
+    // spelling: the results carry real paths, and both hold.
+    const protected = try std.fmt.allocPrint(arena, "[\"{s}/docs\",\"{s}/media\"]", .{ fx.tree.path, via });
+    try testing.expect(s.setProtected(protected));
+    const root = try parse(arena, s.spaceChildren("{\"limit\":500}"));
+    const items = field(field(root, "groups").array.items[0], "items");
+    try testing.expect(std.mem.startsWith(u8, str(findItem(items, "docs").?, "path"), fx.tree.path));
+    try testing.expect(field(findItem(items, "docs").?, "protected").bool);
+    try testing.expect(field(findItem(items, "media").?, "protected").bool);
+    try testing.expect(!field(findItem(items, "archive.zip").?, "protected").bool);
+
+    var recorder: RecordingTrash = .{};
+    const docs = try parse(arena, s.spaceChildren(try std.fmt.allocPrint(arena, "{{\"node\":{d}}}", .{int(findItem(items, "docs").?, "id")})));
+    const pdf_id = int(findItem(field(field(docs, "groups").array.items[0], "items"), "a.pdf").?, "id");
+    const refused = try parse(arena, s.spaceTrash(try std.fmt.allocPrint(arena, "{{\"items\":[{{\"kind\":\"file\",\"id\":{d}}}]}}", .{pdf_id}), RecordingTrash.callback, &recorder));
+    try testing.expectEqual(@as(i64, 0), int(refused, "deleted"));
+    try testing.expectEqual(@as(usize, 0), recorder.asked);
+
+    // An ordinary file there goes, by its real path.
+    var bin = try Scratch.init(testing.allocator, "space-bin");
+    defer bin.deinit();
+    var trash: FakeTrash = .{ .bin = bin.path };
+    const zip_id = int(findItem(items, "archive.zip").?, "id");
+    const moved = try parse(arena, s.spaceTrash(try std.fmt.allocPrint(arena, "{{\"items\":[{{\"kind\":\"file\",\"id\":{d}}}]}}", .{zip_id}), FakeTrash.callback, &trash));
+    try testing.expectEqual(@as(i64, 1), int(moved, "deleted"));
+    try testing.expect(!(fx.tree.exists("archive.zip") catch true));
+}
+
+test "a root given through a link into a system tree is protected under its real path" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A small folder inside a protected tree, under whichever spelling this
+    // system has (on macOS the first is really /private/var/db/timezone/...).
+    const candidates = [_][:0]const u8{ "/usr/share/zoneinfo/Antarctica", "/usr/share/dict" };
+    const target = for (candidates) |c| {
+        const st = pstat.stat(c.ptr) catch continue;
+        if (st.isDir()) break c;
+    } else return error.SkipZigTest;
+    const real_target = try realOf(arena, target.ptr);
+
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    var links = try Scratch.init(testing.allocator, "space-syslink");
+    defer links.deinit();
+    try links.symLink(target, "sys");
+    const via = try links.joinZ("sys");
+    defer testing.allocator.free(via);
+
+    try fx.scanAt(via);
+    const s = try fx.openAt(via);
+    defer s.close();
+    const overview = try parse(arena, s.spaceOverview());
+    try testing.expectEqualStrings(real_target, field(overview, "roots").array.items[0].string);
+
+    const root = try parse(arena, s.spaceChildren("{\"limit\":500}"));
+    const items = field(field(root, "groups").array.items[0], "items").array.items;
+    try testing.expect(items.len > 0);
+    var request: std.ArrayListUnmanaged(u8) = .empty;
+    try request.appendSlice(arena, "{\"items\":[");
+    for (items, 0..) |item, i| {
+        try testing.expect(std.mem.startsWith(u8, str(item, "path"), real_target));
+        try testing.expect(field(item, "protected").bool);
+        if (i > 0) try request.append(arena, ',');
+        const kind = if (std.mem.eql(u8, str(item, "kind"), "file")) "file" else "dir";
+        try request.print(arena, "{{\"kind\":\"{s}\",\"id\":{d}}}", .{ kind, int(item, "id") });
+    }
+    try request.appendSlice(arena, "]}");
+    // Nothing is even offered to the Trash, which would move nothing anyway.
+    var recorder: RecordingTrash = .{};
+    const report = try parse(arena, s.spaceTrash(request.items, RecordingTrash.callback, &recorder));
+    try testing.expectEqual(@as(i64, 0), int(report, "deleted"));
+    try testing.expectEqual(@as(usize, 0), recorder.asked);
 }

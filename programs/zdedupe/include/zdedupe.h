@@ -62,6 +62,12 @@ void zdedupe_free(zdedupe_ctx* ctx);
  * For find_duplicates mode: Add multiple paths to search
  * For compare_folders mode: Add exactly two paths to compare
  *
+ * Every scan walks a path by its real path (links resolved: realpath, or the
+ * final path by handle on Windows), and results and stores carry real paths:
+ * protection and every other rule match paths as spelled, and a root given
+ * through a link (macOS /tmp, a link to /System) must not escape them. A path
+ * that does not resolve fails the scan as before.
+ *
  * @param ctx  Context handle
  * @param path Absolute path to add
  * @return 0 on success, -1 on failure
@@ -209,7 +215,7 @@ int zdedupe_add_exclude(zdedupe_ctx* ctx, const char* name);
  * Never scan this absolute path: a folder is skipped with everything beneath
  * it, a file just itself. For the user's own "do not look here" rules, beside
  * zdedupe_add_exclude's names. A scan root is never skipped. Applies to
- * duplicate scans.
+ * duplicate scans. Matched by its real path, like the roots.
  *
  * @return 0 on success, -1 if the path is empty or not absolute
  */
@@ -502,8 +508,9 @@ typedef struct zdedupe_results zdedupe_results;
  *
  * @param store_path the .zds file zdedupe_run_to_file wrote
  * @param roots_json a JSON array of the scan's root paths, or NULL. When
- *        given (a fresh scan) it is written to the roots sidecar and the
- *        removed sidecar is discarded. When NULL (reopening) both sidecars
+ *        given (a fresh scan) each is resolved to its real path, as the scan
+ *        walked it, and those are what the session reports and writes to the
+ *        roots sidecar; the removed sidecar is discarded. When NULL (reopening) both sidecars
  *        are loaded, and roots absent from the sidecar fall back to the
  *        deepest directory containing every path in the results.
  * @return a session, or NULL if the store fails validation, cannot be read,
@@ -625,8 +632,10 @@ const char* zdedupe_results_bulk_plan(zdedupe_results* r, const char* query_json
  * protected, and so does anything a store, package or user root protects.
  *
  * set_protected replaces the host's own additions with a JSON array of
- * absolute folders; 0 ok, -1 invalid (see last_error). A folder delete is
- * also refused when the folder holds a protected root.
+ * absolute folders; 0 ok, -1 invalid (see last_error). Each protects both as
+ * given and by its real path (results carry real paths); `protected` lists
+ * them as given. A folder delete is also refused when the folder holds a
+ * protected root.
  *
  * protected returns { "system": [...], "home": [...], "stores": [...],
  * "packages": [...], "user": [...] } for a UI to show.

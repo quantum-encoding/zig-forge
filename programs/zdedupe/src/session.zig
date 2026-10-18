@@ -51,6 +51,7 @@ const keep_mod = @import("keep.zig");
 const protect_mod = @import("protect.zig");
 const space_mod = @import("space.zig");
 const buildrule = @import("buildrule.zig");
+const realpath = @import("realpath.zig");
 
 const Allocator = std.mem.Allocator;
 const Filters = filters_mod.Filters;
@@ -391,8 +392,11 @@ pub const Session = struct {
     clone_tally: CloneTally = .empty,
     /// The user's home directory, owned; null when HOME is unset.
     home: ?[]u8 = null,
-    /// Protected roots the host added, owned.
+    /// Protected roots the host added, owned, as the host spelled them.
     user_protected: [][]u8 = &.{},
+    /// The same roots and, where one differs, each one's real path: what
+    /// protection matches, since the results carry real paths. Owned.
+    user_protected_match: [][]u8 = &.{},
     /// The build-output rule on disk for the temp-area exception, its
     /// answers kept for the length of one call.
     build_rule: *buildrule.DiskRule,
@@ -467,8 +471,12 @@ pub const Session = struct {
 
         const fresh = roots_json != null;
         if (roots_json) |json| {
-            self.roots = parseRoots(gpa, json) catch return error.BadRootsJson;
-            self.writeRootsSidecar(json);
+            const given = parseRoots(gpa, json) catch return error.BadRootsJson;
+            defer realpath.freeAll(gpa, given);
+            // The scan walked its roots by their real paths, so the results
+            // (and the location facets that start from these) carry those.
+            self.roots = try realpath.allOrGiven(gpa, given);
+            self.writeRootsSidecarFor(self.roots);
         } else {
             self.roots = self.loadRootsSidecar() catch &.{};
             if (self.roots.len == 0) self.roots = try self.deriveRoots();
@@ -476,7 +484,8 @@ pub const Session = struct {
         self.removed.attach(self.store_path, fresh) catch {};
         if (userHome()) |home| {
             const trimmed = std.mem.trimEnd(u8, home, "/");
-            if (trimmed.len > 0) self.home = gpa.dupe(u8, trimmed) catch null;
+            // By its real path, as the results spell what lies inside it.
+            if (trimmed.len > 0) self.home = realpath.orGiven(gpa, trimmed) catch null;
         }
         return self;
     }
@@ -539,6 +548,15 @@ pub const Session = struct {
 
     fn rootsSidecar(self: *const Session) ![:0]u8 {
         return removed_mod.sidecarPath(self.gpa, self.store_path, "roots.json");
+    }
+
+    /// `writeRootsSidecar` for a list of roots.
+    fn writeRootsSidecarFor(self: *Session, roots: []const []const u8) void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        json.write(roots) catch return;
+        self.writeRootsSidecar(out.writer.buffered());
     }
 
     /// Best effort: without it, results reopened later fall back to deriving
@@ -612,13 +630,16 @@ pub const Session = struct {
     // --- protection -------------------------------------------------------
 
     fn protection(self: *const Session) protect_mod.Protection {
-        return .{ .home = self.home, .user = self.user_protected, .build_output = self.build_rule.hook() };
+        return .{ .home = self.home, .user = self.user_protected_match, .build_output = self.build_rule.hook() };
     }
 
     fn freeUserProtected(self: *Session) void {
         for (self.user_protected) |root| self.gpa.free(root);
         self.gpa.free(self.user_protected);
         self.user_protected = &.{};
+        for (self.user_protected_match) |root| self.gpa.free(root);
+        self.gpa.free(self.user_protected_match);
+        self.user_protected_match = &.{};
     }
 
     /// Replace the roots the host added to the built-in protected locations.
@@ -650,8 +671,31 @@ pub const Session = struct {
             };
             filled += 1;
         }
+        var match: std.ArrayListUnmanaged([]u8) = .empty;
+        defer {
+            for (match.items) |p| self.gpa.free(p);
+            match.deinit(self.gpa);
+        }
+        for (owned) |path| {
+            const spelled = self.gpa.dupe(u8, path) catch return self.protectedOutOfMemory(owned);
+            match.append(self.gpa, spelled) catch {
+                self.gpa.free(spelled);
+                return self.protectedOutOfMemory(owned);
+            };
+            const real = (realpath.of(self.gpa, path) catch return self.protectedOutOfMemory(owned)) orelse continue;
+            if (std.mem.eql(u8, real, path)) {
+                self.gpa.free(real);
+                continue;
+            }
+            match.append(self.gpa, real) catch {
+                self.gpa.free(real);
+                return self.protectedOutOfMemory(owned);
+            };
+        }
+        const match_owned = match.toOwnedSlice(self.gpa) catch return self.protectedOutOfMemory(owned);
         self.freeUserProtected();
         self.user_protected = owned;
+        self.user_protected_match = match_owned;
         return true;
     }
 
@@ -666,13 +710,26 @@ pub const Session = struct {
             self.fail("home \"{s}\" is not an absolute path", .{path});
             return false;
         }
-        const owned = filters_mod.normalizeOwned(self.gpa, path) catch {
+        const normalized = filters_mod.normalizeOwned(self.gpa, path) catch {
+            self.fail("out of memory", .{});
+            return false;
+        };
+        defer self.gpa.free(normalized);
+        // By its real path, as the results spell what lies inside it.
+        const owned = realpath.orGiven(self.gpa, normalized) catch {
             self.fail("out of memory", .{});
             return false;
         };
         if (self.home) |old| self.gpa.free(old);
         self.home = owned;
         return true;
+    }
+
+    fn protectedOutOfMemory(self: *Session, owned: [][]u8) bool {
+        for (owned) |p| self.gpa.free(p);
+        self.gpa.free(owned);
+        self.fail("out of memory", .{});
+        return false;
     }
 
     /// Every protected location in force, for a UI to show: the built-in

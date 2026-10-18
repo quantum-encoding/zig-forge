@@ -33,6 +33,7 @@ const libc = @import("sys.zig").c;
 const pstat = @import("pstat.zig");
 const filters = @import("filters.zig");
 const buildrule = @import("buildrule.zig");
+const realpath = @import("realpath.zig");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -183,11 +184,9 @@ fn homeDir() ?[]const u8 {
     return @import("session.zig").userHome();
 }
 
+/// The core's real path of `path` (realpath.zig), in `arena`.
 pub fn realPath(arena: Allocator, path: []const u8) ?[]const u8 {
-    const z = arena.dupeSentinel(u8, path, 0) catch return null;
-    var buf: [libc.PATH_MAX]u8 = undefined;
-    const resolved = libc.realpath(z.ptr, &buf) orelse return null;
-    return arena.dupe(u8, std.mem.span(resolved)) catch null;
+    return realpath.of(arena, path) catch null;
 }
 
 /// `url` safe to print: an http(s) URL loses its user part entirely (a

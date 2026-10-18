@@ -20,6 +20,7 @@ const dirs = @import("dirs.zig");
 const chunked = @import("chunked.zig");
 const builtin = @import("builtin");
 const sys = @import("sys.zig");
+const realpath = @import("realpath.zig");
 
 /// Cross-platform timestamp for elapsed time measurement using clock_gettime
 const Timestamp = struct {
@@ -126,7 +127,6 @@ pub const DupeFinder = struct {
         fw.setMonitor(self.config.monitor);
         fw.setIncludeHidden(self.config.include_hidden);
         fw.setExcludes(self.config.excludes);
-        fw.setExcludePaths(self.config.exclude_paths);
         fw.setExcludeCacheDirs(self.config.exclude_cache_dirs);
         fw.setOneFilesystem(self.config.one_filesystem);
         fw.setSkipAppLibraries(self.config.skip_app_libraries);
@@ -151,9 +151,14 @@ pub const DupeFinder = struct {
             fw.setFollowSymlinks(self.config.follow_symlinks);
         }
 
+        // Walked by their real paths, so every rule that matches paths
+        // (protection above all) sees where the files really are.
         const roots = try self.coveringRoots(paths);
-        defer self.allocator.free(roots);
+        defer realpath.freeAll(self.allocator, roots);
         self.summary.overlapping_roots = paths.len - roots.len;
+        const exclude_paths = try realpath.allOrGiven(self.allocator, self.config.exclude_paths);
+        defer realpath.freeAll(self.allocator, exclude_paths);
+        fw.setExcludePaths(exclude_paths);
 
         for (roots) |path| {
             fw.walk(path) catch |err| switch (err) {
@@ -280,7 +285,7 @@ pub const DupeFinder = struct {
     /// duplicates of each other: one file, offered for deletion as its own
     /// copy. Compared by canonical path, so a symlinked spelling of a root is
     /// caught too. Caller frees the slice (not the strings).
-    fn coveringRoots(self: *DupeFinder, paths: []const []const u8) ![]const []const u8 {
+    fn coveringRoots(self: *DupeFinder, paths: []const []const u8) ![][]u8 {
         return coveringRootsOf(self.allocator, paths);
     }
 
@@ -705,10 +710,11 @@ pub const DupeFinder = struct {
     }
 };
 
-/// Canonical absolute form of `path` (symlinks resolved), or null if it cannot
-/// be resolved. Caller frees.
+/// The roots to walk: each by its real path (realpath.zig), in the order
+/// given, leaving out any that another root already covers. Every string is owned;
+/// free with `realpath.freeAll`.
 /// See `DupeFinder.coveringRoots`; shared with the disk-space scan.
-pub fn coveringRootsOf(allocator: std.mem.Allocator, paths: []const []const u8) ![]const []const u8 {
+pub fn coveringRootsOf(allocator: std.mem.Allocator, paths: []const []const u8) ![][]u8 {
     const canonical = try allocator.alloc(?[]u8, paths.len);
     @memset(canonical, null);
     defer {
@@ -716,17 +722,20 @@ pub fn coveringRootsOf(allocator: std.mem.Allocator, paths: []const []const u8) 
         allocator.free(canonical);
     }
     for (paths, canonical) |path, *slot| {
-        slot.* = try canonicalPath(allocator, path);
+        slot.* = try realpath.of(allocator, path);
     }
 
-    var kept: std.ArrayListUnmanaged([]const u8) = .empty;
-    errdefer kept.deinit(allocator);
+    var kept: std.ArrayListUnmanaged([]u8) = .empty;
+    errdefer {
+        for (kept.items) |p| allocator.free(p);
+        kept.deinit(allocator);
+    }
 
     outer: for (paths, 0..) |path, i| {
         // Unresolvable (missing, unreadable): keep it so the walk fails
         // and the failure is counted where callers already look for it.
         const mine = canonical[i] orelse {
-            try kept.append(allocator, path);
+            try kept.append(allocator, try allocator.dupe(u8, path));
             continue;
         };
         for (canonical, 0..) |maybe_other, j| {
@@ -738,18 +747,9 @@ pub fn coveringRootsOf(allocator: std.mem.Allocator, paths: []const []const u8) 
             if (same and j < i) continue :outer;
             if (!same and isInside(mine, other)) continue :outer;
         }
-        try kept.append(allocator, path);
+        try kept.append(allocator, try allocator.dupe(u8, mine));
     }
     return kept.toOwnedSlice(allocator);
-}
-
-fn canonicalPath(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
-    const path_z = try allocator.dupeSentinel(u8, path, 0);
-    defer allocator.free(path_z);
-
-    var buf: [sys.c.PATH_MAX]u8 = undefined;
-    const resolved = sys.c.realpath(path_z.ptr, &buf) orelse return null;
-    return try allocator.dupe(u8, std.mem.span(resolved));
 }
 
 /// True if canonical path `inner` lies strictly inside canonical path `outer`.
@@ -906,4 +906,35 @@ test "APFS clones are read once, share a clone class, and count as one copy" {
     // The clone's hash came from its original, not from a read.
     try std.testing.expectEqual(@as(u64, 1), finder.getSummary().clone_hash_skips);
     try std.testing.expectEqual(@as(u64, 2), finder.getSummary().full_hash_jobs);
+}
+
+test "a root given through a link is walked by its real path, and so is an exclude" {
+    const allocator = std.testing.allocator;
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    var scratch = try Scratch.init(allocator, "dedupe-link");
+    defer scratch.deinit();
+    try scratch.makeDir("real");
+    try scratch.makeDir("real/skip");
+    try scratch.writeFile("real/one.txt", "the same bytes");
+    try scratch.writeFile("real/two.txt", "the same bytes");
+    try scratch.writeFile("real/skip/three.txt", "the same bytes");
+    try scratch.symLink("real", "link");
+    const link = try scratch.join("link");
+    defer allocator.free(link);
+    const real_root = try scratch.join("real");
+    defer allocator.free(real_root);
+    // The exclude is spelled through the link too.
+    const skip = try scratch.join("link/skip");
+    defer allocator.free(skip);
+
+    var finder = DupeFinder.init(allocator, .{ .min_size = 0, .exclude_paths = &.{skip} });
+    defer finder.deinit();
+    try finder.scan(&.{link});
+    const groups = finder.getGroups();
+    try std.testing.expectEqual(@as(usize, 1), groups.len);
+    try std.testing.expectEqual(@as(usize, 2), groups[0].count());
+    for (groups[0].file_infos.items) |info| {
+        try std.testing.expect(std.mem.startsWith(u8, info.path, real_root));
+        try std.testing.expect(info.path[real_root.len] == '/');
+    }
 }
