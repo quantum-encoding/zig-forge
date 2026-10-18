@@ -200,6 +200,8 @@ fn ruleOfFolder(path: []const u8, z: [:0]const u8) ?Rule {
         }
     }
     if (shapeOf(DiskProbe{ .dir = path })) |rule| return rule;
+    // Nearly every folder has no tag: one stat says so before anything is opened.
+    if (!(DiskProbe{ .dir = path }).hasFile("CACHEDIR.TAG")) return null;
     const fd = libc.open(z.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(libc.mode_t, 0));
     if (fd < 0) return null;
     defer _ = libc.close(fd);
@@ -207,12 +209,14 @@ fn ruleOfFolder(path: []const u8, z: [:0]const u8) ?Rule {
     return null;
 }
 
-/// What `path` is now, for protect.zig's temp-area exception.
-pub fn placeOf(path: []const u8) protect.Place {
+/// What `path` is now, for protect.zig's temp-area exception; with `rule`
+/// false only whether it is a real folder.
+pub fn placeOf(path: []const u8, rule: bool) protect.Place {
     var buf: [4096]u8 = undefined;
     const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{path}, 0) catch return .other;
     const st = pstat.lstat(z.ptr) catch return .other;
     if (!st.isDir()) return .other;
+    if (!rule) return .folder;
     return if (ruleOfFolder(path, z) != null) .build_output else .folder;
 }
 
@@ -222,7 +226,10 @@ pub fn placeOf(path: []const u8) protect.Place {
 pub const DiskRule = struct {
     /// Null: nothing is remembered.
     arena: ?std.heap.ArenaAllocator = null,
-    memo: std.StringHashMapUnmanaged(protect.Place) = .empty,
+    memo: std.StringHashMapUnmanaged(Known) = .empty,
+
+    /// An answer, and whether the build-output rule was asked for it.
+    const Known = struct { place: protect.Place, ruled: bool };
 
     pub fn init(gpa: Allocator) DiskRule {
         return .{ .arena = std.heap.ArenaAllocator.init(gpa) };
@@ -243,21 +250,29 @@ pub const DiskRule = struct {
         return .{ .ctx = self, .classify = classify };
     }
 
-    fn classify(ctx: ?*anyopaque, path: []const u8) protect.Place {
-        const self: *DiskRule = @ptrCast(@alignCast(ctx orelse return placeOf(path)));
-        const arena = if (self.arena) |*a| a.allocator() else return placeOf(path);
-        if (self.memo.get(path)) |p| return p;
-        const place = placeOf(path);
-        const key = arena.dupe(u8, path) catch return place;
-        self.memo.put(arena, key, place) catch {};
+    fn classify(ctx: ?*anyopaque, path: []const u8, rule: bool) protect.Place {
+        const self: *DiskRule = @ptrCast(@alignCast(ctx orelse return placeOf(path, rule)));
+        const arena = if (self.arena) |*a| a.allocator() else return placeOf(path, rule);
+        const gop = self.memo.getOrPut(arena, path) catch return placeOf(path, rule);
+        if (gop.found_existing) {
+            const known = gop.value_ptr.*;
+            if (known.ruled or !rule or known.place == .other) return known.place;
+        } else {
+            gop.key_ptr.* = arena.dupe(u8, path) catch {
+                _ = self.memo.remove(path);
+                return placeOf(path, rule);
+            };
+        }
+        const place = placeOf(path, rule);
+        gop.value_ptr.* = .{ .place = place, .ruled = rule };
         return place;
     }
 };
 
 /// The rule on disk with nothing remembered.
 pub const on_disk: protect.BuildOutput = .{ .classify = struct {
-    fn f(_: ?*anyopaque, path: []const u8) protect.Place {
-        return placeOf(path);
+    fn f(_: ?*anyopaque, path: []const u8, rule: bool) protect.Place {
+        return placeOf(path, rule);
     }
 }.f };
 
@@ -364,19 +379,19 @@ test "places for the temp-area exception, remembered until reset" {
     var rule = DiskRule.init(testing.allocator);
     defer rule.deinit();
     const hook = rule.hook();
-    try testing.expectEqual(protect.Place.build_output, hook.classify(hook.ctx, nm));
-    try testing.expectEqual(protect.Place.folder, hook.classify(hook.ctx, p));
-    try testing.expectEqual(protect.Place.other, hook.classify(hook.ctx, f));
+    try testing.expectEqual(protect.Place.build_output, hook.classify(hook.ctx, nm, true));
+    try testing.expectEqual(protect.Place.folder, hook.classify(hook.ctx, p, true));
+    try testing.expectEqual(protect.Place.other, hook.classify(hook.ctx, f, true));
     // Remembered: renaming it away does not change the answer until reset.
     const nm_z = try s.joinZ("p/node_modules");
     defer testing.allocator.free(nm_z);
     const moved_z = try s.joinZ("p/moved");
     defer testing.allocator.free(moved_z);
     try testing.expectEqual(@as(c_int, 0), libc.rename(nm_z.ptr, moved_z.ptr));
-    try testing.expectEqual(protect.Place.build_output, hook.classify(hook.ctx, nm));
+    try testing.expectEqual(protect.Place.build_output, hook.classify(hook.ctx, nm, true));
     rule.reset();
-    try testing.expectEqual(protect.Place.other, hook.classify(hook.ctx, nm));
-    try testing.expectEqual(protect.Place.other, on_disk.classify(null, nm));
+    try testing.expectEqual(protect.Place.other, hook.classify(hook.ctx, nm, true));
+    try testing.expectEqual(protect.Place.other, on_disk.classify(null, nm, true));
 }
 
 test "on disk in $TMPDIR: build output may go, a path through a link may not" {

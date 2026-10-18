@@ -120,7 +120,9 @@ pub const Place = enum {
 /// Answers `Place` for a path; buildrule.zig provides the real one.
 pub const BuildOutput = struct {
     ctx: ?*anyopaque = null,
-    classify: *const fn (ctx: ?*anyopaque, path: []const u8) Place,
+    /// What `path` is on disk. With `rule` false only whether it is a real
+    /// folder is asked, and any real folder may answer `.folder`.
+    classify: *const fn (ctx: ?*anyopaque, path: []const u8, rule: bool) Place,
 };
 
 /// The temporary area `path` lies in (the area's own path, a prefix of
@@ -176,20 +178,28 @@ pub const Protection = struct {
 
     /// `path` is build output inside a temp area, or inside build output
     /// there, with only real folders between the area and it.
-    fn tempBuildOutput(self: *const Protection, path: []const u8) bool {
+    /// Not inlined: inside `protects` it slows every path's other checks,
+    /// and it runs only for paths in protected places.
+    noinline fn tempBuildOutput(self: *const Protection, path: []const u8) bool {
         const rule = self.build_output orelse return false;
         const area = tempAreaOf(self.home, path) orelse return false;
+        if (path.len <= area.len + 1) return false;
         var found = false;
-        var at: []const u8 = path;
-        while (at.len > area.len) {
-            switch (rule.classify(rule.ctx, at)) {
+        // The folders between the area and the item, nearest the area first.
+        // Each must be a real folder; below a build folder that is all that
+        // is asked of them.
+        var end = area.len;
+        while (std.mem.indexOfScalarPos(u8, path, end + 1, '/')) |slash| {
+            switch (rule.classify(rule.ctx, path[0..slash], !found)) {
                 .build_output => found = true,
                 .folder => {},
-                // The item itself may be a file or a link; a folder above it may not.
-                .other => if (at.ptr != path.ptr or at.len != path.len) return false,
+                .other => return false,
             }
-            at = filters.parentDir(at) orelse return false;
+            end = slash;
         }
+        // The item itself, when nothing above it is: a folder may be build
+        // output, a file or a link never is.
+        if (!found) found = rule.classify(rule.ctx, path, true) == .build_output;
         return found;
     }
 
@@ -416,7 +426,7 @@ const FakeDisk = struct {
         return .{ .ctx = @constCast(self), .classify = classify };
     }
 
-    fn classify(ctx: ?*anyopaque, path: []const u8) Place {
+    fn classify(ctx: ?*anyopaque, path: []const u8, _: bool) Place {
         const self: *const FakeDisk = @ptrCast(@alignCast(ctx.?));
         for (self.build) |b| if (std.mem.eql(u8, b, path)) return .build_output;
         for (self.links) |l| if (std.mem.eql(u8, l, path)) return .other;
@@ -442,7 +452,7 @@ test "build output in a temp area is not protected; the rest of it is" {
         // A path through a link resolves past it: /private/tmp/s/link may lead
         // to /private/etc, whose node_modules is then a build folder by path.
         .build = &.{ "/private/tmp/s/app/node_modules", "/private/var/folders/ab/cd/T/w/zcache3", "/private/tmp/s/link/node_modules" },
-        .links = &.{ "/private/tmp/s/link", "/private/tmp/s/link-to-build" },
+        .links = &.{ "/private/tmp/s/link", "/private/tmp/s/link-to-build", "/private/tmp/s/app/node_modules/lnk" },
         .files = &.{ "/private/tmp/s/notes.txt", "/private/tmp/s/app/node_modules/a.js" },
     };
     const p: Protection = .{ .home = "/Users/u", .build_output = disk.hook() };
@@ -471,6 +481,9 @@ test "build output in a temp area is not protected; the rest of it is" {
     try testing.expect(p.protects("/private/tmp/s/link/node_modules"));
     try testing.expect(p.protects("/private/tmp/s/link/node_modules/a.js"));
     try testing.expect(p.protects("/private/tmp/s/link-to-build/node_modules/a.js"));
+    // Inside build output too: a link between the build folder and the item.
+    try testing.expect(p.protects("/private/tmp/s/app/node_modules/lnk/a.js"));
+    try testing.expect(!p.protects("/private/tmp/s/app/node_modules/lnk"));
     // Outside temp areas nothing changes: build output in /private/etc or
     // $TMPDIR's sibling caches stays protected.
     const etc: FakeDisk = .{ .build = &.{ "/private/etc/node_modules", "/private/var/folders/ab/cd/C/zcache" } };
