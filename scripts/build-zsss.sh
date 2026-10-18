@@ -64,7 +64,8 @@ forge_zig_require
 # NDK: darwin-x86_64 on every Mac (Rosetta on Apple silicon), linux-x86_64 on Linux.
 find_ndk() {
   local c sdk
-  for c in "${ANDROID_NDK_HOME:-}" "${NDK_HOME:-}"; do
+  # Homebrew's android-ndk cask links its NDK at <prefix>/share/android-ndk.
+  for c in "${ANDROID_NDK_HOME:-}" "${NDK_HOME:-}" /opt/homebrew/share/android-ndk /usr/local/share/android-ndk; do
     [ -n "$c" ] && [ -d "$c/toolchains/llvm/prebuilt" ] && { echo "$c"; return 0; }
   done
   for sdk in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$HOME/Library/Android/sdk" "$HOME/Android/Sdk"; do
