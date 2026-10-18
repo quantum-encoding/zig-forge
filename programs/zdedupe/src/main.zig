@@ -500,13 +500,16 @@ fn printCleanHelp() void {
         \\node_modules, bower_components, .zig-cache, zig-cache, zig-out, DerivedData,
         \\__pycache__, .next, .nuxt, .svelte-kit, .turbo, .parcel-cache, .tox,
         \\.mypy_cache, .pytest_cache, .ruff_cache; target beside Cargo.toml or
-        \\pom.xml; .build beside Package.swift; and any folder with a valid
-        \\CACHEDIR.TAG. Nothing else is ever moved, and whole project copies never.
+        \\pom.xml; .build beside Package.swift; under any name, a Zig cache (h/ o/
+        \\tmp/ z/) or Xcode derived data (info.plist, Build/, Logs/, *.noindex/);
+        \\and any folder with a valid CACHEDIR.TAG. Nothing else is ever moved, and
+        \\whole project copies never.
         \\
         \\OPTIONS:
         \\  --json             The JSON document (schema zdedupe-clean/1, README)
         \\  --trash            Move eligible build folders to the Trash: below a root
-        \\                     (never a root), not protected, not inside .git, read
+        \\                     (never a root), not protected (build output in a temp
+        \\                     area such as /private/tmp is not), not inside .git, read
         \\                     completely, and nothing in them modified or changed
         \\                     for AGE. Each is checked again just before it moves.
         \\                     Never deletes anything permanently.

@@ -50,6 +50,7 @@ const removed_mod = @import("removed.zig");
 const keep_mod = @import("keep.zig");
 const protect_mod = @import("protect.zig");
 const space_mod = @import("space.zig");
+const buildrule = @import("buildrule.zig");
 
 const Allocator = std.mem.Allocator;
 const Filters = filters_mod.Filters;
@@ -392,6 +393,9 @@ pub const Session = struct {
     home: ?[]u8 = null,
     /// Protected roots the host added, owned.
     user_protected: [][]u8 = &.{},
+    /// The build-output rule on disk for the temp-area exception, its
+    /// answers kept for the length of one call.
+    build_rule: *buildrule.DiskRule,
     /// Reused by `planGroup`, one entry per surviving copy.
     plan_members: std.ArrayListUnmanaged(keep_mod.Member) = .empty,
     plan_kept: std.ArrayListUnmanaged(bool) = .empty,
@@ -440,6 +444,9 @@ pub const Session = struct {
 
         const self = try gpa.create(Session);
         errdefer gpa.destroy(self);
+        const build_rule = try gpa.create(buildrule.DiskRule);
+        errdefer gpa.destroy(build_rule);
+        build_rule.* = .init(gpa);
         self.* = .{
             .gpa = gpa,
             .arena = .init(gpa),
@@ -449,11 +456,13 @@ pub const Session = struct {
             .roots = &.{},
             .removed = .init(gpa),
             .space = space_reader,
+            .build_rule = build_rule,
         };
         errdefer {
             self.arena.deinit();
             gpa.free(self.store_path);
             self.removed.deinit();
+            build_rule.deinit();
         }
 
         const fresh = roots_json != null;
@@ -485,6 +494,8 @@ pub const Session = struct {
         if (self.home) |home| gpa.free(home);
         self.freeUserProtected();
         self.removed.deinit();
+        self.build_rule.deinit();
+        gpa.destroy(self.build_rule);
         for (self.roots) |root| gpa.free(root);
         gpa.free(self.roots);
         gpa.free(self.store_path);
@@ -519,6 +530,8 @@ pub const Session = struct {
     /// arena backs this one.
     fn beginCall(self: *Session) Allocator {
         _ = self.arena.reset(.retain_capacity);
+        // What the disk said during the last call may have changed since.
+        self.build_rule.reset();
         return self.arena.allocator();
     }
 
@@ -599,7 +612,7 @@ pub const Session = struct {
     // --- protection -------------------------------------------------------
 
     fn protection(self: *const Session) protect_mod.Protection {
-        return .{ .home = self.home, .user = self.user_protected };
+        return .{ .home = self.home, .user = self.user_protected, .build_output = self.build_rule.hook() };
     }
 
     fn freeUserProtected(self: *Session) void {

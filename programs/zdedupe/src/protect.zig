@@ -7,7 +7,20 @@
 //! every way of deleting — the bulk rule, a hand-ticked file, a folder — skips
 //! them. The built-in list cannot be switched off; a host can only add to it.
 //!
-//! Matching is over raw path bytes and allocates nothing.
+//! **Temp areas.** Build output inside a temporary area (`tempAreaOf`: macOS
+//! `/private/tmp` and each account's `/private/var/folders/<a>/<b>/T`, Linux
+//! `/tmp` and `/var/tmp`, Windows `%TEMP%`) is not protected by where it is:
+//! a build folder there (buildrule.zig decides) and everything inside it.
+//! Everything else in a temp area, the area itself, its other folders and
+//! its loose files, stays exactly as protected as before, and so does
+//! anything the other rules protect (a repository store, a package, a root
+//! the user added). Only when every folder between the area and the path is
+//! a real folder, not a link, so a path through a link never borrows the
+//! exception.
+//!
+//! Matching is over raw path bytes and allocates nothing. The exception
+//! alone looks at the disk, through `Protection.build_output`; without one
+//! there is no exception.
 
 const std = @import("std");
 const filters = @import("filters.zig");
@@ -94,33 +107,64 @@ pub const package_suffixes = [_][]const u8{
     ".aaxplugin",
 } ++ types.Config.app_library_suffixes;
 
+/// What a path is on disk, as the temp-area exception needs to know.
+pub const Place = enum {
+    /// A file, a link, or nothing at all.
+    other,
+    /// A real folder that is not build output.
+    folder,
+    /// A real folder the build-output rule recognises.
+    build_output,
+};
+
+/// Answers `Place` for a path; buildrule.zig provides the real one.
+pub const BuildOutput = struct {
+    ctx: ?*anyopaque = null,
+    classify: *const fn (ctx: ?*anyopaque, path: []const u8) Place,
+};
+
+/// The temporary area `path` lies in (the area's own path, a prefix of
+/// `path`), or null. Real paths: macOS `/tmp` is `/private/tmp`.
+pub fn tempAreaOf(home: ?[]const u8, path: []const u8) ?[]const u8 {
+    for ([_][]const u8{ "/private/tmp", "/tmp", "/var/tmp" }) |area| {
+        if (filters.isAtOrUnder(path, area)) return path[0..area.len];
+    }
+    // Each account's own: /private/var/folders/<a>/<b>/T, which is $TMPDIR
+    // (its siblings C and 0 are caches and state, not temporary).
+    const folders = "/private/var/folders/";
+    if (std.mem.startsWith(u8, path, folders)) {
+        var parts = std.mem.splitScalar(u8, path[folders.len..], '/');
+        const a = parts.next() orelse return null;
+        const b = parts.next() orelse return null;
+        const t = parts.next() orelse return null;
+        if (a.len > 0 and b.len > 0 and std.mem.eql(u8, t, "T")) return path[0 .. folders.len + a.len + 1 + b.len + 1 + 1];
+    }
+    // %TEMP%: <home>/AppData/Local/Temp, compared as NTFS compares names.
+    if (windows) {
+        const h = home orelse return null;
+        const tail = "/AppData/Local/Temp";
+        if (path.len < h.len + tail.len) return null;
+        if (!std.ascii.eqlIgnoreCase(path[0..h.len], h)) return null;
+        if (!std.ascii.eqlIgnoreCase(path[h.len..][0..tail.len], tail)) return null;
+        const end = h.len + tail.len;
+        if (path.len == end or path[end] == '/') return path[0..end];
+    }
+    return null;
+}
+
 pub const Protection = struct {
     /// The user's home directory, without a trailing slash; null when unknown,
     /// which leaves `home_roots` unenforced.
     home: ?[]const u8 = null,
     /// Absolute roots the user added. Borrowed.
     user: []const []const u8 = &.{},
+    /// The build-output rule on disk, for the temp-area exception; null
+    /// leaves every temp area as protected as the rest of its tree.
+    build_output: ?BuildOutput = null,
 
     /// True when a delete must leave `path` alone.
     pub fn protects(self: *const Protection, path: []const u8) bool {
-        for (system_roots) |root| {
-            if (filters.isAtOrUnder(path, root)) return true;
-        }
-        if (windows) {
-            if (belowDrive(path)) |rest| {
-                for (windows_drive_roots) |root| {
-                    if (atOrUnderIgnoreCase(rest, root)) return true;
-                }
-            }
-        }
-        if (self.home) |home| {
-            if (filters.isAtOrUnder(path, home) and path.len > home.len + 1) {
-                const rest = path[home.len + 1 ..];
-                for (home_roots) |root| {
-                    if (filters.isAtOrUnder(rest, root)) return true;
-                }
-            }
-        }
+        if (protectedPlace(self.home, path) and !self.tempBuildOutput(path)) return true;
         for (self.user) |root| {
             if (filters.isAtOrUnder(path, root)) return true;
         }
@@ -128,6 +172,25 @@ pub const Protection = struct {
             if (containsDirs(path, dirs)) return true;
         }
         return inProtectedComponent(path);
+    }
+
+    /// `path` is build output inside a temp area, or inside build output
+    /// there, with only real folders between the area and it.
+    fn tempBuildOutput(self: *const Protection, path: []const u8) bool {
+        const rule = self.build_output orelse return false;
+        const area = tempAreaOf(self.home, path) orelse return false;
+        var found = false;
+        var at: []const u8 = path;
+        while (at.len > area.len) {
+            switch (rule.classify(rule.ctx, at)) {
+                .build_output => found = true,
+                .folder => {},
+                // The item itself may be a file or a link; a folder above it may not.
+                .other => if (at.ptr != path.ptr or at.len != path.len) return false,
+            }
+            at = filters.parentDir(at) orelse return false;
+        }
+        return found;
     }
 
     /// True when deleting the folder `dir` would take a protected location
@@ -166,6 +229,29 @@ pub const Protection = struct {
         return false;
     }
 };
+
+/// `path` lies in an operating-system tree or a per-user application tree.
+fn protectedPlace(home: ?[]const u8, path: []const u8) bool {
+    for (system_roots) |root| {
+        if (filters.isAtOrUnder(path, root)) return true;
+    }
+    if (windows) {
+        if (belowDrive(path)) |rest| {
+            for (windows_drive_roots) |root| {
+                if (atOrUnderIgnoreCase(rest, root)) return true;
+            }
+        }
+    }
+    if (home) |h| {
+        if (filters.isAtOrUnder(path, h) and path.len > h.len + 1) {
+            const rest = path[h.len + 1 ..];
+            for (home_roots) |root| {
+                if (filters.isAtOrUnder(rest, root)) return true;
+            }
+        }
+    }
+    return false;
+}
 
 /// `home/rel` lies at or below `dir`, a folder inside the home folder.
 fn holdsBelowHome(home: []const u8, rel: []const u8, dir: []const u8) bool {
@@ -317,4 +403,92 @@ test "Windows system locations are protected on every drive, whatever the case" 
     try t.expect(p.guardsFolder("C:/"));
     try t.expect(p.guardsFolder("C:/Users"));
     try t.expect(!p.guardsFolder("C:/Users/rich/Documents"));
+}
+
+/// A disk where `build` lists the build folders, `links` the links and
+/// `files` the files; every other path is a real folder.
+const FakeDisk = struct {
+    build: []const []const u8 = &.{},
+    links: []const []const u8 = &.{},
+    files: []const []const u8 = &.{},
+
+    fn hook(self: *const FakeDisk) BuildOutput {
+        return .{ .ctx = @constCast(self), .classify = classify };
+    }
+
+    fn classify(ctx: ?*anyopaque, path: []const u8) Place {
+        const self: *const FakeDisk = @ptrCast(@alignCast(ctx.?));
+        for (self.build) |b| if (std.mem.eql(u8, b, path)) return .build_output;
+        for (self.links) |l| if (std.mem.eql(u8, l, path)) return .other;
+        for (self.files) |f| if (std.mem.eql(u8, f, path)) return .other;
+        return .folder;
+    }
+};
+
+test "temp areas, by real path" {
+    try testing.expectEqualStrings("/private/tmp", tempAreaOf(null, "/private/tmp/x/node_modules").?);
+    try testing.expectEqualStrings("/private/var/folders/ab/cd123/T", tempAreaOf(null, "/private/var/folders/ab/cd123/T/zig/o").?);
+    try testing.expectEqualStrings("/tmp", tempAreaOf(null, "/tmp/build").?);
+    try testing.expectEqualStrings("/var/tmp", tempAreaOf(null, "/var/tmp/x").?);
+    // The caches and state beside T are not temporary.
+    try testing.expect(tempAreaOf(null, "/private/var/folders/ab/cd123/C/x") == null);
+    try testing.expect(tempAreaOf(null, "/private/var/folders/ab/T/x") == null);
+    try testing.expect(tempAreaOf(null, "/private/tmpfoo/x") == null);
+    try testing.expect(tempAreaOf(null, "/private/etc/x") == null);
+}
+
+test "build output in a temp area is not protected; the rest of it is" {
+    const disk: FakeDisk = .{
+        // A path through a link resolves past it: /private/tmp/s/link may lead
+        // to /private/etc, whose node_modules is then a build folder by path.
+        .build = &.{ "/private/tmp/s/app/node_modules", "/private/var/folders/ab/cd/T/w/zcache3", "/private/tmp/s/link/node_modules" },
+        .links = &.{ "/private/tmp/s/link", "/private/tmp/s/link-to-build" },
+        .files = &.{ "/private/tmp/s/notes.txt", "/private/tmp/s/app/node_modules/a.js" },
+    };
+    const p: Protection = .{ .home = "/Users/u", .build_output = disk.hook() };
+    const user_roots = [_][]const u8{"/private/tmp/s/app/node_modules/keep"};
+    const with_user: Protection = .{ .home = "/Users/u", .user = &user_roots, .build_output = disk.hook() };
+
+    // A build folder there, and anything inside one.
+    try testing.expect(!p.protects("/private/tmp/s/app/node_modules"));
+    try testing.expect(!p.protects("/private/tmp/s/app/node_modules/a.js"));
+    try testing.expect(!p.protects("/private/tmp/s/app/node_modules/pkg/lib/x.js"));
+    try testing.expect(!p.protects("/private/var/folders/ab/cd/T/w/zcache3/o/abc/lib.a"));
+    try testing.expect(!p.guardsFolder("/private/tmp/s/app/node_modules"));
+    // The area, its other folders and its loose files stay protected.
+    try testing.expect(p.protects("/private/tmp"));
+    try testing.expect(p.protects("/private/tmp/s"));
+    try testing.expect(p.protects("/private/tmp/s/app"));
+    try testing.expect(p.protects("/private/tmp/s/notes.txt"));
+    try testing.expect(p.guardsFolder("/private/tmp/s/app"));
+    // Other rules still hold inside build output.
+    try testing.expect(p.protects("/private/tmp/s/app/node_modules/dep/.git/HEAD"));
+    try testing.expect(p.protects("/private/tmp/s/app/node_modules/Tool.app/Contents/x"));
+    try testing.expect(with_user.protects("/private/tmp/s/app/node_modules/keep/x"));
+    try testing.expect(with_user.guardsFolder("/private/tmp/s/app/node_modules"));
+    // A link above the path does not lend the exception, even one named
+    // like build output (a link is never a build folder).
+    try testing.expect(p.protects("/private/tmp/s/link/node_modules"));
+    try testing.expect(p.protects("/private/tmp/s/link/node_modules/a.js"));
+    try testing.expect(p.protects("/private/tmp/s/link-to-build/node_modules/a.js"));
+    // Outside temp areas nothing changes: build output in /private/etc or
+    // $TMPDIR's sibling caches stays protected.
+    const etc: FakeDisk = .{ .build = &.{ "/private/etc/node_modules", "/private/var/folders/ab/cd/C/zcache" } };
+    const p2: Protection = .{ .build_output = etc.hook() };
+    try testing.expect(p2.protects("/private/etc/node_modules"));
+    try testing.expect(p2.protects("/private/var/folders/ab/cd/C/zcache"));
+    // Without the rule there is no exception.
+    const bare: Protection = .{};
+    try testing.expect(bare.protects("/private/tmp/s/app/node_modules"));
+}
+
+test "Windows: build output in %TEMP% is not protected, the rest of AppData is" {
+    if (!windows) return error.SkipZigTest;
+    const disk: FakeDisk = .{ .build = &.{ "C:/Users/rich/AppData/Local/Temp/w/node_modules", "C:/Users/rich/AppData/Local/x/node_modules" } };
+    const p: Protection = .{ .home = "C:/Users/rich", .build_output = disk.hook() };
+    try testing.expect(!p.protects("C:/Users/rich/AppData/Local/Temp/w/node_modules"));
+    try testing.expectEqualStrings("C:/Users/rich/appdata/local/temp", tempAreaOf("C:/Users/rich", "C:/Users/rich/appdata/local/temp/w").?);
+    try testing.expect(p.protects("C:/Users/rich/AppData/Local/Temp/w"));
+    try testing.expect(p.protects("C:/Users/rich/AppData/Local/Temp"));
+    try testing.expect(p.protects("C:/Users/rich/AppData/Local/x/node_modules"));
 }

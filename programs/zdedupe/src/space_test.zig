@@ -69,19 +69,28 @@ const Fixture = struct {
     }
 
     fn scan(self: *Fixture) !void {
+        return self.scanAt(self.tree.path);
+    }
+
+    /// Scan the tree as `root` spells it (its real path, say).
+    fn scanAt(self: *Fixture, root: [:0]const u8) !void {
         const ctx = lib.zdedupe_init() orelse return error.ScannerInitFailed;
         defer lib.zdedupe_free(ctx);
         lib.zdedupe_set_mode(ctx, 2);
         // Default excludes would hide node_modules; a disk-space scan ignores them.
         lib.zdedupe_use_default_excludes(ctx, true);
         lib.zdedupe_use_credential_excludes(ctx, true);
-        if (lib.zdedupe_add_path(ctx, self.tree.path.ptr) != 0) return error.AddPathFailed;
+        if (lib.zdedupe_add_path(ctx, root.ptr) != 0) return error.AddPathFailed;
         if (lib.zdedupe_run_to_file(ctx, self.store_path.ptr) != 0) return error.ScanFailed;
     }
 
     fn open(self: *Fixture, fresh: bool) !*Session {
         if (!fresh) return Session.open(self.gpa, self.store_path, null);
-        const roots = try std.fmt.allocPrint(self.gpa, "[\"{s}\"]", .{self.tree.path});
+        return self.openAt(self.tree.path);
+    }
+
+    fn openAt(self: *Fixture, root: []const u8) !*Session {
+        const roots = try std.fmt.allocPrint(self.gpa, "[\"{s}\"]", .{root});
         defer self.gpa.free(roots);
         return Session.open(self.gpa, self.store_path, roots);
     }
@@ -830,4 +839,108 @@ test "suggestions: build output, cache entries, unfinished downloads, large unto
     const scoped = try parse(arena, s.spaceSuggest(in_downloads));
     try testing.expectEqual(@as(i64, 2), int(kindOf(scoped, "partial_downloads"), "count"));
     try testing.expectEqual(@as(i64, 0), int(kindOf(scoped, "build_output"), "count"));
+}
+
+test "suggestions know a Zig cache, Xcode derived data and a tagged cache, not a near miss" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    try fx.write("work/zcache3/h/manifest.txt", 1_000);
+    try fx.write("work/zcache3/o/abc/libx.a", 9_000);
+    try fx.write("work/zcache3/tmp/t", 10);
+    try fx.write("work/zcache3/z/src", 10);
+    try fx.write("work/dd/info.plist", 300);
+    try fx.write("work/dd/Build/Products/app", 9_000);
+    try fx.write("work/dd/Logs/build.log", 2_000);
+    try fx.write("work/dd/Index.noindex/DataStore/v5", 100);
+    // A project with h/, o/ and z/ but no tmp/; one with Info.plist, Build
+    // and Logs but nothing of Xcode's own.
+    try fx.write("work/letters/h/1", 10);
+    try fx.write("work/letters/o/2", 10);
+    try fx.write("work/letters/z/3", 10);
+    try fx.write("work/MyApp/Info.plist", 300);
+    try fx.write("work/MyApp/Build/notes", 10);
+    try fx.write("work/MyApp/Logs/l", 10);
+    // A tagged cache by any name, and a file merely called CACHEDIR.TAG.
+    try fx.write("work/blobs/data", 4_000);
+    try fx.tree.writeFile("work/blobs/CACHEDIR.TAG", "Signature: 8a477f597d28d172789f06886806bc55\n");
+    try fx.write("work/notes/todo", 10);
+    try fx.tree.writeFile("work/notes/CACHEDIR.TAG", "");
+    try fx.scan();
+    const s = try fx.open(true);
+    defer s.close();
+
+    const answer = try parse(arena, s.spaceSuggest("{}"));
+    const items = field(kindOf(answer, "build_output"), "items");
+    try testing.expect(findItem(items, "zcache3") != null);
+    try testing.expect(findItem(items, "dd") != null);
+    try testing.expect(findItem(items, "node_modules") != null);
+    try testing.expect(findItem(items, "letters") == null);
+    try testing.expect(findItem(items, "MyApp") == null);
+    try testing.expect(findItem(items, "blobs") != null);
+    try testing.expect(findItem(items, "notes") == null);
+    try testing.expectEqual(@as(usize, 4), items.array.items.len);
+}
+
+test "temp areas: build output there is suggested and goes to the Trash, the rest stays protected" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    try fx.write("zc/h/manifest.txt", 1_000);
+    try fx.write("zc/o/abc/libx.a", 9_000);
+    try fx.write("zc/tmp/t", 10);
+    try fx.write("zc/z/src", 10);
+    try fx.write("dd/info.plist", 300);
+    try fx.write("dd/Build/app", 9_000);
+    try fx.write("dd/Logs/build.log", 2_000);
+    try fx.write("dd/Index.noindex/i", 100);
+    // The tree by its real path: on macOS that is /private/tmp/..., a temp
+    // area inside the protected /private tree; on Linux /tmp, which nothing
+    // protects to begin with.
+    var real_buf: [sysc.PATH_MAX]u8 = undefined;
+    const real_c = sysc.realpath(fx.tree.path.ptr, &real_buf) orelse return error.TestUnexpectedResult;
+    const real = try arena.dupeSentinel(u8, std.mem.span(real_c), 0);
+    const darwin = comptime @import("builtin").os.tag.isDarwin();
+    if (darwin) try testing.expect(std.mem.startsWith(u8, real, "/private/tmp/"));
+    try fx.scanAt(real);
+    const s = try fx.openAt(real);
+    defer s.close();
+
+    // Suggested, though they sit in /private.
+    const answer = try parse(arena, s.spaceSuggest("{}"));
+    const build_items = field(kindOf(answer, "build_output"), "items");
+    try testing.expect(findItem(build_items, "node_modules") != null);
+    try testing.expect(findItem(build_items, "zc") != null);
+    try testing.expect(findItem(build_items, "dd") != null);
+
+    const root = try parse(arena, s.spaceChildren("{\"limit\":500}"));
+    const root_items = field(field(root, "groups").array.items[0], "items");
+    const zc_id = int(findItem(root_items, "zc").?, "id");
+    const docs_id = int(findItem(root_items, "docs").?, "id");
+    const zip_id = int(findItem(root_items, "archive.zip").?, "id");
+    const logs = try parse(arena, s.spaceChildren(try std.fmt.allocPrint(arena, "{{\"path\":\"{s}/dd/Logs\"}}", .{real})));
+    const log_id = int(findItem(field(field(logs, "groups").array.items[0], "items"), "build.log").?, "id");
+
+    var bin = try Scratch.init(testing.allocator, "space-bin");
+    defer bin.deinit();
+    var trash: FakeTrash = .{ .bin = bin.path };
+    // A build folder, a file inside build output, a plain folder, a loose file.
+    const request = try std.fmt.allocPrint(arena,
+        \\{{"items":[{{"kind":"dir","id":{d}}},{{"kind":"file","id":{d}}},{{"kind":"dir","id":{d}}},{{"kind":"file","id":{d}}}]}}
+    , .{ zc_id, log_id, docs_id, zip_id });
+    const report = try parse(arena, s.spaceTrash(request, FakeTrash.callback, &trash));
+    try testing.expect(!(fx.tree.exists("zc") catch true));
+    try testing.expect(!(fx.tree.exists("dd/Logs/build.log") catch true));
+    if (darwin) {
+        try testing.expectEqual(@as(i64, 2), int(report, "deleted"));
+        try testing.expectEqual(@as(i64, 2), int(report, "failed_count"));
+        try testing.expect(fx.tree.exists("docs/a.pdf") catch false);
+        try testing.expect(fx.tree.exists("archive.zip") catch false);
+    } else {
+        try testing.expectEqual(@as(i64, 4), int(report, "deleted"));
+    }
 }

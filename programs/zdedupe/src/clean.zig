@@ -4,13 +4,14 @@
 //! Three questions, for the roots an agent or a person names (a scratch area,
 //! a worktrees folder, a projects folder):
 //!
-//!   * **What is build output?** The core's own rule, the one Disk Space
-//!     suggests from: a folder named in `space.build_dirs`, a folder named in
-//!     `space.build_dirs_beside` next to one of its manifests, or any folder
-//!     carrying a valid CACHEDIR.TAG (`fast_walker.hasCacheDirTag`). The walk
-//!     stays on the roots' filesystems, never follows a link, never enters a
-//!     version-control store or a credential store, and does not look for
-//!     build output inside build output. A root is the scope, never a finding.
+//!   * **What is build output?** The core's own rule (buildrule.zig), the one
+//!     Disk Space suggests from and protect.zig's temp-area exception asks: a
+//!     folder by its name, a `target` or `.build` beside its manifest, a Zig
+//!     cache or an Xcode derived-data folder by its layout, or any folder
+//!     carrying a valid CACHEDIR.TAG. The walk stays on the roots'
+//!     filesystems, never follows a link, never enters a version-control store
+//!     or a credential store, and does not look for build output inside build
+//!     output. A root is the scope, never a finding.
 //!   * **Which of it is the same?** Identical-folder analysis (dirs.zig) over
 //!     the build folders: content-identical, not name-identical. A folder
 //!     with anything unreadable in it is never called a copy.
@@ -18,6 +19,7 @@
 //!     above it holding `.git` or a manifest (`project_manifests`). Every
 //!     checkout under the roots, and every outermost project (one inside no
 //!     other), is a project too: each copy is reported, build output or not.
+//!     A checkout inside build output (a package manager's) is part of it.
 //!     gitinfo.zig says where its main code lives and whether this copy holds
 //!     work found nowhere else.
 //!
@@ -26,8 +28,9 @@
 //! or had its status changed for `older_s` (default a day): a status change
 //! is set by the system, so an unpacker that restores old modification
 //! times still counts as fresh. It must also lie below a root (never be
-//! one), not be or hold a protected location (protect.zig, on the real path:
-//! macOS's `/private`, which holds `/tmp`, is protected), not be inside a
+//! one), not be or hold a protected location (protect.zig, on the real path,
+//! with its exception for build output in temp areas such as `/private/tmp`
+//! and `$TMPDIR`), not be inside a
 //! version-control store, and have been read completely. Just before a move
 //! each folder is checked again: the same folder (device and inode, not a
 //! link), still build output by the same rule, still old enough, still on one
@@ -40,7 +43,7 @@ const libc = @import("sys.zig").c;
 const types = @import("types.zig");
 const fast_walker = @import("fast_walker.zig");
 const dedupe = @import("dedupe.zig");
-const space = @import("space.zig");
+const buildrule = @import("buildrule.zig");
 const protect = @import("protect.zig");
 const filters = @import("filters.zig");
 const pstat = @import("pstat.zig");
@@ -67,7 +70,7 @@ pub const project_manifests = [_][]const u8{
 
 comptime {
     // Every manifest the build-output rule looks for marks a project.
-    for (space.build_dirs_beside) |b| for (b.manifests) |m| {
+    for (buildrule.beside) |b| for (b.manifests) |m| {
         for (project_manifests) |p| {
             if (std.mem.eql(u8, p, m)) break;
         } else @compileError("project_manifests lacks " ++ m);
@@ -77,7 +80,7 @@ comptime {
 
 /// Names the finding walk prunes: build output (each is then a finding),
 /// version-control stores (each marks a checkout) and credential stores.
-const walk_excludes = space.build_dirs ++ protect.component_names ++ types.Config.credential_excludes;
+const walk_excludes = buildrule.names ++ protect.component_names ++ types.Config.credential_excludes;
 
 const vcs_bit: u64 = 1 << 63;
 
@@ -88,7 +91,7 @@ const text_rows_per_root: usize = 25;
 // The report
 // ===========================================================================
 
-pub const Rule = enum { name, beside_manifest, cachedir_tag };
+pub const Rule = buildrule.Rule;
 
 pub const Root = struct {
     /// As given.
@@ -216,10 +219,11 @@ pub const Options = struct {
     guard_ctx: ?*const anyopaque = null,
 };
 
-/// protect.zig, with the real home folder from the user database.
+/// protect.zig, with the real home folder from the user database and the
+/// build-output rule on disk for its temp-area exception.
 pub fn protectedByCore(_: ?*const anyopaque, path: []const u8) bool {
     const home = if (session.userHome()) |h| filters.trimSep(h) else null;
-    const guard: protect.Protection = .{ .home = home };
+    const guard: protect.Protection = .{ .home = home, .build_output = buildrule.on_disk };
     return guard.guardsFolder(path);
 }
 
@@ -278,7 +282,7 @@ pub fn scan(gpa: Allocator, io: Io, opts: Options) !Report {
                     const name = filters.baseName(s.path);
                     if (isVcsName(name)) {
                         try markDir(a, &markers, filters.parentDir(s.path) orelse continue, vcs_bit);
-                    } else if (space.isBuildDirName(name)) {
+                    } else if (buildrule.isName(name)) {
                         try candidates.append(a, .{ .path = try a.dupe(u8, s.path), .rule = .name });
                     } else {
                         // No name the walk prunes: pruned for its CACHEDIR.TAG.
@@ -289,15 +293,37 @@ pub fn scan(gpa: Allocator, io: Io, opts: Options) !Report {
                 .unreadable, .denied, .privacy, .partial => report.roots[root].unreadable += 1,
             }
         }
+        // Each folder's children as the layouts need them, from the walk's
+        // own records: folders it entered and regular files it listed.
+        var listings: std.StringHashMapUnmanaged(buildrule.Seen) = .empty;
+        defer listings.deinit(gpa);
         for (fw.dirs.items) |d| {
-            const manifests = space.buildDirManifests(filters.baseName(d.path)) orelse continue;
-            const have = markers.get(filters.parentDir(d.path) orelse continue) orelse 0;
+            const name = filters.baseName(d.path);
+            const parent = filters.parentDir(d.path) orelse continue;
+            if (buildrule.Seen.wants(name)) {
+                const gop = try listings.getOrPut(gpa, parent);
+                if (!gop.found_existing) gop.value_ptr.* = .{};
+                gop.value_ptr.note(name, true);
+            }
+            const manifests = buildrule.manifestsFor(name) orelse continue;
+            const have = markers.get(parent) orelse 0;
             for (manifests) |m| {
                 if (have & manifestBit(m).? != 0) {
                     try candidates.append(a, .{ .path = try a.dupe(u8, d.path), .rule = .beside_manifest });
                     break;
                 }
             }
+        }
+        for (fw.files.items) |f| {
+            const name = filters.baseName(f.path);
+            if (!buildrule.Seen.wants(name)) continue;
+            const seen = listings.getPtr(filters.parentDir(f.path) orelse continue) orelse continue;
+            seen.note(name, false);
+        }
+        var listing_it = listings.iterator();
+        while (listing_it.next()) |kv| {
+            const rule = buildrule.shapeOf(kv.value_ptr) orelse continue;
+            try candidates.append(a, .{ .path = try a.dupe(u8, kv.key_ptr.*), .rule = rule });
         }
     }
 
@@ -311,12 +337,16 @@ pub fn scan(gpa: Allocator, io: Io, opts: Options) !Report {
         b.project = try projectIndex(a, &projects, &project_of, &markers, dir, b.root);
     }
     // Every checkout, and every outermost project: each copy of a project
-    // under a root, whether or not it holds build output.
+    // under a root, whether or not it holds build output. One inside build
+    // output (a package manager's checkout) belongs to that output.
+    var build_paths: std.StringHashMapUnmanaged(void) = .empty;
+    for (found.items) |b| try build_paths.put(a, b.path, {});
     var marker_it = markers.iterator();
     while (marker_it.next()) |kv| {
         const dir = kv.key_ptr.*;
         const root = rootOf(report.roots, dir) orelse continue;
         if (kv.value_ptr.* & vcs_bit == 0 and nearestProject(&markers, dir, report.roots[root].path) != null) continue;
+        if (insideAny(&build_paths, dir, report.roots[root].path)) continue;
         _ = try projectIndex(a, &projects, &project_of, &markers, dir, root);
     }
 
@@ -583,6 +613,17 @@ fn preorderLess(x: []const u8, y: []const u8) bool {
     return x.len < y.len;
 }
 
+/// `path` lies inside one of `dirs` (strictly), below `root`.
+fn insideAny(dirs: *const std.StringHashMapUnmanaged(void), path: []const u8, root: []const u8) bool {
+    var dir = filters.parentDir(path) orelse return false;
+    while (filters.isAtOrUnder(dir, root)) {
+        if (dirs.contains(dir)) return true;
+        if (std.mem.eql(u8, dir, root)) return false;
+        dir = filters.parentDir(dir) orelse return false;
+    }
+    return false;
+}
+
 /// The nearest folder above `path`, up to `root`, holding a project marker.
 fn nearestProject(markers: *const std.StringHashMapUnmanaged(u64), path: []const u8, root: []const u8) ?[]const u8 {
     var dir = filters.parentDir(path) orelse return null;
@@ -701,30 +742,19 @@ fn checkFolder(gpa: Allocator, opts: Options, now: i64, b: *const BuildDir) Chec
     return check;
 }
 
-/// Why `b` no longer passes its build-output rule, or null when it does.
+/// Why `b` is no longer build output, or null when it still is (by any
+/// part of the rule).
 fn stillBuildOutput(a: Allocator, b: *const BuildDir) ?[]const u8 {
-    switch (b.rule) {
-        .name => return null,
-        .beside_manifest => {
-            const parent = filters.parentDir(b.path) orelse return "has no parent folder";
-            const manifests = space.buildDirManifests(b.kind) orelse return "is no longer build output";
-            for (manifests) |m| {
-                const z = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ parent, m }, 0) catch return "out of memory";
-                const st = pstat.lstat(z.ptr) catch continue;
-                if (st.isFile()) return null;
-            }
-            return "its manifest is gone, so it is no longer build output";
-        },
-        .cachedir_tag => {
-            if (comptime builtin.os.tag == .windows) return "the Trash is not supported on this platform";
-            const z = a.dupeSentinel(u8, b.path, 0) catch return "out of memory";
-            const fd = libc.open(z.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(libc.mode_t, 0));
-            if (fd < 0) return "cannot be opened";
-            defer _ = libc.close(fd);
-            if (!fast_walker.hasCacheDirTag(fd)) return "its CACHEDIR.TAG is gone, so it is no longer build output";
-            return null;
-        },
-    }
+    if (buildrule.onDisk(b.path) != null) return null;
+    const z = a.dupeSentinel(u8, b.path, 0) catch return "out of memory";
+    const st = pstat.lstat(z.ptr) catch return "is no longer a folder (gone, or now a link)";
+    if (!st.isDir()) return "is no longer a folder (gone, or now a link)";
+    return switch (b.rule) {
+        .name => "is no longer build output",
+        .beside_manifest => "its manifest is gone, so it is no longer build output",
+        .cachedir_tag => "its CACHEDIR.TAG is gone, so it is no longer build output",
+        .zig_cache, .xcode_derived_data => "its layout changed, so it is no longer build output",
+    };
 }
 
 fn insideVcs(path: []const u8) bool {
@@ -1132,7 +1162,12 @@ pub fn writeText(report: *const Report, out: *Io.Writer) !void {
             listed += 1;
             const newest = if (b.newest_mtime) |m| formatAge(&age_buf, now - m) else "-";
             try out.print("  {s:>10}  {d:>8}  {s:>6}  {s:<14}  {s}", .{ types.formatBytes(b.bytes, &size_buf), b.files, newest, b.kind, b.path });
-            if (b.rule == .cachedir_tag) try out.writeAll("  [CACHEDIR.TAG]");
+            switch (b.rule) {
+                .name, .beside_manifest => {},
+                .cachedir_tag => try out.writeAll("  [CACHEDIR.TAG]"),
+                .zig_cache => try out.writeAll("  [Zig cache]"),
+                .xcode_derived_data => try out.writeAll("  [Xcode derived data]"),
+            }
             if (b.duplicate_set) |d| try out.print("  [copy, set {d}]", .{d + 1});
             if (!b.complete) try out.writeAll("  [partly unreadable]");
             try out.writeAll("\n");
@@ -1279,8 +1314,9 @@ test "preorder puts a folder's contents directly after it" {
     try testing.expect(!preorderLess("/a/b-c", "/a/b/c"));
 }
 
-test "the core's protection refuses macOS temp areas by their real path" {
-    try testing.expect(protectedByCore(null, "/private/tmp/claude-502/x/node_modules"));
+test "the core's protection, by real path: a temp area lends nothing the disk does not show" {
+    // Not on disk: nothing says it is build output, so /private keeps it.
+    try testing.expect(protectedByCore(null, "/private/tmp/zdedupe-nonexistent/x/node_modules"));
     try testing.expect(protectedByCore(null, "/usr/local/lib/node_modules"));
     try testing.expect(protectedByCore(null, "/srv/a/.git/x/node_modules"));
     try testing.expect(!protectedByCore(null, "/srv/scratch/app/node_modules"));
@@ -1613,6 +1649,92 @@ test "clean leaves a build folder it could not read completely" {
     try testing.expect(!b.trash.eligible);
     try testing.expectEqual(@as(usize, 0), report.trash.?.moved.len);
     try testing.expect(try f.scratch.exists("app/node_modules"));
+}
+
+test "clean recognises Zig caches and Xcode derived data by their layout, whatever they are called" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var f = try Fixture.init(a, "clean-shapes");
+    defer f.deinit();
+    const s = &f.scratch;
+    for ([_][]const u8{ "zcache7", "zcache7/h", "zcache7/o", "zcache7/o/abc", "zcache7/tmp", "zcache7/z" }) |d| try s.makeDir(d);
+    try s.writeFile("zcache7/h/0123.txt", "manifest");
+    try s.writeFile("zcache7/o/abc/libx.a", "archive");
+    for ([_][]const u8{ "dd", "dd/Build", "dd/Logs", "dd/Index.noindex", "dd/ModuleCache.noindex", "dd/SourcePackages", "dd/SourcePackages/checkouts", "dd/SourcePackages/checkouts/Dep", "dd/SourcePackages/checkouts/Dep/.git" }) |d| try s.makeDir(d);
+    try s.writeFile("dd/info.plist", "<plist/>");
+    try s.writeFile("dd/SourcePackages/checkouts/Dep/Package.swift", "// swift");
+    // Near misses: letters without tmp/, an app with Info.plist, Build and Logs.
+    for ([_][]const u8{ "letters", "letters/h", "letters/o", "letters/z", "MyApp", "MyApp/Build", "MyApp/Logs" }) |d| try s.makeDir(d);
+    try s.writeFile("letters/README", "abc");
+    try s.writeFile("MyApp/Info.plist", "<plist/>");
+    try s.writeFile("MyApp/Package.swift", "// swift");
+
+    var report = try scan(testing.allocator, testing.io, .{
+        .roots = &.{f.real},
+        .main_roots = &.{f.path(a, "none")},
+        .guard_fn = Fixture.guard,
+        .guard_ctx = &f,
+        .git_exe = "/nonexistent/zdedupe/git",
+    });
+    defer report.deinit();
+    const zc = find(&report, &f, a, "zcache7").?;
+    try testing.expectEqual(Rule.zig_cache, zc.rule);
+    try testing.expectEqual(@as(u64, 2), zc.files);
+    const dd = find(&report, &f, a, "dd").?;
+    try testing.expectEqual(Rule.xcode_derived_data, dd.rule);
+    try testing.expect(find(&report, &f, a, "letters") == null);
+    try testing.expect(find(&report, &f, a, "MyApp") == null);
+    try testing.expectEqual(@as(usize, 2), report.build_dirs.len);
+    // The package manager's checkout inside derived data is part of it, not a project.
+    for (report.projects) |p| {
+        try testing.expect(!filters.isAtOrUnder(p.path, f.path(a, "dd")));
+    }
+    var saw_app = false;
+    for (report.projects) |p| saw_app = saw_app or std.mem.eql(u8, p.path, f.path(a, "MyApp"));
+    try testing.expect(saw_app);
+}
+
+test "clean with the core's protection: build output in a temp area may go, the rest of it stays" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // The scratch tree is in $TMPDIR, by its real path: on macOS
+    // /private/var/folders/<a>/<b>/T, a temp area inside protected /private.
+    var f = try Fixture.init(a, "clean-temp");
+    defer f.deinit();
+    const s = &f.scratch;
+    for ([_][]const u8{ "app", "app/node_modules", "app/node_modules/pkg", "app/src", "zc", "zc/h", "zc/o", "zc/tmp", "zc/z" }) |d| try s.makeDir(d);
+    try s.writeFile("app/package.json", "{}");
+    try s.writeFile("app/node_modules/pkg/index.js", "1");
+    try s.writeFile("app/src/main.js", "2");
+    try s.writeFile("zc/h/m.txt", "3");
+
+    const darwin = comptime builtin.os.tag.isDarwin();
+    if (darwin) try testing.expect(protect.tempAreaOf(null, f.real) != null);
+    try testing.expect(!protectedByCore(null, f.path(a, "app/node_modules")));
+    try testing.expect(!protectedByCore(null, f.path(a, "zc")));
+    if (darwin) {
+        // The rest of the temp area is as protected as ever.
+        try testing.expect(protectedByCore(null, f.path(a, "app")));
+        try testing.expect(protectedByCore(null, f.path(a, "app/src")));
+        try testing.expect(protectedByCore(null, f.real));
+    }
+
+    var report = try run(testing.allocator, testing.io, .{
+        .roots = &.{f.real},
+        .main_roots = &.{f.path(a, "none")},
+        .git_exe = "/nonexistent/zdedupe/git",
+        .trash_fn = fakeTrash,
+        .now = realtimeSeconds() + 2 * std.time.s_per_day,
+    }, true);
+    defer report.deinit();
+    try testing.expectEqual(@as(usize, 2), report.trash.?.moved.len);
+    try testing.expect(!try s.exists("app/node_modules"));
+    try testing.expect(!try s.exists("zc"));
+    try testing.expect(try s.exists("app/src/main.js"));
+    try testing.expect(try s.exists("app/package.json"));
 }
 
 test "clean never takes a root, and reports a root inside another once" {

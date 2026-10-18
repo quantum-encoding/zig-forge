@@ -52,6 +52,7 @@ const protect_mod = @import("protect.zig");
 const session_mod = @import("session.zig");
 const pstat = @import("pstat.zig");
 const dedupe = @import("dedupe.zig");
+const buildrule = @import("buildrule.zig");
 const libc = @import("sys.zig").c;
 
 const Allocator = std.mem.Allocator;
@@ -1431,6 +1432,27 @@ pub const Reader = struct {
         return null;
     }
 
+    /// The build-output layout folder `d` has (buildrule.shapes), from its
+    /// listing in the store: its folders once, its files only when a shape
+    /// still could match.
+    pub fn shapeOf(self: *const Reader, d: u32) ReadError!?buildrule.Rule {
+        const p = try self.dir(d);
+        var seen: buildrule.Seen = .{};
+        var c = d + 1;
+        while (c < p.subtree_end) {
+            const child = try self.dir(c);
+            seen.note(try self.dirName(&child), true);
+            c = child.subtree_end;
+        }
+        if (seen.dirs == 0) return null;
+        for (p.first_file..p.first_file + p.direct_files) |f| {
+            const rec = try self.file(f);
+            const name = try self.fileName(&rec);
+            if (buildrule.Seen.wants(name)) seen.note(name, false);
+        }
+        return buildrule.shapeOf(&seen);
+    }
+
     fn directFileNamed(self: *const Reader, parent: u32, name: []const u8) ReadError!?u64 {
         const p = try self.dir(parent);
         for (p.first_file..p.first_file + p.direct_files) |f| {
@@ -1725,38 +1747,6 @@ pub const SuggestQuery = struct {
 pub const SuggestKind = enum { build_output, caches, partial_downloads, stale_large_files };
 
 pub const max_suggest: usize = 200;
-
-/// Build output and dependency stores a project's tooling recreates.
-pub const build_dirs = [_][]const u8{
-    "node_modules", "bower_components", ".zig-cache",    "zig-cache",     "zig-out",
-    "DerivedData",  "__pycache__",      ".next",         ".nuxt",         ".svelte-kit",
-    ".turbo",       ".parcel-cache",    ".tox",          ".mypy_cache",   ".pytest_cache",
-    ".ruff_cache",
-};
-
-/// Build folders whose name is too common to trust alone: each counts only
-/// beside a manifest of the tool that writes it.
-pub const build_dirs_beside = [_]struct { name: []const u8, manifests: []const []const u8 }{
-    .{ .name = "target", .manifests = &.{ "Cargo.toml", "pom.xml" } },
-    .{ .name = ".build", .manifests = &.{"Package.swift"} },
-};
-
-/// A folder called `name` is build output wherever it is.
-pub fn isBuildDirName(name: []const u8) bool {
-    // zig-lens-ignore: EQL-FOR-SECRETS directory names, not secrets
-    for (build_dirs) |b| if (std.mem.eql(u8, name, b)) return true;
-    return false;
-}
-
-/// The manifests one of which must sit beside a folder called `name` for it
-/// to be build output, or null when the name is not one of those.
-pub fn buildDirManifests(name: []const u8) ?[]const []const u8 {
-    for (build_dirs_beside) |b| {
-        // zig-lens-ignore: EQL-FOR-SECRETS directory names, not secrets
-        if (std.mem.eql(u8, name, b.name)) return b.manifests;
-    }
-    return null;
-}
 
 /// Cache roots. They are suggested entry by entry, not whole: all of
 /// ~/.cache is too coarse a choice, and one entry is often most of it.
@@ -2405,15 +2395,15 @@ pub const View = struct {
 
     const Claim = enum { build, cache };
 
-    /// Whether folder `d` is build output or a cache root, by its name and,
-    /// for the ambiguous names, its parent.
-    fn claimOf(self: *const View, rec: *const DirRecord) !?Claim {
+    /// Whether folder `d` is build output (buildrule.zig: by name, beside a
+    /// manifest, by its layout, or by a CACHEDIR.TAG) or a cache root.
+    fn claimOf(self: *const View, d: u32, rec: *const DirRecord) !?Claim {
         const name = try self.r.dirName(rec);
-        if (isBuildDirName(name)) return .build;
+        if (buildrule.isName(name)) return .build;
         // zig-lens-ignore: EQL-FOR-SECRETS directory names, not secrets
         for (cache_dirs) |c| if (std.mem.eql(u8, name, c)) return .cache;
         if (rec.parent == no_parent) return null;
-        if (buildDirManifests(name)) |manifests| {
+        if (buildrule.manifestsFor(name)) |manifests| {
             for (manifests) |m| {
                 if (try self.r.directFileNamed(rec.parent, m) != null) return .build;
             }
@@ -2422,6 +2412,11 @@ pub const View = struct {
         const parent_name = try self.r.dirName(&parent);
         for (cache_dirs_in) |c| {
             if (std.mem.eql(u8, name, c.name) and std.mem.eql(u8, parent_name, c.parent)) return .cache;
+        }
+        if (try self.r.shapeOf(d) != null) return .build;
+        // The store says a file is called CACHEDIR.TAG; the disk says whether it is a tag.
+        if (try self.r.directFileNamed(d, "CACHEDIR.TAG") != null) {
+            if (buildrule.onDisk(try self.r.dirPath(self.arena, d)) != null) return .build;
         }
         return null;
     }
@@ -2483,7 +2478,7 @@ pub const View = struct {
             }
             const candidate = rec.parent != no_parent and (s.dir == null or c != s.dir.?);
             if (candidate) {
-                if (try self.claimOf(&rec)) |claim| {
+                if (try self.claimOf(c, &rec)) |claim| {
                     switch (claim) {
                         .build => try self.offerDir(built, c),
                         .cache => {

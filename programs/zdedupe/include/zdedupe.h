@@ -617,6 +617,12 @@ const char* zdedupe_results_bulk_plan(zdedupe_results* r, const char* query_json
  * application data (~/Library, flatpak), repository stores (.git and the
  * like, anywhere in a path), packages (.app, .framework, photo libraries -
  * any directory so named above a file) and game launcher libraries.
+ * Except build output in a temp area (macOS /private/tmp and the account's
+ * /private/var/folders/<a>/<b>/T, Linux /tmp and /var/tmp, Windows %TEMP%):
+ * a folder the build-output rule recognises, as the disk shows it at the
+ * time of the call, and everything in it, when only real folders lie between
+ * the area and it. The area, its other folders and its loose files stay
+ * protected, and so does anything a store, package or user root protects.
  *
  * set_protected replaces the host's own additions with a JSON array of
  * absolute folders; 0 ok, -1 invalid (see last_error). A folder delete is
@@ -978,7 +984,10 @@ const char* zdedupe_results_space_largest(zdedupe_results* r, const char* query_
  * kind), "stale_days": 365 (0: off), "stale_min_bytes": 104857600,
  * "now": epoch seconds | null }. Four kinds, always in this order:
  * build_output (node_modules, zig-out, DerivedData, __pycache__, ...; target
- * only beside Cargo.toml or pom.xml, .build only beside Package.swift),
+ * only beside Cargo.toml or pom.xml, .build only beside Package.swift; under
+ * any name a Zig cache (h/ o/ tmp/ z/), an Xcode derived-data folder
+ * (info.plist, Build/, Logs/, Index.noindex/ or ModuleCache.noindex/) or a
+ * folder with a valid CACHEDIR.TAG: the shared rule, src/buildrule.zig),
  * caches (each entry of ~/.cache, ~/Library/Caches, .npm, .pnpm-store,
  * ~/.cargo/registry, ~/.gradle/caches), partial_downloads (.part, .partial,
  * .crdownload, .incomplete, .opdownload, .!qB; 1 MiB or more, below which a

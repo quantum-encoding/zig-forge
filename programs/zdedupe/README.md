@@ -63,12 +63,18 @@ zdedupe clean [--json] [--trash] [--older AGE] [--main-roots DIR]... [-j N] <ROO
 Without `--trash` nothing on disk changes, and the report says what `--trash`
 would move. Exit status 1 means no root could be scanned.
 
-**Build output** is the core's own definition, the one Disk Space suggests
-from (`src/space.zig`): a folder named `node_modules`, `bower_components`,
-`.zig-cache`, `zig-cache`, `zig-out`, `DerivedData`, `__pycache__`, `.next`,
-`.nuxt`, `.svelte-kit`, `.turbo`, `.parcel-cache`, `.tox`, `.mypy_cache`,
-`.pytest_cache` or `.ruff_cache`; `target` beside `Cargo.toml` or `pom.xml`;
-`.build` beside `Package.swift`; and any folder carrying a valid CACHEDIR.TAG.
+**Build output** is the core's own definition (`src/buildrule.zig`), the one
+Disk Space suggests from and protection's temp-area exception asks: a folder
+named `node_modules`, `bower_components`, `.zig-cache`, `zig-cache`,
+`zig-out`, `DerivedData`, `__pycache__`, `.next`, `.nuxt`, `.svelte-kit`,
+`.turbo`, `.parcel-cache`, `.tox`, `.mypy_cache`, `.pytest_cache` or
+`.ruff_cache`; `target` beside `Cargo.toml` or `pom.xml`; `.build` beside
+`Package.swift`; whatever it is called, a Zig cache (folders `h/`, `o/`,
+`tmp/` and `z/`) or an Xcode derived-data folder (`info.plist`, `Build/`,
+`Logs/`, and `Index.noindex/` or `ModuleCache.noindex/`); and any folder
+carrying a valid CACHEDIR.TAG. A layout is judged from the folder's own
+entries, a few stats and nothing read, and asks for names no project uses
+together.
 Roots are resolved to their real path. The walk stays on the roots'
 filesystems, never follows a link, never enters `.git` / `.hg` / `.svn` /
 `.bzr` or a credential store (`Config.credential_excludes`), and does not look
@@ -84,7 +90,8 @@ its root, holding `.git` or a manifest (`package.json`, `Cargo.toml`,
 `pom.xml`, `build.gradle(.kts)`, `Gemfile`, `composer.json`, `deno.json`,
 `CMakeLists.txt`, `meson.build`, `mix.exs`, `pubspec.yaml`). Every checkout
 under a root, and every outermost project, is reported too, build output or
-not. For each, git (run read-only: `--no-optional-locks`,
+not; a checkout inside build output (a package manager's) is part of that
+output. For each, git (run read-only: `--no-optional-locks`,
 `core.fsmonitor=false`, nothing fetched) says the checkout's toplevel, origin
 (credentials removed), branch, HEAD, whether it is a linked worktree and of
 which repository, the main checkouts of the same origin under the main roots
@@ -104,8 +111,9 @@ With no `git` the report says so and gives no verdicts.
 
 **What `--trash` moves**: only build folders, only to the Trash, and only
 those that lie below a root (never a root), are not and do not hold a
-protected location (`src/protect.zig`, applied to the real path, so on macOS
-everything under `/private`, `/tmp` included, stays), are not inside a
+protected location (`src/protect.zig`, applied to the real path; build output
+in a temp area such as `/private/tmp` or `$TMPDIR` is not protected by where
+it is, everything else there is), are not inside a
 version-control store, were read completely, and in which nothing, folders
 included, was modified *or had its status changed* for `--older`. The status
 change time is set by the system, so a tool that restores old modification
@@ -144,7 +152,8 @@ going away changes `schema`.
   "build_dirs": [{                       // largest first
     "path": "/private/tmp/scratch/app/node_modules",
     "kind": "node_modules",              // the folder's name
-    "rule": "name",                      // "name" | "beside_manifest" | "cachedir_tag"
+    "rule": "name",                      // "name" | "beside_manifest" | "cachedir_tag" |
+                                         // "zig_cache" | "xcode_derived_data"
     "root": "/private/tmp/scratch",
     "project": "/private/tmp/scratch/app",   // or null
     "bytes": 210000000, "logical_bytes": 190000000, "files": 3377,

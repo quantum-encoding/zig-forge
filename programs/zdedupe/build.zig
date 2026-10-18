@@ -158,6 +158,7 @@ pub fn build(b: *std.Build) void {
         "src/space.zig",
         "src/space_test.zig",
         // The clean subcommand: build leftovers, git verdicts, the Trash.
+        "src/buildrule.zig",
         "src/trash.zig",
         "src/gitinfo.zig",
         "src/clean.zig",

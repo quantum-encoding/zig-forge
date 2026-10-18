@@ -170,6 +170,17 @@ adds its own with `zdedupe_results_set_protected` and lists them all with
 under `delete_only_under`; elsewhere a system copy does not make a project's
 own copy expendable. Code: `src/keep.zig`, `src/protect.zig`.
 
+One exception: inside a temp area (macOS `/private/tmp` and the account's
+`/private/var/folders/<a>/<b>/T`, Linux `/tmp` and `/var/tmp`, Windows
+`%TEMP%`), build output is not protected by where it is: a folder the shared
+build-output rule recognises (`src/buildrule.zig`: Disk Space's build-output
+names, `target`/`.build` beside their manifest, a Zig cache or Xcode
+derived-data folder by its layout, a CACHEDIR.TAG folder) and everything
+inside it, checked on disk at the time of the call and only when every folder
+between the temp area and it is a real folder. The temp area itself, its
+other folders and its loose files stay protected, as does anything another
+rule protects.
+
 ## Delete
 
 ```c

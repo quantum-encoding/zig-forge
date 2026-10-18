@@ -32,7 +32,7 @@ const builtin = @import("builtin");
 const libc = @import("sys.zig").c;
 const pstat = @import("pstat.zig");
 const filters = @import("filters.zig");
-const space = @import("space.zig");
+const buildrule = @import("buildrule.zig");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -266,7 +266,7 @@ pub const MainIndex = struct {
             const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
             const name = std.mem.span(name_ptr);
             if (name.len == 0 or name[0] == '.') continue;
-            if (space.isBuildDirName(name)) continue;
+            if (buildrule.isName(name)) continue;
             const child = if (filters.isRoot(dir))
                 std.fmt.allocPrint(arena, "{s}{s}", .{ dir, name }) catch return
             else
