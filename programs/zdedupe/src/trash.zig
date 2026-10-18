@@ -409,8 +409,9 @@ test "a relative or root path is never trashed" {
     try testing.expect(moveToTrash(arena_state.allocator(), "/", true) == .failed);
 }
 
+// The freedesktop code is plain POSIX, so it is exercised wherever the tests run.
 test "freedesktop: a folder goes to the home trash with its info file, names never collide" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -455,6 +456,44 @@ test "freedesktop: a folder goes to the home trash with its info file, names nev
     const expected_line = try std.fmt.allocPrint(arena, "Path={s}\n", .{second});
     try testing.expect(std.mem.indexOf(u8, text, expected_line) != null);
     try testing.expect(std.mem.startsWith(u8, text, "[Trash Info]\n"));
+}
+
+test "freedesktop: a filesystem's trash is a sticky .Trash/uid, else this account's own .Trash-uid" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const uid = libc.getuid();
+
+    // No .Trash: .Trash-uid is made, owned by this account.
+    var plain = try Scratch.init(testing.allocator, "trash-top");
+    defer plain.deinit();
+    const own = freedesktop.topTrash(arena, plain.path, uid).?;
+    try testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{s}/.Trash-{d}", .{ plain.path, uid }), own);
+
+    // A .Trash without the sticky bit is not to be used.
+    var loose = try Scratch.init(testing.allocator, "trash-top-loose");
+    defer loose.deinit();
+    try loose.makeDir(".Trash");
+    const fallback = freedesktop.topTrash(arena, loose.path, uid).?;
+    try testing.expect(std.mem.endsWith(u8, fallback, try std.fmt.allocPrint(arena, "/.Trash-{d}", .{uid})));
+
+    // A sticky .Trash holds a folder per account.
+    var shared = try Scratch.init(testing.allocator, "trash-top-sticky");
+    defer shared.deinit();
+    try shared.makeDir(".Trash");
+    const sticky_path = try shared.joinZ(".Trash");
+    defer testing.allocator.free(sticky_path);
+    try testing.expectEqual(@as(c_int, 0), libc.chmod(sticky_path.ptr, 0o1777));
+    const mine = freedesktop.topTrash(arena, shared.path, uid).?;
+    try testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{s}/.Trash/{d}", .{ shared.path, uid }), mine);
+
+    // A link where .Trash-uid should be is refused, not followed.
+    var trap = try Scratch.init(testing.allocator, "trash-top-link");
+    defer trap.deinit();
+    try trap.makeDir("elsewhere");
+    try trap.symLink("elsewhere", try std.fmt.allocPrint(arena, ".Trash-{d}", .{uid}));
+    try testing.expect(freedesktop.topTrash(arena, trap.path, uid) == null);
 }
 
 test "macOS: a folder goes to the Trash and the answer says where" {
