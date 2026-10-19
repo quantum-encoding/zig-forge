@@ -1,8 +1,8 @@
 //! zsss - Shamir Secret Sharing
 //!
 //! Cryptographically secure secret splitting using Shamir's Secret Sharing scheme
-//! over GF(2^8). The share values of any k-1 shares reveal nothing about the secret; the
-//! format's 4-byte secret_id does (see Share.secret_id).
+//! over GF(2^8). Any k-1 shares reveal nothing about the secret: no share carries a
+//! function of it (see Share for the version-2 format).
 //!
 //! Usage:
 //!   zsss split -t 3 -n 5 -i secret.bin -o shares/      # Split into 5 shares, need 3 to recover
@@ -11,11 +11,13 @@
 //!
 //! Security:
 //!   - Uses GF(2^8) finite field arithmetic (same as SLIP-39)
-//!   - Cryptographic RNG for polynomial coefficients
-//!   - CRC32 checksum for share integrity
+//!   - Cryptographic RNG for polynomial coefficients, the digest key and the set identifier
+//!   - A random set identifier per split; shares of different splits are refused
+//!   - A 4-byte HMAC-SHA256 digest shared with the secret (SLIP-39's construction), checked
+//!     in constant time once a threshold of shares has recovered it
+//!   - Every share past the threshold must lie on the recovered polynomial
+//!   - CRC32 per share for transport errors only
 //!   - Constant-time field operations (branchless and table-free, slip39.gfMul)
-//!   - Every share stores secret_id = SHA256(secret)[0..4] in the clear, so one share alone
-//!     confirms a guess at a low-entropy secret; see Share.secret_id. SLIP-39 shares do not.
 
 const std = @import("std");
 const crypto = std.crypto;
@@ -137,125 +139,101 @@ pub const GF256 = struct {
     }
 };
 
-/// Share structure with metadata
+/// The native share format's version byte. Only this version is read or written; any other
+/// is refused with error.UnsupportedVersion.
+pub const SHARE_FORMAT_VERSION: u8 = 2;
+
+/// Bytes of the random identifier every share of one split carries.
+pub const SET_ID_LEN = 16;
+
+/// What is shared is not the secret alone but the payload
+///     digest(4) || R(16) || secret,
+/// where R is random and digest = HMAC-SHA256(key = R, msg = secret)[0..4] (SLIP-39's digest
+/// construction). Every byte of the payload is shared with its own random polynomial, so
+/// fewer than `threshold` shares reveal nothing about it, the digest included; once the
+/// payload is recovered the digest is checked in constant time.
+pub const DIGEST_LEN = 4;
+pub const DIGEST_KEY_LEN = 16;
+pub const PAYLOAD_OVERHEAD = DIGEST_LEN + DIGEST_KEY_LEN;
+
+/// version(1) + threshold(1) + total(1) + index(1) + set_id(16) + data_len(4)
+const SHARE_HEADER_LEN = 4 + SET_ID_LEN + 4;
+const SHARE_CRC_LEN = 4;
+
+/// The first DIGEST_LEN bytes of HMAC-SHA256(key = digest_key, msg = secret).
+fn payloadDigest(digest_key: *const [DIGEST_KEY_LEN]u8, secret: []const u8) [DIGEST_LEN]u8 {
+    var mac: [crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
+    defer crypto.secureZero(u8, &mac);
+    crypto.auth.hmac.sha2.HmacSha256.create(&mac, secret, digest_key);
+    return mac[0..DIGEST_LEN].*;
+}
+
+/// One share of a native (non-SLIP-39) split. Wire format, version 2:
+///
+///     version(1) = 2 | threshold(1) | total(1) | index(1) | set_id(16)
+///     | data_len(4, LE) | data(data_len) | crc32(4, LE, over everything before it)
+///
+/// `data` is this share's y-values of the payload (see PAYLOAD_OVERHEAD), so
+/// data_len = secret length + PAYLOAD_OVERHEAD. Nothing in a share is a function of the
+/// secret: set_id is random, and the CRC only catches transport errors.
 pub const Share = struct {
-    /// Share format version (for future compatibility)
-    version: u8 = 1,
+    /// Share format version; always SHARE_FORMAT_VERSION.
+    version: u8 = SHARE_FORMAT_VERSION,
     /// Threshold (k) - minimum shares needed to recover
     threshold: u8,
     /// Total shares (n) created
     total_shares: u8,
     /// This share's index (1-255)
     index: u8,
-    /// Secret identifier: the first 4 bytes of SHA256(secret), identical in every share of a
-    /// split and checked against the recovered secret by `combine`. Being a function of the
-    /// secret, it lets anyone holding a single share test guesses: a secret with less than
-    /// ~32 bits of entropy (a PIN, a short password) is recoverable from one share. Version 1
-    /// of the share format requires it; removing it needs a new format version.
-    secret_id: [4]u8,
-    /// The share data (y-values for this x-coordinate)
+    /// Random identifier from the OS CSPRNG, identical in every share of one split, so
+    /// shares of different splits (even of the same secret) are refused before combining.
+    set_id: [SET_ID_LEN]u8,
+    /// The share data (y-values of the payload for this x-coordinate)
     data: []u8,
     /// CRC32 checksum of all above fields
     checksum: u32,
 
-    /// Serialize share to bytes
+    /// Serialize share to bytes. `data` must be at most maxInt(u32) bytes (split ensures it).
     pub fn serialize(self: *const Share, allocator: Allocator) ![]u8 {
-        // Format: version(1) + threshold(1) + total(1) + index(1) + secret_id(4) + data_len(4) + data + checksum(4)
-        const header_size = 1 + 1 + 1 + 1 + 4 + 4;
-        const total_size = header_size + self.data.len + 4;
-
-        var buffer = try allocator.alloc(u8, total_size);
-        var pos: usize = 0;
-
-        buffer[pos] = self.version;
-        pos += 1;
-        buffer[pos] = self.threshold;
-        pos += 1;
-        buffer[pos] = self.total_shares;
-        pos += 1;
-        buffer[pos] = self.index;
-        pos += 1;
-
-        @memcpy(buffer[pos .. pos + 4], &self.secret_id);
-        pos += 4;
-
-        // Data length as 4-byte little-endian
-        const data_len: u32 = @intCast(self.data.len);
-        buffer[pos] = @intCast(data_len & 0xFF);
-        buffer[pos + 1] = @intCast((data_len >> 8) & 0xFF);
-        buffer[pos + 2] = @intCast((data_len >> 16) & 0xFF);
-        buffer[pos + 3] = @intCast((data_len >> 24) & 0xFF);
-        pos += 4;
-
-        @memcpy(buffer[pos .. pos + self.data.len], self.data);
-        pos += self.data.len;
-
-        // Compute checksum over everything before it
-        const crc = std.hash.Crc32.hash(buffer[0..pos]);
-        buffer[pos] = @intCast(crc & 0xFF);
-        buffer[pos + 1] = @intCast((crc >> 8) & 0xFF);
-        buffer[pos + 2] = @intCast((crc >> 16) & 0xFF);
-        buffer[pos + 3] = @intCast((crc >> 24) & 0xFF);
-
+        const data_len = std.math.cast(u32, self.data.len) orelse return error.SecretTooLong;
+        const buffer = try allocator.alloc(u8, SHARE_HEADER_LEN + self.data.len + SHARE_CRC_LEN);
+        buffer[0] = self.version;
+        buffer[1] = self.threshold;
+        buffer[2] = self.total_shares;
+        buffer[3] = self.index;
+        @memcpy(buffer[4..][0..SET_ID_LEN], &self.set_id);
+        std.mem.writeInt(u32, buffer[4 + SET_ID_LEN ..][0..4], data_len, .little);
+        @memcpy(buffer[SHARE_HEADER_LEN..][0..self.data.len], self.data);
+        const crc_at = SHARE_HEADER_LEN + self.data.len;
+        std.mem.writeInt(u32, buffer[crc_at..][0..4], std.hash.Crc32.hash(buffer[0..crc_at]), .little);
         return buffer;
     }
 
-    /// Deserialize share from bytes
+    /// Deserialize share from bytes. Refuses any version but SHARE_FORMAT_VERSION
+    /// (UnsupportedVersion), a length that does not match the bytes or is too short to hold
+    /// a payload (ShareTooShort), and a CRC mismatch (ChecksumMismatch).
     pub fn deserialize(allocator: Allocator, bytes: []const u8) !Share {
-        if (bytes.len < 16) return error.ShareTooShort;
+        if (bytes.len == 0) return error.ShareTooShort;
+        if (bytes[0] != SHARE_FORMAT_VERSION) return error.UnsupportedVersion;
+        if (bytes.len < SHARE_HEADER_LEN + SHARE_CRC_LEN) return error.ShareTooShort;
 
-        var pos: usize = 0;
+        const data_len = std.mem.readInt(u32, bytes[4 + SET_ID_LEN ..][0..4], .little);
+        // Compare against what remains, never `pos + data_len + 4`: on a 32-bit target that
+        // wraps for a length near 2^32.
+        if (data_len != bytes.len - SHARE_HEADER_LEN - SHARE_CRC_LEN) return error.ShareTooShort;
+        if (data_len <= PAYLOAD_OVERHEAD) return error.ShareTooShort;
 
-        const version = bytes[pos];
-        pos += 1;
-        if (version != 1) return error.UnsupportedVersion;
-
-        const threshold = bytes[pos];
-        pos += 1;
-        const total_shares = bytes[pos];
-        pos += 1;
-        const index = bytes[pos];
-        pos += 1;
-
-        var secret_id: [4]u8 = undefined;
-        @memcpy(&secret_id, bytes[pos .. pos + 4]);
-        pos += 4;
-
-        // Read data length
-        const data_len: u32 = @as(u32, bytes[pos]) |
-            (@as(u32, bytes[pos + 1]) << 8) |
-            (@as(u32, bytes[pos + 2]) << 16) |
-            (@as(u32, bytes[pos + 3]) << 24);
-        pos += 4;
-
-        // Compare against what remains (pos <= 12 < bytes.len here), never
-        // `pos + data_len + 4`: on a 32-bit target that wraps for a length near 2^32.
-        if (data_len > bytes.len - pos or bytes.len - pos - data_len < 4) return error.ShareTooShort;
-
-        const data = try allocator.alloc(u8, data_len);
-        errdefer {
-            crypto.secureZero(u8, data);
-            allocator.free(data);
-        }
-        @memcpy(data, bytes[pos .. pos + data_len]);
-        pos += data_len;
-
-        // Read and verify checksum
-        const stored_crc: u32 = @as(u32, bytes[pos]) |
-            (@as(u32, bytes[pos + 1]) << 8) |
-            (@as(u32, bytes[pos + 2]) << 16) |
-            (@as(u32, bytes[pos + 3]) << 24);
-
-        const computed_crc = std.hash.Crc32.hash(bytes[0..pos]);
-        if (stored_crc != computed_crc) return error.ChecksumMismatch;
+        const crc_at = SHARE_HEADER_LEN + data_len;
+        const stored_crc = std.mem.readInt(u32, bytes[crc_at..][0..4], .little);
+        if (stored_crc != std.hash.Crc32.hash(bytes[0..crc_at])) return error.ChecksumMismatch;
 
         return Share{
-            .version = version,
-            .threshold = threshold,
-            .total_shares = total_shares,
-            .index = index,
-            .secret_id = secret_id,
-            .data = data,
+            .version = bytes[0],
+            .threshold = bytes[1],
+            .total_shares = bytes[2],
+            .index = bytes[3],
+            .set_id = bytes[4..][0..SET_ID_LEN].*,
+            .data = try allocator.dupe(u8, bytes[SHARE_HEADER_LEN..][0..data_len]),
             .checksum = stored_crc,
         };
     }
@@ -269,8 +247,9 @@ pub const Share = struct {
 
 /// Shamir Secret Sharing implementation
 pub const SSS = struct {
-    /// Split a secret into n shares with threshold k
-    /// Returns array of Share structures
+    /// Split a secret into n shares with threshold k (2 <= k <= n <= 255). Returns array of
+    /// Share structures. A threshold of 1 is refused: every share would hold the payload, and
+    /// with it the secret, in the clear.
     pub fn split(
         allocator: Allocator,
         secret: []const u8,
@@ -279,17 +258,22 @@ pub const SSS = struct {
     ) ![]Share {
         if (threshold < 2) return error.ThresholdTooLow;
         if (threshold > num_shares) return error.ThresholdExceedsShares;
-        if (num_shares > 255) return error.TooManyShares;
         if (secret.len == 0) return error.EmptySecret;
+        if (secret.len > std.math.maxInt(u32) - PAYLOAD_OVERHEAD) return error.SecretTooLong;
 
-        GF256.init();
+        // The payload digest(4) || R(16) || secret, every byte of which is shared.
+        const payload = try allocator.alloc(u8, PAYLOAD_OVERHEAD + secret.len);
+        defer {
+            crypto.secureZero(u8, payload);
+            allocator.free(payload);
+        }
+        const digest_key = payload[DIGEST_LEN..PAYLOAD_OVERHEAD];
+        try fillRandomBytes(digest_key);
+        @memcpy(payload[PAYLOAD_OVERHEAD..], secret);
+        payload[0..DIGEST_LEN].* = payloadDigest(digest_key[0..DIGEST_KEY_LEN], secret);
 
-        // Compute secret identifier (first 4 bytes of SHA256); the other 28 are not published.
-        var secret_id: [4]u8 = undefined;
-        var hash: [32]u8 = undefined;
-        crypto.hash.sha2.Sha256.hash(secret, &hash, .{});
-        @memcpy(&secret_id, hash[0..4]);
-        crypto.secureZero(u8, &hash);
+        var set_id: [SET_ID_LEN]u8 = undefined;
+        try fillRandomBytes(&set_id);
 
         // Allocate shares. Only shares[0..initialized] hold an allocated `data`.
         const shares = try allocator.alloc(Share, num_shares);
@@ -302,28 +286,27 @@ pub const SSS = struct {
         // Initialize share metadata
         for (shares, 1..) |*share, x| {
             share.* = Share{
-                .version = 1,
                 .threshold = threshold,
                 .total_shares = num_shares,
                 .index = @intCast(x),
-                .secret_id = secret_id,
-                .data = try allocator.alloc(u8, secret.len),
+                .set_id = set_id,
+                .data = try allocator.alloc(u8, payload.len),
                 .checksum = 0,
             };
             initialized += 1;
         }
 
-        // Allocate polynomial coefficients; coeffs[0] is a secret byte, the rest determine it.
+        // Allocate polynomial coefficients; coeffs[0] is a payload byte, the rest determine it.
         var coeffs = try allocator.alloc(u8, threshold);
         defer {
             crypto.secureZero(u8, coeffs);
             allocator.free(coeffs);
         }
 
-        // Process each byte of the secret independently
-        for (secret, 0..) |secret_byte, byte_idx| {
-            // Build polynomial: f(x) = secret_byte + a1*x + a2*x^2 + ... + a(k-1)*x^(k-1)
-            coeffs[0] = secret_byte; // Constant term is the secret byte
+        // Process each byte of the payload independently
+        for (payload, 0..) |payload_byte, byte_idx| {
+            // Build polynomial: f(x) = payload_byte + a1*x + a2*x^2 + ... + a(k-1)*x^(k-1)
+            coeffs[0] = payload_byte;
 
             // Generate random coefficients using cryptographic RNG.
             // On RNG failure we MUST abort — proceeding would emit shares
@@ -343,12 +326,7 @@ pub const SSS = struct {
                 crypto.secureZero(u8, serialized);
                 allocator.free(serialized);
             }
-            // Checksum is embedded in serialization, extract it
-            const len = serialized.len;
-            share.checksum = @as(u32, serialized[len - 4]) |
-                (@as(u32, serialized[len - 3]) << 8) |
-                (@as(u32, serialized[len - 2]) << 16) |
-                (@as(u32, serialized[len - 1]) << 24);
+            share.checksum = std.mem.readInt(u32, serialized[serialized.len - 4 ..][0..4], .little);
         }
 
         return shares;
@@ -365,7 +343,7 @@ pub const SSS = struct {
 
         // Verify all shares have same parameters
         const threshold = shares[0].threshold;
-        const secret_id = shares[0].secret_id;
+        const set_id = shares[0].set_id;
         const data_len = shares[0].data.len;
 
         // A threshold below 2 is never produced by `split` (it rejects k < 2)
@@ -374,9 +352,8 @@ pub const SSS = struct {
         // nonsensical k.
         if (threshold < 2) return error.InsufficientShares;
 
-        // A non-empty payload is required; a zero-length data field would make
-        // the reconstruction loop a no-op and slip a bogus share set through.
-        if (data_len == 0) return error.DataLengthMismatch;
+        // The payload holds the digest, its key and at least one secret byte.
+        if (data_len <= PAYLOAD_OVERHEAD) return error.DataLengthMismatch;
 
         // The x-coordinate (share index) must be a valid evaluation point.
         // `split` assigns indices 1..n; index 0 is the secret position itself
@@ -384,8 +361,9 @@ pub const SSS = struct {
         if (shares[0].index == 0) return error.DuplicateShareIndex;
 
         for (shares[1..]) |share| {
-            if (share.threshold != threshold) return error.ThresholdMismatch;
-            if (!mem.eql(u8, &share.secret_id, &secret_id)) return error.SecretIdMismatch;
+            if (share.threshold != threshold or share.total_shares != shares[0].total_shares) return error.ThresholdMismatch;
+            // The set identifier is random and public; comparing it leaks nothing.
+            if (!mem.eql(u8, &share.set_id, &set_id)) return error.SetIdMismatch;
             if (share.data.len != data_len) return error.DataLengthMismatch;
             if (share.index == 0) return error.DuplicateShareIndex;
         }
@@ -399,11 +377,11 @@ pub const SSS = struct {
             }
         }
 
-        // Allocate secret buffer
-        var secret = try allocator.alloc(u8, data_len);
-        errdefer {
-            crypto.secureZero(u8, secret);
-            allocator.free(secret);
+        // The recovered payload: digest || R || secret.
+        const payload = try allocator.alloc(u8, data_len);
+        defer {
+            crypto.secureZero(u8, payload);
+            allocator.free(payload);
         }
 
         // The first 'threshold' shares determine the polynomial (any k shares work).
@@ -414,7 +392,7 @@ pub const SSS = struct {
         // Reconstruct each byte using Lagrange interpolation at x = 0
         lagrangeWeights(basis, 0, weights[0..threshold]);
         for (0..data_len) |byte_idx| {
-            secret[byte_idx] = evaluateAt(basis, weights[0..threshold], byte_idx);
+            payload[byte_idx] = evaluateAt(basis, weights[0..threshold], byte_idx);
         }
 
         // Every further share must be the polynomial's value at its own index. The
@@ -428,17 +406,14 @@ pub const SSS = struct {
             if (diff != 0) return error.InconsistentShares;
         }
 
-        // Verify secret ID matches. On mismatch the `errdefer` registered above
-        // wipes and frees `secret`; it must not be freed here as well (a
-        // double free SIGSEGVs under the page allocator).
-        var hash: [32]u8 = undefined;
-        crypto.hash.sha2.Sha256.hash(secret, &hash, .{});
-        defer crypto.secureZero(u8, &hash);
-        if (!crypto.timing_safe.eql([4]u8, hash[0..4].*, secret_id)) {
+        // The digest binds the secret to R; it is computable only from a recovered payload.
+        var expected = payloadDigest(payload[DIGEST_LEN..PAYLOAD_OVERHEAD], payload[PAYLOAD_OVERHEAD..]);
+        defer crypto.secureZero(u8, &expected);
+        if (!crypto.timing_safe.eql([DIGEST_LEN]u8, expected, payload[0..DIGEST_LEN].*)) {
             return error.SecretVerificationFailed;
         }
 
-        return secret;
+        return allocator.dupe(u8, payload[PAYLOAD_OVERHEAD..]);
     }
 
     /// Evaluate polynomial at point x using Horner's method
@@ -959,7 +934,10 @@ fn doSplit(allocator: Allocator, config: *const Config) !void {
         var filename_buf: [256]u8 = undefined;
 
         const serialized = try share.serialize(allocator);
-        defer allocator.free(serialized);
+        defer {
+            crypto.secureZero(u8, serialized);
+            allocator.free(serialized);
+        }
 
         const filename = std.fmt.bufPrint(&filename_buf, "{s}/share-{d}.sss", .{
             output_dir,
@@ -969,7 +947,10 @@ fn doSplit(allocator: Allocator, config: *const Config) !void {
         if (config.hex_mode) {
             // Write as hex
             const hex_buf = try allocator.alloc(u8, serialized.len * 2);
-            defer allocator.free(hex_buf);
+            defer {
+                crypto.secureZero(u8, hex_buf);
+                allocator.free(hex_buf);
+            }
             const hex_chars = "0123456789abcdef";
             for (serialized, 0..) |byte, idx| {
                 hex_buf[idx * 2] = hex_chars[byte >> 4];
@@ -992,12 +973,7 @@ fn doSplit(allocator: Allocator, config: *const Config) !void {
     }
 
     std.debug.print("Successfully created {d} shares in {s}/ (binary format)\n", .{ config.num_shares, output_dir });
-    std.debug.print("Secret ID: {x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{
-        shares[0].secret_id[0],
-        shares[0].secret_id[1],
-        shares[0].secret_id[2],
-        shares[0].secret_id[3],
-    });
+    std.debug.print("Set ID: {x}\n", .{&shares[0].set_id});
     std.debug.print("Threshold: {d} of {d} shares required to recover\n", .{
         config.threshold,
         config.num_shares,
@@ -1339,13 +1315,8 @@ fn doVerify(allocator: Allocator, config: *Config) !void {
         if (config.verbose) {
             std.debug.print("  Index: {d} of {d}\n", .{ share.index, share.total_shares });
             std.debug.print("  Threshold: {d}\n", .{share.threshold});
-            std.debug.print("  Secret ID: {x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{
-                share.secret_id[0],
-                share.secret_id[1],
-                share.secret_id[2],
-                share.secret_id[3],
-            });
-            std.debug.print("  Data size: {d} bytes\n", .{share.data.len});
+            std.debug.print("  Set ID: {x}\n", .{&share.set_id});
+            std.debug.print("  Secret size: {d} bytes\n", .{share.data.len - PAYLOAD_OVERHEAD});
         }
     }
 
@@ -1897,6 +1868,208 @@ test "GF256 basic operations" {
     }
 }
 
+/// The bytes that tie a share to its split: the set identifier.
+fn shareIdentifier(share: *const Share) []const u8 {
+    return &share.set_id;
+}
+
+test "shares carry no function of the secret: no SHA-256 of it, and each split has its own set identifier" {
+    const allocator = std.testing.allocator;
+    const secret = "correct horse battery staple";
+    var digest: [32]u8 = undefined;
+    crypto.hash.sha2.Sha256.hash(secret, &digest, .{});
+
+    const a = try SSS.split(allocator, secret, 3, 5);
+    defer {
+        for (a) |*share| share.deinit(allocator);
+        allocator.free(a);
+    }
+    const b = try SSS.split(allocator, secret, 3, 5);
+    defer {
+        for (b) |*share| share.deinit(allocator);
+        allocator.free(b);
+    }
+
+    // Two splits of one secret are told apart by their identifiers, not linked by them.
+    try std.testing.expect(!mem.eql(u8, shareIdentifier(&a[0]), shareIdentifier(&b[0])));
+    for (a) |*share| {
+        try std.testing.expectEqualSlices(u8, shareIdentifier(&a[0]), shareIdentifier(share));
+        // No window of the serialised share is the start or end of SHA-256(secret).
+        const bytes = try share.serialize(allocator);
+        defer allocator.free(bytes);
+        try std.testing.expect(mem.indexOf(u8, bytes, digest[0..4]) == null);
+        try std.testing.expect(mem.indexOf(u8, bytes, digest[28..32]) == null);
+    }
+}
+
+test "combine refuses shares mixed from two splits of the same secret" {
+    const allocator = std.testing.allocator;
+    const secret = "the same secret, split twice";
+    const a = try SSS.split(allocator, secret, 3, 5);
+    defer {
+        for (a) |*share| share.deinit(allocator);
+        allocator.free(a);
+    }
+    const b = try SSS.split(allocator, secret, 3, 5);
+    defer {
+        for (b) |*share| share.deinit(allocator);
+        allocator.free(b);
+    }
+    // Distinct indices from two splits: structurally a set, but not one polynomial.
+    const mixed = [_]Share{ a[0], b[1], b[2] };
+    try std.testing.expectError(error.SetIdMismatch, SSS.combine(allocator, &mixed));
+}
+
+test "a share in format version 1 (or any version but 2) is refused" {
+    const allocator = std.testing.allocator;
+    // A well-formed version-1 share: header, secret_id, length 3, data, CRC32.
+    var v1 = [_]u8{ 1, 3, 5, 1, 0xde, 0xad, 0xbe, 0xef, 3, 0, 0, 0, 0x11, 0x22, 0x33, 0, 0, 0, 0 };
+    std.mem.writeInt(u32, v1[15..19], std.hash.Crc32.hash(v1[0..15]), .little);
+    try std.testing.expectError(error.UnsupportedVersion, Share.deserialize(allocator, &v1));
+    for ([_]u8{ 0, 3, 255 }) |version| {
+        v1[0] = version;
+        std.mem.writeInt(u32, v1[15..19], std.hash.Crc32.hash(v1[0..15]), .little);
+        try std.testing.expectError(error.UnsupportedVersion, Share.deserialize(allocator, &v1));
+    }
+}
+
+test "fewer than threshold shares are consistent with every secret of their length" {
+    // Two real shares of a 3-of-5 split plus a third built for a chosen secret recover that
+    // secret, digest and all: the two real shares rule no secret out.
+    const allocator = std.testing.allocator;
+    const real = "the real secret!";
+    const shares = try SSS.split(allocator, real, 3, 5);
+    defer {
+        for (shares) |*share| share.deinit(allocator);
+        allocator.free(shares);
+    }
+    for ([_]*const [16]u8{ "the real secret!", "a different one!", "AAAAAAAAAAAAAAAA" }) |target| {
+        var payload: [PAYLOAD_OVERHEAD + 16]u8 = undefined;
+        const key: [DIGEST_KEY_LEN]u8 = @splat(0x42);
+        payload[0..DIGEST_LEN].* = payloadDigest(&key, target);
+        payload[DIGEST_LEN..PAYLOAD_OVERHEAD].* = key;
+        payload[PAYLOAD_OVERHEAD..].* = target.*;
+
+        // The polynomials through (0, payload) and the two real shares, evaluated at x = 3.
+        const at_zero = Share{ .threshold = 3, .total_shares = 5, .index = 0, .set_id = shares[0].set_id, .data = &payload, .checksum = 0 };
+        const basis = [_]Share{ at_zero, shares[0], shares[1] };
+        var weights: [3]u8 = undefined;
+        SSS.lagrangeWeights(&basis, shares[2].index, &weights);
+        var forged_data: [payload.len]u8 = undefined;
+        for (&forged_data, 0..) |*byte, b| byte.* = SSS.evaluateAt(&basis, &weights, b);
+        var forged = shares[2];
+        forged.data = &forged_data;
+
+        const recovered = try SSS.combine(allocator, &.{ shares[0], shares[1], forged });
+        defer {
+            crypto.secureZero(u8, recovered);
+            allocator.free(recovered);
+        }
+        try std.testing.expectEqualSlices(u8, target, recovered);
+    }
+}
+
+test "the shared digest catches a corrupted share whose CRC is valid" {
+    const allocator = std.testing.allocator;
+    const secret = "digest-protected secret";
+    const shares = try SSS.split(allocator, secret, 3, 5);
+    defer {
+        for (shares) |*share| share.deinit(allocator);
+        allocator.free(shares);
+    }
+    // One bit flipped in the digest, in R, and in the first and last secret bytes, each
+    // re-serialised so the CRC is recomputed, as a deliberate edit or a bad copy would.
+    for ([_]usize{ 0, DIGEST_LEN, PAYLOAD_OVERHEAD, PAYLOAD_OVERHEAD + secret.len - 1 }) |pos| {
+        shares[1].data[pos] ^= 0x80;
+        defer shares[1].data[pos] ^= 0x80;
+        const bytes = try shares[1].serialize(allocator);
+        defer allocator.free(bytes);
+        var reread = try Share.deserialize(allocator, bytes);
+        defer reread.deinit(allocator);
+        try std.testing.expectError(error.SecretVerificationFailed, SSS.combine(allocator, &.{ shares[0], reread, shares[2] }));
+    }
+}
+
+fn expectRoundTrip(allocator: Allocator, secret: []const u8, k: u8, n: u8) !void {
+    const shares = try SSS.split(allocator, secret, k, n);
+    defer {
+        for (shares) |*share| share.deinit(allocator);
+        allocator.free(shares);
+    }
+    // Every serialised share parses back unchanged.
+    for (shares) |*share| {
+        const bytes = try share.serialize(allocator);
+        defer allocator.free(bytes);
+        var reread = try Share.deserialize(allocator, bytes);
+        defer reread.deinit(allocator);
+        try std.testing.expectEqualSlices(u8, share.data, reread.data);
+        try std.testing.expectEqualSlices(u8, &share.set_id, &reread.set_id);
+    }
+    // The first k, the last k, every share, and k shares taken from both ends recover it.
+    var mixed: [255]Share = undefined;
+    for (0..k) |i| mixed[i] = shares[if (i % 2 == 0) i / 2 else n - 1 - i / 2];
+    for ([_][]const Share{ shares[0..k], shares[n - k ..], shares, mixed[0..k] }) |subset| {
+        const recovered = try SSS.combine(allocator, subset);
+        defer {
+            crypto.secureZero(u8, recovered);
+            allocator.free(recovered);
+        }
+        try std.testing.expectEqualSlices(u8, secret, recovered);
+    }
+    try std.testing.expectError(error.InsufficientShares, SSS.combine(allocator, shares[0 .. k - 1]));
+}
+
+test "split and combine round-trip for every threshold 2..n and edge secret sizes" {
+    const allocator = std.testing.allocator;
+    var secret: [4096]u8 = undefined;
+    for (&secret, 0..) |*byte, i| byte.* = @truncate(i *% 151 +% 7);
+    for ([_]u8{ 2, 3, 4, 5, 7 }) |n| {
+        var k: u8 = 2;
+        while (k <= n) : (k += 1) {
+            for ([_]usize{ 1, 2, 15, 16, 17, 31, 32, 33, 64, 255, 256, 4096 }) |len| {
+                try expectRoundTrip(allocator, secret[0..len], k, n);
+            }
+        }
+    }
+    try expectRoundTrip(allocator, secret[0..32], 2, 255);
+    try expectRoundTrip(allocator, secret[0..32], 255, 255);
+
+    // A threshold of 1 would put the secret in every share in the clear.
+    try std.testing.expectError(error.ThresholdTooLow, SSS.split(allocator, "s", 1, 3));
+    try std.testing.expectError(error.ThresholdExceedsShares, SSS.split(allocator, "s", 4, 3));
+    try std.testing.expectError(error.EmptySecret, SSS.split(allocator, "", 2, 3));
+}
+
+test "version-2 shares round-trip through stego embedding" {
+    const allocator = std.testing.allocator;
+    const secret = "a 32-byte seed stand-in, exactly";
+    const shares = try SSS.split(allocator, secret, 3, 5);
+    defer {
+        for (shares) |*share| share.deinit(allocator);
+        allocator.free(shares);
+    }
+    var carrier: [64 * 64 * 3]u8 = undefined;
+    for (&carrier, 0..) |*px, i| px.* = @truncate(i *% 37 +% (i >> 7));
+
+    var extracted: [3]Share = undefined;
+    var made: usize = 0;
+    defer for (extracted[0..made]) |*share| share.deinit(allocator);
+    for (shares[1..4], 0..) |*share, i| {
+        const bytes = try share.serialize(allocator);
+        defer allocator.free(bytes);
+        var pixels = carrier;
+        try stego.embedInPixelsWithLayer(allocator, &pixels, bytes, if (i == 0) null else "photo password", null);
+        const out = try stego.extractFromPixelsWithLayer(allocator, &pixels, if (i == 0) null else "photo password", null);
+        defer allocator.free(out);
+        try std.testing.expectEqualSlices(u8, bytes, out);
+        extracted[i] = try Share.deserialize(allocator, out);
+        made += 1;
+    }
+    const recovered = try SSS.combine(allocator, &extracted);
+    defer allocator.free(recovered);
+    try std.testing.expectEqualSlices(u8, secret, recovered);
+}
+
 test "SSS.combine checks every share past the threshold against the recovered polynomial" {
     const allocator = std.testing.allocator;
     const secret = "sixteen-byte-sec";
@@ -2010,23 +2183,23 @@ test "Share serialization roundtrip" {
     try std.testing.expectEqual(shares[0].threshold, deserialized.threshold);
     try std.testing.expectEqual(shares[0].total_shares, deserialized.total_shares);
     try std.testing.expectEqual(shares[0].index, deserialized.index);
-    try std.testing.expectEqualSlices(u8, &shares[0].secret_id, &deserialized.secret_id);
+    try std.testing.expectEqualSlices(u8, &shares[0].set_id, &deserialized.set_id);
     try std.testing.expectEqualSlices(u8, shares[0].data, deserialized.data);
 }
 
-// Regression: combining shares that come from two INDEPENDENT splits of the
-// SAME secret (same n,k -> same secret_id, same threshold, distinct indices)
-// used to reach the secret-verification branch and double-free `secret`,
-// SIGSEGV'ing under the page allocator. It must now fail verification and
-// return a clean error WITHOUT crashing or leaking. (Audit finding X-3.)
+// Combining shares that come from two INDEPENDENT splits of the SAME secret
+// (same n,k and threshold, distinct indices) must return a clean error WITHOUT
+// crashing or leaking: once a double free on the verification path (audit
+// finding X-3). Each split carries its own random set identifier, so the mix is
+// refused before interpolation.
 test "SSS combine mismatched shares from two splits returns error, no crash" {
     const allocator = std.testing.allocator;
     GF256.init();
 
     const secret = "SAME-SECRET-VALUE-32-BYTES-LONG!";
 
-    // Two independent splits of the same secret. Same params, so they share a
-    // secret_id and threshold; only the random polynomials differ.
+    // Two independent splits of the same secret. Same params; the set
+    // identifiers and the random polynomials differ.
     const split_a = try SSS.split(allocator, secret, 3, 5);
     defer {
         for (split_a) |*s| s.deinit(allocator);
@@ -2038,21 +2211,9 @@ test "SSS combine mismatched shares from two splits returns error, no crash" {
         allocator.free(split_b);
     }
 
-    // Mix shares with DISTINCT indices (1 from A, 2 and 3 from B): passes the
-    // structural checks (same threshold/secret_id/len, no duplicate index) and
-    // exercises the interpolation + verification path that used to crash.
+    // Mix shares with DISTINCT indices (1 from A, 2 and 3 from B).
     var subset = [_]Share{ split_a[0], split_b[1], split_b[2] };
-    const result = SSS.combine(allocator, &subset);
-    if (result) |recovered| {
-        // Reaching here is acceptable only if recovery happened to be exact
-        // (vanishingly unlikely); free it so the leak detector stays quiet.
-        defer allocator.free(recovered);
-        // It must never silently match the real secret from foreign shares.
-        try std.testing.expect(!mem.eql(u8, recovered, secret));
-    } else |err| {
-        // Expected path: verification fails on mismatched shares.
-        try std.testing.expectEqual(error.SecretVerificationFailed, err);
-    }
+    try std.testing.expectError(error.SetIdMismatch, SSS.combine(allocator, &subset));
 }
 
 // Structural rejection: a share carrying an out-of-range x-coordinate (index 0)
@@ -2200,12 +2361,12 @@ test "CLI file I/O refuses a planted symlink at the input and the output path" {
 test "Share.deserialize refuses a data length near 2^32 instead of wrapping the bound" {
     const allocator = std.testing.allocator;
     for ([_]u32{ 0xFFFFFFFF, 0xFFFFFFFD, 0xFFFFFFF0, 0x7FFFFFFF }) |len| {
-        var bytes: [20]u8 = @splat(0);
-        bytes[0] = 1; // version
+        var bytes: [SHARE_HEADER_LEN + 8]u8 = @splat(0);
+        bytes[0] = SHARE_FORMAT_VERSION;
         bytes[1] = 2; // threshold
         bytes[2] = 3; // total shares
         bytes[3] = 1; // index
-        std.mem.writeInt(u32, bytes[8..12], len, .little);
+        std.mem.writeInt(u32, bytes[4 + SET_ID_LEN ..][0..4], len, .little);
         try std.testing.expectError(error.ShareTooShort, Share.deserialize(allocator, &bytes));
     }
 }

@@ -22,9 +22,10 @@
 //!      an INDEPENDENT polynomial evaluator (`refEval`) built on an independent
 //!      Russian-peasant field multiply (`refGfMul`), itself pinned to the
 //!      FIPS-197 vectors above. split() is never called, so this is not a
-//!      roundtrip: an outside evaluator produces the y-values and the library's
+//!      roundtrip: an outside evaluator produces the y-values of the documented
+//!      v2 payload (HMAC-SHA256 digest || R || secret) and the library's
 //!      Lagrange interpolator must invert them back to the known secret (which
-//!      combine independently re-checks via SHA-256 of the recovered bytes).
+//!      combine independently re-checks via the digest).
 //!
 //!   3. PNG chunk parsing — crafted inputs per the PNG spec chunk layout
 //!      (4-byte big-endian length + 4-byte type + data + 4-byte CRC). A chunk
@@ -133,43 +134,39 @@ fn buildShare(
     threshold: u8,
     total: u8,
     index: u8,
-    secret_id: [4]u8,
+    set_id: [main.SET_ID_LEN]u8,
     y_values: []const u8,
 ) !Share {
     return Share{
-        .version = 1,
         .threshold = threshold,
         .total_shares = total,
         .index = index,
-        .secret_id = secret_id,
+        .set_id = set_id,
         .data = try allocator.dupe(u8, y_values),
         .checksum = 0,
     };
 }
 
-test "Shamir: library combine inverts independently-generated shares (threshold 3)" {
+test "Shamir: library combine inverts independently-generated shares of the v2 payload (threshold 3)" {
     const allocator = testing.allocator;
-    GF256.init();
 
-    // Known secret (3 bytes). combine() will independently re-verify the
-    // recovered bytes via SHA-256(secret)[0..4], so we set secret_id honestly.
+    // Known secret (3 bytes), shared as the version-2 payload the format documents,
+    //   HMAC-SHA256(key = R, msg = secret)[0..4] || R || secret,
+    // with a fixed R. combine() recomputes the digest from what it recovers, so a wrong
+    // reconstruction fails rather than returning other bytes.
     const secret = [_]u8{ 0x53, 0x1a, 0xc4 };
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(&secret, &hash, .{});
-    var secret_id: [4]u8 = undefined;
-    @memcpy(&secret_id, hash[0..4]);
+    const r = [16]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10 };
+    var mac: [32]u8 = undefined;
+    std.crypto.auth.hmac.sha2.HmacSha256.create(&mac, &secret, &r);
+    const payload = mac[0..4].* ++ r ++ secret;
+    try testing.expectEqual(main.PAYLOAD_OVERHEAD + secret.len, payload.len);
 
-    // Fixed degree-2 polynomials, one per secret byte: coeffs[0] is the secret
-    // byte, coeffs[1..] are arbitrary-but-fixed. These come from us, but the
-    // *reconstruction* is what is under test, and it is checked against the
-    // secret above — an external fact combine cannot fake.
-    const poly = [3][3]u8{
-        .{ secret[0], 0xca, 0x1f },
-        .{ secret[1], 0x33, 0x9e },
-        .{ secret[2], 0x71, 0x08 },
-    };
+    // Fixed degree-2 polynomials, one per payload byte: coeffs[0] is the payload byte,
+    // coeffs[1..] are arbitrary-but-fixed. These come from us, but the *reconstruction* is
+    // what is under test, and it is checked against the secret above.
     const threshold: u8 = 3;
     const total: u8 = 5;
+    const set_id: [main.SET_ID_LEN]u8 = @splat(0x5e);
 
     // Generate 5 shares by evaluating with the INDEPENDENT refEval.
     var all_shares: [5]Share = undefined;
@@ -179,9 +176,12 @@ test "Shamir: library combine inverts independently-generated shares (threshold 
     }
     var xi: u8 = 1;
     while (xi <= total) : (xi += 1) {
-        var y: [3]u8 = undefined;
-        for (0..3) |b| y[b] = refEval(&poly[b], xi);
-        all_shares[xi - 1] = try buildShare(allocator, threshold, total, xi, secret_id, &y);
+        var y: [payload.len]u8 = undefined;
+        for (0..payload.len) |b| {
+            const i: u8 = @intCast(b);
+            y[b] = refEval(&.{ payload[b], 0xca +% i *% 0x1d, 0x1f +% i *% 0x3b }, xi);
+        }
+        all_shares[xi - 1] = try buildShare(allocator, threshold, total, xi, set_id, &y);
         made += 1;
     }
 
@@ -198,6 +198,10 @@ test "Shamir: library combine inverts independently-generated shares (threshold 
         defer allocator.free(recovered);
         try testing.expectEqualSlices(u8, &secret, recovered);
     }
+    // All five lie on the polynomials, so the full set recovers too.
+    const recovered_all = try SSS.combine(allocator, &all_shares);
+    defer allocator.free(recovered_all);
+    try testing.expectEqualSlices(u8, &secret, recovered_all);
 }
 
 // ---------------------------------------------------------------------------

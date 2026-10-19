@@ -69,7 +69,10 @@ extern "C" {
 #define ZSSS_ERR_PNG_CRC_MISMATCH       -26  /* chunk CRC or zlib Adler-32 wrong */
 #define ZSSS_ERR_PNG_TOO_LARGE          -27  /* over 16 Mpx or 65536 px per side */
 #define ZSSS_ERR_STEGO_CORRUPTED        -28  /* hidden-data header corrupt / bad version */
-#define ZSSS_ERR_RANDOM_FAILURE         -29  /* OS CSPRNG failed (embed with password) */
+#define ZSSS_ERR_RANDOM_FAILURE         -29  /* OS CSPRNG failed (embed with password, split) */
+/* Native share format, version 2 (zsss_split / zsss_combine) */
+#define ZSSS_ERR_UNSUPPORTED_SHARE_VERSION -30  /* a share in any format version but 2 */
+#define ZSSS_ERR_SHARE_SET_MISMATCH        -31  /* shares of different splits, parameters or a repeated index */
 #define ZSSS_ERR_UNKNOWN                -99
 
 /**
@@ -111,6 +114,18 @@ const char* zsss_error_message(int32_t error_code);
  * ============================================================================
  * Shamir Secret Sharing
  * ============================================================================
+ *
+ * zsss's own share format, version 2 (not interoperable; for that use SLIP-0039
+ * below). Each share is
+ *
+ *   version(1) = 2 | threshold(1) | total(1) | index(1) | set_id(16)
+ *   | data_len(4, LE) | data(data_len) | crc32(4, LE)
+ *
+ * set_id is random, one per split. data is the share of the payload
+ * HMAC-SHA256(key = R, msg = secret)[0..4] || R(16 random bytes) || secret, so
+ * data_len = secret_len + 20 and no share holds any function of the secret.
+ * Combining checks the digest in constant time and that every share past the
+ * threshold lies on the same polynomial. Only version 2 is read or written.
  */
 
 /**
@@ -122,6 +137,8 @@ const char* zsss_error_message(int32_t error_code);
  * @param num_shares Total shares to create (n, must be >= threshold, <= 255)
  * @return ZsssBuffer containing concatenated length-prefixed shares
  *         Format: [len1:u32le][share1][len2:u32le][share2]...
+ *         Errors: ZSSS_ERR_EMPTY_SECRET, ZSSS_ERR_INVALID_INPUT (threshold or
+ *         count), ZSSS_ERR_RANDOM_FAILURE, ZSSS_ERR_OUT_OF_MEMORY
  *
  * Example:
  *   ZsssBuffer result = zsss_split(secret, 32, 3, 5);
@@ -141,9 +158,15 @@ ZsssBuffer zsss_split(
  * Combine shares to recover the original secret.
  *
  * @param shares_ptr Pointer to concatenated length-prefixed shares
- *                   (same format as zsss_split output)
+ *                   (same format as zsss_split output); k or more of one split
  * @param shares_len Total length of shares data
  * @return ZsssBuffer containing recovered secret
+ *         Errors: ZSSS_ERR_NO_SHARES, ZSSS_ERR_INVALID_INPUT (framing),
+ *         ZSSS_ERR_UNSUPPORTED_SHARE_VERSION, ZSSS_ERR_CHECKSUM_MISMATCH (CRC or
+ *         length), ZSSS_ERR_INSUFFICIENT_SHARES (fewer than k),
+ *         ZSSS_ERR_SHARE_SET_MISMATCH (not one split),
+ *         ZSSS_ERR_SECRET_VERIFICATION_FAILED (digest, or a share past the
+ *         threshold off the polynomial), ZSSS_ERR_OUT_OF_MEMORY
  *
  * Example:
  *   ZsssBuffer secret = zsss_combine(shares_data, shares_len);

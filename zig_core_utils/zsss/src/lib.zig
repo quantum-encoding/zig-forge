@@ -89,6 +89,9 @@ pub const ZSSS_ERR_PNG_CRC_MISMATCH: i32 = -26;
 pub const ZSSS_ERR_PNG_TOO_LARGE: i32 = -27;
 pub const ZSSS_ERR_STEGO_CORRUPTED: i32 = -28;
 pub const ZSSS_ERR_RANDOM_FAILURE: i32 = -29;
+// Native share format version 2 (zsss_split / zsss_combine).
+pub const ZSSS_ERR_UNSUPPORTED_SHARE_VERSION: i32 = -30;
+pub const ZSSS_ERR_SHARE_SET_MISMATCH: i32 = -31;
 pub const ZSSS_ERR_UNKNOWN: i32 = -99;
 
 /// The `[len: u32 LE][bytes]` frames zsss_split and zsss_slip39_generate emit. `next` returns
@@ -205,7 +208,11 @@ export fn zsss_split(
     const output = splitFramed(ffi_allocator, secret, threshold, num_shares) catch |err| {
         // Threshold and count errors share the generic code; specific ones would need
         // matching against SSS.split's inferred error set.
-        const code = if (err == error.OutOfMemory) ZSSS_ERR_OUT_OF_MEMORY else ZSSS_ERR_INVALID_INPUT;
+        const code = switch (err) {
+            error.OutOfMemory => ZSSS_ERR_OUT_OF_MEMORY,
+            error.RandomFailure => ZSSS_ERR_RANDOM_FAILURE,
+            else => ZSSS_ERR_INVALID_INPUT,
+        };
         return .{ .data = null, .len = 0, .error_code = code };
     };
     return .{ .data = output.ptr, .len = output.len, .error_code = ZSSS_OK };
@@ -234,8 +241,13 @@ export fn zsss_combine(
 
     var frames = FrameReader{ .data = shares_data };
     while (frames.next() catch return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT }) |frame| {
-        var share = Share.deserialize(ffi_allocator, frame) catch {
-            return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_CHECKSUM_MISMATCH };
+        var share = Share.deserialize(ffi_allocator, frame) catch |err| {
+            const code = switch (err) {
+                error.UnsupportedVersion => ZSSS_ERR_UNSUPPORTED_SHARE_VERSION,
+                error.OutOfMemory => ZSSS_ERR_OUT_OF_MEMORY,
+                error.ShareTooShort, error.ChecksumMismatch => ZSSS_ERR_CHECKSUM_MISMATCH,
+            };
+            return .{ .data = null, .len = 0, .error_code = code };
         };
         shares_list.append(ffi_allocator, share) catch {
             share.deinit(ffi_allocator);
@@ -247,14 +259,28 @@ export fn zsss_combine(
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_NO_SHARES };
     }
 
-    // Combine shares. A share beyond the threshold that is off the polynomial reports as a
-    // failed verification; every other refusal keeps the generic code.
     const secret = SSS.combine(ffi_allocator, shares_list.items) catch |err| {
-        const code = if (err == error.InconsistentShares) ZSSS_ERR_SECRET_VERIFICATION_FAILED else ZSSS_ERR_INSUFFICIENT_SHARES;
-        return .{ .data = null, .len = 0, .error_code = code };
+        return .{ .data = null, .len = 0, .error_code = combineErrorCode(err) };
     };
 
     return .{ .data = secret.ptr, .len = secret.len, .error_code = ZSSS_OK };
+}
+
+/// The code zsss_combine reports for each SSS.combine refusal.
+fn combineErrorCode(err: anyerror) i32 {
+    return switch (err) {
+        error.NoShares, error.InsufficientShares => ZSSS_ERR_INSUFFICIENT_SHARES,
+        // Not one split: different set identifiers, parameters, lengths, or a repeated index.
+        error.SetIdMismatch,
+        error.ThresholdMismatch,
+        error.DataLengthMismatch,
+        error.DuplicateShareIndex,
+        => ZSSS_ERR_SHARE_SET_MISMATCH,
+        // One split, but a share is corrupt: the digest or an extra share disagrees.
+        error.SecretVerificationFailed, error.InconsistentShares => ZSSS_ERR_SECRET_VERIFICATION_FAILED,
+        error.OutOfMemory => ZSSS_ERR_OUT_OF_MEMORY,
+        else => ZSSS_ERR_UNKNOWN,
+    };
 }
 
 // =============================================================================
@@ -827,6 +853,8 @@ export fn zsss_error_message(error_code: i32) [*:0]const u8 {
         ZSSS_ERR_PNG_TOO_LARGE => "PNG exceeds the decode budget (16 megapixels, 65536 px per side)",
         ZSSS_ERR_STEGO_CORRUPTED => "Hidden data header is corrupt or from an unsupported version",
         ZSSS_ERR_RANDOM_FAILURE => "System random number source failed",
+        ZSSS_ERR_UNSUPPORTED_SHARE_VERSION => "Share format version not supported (zsss reads and writes version 2 only)",
+        ZSSS_ERR_SHARE_SET_MISMATCH => "Shares do not form one set (different splits, parameters or a repeated index)",
         else => "Unknown error",
     };
 }
@@ -974,8 +1002,8 @@ test "FFI combine mismatched same-secret shares returns error, no crash" {
     const buf_a = split_a.data.?[0..split_a.len];
     const buf_b = split_b.data.?[0..split_b.len];
 
-    // Distinct indices (A#1, B#2, B#3): passes structural checks, fails
-    // reconstruction verification -> must surface as an error code, not a crash.
+    // Distinct indices (A#1, B#2, B#3) from two splits: must surface as an error code,
+    // not a crash.
     const a = std.testing.allocator;
     var combo: std.ArrayList(u8) = .empty;
     defer combo.deinit(a);
@@ -986,11 +1014,10 @@ test "FFI combine mismatched same-secret shares returns error, no crash" {
     const result = zsss_combine(combo.items.ptr, combo.items.len);
     defer zsss_free(result);
 
-    // No SIGSEGV reaching here is the primary assertion. The set is
-    // structurally valid, so it is rejected at reconstruction verification,
-    // mapped by the FFI layer to ZSSS_ERR_INSUFFICIENT_SHARES.
+    // No SIGSEGV reaching here is the primary assertion. Each split has its own random
+    // set identifier, so the mix is refused before any interpolation.
     try std.testing.expect(result.error_code != ZSSS_OK);
-    try std.testing.expectEqual(ZSSS_ERR_INSUFFICIENT_SHARES, result.error_code);
+    try std.testing.expectEqual(ZSSS_ERR_SHARE_SET_MISMATCH, result.error_code);
 }
 
 test "FFI combine refuses a share past the threshold that is not on the shares' polynomial" {
@@ -1023,6 +1050,60 @@ test "FFI combine refuses a share past the threshold that is not on the shares' 
 
     // The same four frames untampered recover.
     const ok = zsss_combine(buf.ptr, nthShareFrame(buf, 0).len * 4);
+    defer zsss_free(ok);
+    try std.testing.expectEqual(ZSSS_OK, ok.error_code);
+    try std.testing.expectEqualStrings(secret, ok.data.?[0..ok.len]);
+}
+
+test "FFI combine: version-1 shares, mixed splits and a corrupted share each get their own code" {
+    const a = std.testing.allocator;
+    const secret = "native share format v2";
+
+    // A well-formed version-1 share (header, secret_id, length, data, CRC) is refused.
+    var v1 = [_]u8{ 1, 2, 3, 1, 0xde, 0xad, 0xbe, 0xef, 3, 0, 0, 0, 0x11, 0x22, 0x33, 0, 0, 0, 0 };
+    std.mem.writeInt(u32, v1[15..19], std.hash.Crc32.hash(v1[0..15]), .little);
+    var framed: [4 + v1.len]u8 = undefined;
+    std.mem.writeInt(u32, framed[0..4], v1.len, .little);
+    @memcpy(framed[4..], &v1);
+    const r_v1 = zsss_combine(&framed, framed.len);
+    defer zsss_free(r_v1);
+    try std.testing.expectEqual(ZSSS_ERR_UNSUPPORTED_SHARE_VERSION, r_v1.error_code);
+
+    const split_a = zsss_split(secret.ptr, secret.len, 2, 3);
+    defer zsss_free(split_a);
+    const split_b = zsss_split(secret.ptr, secret.len, 2, 3);
+    defer zsss_free(split_b);
+    const buf_a = split_a.data.?[0..split_a.len];
+    const buf_b = split_b.data.?[0..split_b.len];
+
+    // Two splits of one secret: different set identifiers.
+    var mixed: std.ArrayList(u8) = .empty;
+    defer mixed.deinit(a);
+    try mixed.appendSlice(a, nthShareFrame(buf_a, 0));
+    try mixed.appendSlice(a, nthShareFrame(buf_b, 1));
+    const r_mix = zsss_combine(mixed.items.ptr, mixed.items.len);
+    defer zsss_free(r_mix);
+    try std.testing.expectEqual(ZSSS_ERR_SHARE_SET_MISMATCH, r_mix.error_code);
+
+    // Exactly a threshold of shares, one corrupted with its CRC recomputed: the digest.
+    var share = try Share.deserialize(a, nthShareFrame(buf_a, 1)[4..]);
+    defer share.deinit(a);
+    share.data[main.PAYLOAD_OVERHEAD] ^= 0x01;
+    const tampered = try share.serialize(a);
+    defer a.free(tampered);
+    var corrupt: std.ArrayList(u8) = .empty;
+    defer corrupt.deinit(a);
+    try corrupt.appendSlice(a, nthShareFrame(buf_a, 0));
+    var prefix: [4]u8 = undefined;
+    std.mem.writeInt(u32, &prefix, @intCast(tampered.len), .little);
+    try corrupt.appendSlice(a, &prefix);
+    try corrupt.appendSlice(a, tampered);
+    const r_bad = zsss_combine(corrupt.items.ptr, corrupt.items.len);
+    defer zsss_free(r_bad);
+    try std.testing.expectEqual(ZSSS_ERR_SECRET_VERIFICATION_FAILED, r_bad.error_code);
+
+    // The untouched pair recovers.
+    const ok = zsss_combine(buf_a.ptr, buf_a.len);
     defer zsss_free(ok);
     try std.testing.expectEqual(ZSSS_OK, ok.error_code);
     try std.testing.expectEqualStrings(secret, ok.data.?[0..ok.len]);

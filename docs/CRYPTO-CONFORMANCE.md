@@ -77,7 +77,7 @@ them, in `src/conformance.zig` (`zig build test`, or `zig build conformance` for
 | Primitive | Official vectors | Result |
 |---|---|---|
 | SLIP-0039 generate / combine | Trezor `python-shamir-mnemonic` `vectors.json`, all 45 incl. the negative ones, plus the BIP-32 master xprv of each (`src/slip39_vectors_test.zig`, pre-existing) | **PASS** |
-| Plain Shamir split/combine `zsss_split` / `zsss_combine` | no standard defines this format; covered by `gnu_parity_test.zig` and round trips only | **N/A (no external anchor)** |
+| Plain Shamir split/combine `zsss_split` / `zsss_combine` (share format v2: random set id, SLIP-39-style HMAC digest shared with the secret, CRC per share) | no standard defines this format; `gnu_parity_test.zig` combines shares of the documented v2 payload made by an independent FIPS-197-anchored evaluator; property tests for below-threshold secrecy, wrong-set mixes, digest and extra-share checks, v1 refusal | **N/A (no external anchor for the format)** |
 
 ## Findings and fixes
 
