@@ -157,17 +157,41 @@ fn amountNeeded(target: u64, fee: u64) CoinSelectError!u64 {
     return std.math.add(u64, target, fee) catch CoinSelectError.InsufficientFunds;
 }
 
-/// Fill change_amount and is_exact_match for a selection holding at least `needed`.
-fn settleChange(result: *SelectionResult, needed: u64, min_change: u64) void {
-    const excess = result.total_value - needed;
-    if (excess < min_change) {
-        // Excess too small for a change output: it goes to the fee.
-        result.change_amount = 0;
-        result.is_exact_match = (excess == 0);
-    } else {
-        result.change_amount = excess;
-        result.is_exact_match = false;
+/// How a selection's value divides between the target, the fee and change.
+const Settlement = struct {
+    /// The change output's value; 0 when the transaction has no change output.
+    change: u64,
+    /// Value above the no-change fee that is not change and so also goes to the fee.
+    surplus: u64,
+};
+
+/// Settle `total` from `input_count` inputs against the target, or null when it cannot pay
+/// the target plus the fee of the transaction without a change output. A change output adds
+/// OUTPUT_VSIZE_P2WPKH vbytes, so it is made only when the total still leaves at least
+/// min_change (and more than 0) after the fee for output_count + 1 outputs; otherwise the
+/// whole excess over the no-change fee goes to the fee. Either way the fee paid covers the
+/// transaction the result describes.
+fn settle(total: u64, input_count: usize, params: SelectionParams) ?Settlement {
+    const fee = calculateFee(input_count, params.output_count, params.fee_rate) catch return null;
+    const needed = std.math.add(u64, params.target_amount, fee) catch return null;
+    if (total < needed) return null;
+    const excess = total - needed;
+    if (excess == 0) return .{ .change = 0, .surplus = 0 };
+
+    const fee_with_change = calculateFee(input_count, params.output_count +| 1, params.fee_rate) catch
+        return .{ .change = 0, .surplus = excess };
+    const needed_with_change = std.math.add(u64, params.target_amount, fee_with_change) catch
+        return .{ .change = 0, .surplus = excess };
+    if (total > needed_with_change and total - needed_with_change >= params.min_change) {
+        return .{ .change = total - needed_with_change, .surplus = 0 };
     }
+    return .{ .change = 0, .surplus = excess };
+}
+
+/// Record a settlement on a selection result.
+fn applySettlement(result: *SelectionResult, settlement: Settlement) void {
+    result.change_amount = settlement.change;
+    result.is_exact_match = settlement.change == 0 and settlement.surplus == 0;
 }
 
 /// Select UTXOs to fund a transaction
@@ -316,19 +340,15 @@ fn branchAndBound(
         }
 
         if (depth >= n) {
-            // Leaf node: evaluate solution. A fee or need past 64 bits cannot be met here.
-            const fee = feeFor(current_input_count, params.output_count, params.fee_rate) catch null;
-            const needed = if (fee) |f| amountNeeded(params.target_amount, f) catch null else null;
-            if (needed != null and current_value >= target_no_change and current_value >= needed.?) {
-                const excess = current_value - needed.?;
-
-                // "Waste": excess that becomes either change or fee
-                const waste: u64 = if (excess == 0)
-                    0 // Perfect match - no waste
-                else if (excess < params.min_change)
-                    excess // Excess too small for change, added to the fee
-                else
-                    change_cost; // Create change output
+            // Leaf node: evaluate solution, settled exactly as the result will be.
+            const settlement = if (current_value >= target_no_change)
+                settle(current_value, current_input_count, params)
+            else
+                null;
+            if (settlement) |settled| {
+                // "Waste": the cost of a change output, or the surplus that goes to the fee
+                // (0 for a perfect match).
+                const waste: u64 = if (settled.change > 0) change_cost else settled.surplus;
 
                 if (!found_solution or waste < best_waste) {
                     best_waste = waste;
@@ -386,9 +406,8 @@ fn branchAndBound(
         }
     }
 
-    const needed = try amountNeeded(params.target_amount, try feeFor(result.selected_count, params.output_count, params.fee_rate));
-    if (result.total_value < needed) return CoinSelectError.SelectionFailed;
-    settleChange(&result, needed, params.min_change);
+    applySettlement(&result, settle(result.total_value, result.selected_count, params) orelse
+        return CoinSelectError.SelectionFailed);
     return result;
 }
 
@@ -466,11 +485,8 @@ fn greedySelect(
     }
 
     // Check if we have enough
-    const needed = try amountNeeded(params.target_amount, try feeFor(result.selected_count, params.output_count, params.fee_rate));
-    if (result.total_value < needed) {
-        return CoinSelectError.InsufficientFunds;
-    }
-    settleChange(result, needed, params.min_change);
+    applySettlement(result, settle(result.total_value, result.selected_count, params) orelse
+        return CoinSelectError.InsufficientFunds);
 }
 
 /// Largest-First coin selection
@@ -564,6 +580,55 @@ test "calculate fee" {
     // vsize = 11 (overhead) + 68 (input) + 31 (output) = 110
     const fee = try calculateFee(1, 1, 10);
     try std.testing.expectEqual(@as(u64, 1100), fee);
+}
+
+/// A settled selection pays at least the fee of the transaction it describes: the target's
+/// outputs plus one change output when change_amount is non-zero, and change is never below
+/// min_change.
+fn expectFeeCovered(params: SelectionParams, result: SelectionResult) !void {
+    const paid = result.total_value - params.target_amount - result.change_amount;
+    const outputs = params.output_count + @intFromBool(result.change_amount > 0);
+    try std.testing.expect(paid >= try calculateFee(result.selected_count, outputs, params.fee_rate));
+    if (result.change_amount > 0) try std.testing.expect(result.change_amount >= params.min_change);
+}
+
+const Selector = *const fn ([]const CoinUtxo, SelectionParams, *SelectionResult) CoinSelectError!void;
+const all_selectors = [_]Selector{ selectCoins, largestFirst, smallestFirst };
+
+test "a change output is created only when its own fee is paid and min_change still remains" {
+    var result: SelectionResult = undefined;
+
+    // One 100 000-sat UTXO, target 98 300 at 10 sat/vB: one output costs 1100 in fees, two
+    // cost 1410. The 600 left after the one-output fee would be 290 once the change output
+    // pays for itself, below min_change, so it goes to the fee and no change is made.
+    var one = [_]CoinUtxo{CoinUtxo.p2wpkh(100_000, 0)};
+    const params = SelectionParams.default(98_300, 10);
+    for (all_selectors) |select| {
+        try select(&one, params, &result);
+        try std.testing.expectEqual(@as(u64, 0), result.change_amount);
+        try expectFeeCovered(params, result);
+    }
+
+    // Spending both of 100 000 + 50 000: the two-output fee is 2090, so change is 49 610.
+    var two = [_]CoinUtxo{ CoinUtxo.p2wpkh(100_000, 0), CoinUtxo.p2wpkh(50_000, 1) };
+    for (all_selectors) |select| {
+        try select(&two, params, &result);
+        try expectFeeCovered(params, result);
+        if (result.selected_count == 2) try std.testing.expectEqual(@as(u64, 150_000 - 98_300 - 2090), result.change_amount);
+    }
+
+    // Across targets and rates, every algorithm either refuses or pays for what it builds.
+    var three = [_]CoinUtxo{ CoinUtxo.p2wpkh(100_000, 0), CoinUtxo.p2wpkh(50_000, 1), CoinUtxo.p2wpkh(3_000, 2) };
+    for ([_]u64{ 1_000, 10_000, 49_000, 98_300, 99_000, 120_000, 149_000, 151_000 }) |target| {
+        for ([_]u64{ 1, 10, 37, 100 }) |rate| {
+            const p = SelectionParams.default(target, rate);
+            for (all_selectors) |select| {
+                if (select(&three, p, &result)) |_| {
+                    try expectFeeCovered(p, result);
+                } else |err| try std.testing.expectEqual(CoinSelectError.InsufficientFunds, err);
+            }
+        }
+    }
 }
 
 test "largest first basic" {

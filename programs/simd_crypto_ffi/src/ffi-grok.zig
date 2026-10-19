@@ -3822,6 +3822,25 @@ test "coin-select exports report amount_out_of_range for UTXO values summing pas
     try std.testing.expectEqual(out_of_range, quantum_coin_select_smallest_first(&utxos, 2, &params, &result));
 }
 
+test "quantum_coin_select pays the change output's own fee or makes no change" {
+    // 100 000 sats, target 98 300 at 10 sat/vB: 1100 with one output, 1410 with two. The
+    // 600 over the one-output fee cannot fund a change output of at least min_change.
+    const utxos = [_]CCoinUtxo{.{ .value = 100_000, .original_index = 0, ._reserved = 0 }};
+    const params = CSelectionParams{
+        .target_amount = 98_300,
+        .fee_rate = 10,
+        .output_count = 1,
+        .min_change = 546,
+        .prefer_no_change = 1,
+        ._reserved = @splat(0),
+    };
+    var result: CSelectionResult = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), quantum_coin_select(&utxos, 1, &params, &result));
+    try std.testing.expectEqual(@as(u64, 0), result.change_amount);
+    const fee_paid = result.total_value - params.target_amount - result.change_amount;
+    try std.testing.expect(fee_paid >= quantum_calculate_fee(result.selected_count, 1, params.fee_rate));
+}
+
 test "calculate fee FFI" {
     // 1 input, 2 outputs at 10 sat/vb
     // vsize = 11 + 68 + 62 = 141
