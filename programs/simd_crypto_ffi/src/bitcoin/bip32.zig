@@ -250,6 +250,8 @@ pub const Bip32Error = error{
     InvalidChecksum,
     InvalidVersion,
     PointAtInfinity,
+    /// The key is at depth 255, the deepest the one-byte depth field can record.
+    MaxDepthExceeded,
 };
 
 // ============================================================================
@@ -322,6 +324,7 @@ pub const ExtendedKey = struct {
 
     /// Derive child key at given index
     pub fn deriveChild(self: Self, index: u32) Bip32Error!Self {
+        if (self.depth == std.math.maxInt(u8)) return Bip32Error.MaxDepthExceeded;
         const hardened = (index & HARDENED_OFFSET) != 0;
 
         // Cannot do hardened derivation from public key
@@ -380,25 +383,20 @@ pub const ExtendedKey = struct {
         return child;
     }
 
-    /// Derive from path string (e.g., "m/44'/0'/0'/0/0")
+    /// Derive from path string (e.g., "m/44'/0'/0'/0/0"). A leading "m" names this key;
+    /// without it the first component is already a child index. Every component after a
+    /// '/' must be an index (see parsePathComponent), so "m/", "m//0" and "m/0/" are
+    /// InvalidPath rather than shorter paths.
     pub fn derivePath(self: Self, path: []const u8) Bip32Error!Self {
         var current = self;
         var iter = std.mem.splitScalar(u8, path, '/');
 
-        // Skip "m" prefix if present
-        if (iter.next()) |first| {
-            if (!std.mem.eql(u8, first, "m")) {
-                // First element is a number, process it
-                const index = parsePathComponent(first) catch return Bip32Error.InvalidPath;
-                current = try current.deriveChild(index);
-            }
+        const first = iter.first();
+        if (!std.mem.eql(u8, first, "m")) {
+            current = try current.deriveChild(try parsePathComponent(first));
         }
-
-        // Process remaining components
         while (iter.next()) |component| {
-            if (component.len == 0) continue;
-            const index = parsePathComponent(component) catch return Bip32Error.InvalidPath;
-            current = try current.deriveChild(index);
+            current = try current.deriveChild(try parsePathComponent(component));
         }
 
         return current;
@@ -715,23 +713,32 @@ fn addPublicKeys(public_key: *const [33]u8, scalar_bytes: *const [32]u8) ![33]u8
     return result.toCompressedSec1();
 }
 
-/// Parse path component (e.g., "44'" or "0")
-fn parsePathComponent(component: []const u8) !u32 {
-    var is_hardened = false;
-    var num_str = component;
+/// Parse one path component ("44'", "0h", "7"): one or more decimal digits, then at most one
+/// hardened marker (', h or H). The number must be below 2^31 either way; only the marker
+/// selects hardened derivation, so "2147483648" cannot stand in for "0'". Signs, digit
+/// separators and anything else std.fmt.parseInt would tolerate are InvalidPath.
+fn parsePathComponent(component: []const u8) Bip32Error!u32 {
+    var digits = component;
+    var hardened = false;
+    if (digits.len > 0) switch (digits[digits.len - 1]) {
+        '\'', 'h', 'H' => {
+            hardened = true;
+            digits = digits[0 .. digits.len - 1];
+        },
+        else => {},
+    };
 
-    // Check for hardened marker
-    if (component.len > 0 and (component[component.len - 1] == '\'' or component[component.len - 1] == 'h' or component[component.len - 1] == 'H')) {
-        is_hardened = true;
-        num_str = component[0 .. component.len - 1];
+    // 10 digits cover every u32; more cannot be below 2^31.
+    if (digits.len == 0 or digits.len > 10) return Bip32Error.InvalidPath;
+    var index: u64 = 0;
+    for (digits) |c| {
+        if (c < '0' or c > '9') return Bip32Error.InvalidPath;
+        index = index * 10 + (c - '0');
     }
+    if (index >= HARDENED_OFFSET) return Bip32Error.InvalidPath;
 
-    const index = std.fmt.parseInt(u32, num_str, 10) catch return error.InvalidPath;
-
-    if (is_hardened) {
-        return index | HARDENED_OFFSET;
-    }
-    return index;
+    const unhardened: u32 = @intCast(index);
+    return if (hardened) unhardened | HARDENED_OFFSET else unhardened;
 }
 
 // ============================================================================
@@ -916,6 +923,52 @@ test "Parse path component" {
     try std.testing.expectEqual(@as(u32, 44 | HARDENED_OFFSET), try parsePathComponent("44'"));
     try std.testing.expectEqual(@as(u32, 0 | HARDENED_OFFSET), try parsePathComponent("0h"));
     try std.testing.expectEqual(@as(u32, 0), try parsePathComponent("0"));
+}
+
+const vector1_seed = [_]u8{
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+};
+
+test "derivePath refuses a child index of 2^31 or more instead of deriving a hardened key" {
+    const master = try ExtendedKey.fromSeed(&vector1_seed);
+    // "2147483648" used to set bit 31 and derive m/0'; with a marker it collided with 0'.
+    for ([_][]const u8{ "m/2147483648", "m/2147483648'", "m/2147483648h", "m/4294967295", "m/4294967295'", "m/0/2147483648", "2147483648", "m/99999999999" }) |p| {
+        try std.testing.expectError(error.InvalidPath, master.derivePath(p));
+    }
+    // The largest index of each kind still derives, to the index the path names.
+    try std.testing.expectEqual(@as(u32, 0x7fffffff), (try master.derivePath("m/2147483647")).child_index);
+    try std.testing.expectEqual(@as(u32, 0xffffffff), (try master.derivePath("m/2147483647'")).child_index);
+    try std.testing.expectEqual(@as(u32, 0x80000000), (try master.derivePath("m/0H")).child_index);
+}
+
+test "derivePath refuses empty and malformed segments" {
+    const master = try ExtendedKey.fromSeed(&vector1_seed);
+    for ([_][]const u8{
+        "",       "/",     "m/",      "m//",  "m//0", "m/0/",  "m/44'//0'", "/0",
+        "m/'",    "m/h",   "m/4_4'",  "m/+1", "m/-1", "m/0x1", "m/ 1",      "m/1 ",
+        "m/1''",  "m/1'h", "mm/0",    "M/0",
+    }) |p| {
+        try std.testing.expectError(error.InvalidPath, master.derivePath(p));
+    }
+    // "m" alone is the key itself.
+    const same = try master.derivePath("m");
+    try std.testing.expectEqualSlices(u8, &master.serialize(true), &same.serialize(true));
+}
+
+test "deriveChild refuses to derive below depth 255 instead of wrapping to depth 0" {
+    const master = try ExtendedKey.fromSeed(&vector1_seed);
+    var deep = master;
+    deep.depth = 255;
+    try std.testing.expectError(error.MaxDepthExceeded, deep.deriveChild(0));
+    try std.testing.expectError(error.MaxDepthExceeded, deep.deriveChild(HARDENED_OFFSET));
+    var deep_public = master.neuter();
+    deep_public.depth = 255;
+    try std.testing.expectError(error.MaxDepthExceeded, deep_public.deriveChild(0));
+    // 254 -> 255 is the last derivation the one-byte depth field can record.
+    var last = master;
+    last.depth = 254;
+    try std.testing.expectEqual(@as(u8, 255), (try last.deriveChild(0)).depth);
 }
 
 test "ExtendedKey serialization" {

@@ -2057,6 +2057,8 @@ export fn quantum_bip32_derive_child(
             error.HardenedPublicDerivation => @intFromEnum(Bip32Result.hardened_public),
             error.InvalidKey => @intFromEnum(Bip32Result.invalid_key),
             error.PointAtInfinity => @intFromEnum(Bip32Result.point_at_infinity),
+            // A depth-255 parent has no representable child.
+            error.MaxDepthExceeded => @intFromEnum(Bip32Result.invalid_path),
             else => @intFromEnum(Bip32Result.invalid_key),
         };
     };
@@ -2092,7 +2094,7 @@ export fn quantum_bip32_derive_path(
     defer master_key.secureZero();
     var derived = master_key.derivePath(path[0..path_len]) catch |err| {
         return switch (err) {
-            error.InvalidPath => @intFromEnum(Bip32Result.invalid_path),
+            error.InvalidPath, error.MaxDepthExceeded => @intFromEnum(Bip32Result.invalid_path),
             error.HardenedPublicDerivation => @intFromEnum(Bip32Result.hardened_public),
             error.InvalidKey => @intFromEnum(Bip32Result.invalid_key),
             error.PointAtInfinity => @intFromEnum(Bip32Result.point_at_infinity),
@@ -2259,6 +2261,27 @@ fn convertFromCKey(c_key: *const CExtendedKey) bip32.ExtendedKey {
         .child_index = c_key.child_index,
         .is_private = c_key.is_private != 0,
     };
+}
+
+test "quantum_bip32_derive_path refuses m/2147483648 and quantum_bip32_derive_child refuses depth 255" {
+    const seed = [_]u8{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f };
+    var master: CExtendedKey = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), quantum_bip32_from_seed(&seed, seed.len, &master));
+    var out: CExtendedKey = undefined;
+    const invalid_path = @intFromEnum(Bip32Result.invalid_path);
+
+    // The report's PoC 2a: an unhardened 2^31 derived m/0'.
+    for ([_][]const u8{ "m/2147483648", "m//0", "m/0/" }) |p| {
+        try std.testing.expectEqual(invalid_path, quantum_bip32_derive_path(&master, p.ptr, p.len, &out));
+    }
+
+    // PoC 2b: depth 255 wrapped to 0 with a non-zero parent fingerprint.
+    var deep = master;
+    deep.depth = 255;
+    try std.testing.expectEqual(invalid_path, quantum_bip32_derive_child(&deep, 0, &out));
+    deep.depth = 254;
+    try std.testing.expectEqual(@as(c_int, 0), quantum_bip32_derive_child(&deep, 0, &out));
+    try std.testing.expectEqual(@as(u8, 255), out.depth);
 }
 
 // =============================================================================
