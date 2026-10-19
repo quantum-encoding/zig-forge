@@ -111,9 +111,10 @@ fn deriveKey(password: []const u8, pixel_salt: []const u8) [32]u8 {
         msb.* = pixel & 0xFE; // Clear LSB
     }
     @memset(msb_salt[salt_len..], 0);
-    // Extract PRK from password with MSB salt
-    const prk = Kdf.extract(&msb_salt, password);
-    // Expand to derive key
+    // Extract PRK from password with MSB salt. The PRK keys the expansion, so it is wiped.
+    var prk = Kdf.extract(&msb_salt, password);
+    defer crypto.secureZero(u8, &prk);
+    // Expand to derive key; callers wipe the key they receive.
     var key: [32]u8 = undefined;
     Kdf.expand(&key, "zsss-stego-key", prk);
     return key;
@@ -234,7 +235,10 @@ fn decryptData(
     tag: [16]u8,
 ) ![]u8 {
     const plaintext = try allocator.alloc(u8, ciphertext.len);
-    errdefer allocator.free(plaintext);
+    errdefer {
+        crypto.secureZero(u8, plaintext);
+        allocator.free(plaintext);
+    }
 
     crypto.aead.aes_gcm.Aes256Gcm.decrypt(
         plaintext,
@@ -269,7 +273,8 @@ pub fn embedInPixelsWithLayer(
     };
 
     if (password) |pwd| {
-        const key = deriveKey(pwd, pixels[0..@min(pixels.len, 64)]);
+        var key = deriveKey(pwd, pixels[0..@min(pixels.len, 64)]);
+        defer crypto.secureZero(u8, &key);
         const encrypted = try encryptData(allocator, data, key);
         payload = encrypted.ciphertext;
         header.nonce = encrypted.nonce;
@@ -281,7 +286,11 @@ pub fn embedInPixelsWithLayer(
         @memset(&header.nonce, 0);
         @memset(&header.tag, 0);
     }
-    defer allocator.free(payload);
+    // Without a password the payload is the caller's data in the clear (a share, a secret).
+    defer {
+        crypto.secureZero(u8, payload);
+        allocator.free(payload);
+    }
 
     // Calculate total bits needed (checked: the header stores data_len as a u32)
     if (payload.len > std.math.maxInt(u32)) return StegoError.ImageTooSmall;
@@ -332,7 +341,10 @@ pub fn embedInPixelsWithLayer(
 
     // Combine header and payload
     var full_data = try allocator.alloc(u8, total_bytes);
-    defer allocator.free(full_data);
+    defer {
+        crypto.secureZero(u8, full_data);
+        allocator.free(full_data);
+    }
     @memcpy(full_data[0..HEADER_SIZE], &header_buf);
     @memcpy(full_data[HEADER_SIZE..], payload);
 
@@ -467,7 +479,10 @@ pub fn extractFromPixelsWithLayer(
 
     // Extract payload
     const payload = try allocator.alloc(u8, data_len);
-    errdefer allocator.free(payload);
+    errdefer {
+        crypto.secureZero(u8, payload);
+        allocator.free(payload);
+    }
 
     bit_idx = HEADER_SIZE * 8; // Skip header
     for (payload) |*byte| {
@@ -492,8 +507,10 @@ pub fn extractFromPixelsWithLayer(
 
     if (has_encryption) {
         if (password) |pwd| {
-            const key = deriveKey(pwd, pixels[0..@min(pixels.len, 64)]);
+            var key = deriveKey(pwd, pixels[0..@min(pixels.len, 64)]);
+            defer crypto.secureZero(u8, &key);
             const decrypted = try decryptData(allocator, payload, key, nonce, tag);
+            crypto.secureZero(u8, payload);
             allocator.free(payload);
             return decrypted;
         } else {

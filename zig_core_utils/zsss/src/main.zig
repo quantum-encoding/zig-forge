@@ -547,7 +547,11 @@ const Config = struct {
         if (self.input_file) |f| self.allocator.free(f);
         if (self.output_path) |p| self.allocator.free(p);
         if (self.image_file) |i| self.allocator.free(i);
-        if (self.password) |pw| self.allocator.free(pw);
+        if (self.password) |pw| {
+            // A stego or ticket password, wiped like the passphrase below.
+            std.crypto.secureZero(u8, @constCast(pw));
+            self.allocator.free(pw);
+        }
         if (self.passphrase) |pp| {
             // The passphrase is secret material; do not leave it on the heap.
             std.crypto.secureZero(u8, @constCast(pp));
