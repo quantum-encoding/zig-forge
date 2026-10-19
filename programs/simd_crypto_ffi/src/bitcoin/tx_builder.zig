@@ -603,14 +603,6 @@ fn feedOutputToHasher(hasher: *Sha256, output: *const TxDestination) void {
 // ECDSA Signing
 // =============================================================================
 
-/// secp256k1 group order n, big-endian.
-const CURVE_ORDER = [32]u8{
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
-    0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B,
-    0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
-};
-
 /// floor(n / 2), big-endian: the largest s BIP-62/146 low-S allows.
 const HALF_ORDER = [32]u8{
     0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -736,35 +728,18 @@ pub fn derivePublicKey(private_key: *const [32]u8) TxBuilderError![33]u8 {
 }
 
 /// Convert signature to DER format (for Bitcoin)
-/// Enforces low-S per BIP 62/146 (S must be <= N/2)
+/// Enforces low-S per BIP 62/146 (S must be <= N/2). An S that is not below N is no
+/// signature and is refused with SerializationFailed.
 pub fn signatureToDer(sig: *const [64]u8, out: []u8) TxBuilderError!usize {
     if (out.len < 72) return TxBuilderError.BufferTooSmall;
 
     const r = sig[0..32];
 
-    // Enforce low-S: if S > N/2, replace with N - S (BIP 62)
-    const curve_order = CURVE_ORDER;
-    const half_order = HALF_ORDER;
-
-    var s_bytes: [32]u8 = sig[32..64].*;
-    // Check if S > half_order
-    var s_high = false;
-    for (0..32) |i| {
-        if (s_bytes[i] > half_order[i]) { s_high = true; break; }
-        if (s_bytes[i] < half_order[i]) break;
-    }
-    // If S is high, compute S = N - S
-    if (s_high) {
-        var borrow: u16 = 0;
-        var i: usize = 31;
-        while (true) {
-            const diff = @as(u16, curve_order[i]) -% @as(u16, s_bytes[i]) -% borrow;
-            s_bytes[i] = @truncate(diff);
-            borrow = if (diff > 0xFF) 1 else 0;
-            if (i == 0) break;
-            i -= 1;
-        }
-    }
+    // Enforce low-S: if S > N/2, replace with N - S (BIP 62), as signHash does.
+    const s_scalar = Secp256k1.scalar.Scalar.fromBytes(sig[32..64].*, .big) catch
+        return TxBuilderError.SerializationFailed;
+    const s_high = std.mem.order(u8, sig[32..64], &HALF_ORDER) == .gt;
+    const s_bytes = (if (s_high) s_scalar.neg() else s_scalar).toBytes(.big);
 
     const s = &s_bytes;
 
@@ -1116,6 +1091,33 @@ test "signature to DER" {
     // DER signature starts with 0x30 (SEQUENCE)
     try std.testing.expect(der[0] == 0x30);
     try std.testing.expect(len > 0 and len <= 72);
+}
+
+test "signatureToDer: a high S is encoded as n - S, an S not below n is refused" {
+    // Oracle: plain u256 arithmetic, independent of the Scalar type signatureToDer uses.
+    const n: u256 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
+    const r: [32]u8 = @as([31]u8, @splat(0)) ++ [_]u8{0x2a};
+    for ([_]u256{ 1, n / 2, n / 2 + 1, n / 2 + 0x1234, n - 2, n - 1 }) |s_value| {
+        var sig: [64]u8 = undefined;
+        sig[0..32].* = r;
+        std.mem.writeInt(u256, sig[32..64], s_value, .big);
+        var der: [72]u8 = undefined;
+        const len = try signatureToDer(&sig, &der);
+        // 30 len 02 01 2a 02 slen s...: R is the single byte 0x2a.
+        const s_len = der[6];
+        var s_der: [33]u8 = @splat(0);
+        @memcpy(s_der[33 - s_len ..], der[7..][0..s_len]);
+        try std.testing.expectEqual(len, 7 + @as(usize, s_len));
+        const expected = if (s_value > n / 2) n - s_value else s_value;
+        try std.testing.expectEqual(expected, std.mem.readInt(u264, &s_der, .big));
+    }
+    for ([_]u256{ n, n + 1, std.math.maxInt(u256) }) |s_value| {
+        var sig: [64]u8 = undefined;
+        sig[0..32].* = r;
+        std.mem.writeInt(u256, sig[32..64], s_value, .big);
+        var der: [72]u8 = undefined;
+        try std.testing.expectError(error.SerializationFailed, signatureToDer(&sig, &der));
+    }
 }
 
 test "estimate vsize" {
