@@ -1038,6 +1038,10 @@ export fn quantum_merkle_root(
         setLastError("Merkle root: output is null");
         return @intFromEnum(QuantumCryptoError.invalid_output);
     }
+    if (branch_count > 0 and @intFromPtr(branches) == 0) {
+        setLastError("Merkle root: branches is null");
+        return @intFromEnum(QuantumCryptoError.invalid_input);
+    }
 
     // Start with coinbase hash
     var current: [32]u8 = undefined;
@@ -1298,16 +1302,16 @@ threadlocal var tx_parse_allocator = std.heap.page_allocator;
 export fn quantum_bitcoin_parse_tx(
     raw_tx: [*c]const u8,
     raw_tx_len: usize,
-    parsed: *CParsedTx,
+    maybe_parsed: ?*CParsedTx,
 ) c_int {
     if (@intFromPtr(raw_tx) == 0 or raw_tx_len == 0) {
         setLastError("Bitcoin parse: null or empty input");
         return @intFromEnum(QuantumCryptoError.invalid_input);
     }
-    if (@intFromPtr(parsed) == 0) {
+    const parsed = maybe_parsed orelse {
         setLastError("Bitcoin parse: null output struct");
         return @intFromEnum(QuantumCryptoError.invalid_output);
-    }
+    };
 
     const data = raw_tx[0..raw_tx_len];
 
@@ -1399,8 +1403,9 @@ export fn quantum_bitcoin_parse_tx(
 /// Parameters:
 /// - script: Pointer to script bytes
 /// - script_len: Length of script
-/// - address_hash: Buffer to receive address hash (32 bytes, caller-allocated)
-/// - address_hash_len: Pointer to receive actual hash length (0, 20, or 32)
+/// - address_hash: Buffer to receive address hash (32 bytes, caller-allocated), or NULL
+/// - address_hash_len: Receives the number of hash bytes copied into address_hash: 20 or
+///   32, or 0 when the script has no hash or address_hash is NULL. May be NULL.
 ///
 /// Returns:
 /// - Script type as u8 (see CScriptType enum)
@@ -1408,10 +1413,13 @@ export fn quantum_bitcoin_detect_script_type(
     script: [*c]const u8,
     script_len: usize,
     address_hash: [*c]u8,
-    address_hash_len: *u8,
+    address_hash_len: ?*u8,
 ) u8 {
+    var copied: u8 = 0;
+    defer if (address_hash_len) |len| {
+        len.* = copied;
+    };
     if (@intFromPtr(script) == 0 or script_len == 0) {
-        address_hash_len.* = 0;
         return @intFromEnum(CScriptType.unknown);
     }
 
@@ -1423,10 +1431,8 @@ export fn quantum_bitcoin_detect_script_type(
         if (@intFromPtr(address_hash) != 0) {
             const hash_len = @min(hash.len, 32);
             @memcpy(address_hash[0..hash_len], hash[0..hash_len]);
-            address_hash_len.* = @intCast(hash_len);
+            copied = @intCast(hash_len);
         }
-    } else {
-        address_hash_len.* = 0;
     }
 
     return @intFromEnum(result.script_type);
@@ -1666,12 +1672,16 @@ pub const SpvResult = enum(c_int) {
 export fn quantum_spv_verify_merkle_proof(
     tx_hash: [*c]const u8,
     merkle_root: [*c]const u8,
-    proof: *const CMerkleProof,
+    maybe_proof: ?*const CMerkleProof,
 ) c_int {
     if (@intFromPtr(tx_hash) == 0 or @intFromPtr(merkle_root) == 0) {
         setLastError("SPV: null input pointer");
         return @intFromEnum(SpvResult.invalid_input);
     }
+    const proof = maybe_proof orelse {
+        setLastError("SPV: null proof pointer");
+        return @intFromEnum(SpvResult.invalid_input);
+    };
     if (proof.hash_count > MAX_MERKLE_PROOF_DEPTH) {
         setLastError("SPV: proof depth exceeds maximum");
         return @intFromEnum(SpvResult.proof_too_deep);
@@ -1716,9 +1726,13 @@ export fn quantum_spv_verify_merkle_proof(
 /// - negative error code on failure
 export fn quantum_spv_parse_header(
     raw_header: [*c]const u8,
-    parsed: *CBlockHeader,
+    maybe_parsed: ?*CBlockHeader,
 ) c_int {
-    if (@intFromPtr(raw_header) == 0 or @intFromPtr(parsed) == 0) {
+    const parsed = maybe_parsed orelse {
+        setLastError("SPV: null pointer");
+        return @intFromEnum(SpvResult.invalid_input);
+    };
+    if (@intFromPtr(raw_header) == 0) {
         setLastError("SPV: null pointer");
         return @intFromEnum(SpvResult.invalid_input);
     }
@@ -1753,11 +1767,15 @@ export fn quantum_spv_parse_header(
 /// - 0 on success
 /// - negative error code on failure
 export fn quantum_spv_block_hash(
-    header: *const CBlockHeader,
+    maybe_header: ?*const CBlockHeader,
     hash_out: [*c]u8,
     display_order: bool,
 ) c_int {
-    if (@intFromPtr(header) == 0 or @intFromPtr(hash_out) == 0) {
+    const header = maybe_header orelse {
+        setLastError("SPV: null pointer");
+        return @intFromEnum(SpvResult.invalid_input);
+    };
+    if (@intFromPtr(hash_out) == 0) {
         setLastError("SPV: null pointer");
         return @intFromEnum(SpvResult.invalid_input);
     }
@@ -1790,10 +1808,14 @@ export fn quantum_spv_block_hash(
 /// - 0 if header correctly links to prev_hash
 /// - negative error code on failure
 export fn quantum_spv_verify_linkage(
-    header: *const CBlockHeader,
+    maybe_header: ?*const CBlockHeader,
     prev_hash: [*c]const u8,
 ) c_int {
-    if (@intFromPtr(header) == 0 or @intFromPtr(prev_hash) == 0) {
+    const header = maybe_header orelse {
+        setLastError("SPV: null pointer");
+        return @intFromEnum(SpvResult.invalid_input);
+    };
+    if (@intFromPtr(prev_hash) == 0) {
         setLastError("SPV: null pointer");
         return @intFromEnum(SpvResult.invalid_input);
     }
@@ -1834,12 +1856,12 @@ export fn quantum_spv_verify_linkage(
 /// - 0 if PoW is valid (hash <= target)
 /// - negative error code on failure
 export fn quantum_spv_verify_pow(
-    header: *const CBlockHeader,
+    maybe_header: ?*const CBlockHeader,
 ) c_int {
-    if (@intFromPtr(header) == 0) {
+    const header = maybe_header orelse {
         setLastError("SPV: null pointer");
         return @intFromEnum(SpvResult.invalid_input);
-    }
+    };
 
     const internal_header = spv.BlockHeader{
         .version = header.version,
@@ -1888,8 +1910,8 @@ export fn quantum_spv_difficulty(bits: u32) u64 {
 /// - negative error code on failure
 export fn quantum_spv_verify_payment(
     tx_hash: [*c]const u8,
-    proof: *const CMerkleProof,
-    header: *const CBlockHeader,
+    maybe_proof: ?*const CMerkleProof,
+    maybe_header: ?*const CBlockHeader,
     prev_hash: [*c]const u8,
     check_pow: bool,
 ) c_int {
@@ -1897,10 +1919,14 @@ export fn quantum_spv_verify_payment(
         setLastError("SPV: null pointer");
         return @intFromEnum(SpvResult.invalid_input);
     }
-    if (@intFromPtr(header) == 0 or @intFromPtr(proof) == 0) {
+    const proof = maybe_proof orelse {
         setLastError("SPV: null pointer");
         return @intFromEnum(SpvResult.invalid_input);
-    }
+    };
+    const header = maybe_header orelse {
+        setLastError("SPV: null pointer");
+        return @intFromEnum(SpvResult.invalid_input);
+    };
     if (proof.hash_count > MAX_MERKLE_PROOF_DEPTH) {
         setLastError("SPV: proof depth exceeds maximum");
         return @intFromEnum(SpvResult.proof_too_deep);
@@ -2011,14 +2037,12 @@ pub const Bip32Result = enum(c_int) {
 export fn quantum_bip32_from_seed(
     seed: [*c]const u8,
     seed_len: usize,
-    out_key: *CExtendedKey,
+    maybe_out_key: ?*CExtendedKey,
 ) c_int {
     if (@intFromPtr(seed) == 0 or seed_len == 0) {
         return @intFromEnum(Bip32Result.null_pointer);
     }
-    if (@intFromPtr(out_key) == 0) {
-        return @intFromEnum(Bip32Result.null_pointer);
-    }
+    const out_key = maybe_out_key orelse return @intFromEnum(Bip32Result.null_pointer);
 
     var master = bip32.ExtendedKey.fromSeed(seed[0..seed_len]) catch |err| {
         return switch (err) {
@@ -2042,13 +2066,12 @@ export fn quantum_bip32_from_seed(
 ///
 /// Returns: 0 on success, negative error code on failure
 export fn quantum_bip32_derive_child(
-    parent: *const CExtendedKey,
+    maybe_parent: ?*const CExtendedKey,
     index: u32,
-    out_child: *CExtendedKey,
+    maybe_out_child: ?*CExtendedKey,
 ) c_int {
-    if (@intFromPtr(parent) == 0 or @intFromPtr(out_child) == 0) {
-        return @intFromEnum(Bip32Result.null_pointer);
-    }
+    const parent = maybe_parent orelse return @intFromEnum(Bip32Result.null_pointer);
+    const out_child = maybe_out_child orelse return @intFromEnum(Bip32Result.null_pointer);
 
     var parent_key = convertFromCKey(parent);
     defer parent_key.secureZero();
@@ -2078,12 +2101,14 @@ export fn quantum_bip32_derive_child(
 ///
 /// Returns: 0 on success, negative error code on failure
 export fn quantum_bip32_derive_path(
-    master: *const CExtendedKey,
+    maybe_master: ?*const CExtendedKey,
     path: [*c]const u8,
     path_len: usize,
-    out_key: *CExtendedKey,
+    maybe_out_key: ?*CExtendedKey,
 ) c_int {
-    if (@intFromPtr(master) == 0 or @intFromPtr(path) == 0 or @intFromPtr(out_key) == 0) {
+    const master = maybe_master orelse return @intFromEnum(Bip32Result.null_pointer);
+    const out_key = maybe_out_key orelse return @intFromEnum(Bip32Result.null_pointer);
+    if (@intFromPtr(path) == 0) {
         return @intFromEnum(Bip32Result.null_pointer);
     }
     if (path_len == 0) {
@@ -2115,12 +2140,11 @@ export fn quantum_bip32_derive_path(
 ///
 /// Returns: 0 on success
 export fn quantum_bip32_neuter(
-    key: *const CExtendedKey,
-    out_public: *CExtendedKey,
+    maybe_key: ?*const CExtendedKey,
+    maybe_out_public: ?*CExtendedKey,
 ) c_int {
-    if (@intFromPtr(key) == 0 or @intFromPtr(out_public) == 0) {
-        return @intFromEnum(Bip32Result.null_pointer);
-    }
+    const key = maybe_key orelse return @intFromEnum(Bip32Result.null_pointer);
+    const out_public = maybe_out_public orelse return @intFromEnum(Bip32Result.null_pointer);
 
     var internal_key = convertFromCKey(key);
     defer internal_key.secureZero();
@@ -2138,11 +2162,12 @@ export fn quantum_bip32_neuter(
 ///
 /// Returns: 82 (serialized length) on success, negative error code on failure
 export fn quantum_bip32_serialize(
-    key: *const CExtendedKey,
+    maybe_key: ?*const CExtendedKey,
     mainnet: c_int,
     out_bytes: [*c]u8,
 ) c_int {
-    if (@intFromPtr(key) == 0 or @intFromPtr(out_bytes) == 0) {
+    const key = maybe_key orelse return @intFromEnum(Bip32Result.null_pointer);
+    if (@intFromPtr(out_bytes) == 0) {
         return @intFromEnum(Bip32Result.null_pointer);
     }
 
@@ -2388,12 +2413,12 @@ export fn quantum_tx_builder_init() c_int {
 ///
 /// Returns: 0 on success, negative error code on failure
 export fn quantum_tx_builder_add_input(
-    utxo: *const CSpendableUtxo,
+    maybe_utxo: ?*const CSpendableUtxo,
 ) c_int {
-    if (@intFromPtr(utxo) == 0) {
+    const utxo = maybe_utxo orelse {
         setLastError("TX builder: null UTXO pointer");
         return @intFromEnum(TxResult.null_pointer);
-    }
+    };
     if (!tx_builder_initialized) {
         setLastError("TX builder: not initialized");
         return @intFromEnum(TxResult.null_pointer);
@@ -2620,13 +2645,17 @@ export fn quantum_tx_sign(
     key_count: usize,
     out_tx: [*c]u8,
     out_tx_size: usize,
-    actual_size: *usize,
+    maybe_actual_size: ?*usize,
 ) c_int {
     if (@intFromPtr(private_keys) == 0) {
         setLastError("TX sign: null private_keys pointer");
         return @intFromEnum(TxResult.null_pointer);
     }
-    if (@intFromPtr(out_tx) == 0 or @intFromPtr(actual_size) == 0) {
+    const actual_size = maybe_actual_size orelse {
+        setLastError("TX sign: null output pointer");
+        return @intFromEnum(TxResult.null_pointer);
+    };
+    if (@intFromPtr(out_tx) == 0) {
         setLastError("TX sign: null output pointer");
         return @intFromEnum(TxResult.null_pointer);
     }
@@ -2652,6 +2681,10 @@ export fn quantum_tx_sign(
             error.NoOutputs => @intFromEnum(TxResult.no_outputs),
             error.InsufficientFunds => @intFromEnum(TxResult.insufficient_funds),
             error.InvalidPrivateKey => @intFromEnum(TxResult.invalid_private_key),
+            error.KeyDoesNotMatchInput => {
+                setLastError("TX sign: a key's hash160 is not its input's pubkey_hash");
+                return @intFromEnum(TxResult.invalid_private_key);
+            },
             error.SigningFailed => @intFromEnum(TxResult.signing_failed),
             error.BufferTooSmall => @intFromEnum(TxResult.buffer_too_small),
             else => @intFromEnum(TxResult.signing_failed),
@@ -2700,6 +2733,10 @@ export fn quantum_tx_compute_sighash(
         return switch (err) {
             error.NoInputs => @intFromEnum(TxResult.no_inputs),
             error.InvalidPrivateKey => @intFromEnum(TxResult.invalid_private_key),
+            error.KeyDoesNotMatchInput => {
+                setLastError("TX sighash: hash160 of the key's public key is not the input's pubkey_hash");
+                return @intFromEnum(TxResult.invalid_private_key);
+            },
             else => @intFromEnum(TxResult.signing_failed),
         };
     };
@@ -2744,15 +2781,15 @@ export fn quantum_tx_builder_free(handle: ?*anyopaque) void {
     std.heap.c_allocator.destroy(b);
 }
 
-export fn quantum_tx_builder_add_input_ctx(handle: ?*anyopaque, utxo: *const CSpendableUtxo) c_int {
+export fn quantum_tx_builder_add_input_ctx(handle: ?*anyopaque, maybe_utxo: ?*const CSpendableUtxo) c_int {
     const b = builderFromHandle(handle) orelse {
         setLastError("TX builder: null handle");
         return @intFromEnum(TxResult.null_pointer);
     };
-    if (@intFromPtr(utxo) == 0) {
+    const utxo = maybe_utxo orelse {
         setLastError("TX builder: null UTXO pointer");
         return @intFromEnum(TxResult.null_pointer);
-    }
+    };
     const internal_utxo = tx_builder.SpendableUtxo{
         .txid = utxo.txid,
         .vout = utxo.vout,
@@ -2888,7 +2925,7 @@ export fn quantum_tx_sign_ctx(
     key_count: usize,
     out_tx: [*c]u8,
     out_tx_size: usize,
-    actual_size: *usize,
+    maybe_actual_size: ?*usize,
 ) c_int {
     const b = builderFromHandle(handle) orelse {
         setLastError("TX sign: null handle");
@@ -2898,7 +2935,11 @@ export fn quantum_tx_sign_ctx(
         setLastError("TX sign: null private_keys pointer");
         return @intFromEnum(TxResult.null_pointer);
     }
-    if (@intFromPtr(out_tx) == 0 or @intFromPtr(actual_size) == 0) {
+    const actual_size = maybe_actual_size orelse {
+        setLastError("TX sign: null output pointer");
+        return @intFromEnum(TxResult.null_pointer);
+    };
+    if (@intFromPtr(out_tx) == 0) {
         setLastError("TX sign: null output pointer");
         return @intFromEnum(TxResult.null_pointer);
     }
@@ -2918,6 +2959,10 @@ export fn quantum_tx_sign_ctx(
             error.NoOutputs => @intFromEnum(TxResult.no_outputs),
             error.InsufficientFunds => @intFromEnum(TxResult.insufficient_funds),
             error.InvalidPrivateKey => @intFromEnum(TxResult.invalid_private_key),
+            error.KeyDoesNotMatchInput => {
+                setLastError("TX sign: a key's hash160 is not its input's pubkey_hash");
+                return @intFromEnum(TxResult.invalid_private_key);
+            },
             error.SigningFailed => @intFromEnum(TxResult.signing_failed),
             error.BufferTooSmall => @intFromEnum(TxResult.buffer_too_small),
             else => @intFromEnum(TxResult.signing_failed),
@@ -2953,6 +2998,10 @@ export fn quantum_tx_compute_sighash_ctx(
         return switch (err) {
             error.NoInputs => @intFromEnum(TxResult.no_inputs),
             error.InvalidPrivateKey => @intFromEnum(TxResult.invalid_private_key),
+            error.KeyDoesNotMatchInput => {
+                setLastError("TX sighash: hash160 of the key's public key is not the input's pubkey_hash");
+                return @intFromEnum(TxResult.invalid_private_key);
+            },
             else => @intFromEnum(TxResult.signing_failed),
         };
     };
@@ -2975,13 +3024,17 @@ export fn quantum_ecdsa_sign(
     hash: [*c]const u8,
     private_key: [*c]const u8,
     signature_out: [*c]u8,
-    sig_len_out: *usize,
+    maybe_sig_len_out: ?*usize,
 ) c_int {
     if (@intFromPtr(hash) == 0 or @intFromPtr(private_key) == 0) {
         setLastError("ECDSA sign: null input pointer");
         return @intFromEnum(TxResult.null_pointer);
     }
-    if (@intFromPtr(signature_out) == 0 or @intFromPtr(sig_len_out) == 0) {
+    const sig_len_out = maybe_sig_len_out orelse {
+        setLastError("ECDSA sign: null output pointer");
+        return @intFromEnum(TxResult.null_pointer);
+    };
+    if (@intFromPtr(signature_out) == 0) {
         setLastError("ECDSA sign: null output pointer");
         return @intFromEnum(TxResult.null_pointer);
     }
@@ -3192,6 +3245,118 @@ test "quantum_tx_sign_ctx refuses an output buffer smaller than the signed trans
     try std.testing.expectEqual(need, written);
 }
 
+test "quantum_tx_compute_sighash_ctx and quantum_tx_sign_ctx refuse a key that does not own the input" {
+    var key: [32]u8 = undefined;
+    const h = try bip143KeyedBuilder(&key);
+    defer quantum_tx_builder_free(h);
+    const stranger: [32]u8 = @as([31]u8, @splat(0)) ++ [_]u8{1};
+    var sighash: [32]u8 = undefined;
+    var buf: [512]u8 = undefined;
+    var written: usize = 0;
+    const invalid_key = @intFromEnum(TxResult.invalid_private_key);
+    try std.testing.expectEqual(invalid_key, quantum_tx_compute_sighash_ctx(h, 0, &stranger, &sighash));
+    try std.testing.expectEqual(invalid_key, quantum_tx_sign_ctx(h, &[_][32]u8{stranger}, 1, &buf, buf.len, &written));
+    try std.testing.expectEqual(@as(c_int, 0), quantum_tx_compute_sighash_ctx(h, 0, &key, &sighash));
+}
+
+test "null: the SPV exports refuse a null struct pointer" {
+    const verify_pow: *const fn (?*const CBlockHeader) callconv(.c) c_int = @ptrCast(&quantum_spv_verify_pow);
+    const block_hash: *const fn (?*const CBlockHeader, [*c]u8, bool) callconv(.c) c_int = @ptrCast(&quantum_spv_block_hash);
+    const linkage: *const fn (?*const CBlockHeader, [*c]const u8) callconv(.c) c_int = @ptrCast(&quantum_spv_verify_linkage);
+    const parse_header: *const fn ([*c]const u8, ?*CBlockHeader) callconv(.c) c_int = @ptrCast(&quantum_spv_parse_header);
+    const merkle: *const fn ([*c]const u8, [*c]const u8, ?*const CMerkleProof) callconv(.c) c_int = @ptrCast(&quantum_spv_verify_merkle_proof);
+    const payment: *const fn ([*c]const u8, ?*const CMerkleProof, ?*const CBlockHeader, [*c]const u8, bool) callconv(.c) c_int = @ptrCast(&quantum_spv_verify_payment);
+    const invalid = @intFromEnum(SpvResult.invalid_input);
+    const hash: [32]u8 = @splat(0);
+    const raw: [80]u8 = @splat(0);
+    var out: [32]u8 = undefined;
+    const header = std.mem.zeroes(CBlockHeader);
+    try std.testing.expectEqual(invalid, verify_pow(null));
+    try std.testing.expectEqual(invalid, block_hash(null, &out, false));
+    try std.testing.expectEqual(invalid, linkage(null, &hash));
+    try std.testing.expectEqual(invalid, parse_header(&raw, null));
+    try std.testing.expectEqual(invalid, merkle(&hash, &hash, null));
+    try std.testing.expectEqual(invalid, payment(&hash, null, &header, &hash, false));
+}
+
+test "null: the BIP-32 exports refuse a null key pointer" {
+    const from_seed: *const fn ([*c]const u8, usize, ?*CExtendedKey) callconv(.c) c_int = @ptrCast(&quantum_bip32_from_seed);
+    const derive_child: *const fn (?*const CExtendedKey, u32, ?*CExtendedKey) callconv(.c) c_int = @ptrCast(&quantum_bip32_derive_child);
+    const derive_path: *const fn (?*const CExtendedKey, [*c]const u8, usize, ?*CExtendedKey) callconv(.c) c_int = @ptrCast(&quantum_bip32_derive_path);
+    const neuter: *const fn (?*const CExtendedKey, ?*CExtendedKey) callconv(.c) c_int = @ptrCast(&quantum_bip32_neuter);
+    const serialize: *const fn (?*const CExtendedKey, c_int, [*c]u8) callconv(.c) c_int = @ptrCast(&quantum_bip32_serialize);
+    const null_ptr = @intFromEnum(Bip32Result.null_pointer);
+    const seed: [16]u8 = @splat(7);
+    var key: CExtendedKey = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), quantum_bip32_from_seed(&seed, seed.len, &key));
+    var ser: [82]u8 = undefined;
+    try std.testing.expectEqual(null_ptr, from_seed(&seed, seed.len, null));
+    try std.testing.expectEqual(null_ptr, derive_child(null, 0, &key));
+    try std.testing.expectEqual(null_ptr, derive_child(&key, 0, null));
+    try std.testing.expectEqual(null_ptr, derive_path(null, "m/0", 3, &key));
+    try std.testing.expectEqual(null_ptr, derive_path(&key, "m/0", 3, null));
+    try std.testing.expectEqual(null_ptr, neuter(null, &key));
+    try std.testing.expectEqual(null_ptr, neuter(&key, null));
+    try std.testing.expectEqual(null_ptr, serialize(null, 1, &ser));
+}
+
+test "null: the transaction and signing exports refuse a null pointer" {
+    var key: [32]u8 = undefined;
+    const h = try bip143KeyedBuilder(&key);
+    defer quantum_tx_builder_free(h);
+    const add_input_ctx: *const fn (?*anyopaque, ?*const CSpendableUtxo) callconv(.c) c_int = @ptrCast(&quantum_tx_builder_add_input_ctx);
+    const add_input: *const fn (?*const CSpendableUtxo) callconv(.c) c_int = @ptrCast(&quantum_tx_builder_add_input);
+    const sign_ctx: *const fn (?*anyopaque, [*c]const [32]u8, usize, [*c]u8, usize, ?*usize) callconv(.c) c_int = @ptrCast(&quantum_tx_sign_ctx);
+    const sign: *const fn ([*c]const [32]u8, usize, [*c]u8, usize, ?*usize) callconv(.c) c_int = @ptrCast(&quantum_tx_sign);
+    const ecdsa_sign: *const fn ([*c]const u8, [*c]const u8, [*c]u8, ?*usize) callconv(.c) c_int = @ptrCast(&quantum_ecdsa_sign);
+    const null_ptr = @intFromEnum(TxResult.null_pointer);
+    var buf: [512]u8 = undefined;
+    const digest: [32]u8 = @splat(1);
+    _ = quantum_tx_builder_init();
+    try std.testing.expectEqual(null_ptr, add_input_ctx(h, null));
+    try std.testing.expectEqual(null_ptr, add_input(null));
+    try std.testing.expectEqual(null_ptr, sign_ctx(h, &[_][32]u8{key}, 1, &buf, buf.len, null));
+    try std.testing.expectEqual(null_ptr, sign(&[_][32]u8{key}, 1, &buf, buf.len, null));
+    try std.testing.expectEqual(null_ptr, ecdsa_sign(&digest, &key, &buf, null));
+}
+
+test "null: the coin-select exports refuse null params or result" {
+    const Select = *const fn ([*c]const CCoinUtxo, usize, ?*const CSelectionParams, ?*CSelectionResult) callconv(.c) c_int;
+    const utxos = [_]CCoinUtxo{.{ .value = 100_000, .original_index = 0, ._reserved = 0 }};
+    const params = CSelectionParams{ .target_amount = 10_000, .fee_rate = 1, .output_count = 1, .min_change = 546, .prefer_no_change = 1, ._reserved = @splat(0) };
+    var result: CSelectionResult = undefined;
+    const null_ptr = @intFromEnum(CoinSelectResult.null_pointer);
+    for ([_]Select{ @ptrCast(&quantum_coin_select), @ptrCast(&quantum_coin_select_largest_first), @ptrCast(&quantum_coin_select_smallest_first) }) |select| {
+        try std.testing.expectEqual(null_ptr, select(&utxos, 1, null, &result));
+        try std.testing.expectEqual(null_ptr, select(&utxos, 1, &params, null));
+    }
+}
+
+test "null: quantum_merkle_root, quantum_bitcoin_parse_tx and quantum_bitcoin_detect_script_type" {
+    const hash: [32]u8 = @splat(0x11);
+    var out: [32]u8 = undefined;
+    // branches == NULL with a non-zero count used to read branches[0].
+    try std.testing.expectEqual(@intFromEnum(QuantumCryptoError.invalid_input), quantum_merkle_root(&hash, null, 1, &out));
+    try std.testing.expectEqual(@intFromEnum(QuantumCryptoError.success), quantum_merkle_root(&hash, null, 0, &out));
+
+    const parse: *const fn ([*c]const u8, usize, ?*CParsedTx) callconv(.c) c_int = @ptrCast(&quantum_bitcoin_parse_tx);
+    try std.testing.expectEqual(@intFromEnum(QuantumCryptoError.invalid_output), parse(&hash, hash.len, null));
+
+    // A P2WPKH script: the type comes back whether or not either out-pointer is given, and the
+    // length written is what was copied (0 with no buffer), never left unwritten.
+    const detect: *const fn ([*c]const u8, usize, [*c]u8, ?*u8) callconv(.c) u8 = @ptrCast(&quantum_bitcoin_detect_script_type);
+    const script = [_]u8{ 0x00, 0x14 } ++ @as([20]u8, @splat(0x42));
+    const p2wpkh = @intFromEnum(bitcoin_tx.analyzeScript(&script).script_type);
+    var len: u8 = 0xEE;
+    try std.testing.expectEqual(p2wpkh, detect(&script, script.len, null, null));
+    try std.testing.expectEqual(p2wpkh, detect(&script, script.len, null, &len));
+    try std.testing.expectEqual(@as(u8, 0), len);
+    var hash_out: [32]u8 = undefined;
+    try std.testing.expectEqual(p2wpkh, detect(&script, script.len, &hash_out, &len));
+    try std.testing.expectEqual(@as(u8, 20), len);
+    try std.testing.expectEqualSlices(u8, script[2..], hash_out[0..20]);
+}
+
 test "derive pubkey" {
     const private_key = [_]u8{
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -3294,17 +3459,21 @@ pub const CoinSelectResult = enum(c_int) {
 export fn quantum_coin_select(
     utxos: [*c]const CCoinUtxo,
     utxo_count: usize,
-    params: *const CSelectionParams,
-    result: *CSelectionResult,
+    maybe_params: ?*const CSelectionParams,
+    maybe_result: ?*CSelectionResult,
 ) c_int {
     if (@intFromPtr(utxos) == 0 and utxo_count > 0) {
         setLastError("Coin select: null UTXOs pointer");
         return @intFromEnum(CoinSelectResult.null_pointer);
     }
-    if (@intFromPtr(params) == 0 or @intFromPtr(result) == 0) {
+    const params = maybe_params orelse {
         setLastError("Coin select: null params or result pointer");
         return @intFromEnum(CoinSelectResult.null_pointer);
-    }
+    };
+    const result = maybe_result orelse {
+        setLastError("Coin select: null params or result pointer");
+        return @intFromEnum(CoinSelectResult.null_pointer);
+    };
 
     if (utxo_count == 0) {
         setLastError("Coin select: no UTXOs available");
@@ -3366,15 +3535,14 @@ export fn quantum_coin_select(
 export fn quantum_coin_select_largest_first(
     utxos: [*c]const CCoinUtxo,
     utxo_count: usize,
-    params: *const CSelectionParams,
-    result: *CSelectionResult,
+    maybe_params: ?*const CSelectionParams,
+    maybe_result: ?*CSelectionResult,
 ) c_int {
     if (@intFromPtr(utxos) == 0 and utxo_count > 0) {
         return @intFromEnum(CoinSelectResult.null_pointer);
     }
-    if (@intFromPtr(params) == 0 or @intFromPtr(result) == 0) {
-        return @intFromEnum(CoinSelectResult.null_pointer);
-    }
+    const params = maybe_params orelse return @intFromEnum(CoinSelectResult.null_pointer);
+    const result = maybe_result orelse return @intFromEnum(CoinSelectResult.null_pointer);
     if (utxo_count == 0) {
         return @intFromEnum(CoinSelectResult.no_utxos_available);
     }
@@ -3427,15 +3595,14 @@ export fn quantum_coin_select_largest_first(
 export fn quantum_coin_select_smallest_first(
     utxos: [*c]const CCoinUtxo,
     utxo_count: usize,
-    params: *const CSelectionParams,
-    result: *CSelectionResult,
+    maybe_params: ?*const CSelectionParams,
+    maybe_result: ?*CSelectionResult,
 ) c_int {
     if (@intFromPtr(utxos) == 0 and utxo_count > 0) {
         return @intFromEnum(CoinSelectResult.null_pointer);
     }
-    if (@intFromPtr(params) == 0 or @intFromPtr(result) == 0) {
-        return @intFromEnum(CoinSelectResult.null_pointer);
-    }
+    const params = maybe_params orelse return @intFromEnum(CoinSelectResult.null_pointer);
+    const result = maybe_result orelse return @intFromEnum(CoinSelectResult.null_pointer);
     if (utxo_count == 0) {
         return @intFromEnum(CoinSelectResult.no_utxos_available);
     }

@@ -19,6 +19,7 @@ const std = @import("std");
 const crypto = std.crypto;
 const Sha256 = crypto.hash.sha2.Sha256;
 const Secp256k1 = crypto.ecc.Secp256k1;
+const hash160 = @import("bip32.zig").hash160;
 
 // =============================================================================
 // Side-channel mitigations guard
@@ -102,6 +103,9 @@ pub const TxBuilderError = error{
     TooManyOutputs,
     InvalidAddress,
     BufferTooSmall,
+    /// hash160 of the signing key's public key is not the input's pubkey_hash, so no
+    /// signature from it can satisfy the input's P2WPKH scriptPubKey.
+    KeyDoesNotMatchInput,
 };
 
 // =============================================================================
@@ -406,8 +410,12 @@ pub fn computeSighashBip143(
 
     const input = &builder.inputs[input_index];
 
-    // Derive public key for key validation (not used in the sighash bytes).
-    _ = derivePublicKey(private_key) catch return TxBuilderError.InvalidPrivateKey;
+    // The key must own the input: P2WPKH locks to hash160(pubkey), so a signature from any
+    // other key yields a transaction every node rejects. Both hashes are public.
+    const pubkey = derivePublicKey(private_key) catch return TxBuilderError.InvalidPrivateKey;
+    if (!crypto.timing_safe.eql([20]u8, hash160(&pubkey), input.pubkey_hash)) {
+        return TxBuilderError.KeyDoesNotMatchInput;
+    }
 
     // Build the scriptCode for P2WPKH: OP_DUP OP_HASH160 <20-byte-hash> OP_EQUALVERIFY OP_CHECKSIG
     var script_code: [25]u8 = undefined;
@@ -595,11 +603,28 @@ fn feedOutputToHasher(hasher: *Sha256, output: *const TxDestination) void {
 // ECDSA Signing
 // =============================================================================
 
+/// secp256k1 group order n, big-endian.
+const CURVE_ORDER = [32]u8{
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
+    0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B,
+    0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
+};
+
+/// floor(n / 2), big-endian: the largest s BIP-62/146 low-S allows.
+const HALF_ORDER = [32]u8{
+    0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x5D, 0x57, 0x6E, 0x73, 0x57, 0xA4, 0x50, 0x1D,
+    0xDF, 0xE9, 0x2F, 0x46, 0x68, 0x1B, 0x20, 0xA0,
+};
+
 /// Sign a 32-byte digest with a private key: ECDSA over secp256k1 with the RFC 6979 section 3.2
-/// deterministic nonce (HMAC-SHA256 DRBG). Returns r || s, s not yet normalised; signatureToDer
-/// applies low-S. Together they produce the bytes libsecp256k1's secp256k1_ecdsa_sign does, so
-/// Bitcoin Core's published signatures (BIP-143) and the tiny-secp256k1 fixtures reproduce
-/// exactly (src/conformance.zig, test below).
+/// deterministic nonce (HMAC-SHA256 DRBG). Returns r || s with s normalised to low-S
+/// (s <= n/2, BIP-62/146), the only form Bitcoin relays; signatureToDer normalises again for
+/// signatures from elsewhere. Together they produce the bytes libsecp256k1's
+/// secp256k1_ecdsa_sign does, so Bitcoin Core's published signatures (BIP-143) and the
+/// tiny-secp256k1 fixtures reproduce exactly (src/conformance.zig, test below).
 ///
 /// This used to call std's Ecdsa.signPrehashed, whose deterministic nonce is NOT RFC 6979: it
 /// HMACs V || 0x00 || Z || x || h with a 32-byte noise block Z (zeros when no noise is given),
@@ -642,7 +667,9 @@ pub fn signHash(hash: *const [32]u8, private_key: *const [32]u8) TxBuilderError!
             drbg.reseed();
             continue;
         }
-        return r.toBytes(.big) ++ s.toBytes(.big);
+        // s and n - s both verify. The signature is published, so branching on it leaks nothing.
+        const s_high = std.mem.order(u8, &s.toBytes(.big), &HALF_ORDER) == .gt;
+        return r.toBytes(.big) ++ (if (s_high) s.neg() else s).toBytes(.big);
     }
 }
 
@@ -710,19 +737,8 @@ pub fn signatureToDer(sig: *const [64]u8, out: []u8) TxBuilderError!usize {
     const r = sig[0..32];
 
     // Enforce low-S: if S > N/2, replace with N - S (BIP 62)
-    // secp256k1 curve order N
-    const curve_order = [32]u8{
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
-        0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B,
-        0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
-    };
-    const half_order = [32]u8{
-        0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        0x5D, 0x57, 0x6E, 0x73, 0x57, 0xA4, 0x50, 0x1D,
-        0xDF, 0xE9, 0x2F, 0x46, 0x68, 0x1B, 0x20, 0xA0,
-    };
+    const curve_order = CURVE_ORDER;
+    const half_order = HALF_ORDER;
 
     var s_bytes: [32]u8 = sig[32..64].*;
     // Check if S > half_order
@@ -1149,6 +1165,8 @@ const TEST_PRIVKEY: [32]u8 = blk: {
 fn buildVariantBuilder() !TxBuilder {
     var builder = TxBuilder.init();
     builder.locktime = 0;
+    // Both inputs belong to TEST_PRIVKEY, which computeSighashBip143 checks.
+    const owner = hash160(&(try derivePublicKey(&TEST_PRIVKEY)));
 
     // Two inputs, two outputs, distinct sequences so the prevouts/sequence
     // commitments differ between variants in observable ways.
@@ -1156,7 +1174,7 @@ fn buildVariantBuilder() !TxBuilder {
         .txid = @splat(0xa1),
         .vout = 0,
         .value = 100000,
-        .pubkey_hash = @splat(0xaa),
+        .pubkey_hash = owner,
         .derivation_index = 0,
         .sequence = 0xfffffffe, // RBF-disabled
     });
@@ -1164,7 +1182,7 @@ fn buildVariantBuilder() !TxBuilder {
         .txid = @splat(0xb2),
         .vout = 1,
         .value = 50000,
-        .pubkey_hash = @splat(0xbb),
+        .pubkey_hash = owner,
         .derivation_index = 1,
         .sequence = DEFAULT_SEQUENCE,
     });
@@ -1393,6 +1411,44 @@ test "serializeSignedTransaction: the exact size fits, one byte less is refused,
     @memset(&buf, 0xAA);
     try std.testing.expectEqual(need, try signTransaction(&builder, &keys, buf[0..need]));
     for (buf[need..]) |b| try std.testing.expectEqual(@as(u8, 0xAA), b);
+}
+
+test "computeSighashBip143 and signTransaction refuse a key whose hash160 is not the input's pubkey_hash" {
+    var owner: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&owner, "619c335025c7f4012e556c2a58b2506e30b8511b53ade95ea316fd8c3286feb9");
+    var pkh: [20]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&pkh, "1d0f172a0ecb48aee1be1f2687d2963ae33f71a1");
+    var builder = TxBuilder.init();
+    try builder.addInput(.{ .txid = @splat(0x01), .vout = 0, .value = 100_000, .pubkey_hash = pkh, .derivation_index = 0 });
+    try builder.addP2wpkhOutput(90_000, &@as([20]u8, @splat(0x03)));
+
+    // A valid key that does not own the input: its signature could never satisfy the
+    // scriptPubKey, so a transaction signed with it is one every node rejects.
+    try std.testing.expectError(error.KeyDoesNotMatchInput, computeSighashBip143(&builder, 0, &TEST_PRIVKEY, SIGHASH_ALL));
+    var buf: [512]u8 = undefined;
+    try std.testing.expectError(error.KeyDoesNotMatchInput, signTransaction(&builder, &[_][32]u8{TEST_PRIVKEY}, &buf));
+    _ = try computeSighashBip143(&builder, 0, &owner, SIGHASH_ALL);
+    _ = try signTransaction(&builder, &[_][32]u8{owner}, &buf);
+}
+
+test "signHash returns low-S signatures that still verify" {
+    const half_order = [32]u8{
+        0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x5D, 0x57, 0x6E, 0x73, 0x57, 0xA4, 0x50, 0x1D, 0xDF, 0xE9, 0x2F, 0x46, 0x68, 0x1B, 0x20, 0xA0,
+    };
+    var key: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&key, "619c335025c7f4012e556c2a58b2506e30b8511b53ade95ea316fd8c3286feb9");
+    const Ecdsa = crypto.sign.ecdsa.Ecdsa(Secp256k1, Sha256);
+    const pk = try Ecdsa.PublicKey.fromSec1(&(try derivePublicKey(&key)));
+    // RFC 6979 is deterministic, so these 64 digests always give the same signatures; about
+    // half of the raw s values are above n/2.
+    for (0..64) |i| {
+        var digest: [32]u8 = undefined;
+        Sha256.hash(&[_]u8{@intCast(i)}, &digest, .{});
+        const sig = try signHash(&digest, &key);
+        try std.testing.expect(std.mem.order(u8, sig[32..64], &half_order) != .gt);
+        try Ecdsa.Signature.fromBytes(sig).verifyPrehashed(digest, pk);
+    }
 }
 
 test "SpendableUtxo default sequence is DEFAULT_SEQUENCE" {
