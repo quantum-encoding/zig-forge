@@ -501,18 +501,26 @@ pub fn smallestFirst(
 // Utility Functions
 // =============================================================================
 
-/// Calculate transaction fee in satoshis; error.Overflow if it does not fit in a u64.
+/// Calculate transaction fee in satoshis: estimateVsize * fee_rate, exact whenever the fee fits
+/// in a u64 (a rate of 0 is a fee of 0 however large the size); error.Overflow otherwise.
 ///
 /// Parameters:
 /// - input_count: Number of inputs
 /// - output_count: Number of outputs
 /// - fee_rate: Satoshis per virtual byte
 pub fn calculateFee(input_count: usize, output_count: usize, fee_rate: u64) error{Overflow}!u64 {
-    return std.math.mul(u64, try estimateVsize(input_count, output_count), fee_rate);
+    // The size is below 2^71, so the product overflows u128 only when it is far past 2^64.
+    const fee = try std.math.mul(u128, exactVsize(input_count, output_count), fee_rate);
+    return std.math.cast(u64, fee) orelse error.Overflow;
 }
 
 /// Estimate transaction virtual size; error.Overflow if it does not fit in a u64.
 pub fn estimateVsize(input_count: usize, output_count: usize) error{Overflow}!u64 {
+    return std.math.cast(u64, exactVsize(input_count, output_count)) orelse error.Overflow;
+}
+
+/// The virtual size, exactly: 11 + 68 * inputs + 31 * outputs is below 2^71 for any counts.
+fn exactVsize(input_count: usize, output_count: usize) u128 {
     // P2WPKH transaction structure:
     // - 4 bytes version
     // - 1 byte marker (0x00)
@@ -522,10 +530,9 @@ pub fn estimateVsize(input_count: usize, output_count: usize) error{Overflow}!u6
     // - 1-3 bytes output count (varint)
     // - outputs: 31 bytes each for P2WPKH
     // - 4 bytes locktime
-    const base: u64 = TX_OVERHEAD_VSIZE;
-    const inputs = try std.math.mul(u64, input_count, INPUT_VSIZE_P2WPKH);
-    const outputs = try std.math.mul(u64, output_count, OUTPUT_VSIZE_P2WPKH);
-    return std.math.add(u64, try std.math.add(u64, base, inputs), outputs);
+    return @as(u128, TX_OVERHEAD_VSIZE) +
+        @as(u128, input_count) * INPUT_VSIZE_P2WPKH +
+        @as(u128, output_count) * OUTPUT_VSIZE_P2WPKH;
 }
 
 /// Check if a value is above dust threshold
@@ -670,6 +677,28 @@ test "amounts, fees and values that overflow 64 bits are refused or saturated, n
     try std.testing.expectEqual(@as(i64, std.math.maxInt(i64)), effectiveValue(CoinUtxo.p2wpkh(max, 0), 0));
     try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), effectiveValue(CoinUtxo.p2wpkh(0, 0), max));
     try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), effectiveValue(CoinUtxo.p2wpkh(0, 0), (1 << 63) / INPUT_VSIZE_P2WPKH + 1));
+}
+
+test "calculateFee and estimateVsize are exact whenever the result fits, Overflow otherwise" {
+    // walletcore's prop_zig_fee_helpers_never_wrap grid, against a u128 oracle.
+    const counts = [_]usize{ 0, 1, 2, 200, std.math.maxInt(u32), std.math.maxInt(usize) / 68, std.math.maxInt(usize) };
+    const rates = [_]u64{ 0, 1, 1000, std.math.maxInt(u64) / 110, std.math.maxInt(u64) };
+    for (counts) |i| for (counts) |o| {
+        const vsize: u128 = 11 + 68 * @as(u128, i) + 31 * @as(u128, o);
+        if (vsize <= std.math.maxInt(u64)) {
+            try std.testing.expectEqual(@as(u64, @intCast(vsize)), try estimateVsize(i, o));
+        } else {
+            try std.testing.expectError(error.Overflow, estimateVsize(i, o));
+        }
+        for (rates) |r| {
+            const fee = vsize *| r;
+            if (fee <= std.math.maxInt(u64)) {
+                try std.testing.expectEqual(@as(u64, @intCast(fee)), try calculateFee(i, o, r));
+            } else {
+                try std.testing.expectError(error.Overflow, calculateFee(i, o, r));
+            }
+        }
+    };
 }
 
 test "calculateFee and estimateVsize report overflow" {
