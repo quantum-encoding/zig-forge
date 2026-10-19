@@ -651,8 +651,8 @@ test "amounts, fees and values that overflow 64 bits are refused or saturated, n
     const max = std.math.maxInt(u64);
     var result: SelectionResult = undefined;
 
-    // The report's PoC 5: target u64::MAX - 100 against one 10 000-sat UTXO wrapped
-    // target + fee, selected the UTXO and reported change 9001.
+    // A target of u64::MAX - 100 against one 10 000-sat UTXO: target + fee does not fit in
+    // 64 bits, so no UTXO set can fund it.
     var one = [_]CoinUtxo{CoinUtxo.p2wpkh(10_000, 0)};
     const huge_target = SelectionParams.default(max - 100, 10);
     try std.testing.expectError(error.InsufficientFunds, selectCoins(&one, huge_target, &result));

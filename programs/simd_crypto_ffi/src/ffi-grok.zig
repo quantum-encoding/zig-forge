@@ -2304,9 +2304,9 @@ test "quantum_bip32_p2wpkh_address and quantum_bip32_hash160 refuse a public key
     var addr: [90]u8 = undefined;
     var h160: [20]u8 = undefined;
     const invalid_key = @intFromEnum(Bip32Result.invalid_key);
-    // The report's PoC 2c: the all-zero "key" produced bc1q988uvdmz2kncg50wkjcjnmvw4nl69lh0ynpvgh,
-    // an address nobody holds a key for. Also: x = 0 (not on secp256k1), the uncompressed
-    // prefix on 33 bytes, and x = p (non-canonical).
+    // The all-zero "key" hashes to bc1q988uvdmz2kncg50wkjcjnmvw4nl69lh0ynpvgh, an address
+    // nobody holds a key for. Also: x = 0 (not on secp256k1), the uncompressed prefix on
+    // 33 bytes, and x = p (non-canonical).
     var bad: [4][33]u8 = .{ @splat(0), @splat(0), @splat(0), @splat(0xff) };
     bad[1][0] = 0x02;
     bad[2] = [_]u8{0x04} ++ @as([32]u8, @splat(0x11));
@@ -2330,12 +2330,12 @@ test "quantum_bip32_derive_path refuses m/2147483648 and quantum_bip32_derive_ch
     var out: CExtendedKey = undefined;
     const invalid_path = @intFromEnum(Bip32Result.invalid_path);
 
-    // The report's PoC 2a: an unhardened 2^31 derived m/0'.
+    // An unhardened 2^31 would name m/0'; empty segments would name a shorter path.
     for ([_][]const u8{ "m/2147483648", "m//0", "m/0/" }) |p| {
         try std.testing.expectEqual(invalid_path, quantum_bip32_derive_path(&master, p.ptr, p.len, &out));
     }
 
-    // PoC 2b: depth 255 wrapped to 0 with a non-zero parent fingerprint.
+    // A child of a depth-255 key cannot record its depth in one byte.
     var deep = master;
     deep.depth = 255;
     try std.testing.expectEqual(invalid_path, quantum_bip32_derive_child(&deep, 0, &out));
@@ -3231,8 +3231,8 @@ test "quantum_tx_sign_ctx refuses an output buffer smaller than the signed trans
     const keys = [_][32]u8{key};
     const too_small = @intFromEnum(TxResult.buffer_too_small);
 
-    // 100 bytes claimed for a 1-in/1-out P2WPKH transaction of about 192: refused, and the
-    // canary after the claimed capacity is untouched.
+    // 100 bytes for a 1-in/1-out P2WPKH transaction of about 192: refused, and the canary
+    // after that capacity is untouched.
     var buf: [512]u8 = @splat(0xAA);
     var written: usize = 0;
     try std.testing.expectEqual(too_small, quantum_tx_sign_ctx(h, &keys, 1, &buf, 100, &written));
@@ -3338,7 +3338,7 @@ test "null: the coin-select exports refuse null params or result" {
 test "null: quantum_merkle_root, quantum_bitcoin_parse_tx and quantum_bitcoin_detect_script_type" {
     const hash: [32]u8 = @splat(0x11);
     var out: [32]u8 = undefined;
-    // branches == NULL with a non-zero count used to read branches[0].
+    // branches == NULL with a non-zero count is refused before branches[0] is read.
     try std.testing.expectEqual(@intFromEnum(QuantumCryptoError.invalid_input), quantum_merkle_root(&hash, null, 1, &out));
     try std.testing.expectEqual(@intFromEnum(QuantumCryptoError.success), quantum_merkle_root(&hash, null, 0, &out));
 
@@ -3778,7 +3778,7 @@ test "every coin-select export refuses more than 256 UTXOs before copying any of
     try std.testing.expectEqual(@as(c_int, 0), quantum_coin_select_smallest_first(&utxos, 256, &params, &result));
 }
 
-test "coin-select exports refuse a target or fee past 64 bits instead of wrapping (PoC 5)" {
+test "coin-select exports refuse a target or fee past 64 bits instead of wrapping" {
     const max = std.math.maxInt(u64);
     const utxos = [_]CCoinUtxo{.{ .value = 10_000, .original_index = 0, ._reserved = 0 }};
     const params = CSelectionParams{
@@ -3961,7 +3961,7 @@ test "quantum_spv_verify_pow refuses a target above powLimit at the FFI boundary
 }
 
 test "quantum_spv_verify_merkle_proof refuses an odd leaf with a distinct sibling, quantum_spv_difficulty is 0 for nBits 0" {
-    // The report's PoC 6: a 3-tx block whose third leaf is paired with tx3 != tx2.
+    // A 3-tx block whose third leaf is paired with tx3 != tx2 rather than with itself.
     const tx0 = spv.hashDoubleSha256("tx0");
     const tx1 = spv.hashDoubleSha256("tx1");
     const tx2 = spv.hashDoubleSha256("tx2");
@@ -3977,7 +3977,7 @@ test "quantum_spv_verify_merkle_proof refuses an odd leaf with a distinct siblin
     const root = spv.hashPair(left, spv.hashPair(tx2, tx2));
     try std.testing.expectEqual(@intFromEnum(SpvResult.success), quantum_spv_verify_merkle_proof(&tx2, &root, &cproof));
 
-    // PoC 4a: invalid nBits read as maximum difficulty.
+    // Invalid nBits have no difficulty.
     try std.testing.expectEqual(@as(u64, 0), quantum_spv_difficulty(0));
     try std.testing.expectEqual(@as(u64, 0), quantum_spv_difficulty(0x1d80ffff));
 }

@@ -889,9 +889,9 @@ test "PoW: a target above powLimit is refused whatever the hash (finding #12 / A
 }
 
 test "calculateDifficulty is 0 for a target Bitcoin mainnet would refuse" {
-    // Zero, negative, zero-mantissa and overflowing encodings decode to the zero target and
-    // used to read as maximum difficulty (all 248 leading bits zero); targets above powLimit
-    // are refused by checkProofOfWork too.
+    // Zero, negative, zero-mantissa and overflowing encodings decode to the zero target, whose
+    // 248 leading zero bits would read as maximum difficulty; targets above powLimit are
+    // refused by checkProofOfWork too.
     for ([_]u32{ 0, 0x1d80ffff, 0x1d000000, 0x22000100, 0xff7fffff, 0x2100ffff, 0x1e00ffff, 0x1d010000 }) |bits| {
         try std.testing.expectEqual(@as(u64, 0), calculateDifficulty(bits));
     }
@@ -953,8 +953,8 @@ test "verifyMerkleProof enforces odd-node self-pairing and refuses equal pairs (
         }
     }
 
-    // The report's PoC 6: in a claimed 3-transaction block the third leaf must pair with
-    // itself. A distinct sibling x is the root of [t0, t1, t2, x], a different block.
+    // In a claimed 3-transaction block the third leaf must pair with itself. A distinct
+    // sibling x is the root of [t0, t1, t2, x], a different block.
     const t = leaves[0..3];
     const left = hashPair(t[0], t[1]);
     const x = hashDoubleSha256("not in the block");

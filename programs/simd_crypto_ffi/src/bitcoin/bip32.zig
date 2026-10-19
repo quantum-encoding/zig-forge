@@ -927,7 +927,7 @@ test "isValidPrivateKey accepts exactly 1 .. n-1" {
 
 test "addPublicKeys refuses a sum that is the point at infinity" {
     // -G (the generator with the odd-y prefix) plus 1*G is the identity, which has no SEC1
-    // encoding; toCompressedSec1 used to return an off-curve 03 00..00 for it.
+    // encoding (std's toCompressedSec1 returns the off-curve bytes 03 00..00 for it).
     var neg_g: [33]u8 = undefined;
     _ = try std.fmt.hexToBytes(&neg_g, "0379be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
     const one: [32]u8 = @as([31]u8, @splat(0)) ++ [_]u8{1};
@@ -1029,7 +1029,8 @@ const vector1_seed = [_]u8{
 
 test "derivePath refuses a child index of 2^31 or more instead of deriving a hardened key" {
     const master = try ExtendedKey.fromSeed(&vector1_seed);
-    // "2147483648" used to set bit 31 and derive m/0'; with a marker it collided with 0'.
+    // "2147483648" is no unhardened index: read as one it sets bit 31 and names m/0', and
+    // with a marker it collides with 0'.
     for ([_][]const u8{ "m/2147483648", "m/2147483648'", "m/2147483648h", "m/4294967295", "m/4294967295'", "m/0/2147483648", "2147483648", "m/99999999999" }) |p| {
         try std.testing.expectError(error.InvalidPath, master.derivePath(p));
     }

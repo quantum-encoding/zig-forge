@@ -966,8 +966,8 @@ pub fn combineShares(allocator: Allocator, shares: []const Share, passphrase: []
     // Bucket shares by group index. Member indices within a group MUST be
     // pairwise distinct (spec: "Combining the shares", check 3), so a repeated
     // share is refused like any other duplicate index. The reference
-    // implementation keeps shares in a set and folds exact copies; folding here
-    // let a copy skip the member-threshold check and padded a short set.
+    // implementation keeps shares in a set and folds exact copies; folding would
+    // let a copy skip the member-threshold check and pad a short set.
     var group_indices: [MAX_SHARE_COUNT]u4 = undefined;
     var group_members: [MAX_SHARE_COUNT][MAX_SHARE_COUNT]usize = undefined;
     var group_member_counts: [MAX_SHARE_COUNT]usize = @splat(0);
@@ -2630,13 +2630,13 @@ test "combine refuses a repeated share instead of folding it: member indices mus
     });
     defer freeMnemonics(allocator, mnemonics);
 
-    // [s0, s0, s1] for a 2-of-3 group used to recover: the copy was folded away before any
-    // count check ran.
+    // [s0, s0, s1] for a 2-of-3 group: the copy repeats a member index, which is refused
+    // before it can count towards the threshold.
     try testing.expectError(error.DuplicateMemberIndex, combineMnemonics(allocator, &.{ mnemonics[0], mnemonics[0], mnemonics[1] }, ""));
     try testing.expectError(error.DuplicateMemberIndex, combineMnemonics(allocator, &.{ mnemonics[0], mnemonics[0] }, ""));
 
-    // A copy of s0 re-encoded with another member threshold was folded before the
-    // member-threshold check could see it.
+    // A copy of s0 re-encoded with another member threshold is refused as a duplicate, so it
+    // cannot reach the member-threshold check disguised as the original.
     var altered = try Share.fromMnemonic(allocator, mnemonics[0]);
     defer altered.deinit(allocator);
     altered.member_threshold = 3;

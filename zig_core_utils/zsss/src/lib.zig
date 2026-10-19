@@ -1052,7 +1052,7 @@ test "FFI SLIP-39 combine refuses a repeated share, bytes that are not whole fra
     try pair.appendSlice(a, nthShareFrame(buf, 0));
     try pair.appendSlice(a, nthShareFrame(buf, 1));
 
-    // The report's PoC 3: [s0, s0, s1] for a 2-of-3 group recovered the secret.
+    // [s0, s0, s1] for a 2-of-3 group: s0 twice.
     var dup: std.ArrayList(u8) = .empty;
     defer dup.deinit(a);
     try dup.appendSlice(a, nthShareFrame(buf, 0));
