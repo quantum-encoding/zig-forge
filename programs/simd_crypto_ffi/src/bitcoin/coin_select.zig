@@ -145,6 +145,9 @@ pub fn selectCoins(
     if (utxos.len == 0) {
         return CoinSelectError.NoUtxosAvailable;
     }
+    if (utxos.len > SelectionResult.MAX_SELECTION) {
+        return CoinSelectError.TooManyUtxos;
+    }
 
     if (params.target_amount < tx_builder.DUST_LIMIT) {
         return CoinSelectError.TargetBelowDust;
@@ -381,8 +384,12 @@ pub fn largestFirst(
     if (utxos.len == 0) {
         return CoinSelectError.NoUtxosAvailable;
     }
+    // A selection over only the first MAX_SELECTION UTXOs would ignore the rest silently.
+    if (utxos.len > SelectionResult.MAX_SELECTION) {
+        return CoinSelectError.TooManyUtxos;
+    }
 
-    const n = @min(utxos.len, SelectionResult.MAX_SELECTION);
+    const n = utxos.len;
 
     // Sort by value descending
     var sorted_indices: [SelectionResult.MAX_SELECTION]usize = undefined;
@@ -460,8 +467,12 @@ pub fn smallestFirst(
     if (utxos.len == 0) {
         return CoinSelectError.NoUtxosAvailable;
     }
+    // A selection over only the first MAX_SELECTION UTXOs would ignore the rest silently.
+    if (utxos.len > SelectionResult.MAX_SELECTION) {
+        return CoinSelectError.TooManyUtxos;
+    }
 
-    const n = @min(utxos.len, SelectionResult.MAX_SELECTION);
+    const n = utxos.len;
 
     // Sort by value ascending
     var sorted_indices: [SelectionResult.MAX_SELECTION]usize = undefined;
@@ -644,6 +655,18 @@ test "branch and bound exact match" {
     try std.testing.expectEqual(@as(usize, 1), result.selected_count);
     try std.testing.expectEqual(@as(u64, 50000), result.total_value);
     try std.testing.expect(result.is_exact_match or result.change_amount < tx_builder.DUST_LIMIT);
+}
+
+test "selection over more than MAX_SELECTION UTXOs is refused, not truncated" {
+    var utxos: [SelectionResult.MAX_SELECTION + 1]CoinUtxo = undefined;
+    for (&utxos, 0..) |*u, i| u.* = CoinUtxo.p2wpkh(1_000, i);
+    // The one UTXO that could fund the target sits past the first MAX_SELECTION.
+    utxos[SelectionResult.MAX_SELECTION] = CoinUtxo.p2wpkh(10_000_000, SelectionResult.MAX_SELECTION);
+    const params = SelectionParams.default(5_000_000, 1);
+    var result: SelectionResult = undefined;
+    try std.testing.expectError(CoinSelectError.TooManyUtxos, largestFirst(&utxos, params, &result));
+    try std.testing.expectError(CoinSelectError.TooManyUtxos, smallestFirst(&utxos, params, &result));
+    try std.testing.expectError(CoinSelectError.TooManyUtxos, selectCoins(&utxos, params, &result));
 }
 
 test "effective value" {

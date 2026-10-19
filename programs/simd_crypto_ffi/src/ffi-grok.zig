@@ -3259,7 +3259,7 @@ export fn quantum_coin_select(
     }
 
     // Convert C UTXOs to internal format
-    var internal_utxos: [256]coin_select.CoinUtxo = undefined;
+    var internal_utxos: [coin_select.SelectionResult.MAX_SELECTION]coin_select.CoinUtxo = undefined;
     for (0..utxo_count) |i| {
         internal_utxos[i] = coin_select.CoinUtxo.p2wpkh(
             utxos[i].value,
@@ -3319,8 +3319,13 @@ export fn quantum_coin_select_largest_first(
     if (utxo_count == 0) {
         return @intFromEnum(CoinSelectResult.no_utxos_available);
     }
+    // internal_utxos holds MAX_SELECTION entries; more would be copied past it.
+    if (utxo_count > coin_select.SelectionResult.MAX_SELECTION) {
+        setLastError("Coin select: too many UTXOs");
+        return @intFromEnum(CoinSelectResult.too_many_utxos);
+    }
 
-    var internal_utxos: [256]coin_select.CoinUtxo = undefined;
+    var internal_utxos: [coin_select.SelectionResult.MAX_SELECTION]coin_select.CoinUtxo = undefined;
     for (0..utxo_count) |i| {
         internal_utxos[i] = coin_select.CoinUtxo.p2wpkh(utxos[i].value, utxos[i].original_index);
     }
@@ -3374,8 +3379,13 @@ export fn quantum_coin_select_smallest_first(
     if (utxo_count == 0) {
         return @intFromEnum(CoinSelectResult.no_utxos_available);
     }
+    // internal_utxos holds MAX_SELECTION entries; more would be copied past it.
+    if (utxo_count > coin_select.SelectionResult.MAX_SELECTION) {
+        setLastError("Coin select: too many UTXOs");
+        return @intFromEnum(CoinSelectResult.too_many_utxos);
+    }
 
-    var internal_utxos: [256]coin_select.CoinUtxo = undefined;
+    var internal_utxos: [coin_select.SelectionResult.MAX_SELECTION]coin_select.CoinUtxo = undefined;
     for (0..utxo_count) |i| {
         internal_utxos[i] = coin_select.CoinUtxo.p2wpkh(utxos[i].value, utxos[i].original_index);
     }
@@ -3509,6 +3519,31 @@ test "coin select insufficient funds" {
     const ret = quantum_coin_select(&utxos, 1, &params, &result);
 
     try std.testing.expectEqual(@intFromEnum(CoinSelectResult.insufficient_funds), ret);
+}
+
+test "every coin-select export refuses more than 256 UTXOs before copying any of them" {
+    // 300 UTXOs, as an address under a dust attack returns from an explorer. Each export
+    // copies into a 256-entry stack array; past 256 that write lands on the stack frame.
+    var utxos: [300]CCoinUtxo = undefined;
+    for (&utxos, 0..) |*u, i| u.* = .{ .value = 10_000, .original_index = @intCast(i), ._reserved = 0 };
+    const params = CSelectionParams{
+        .target_amount = 50_000,
+        .fee_rate = 1,
+        .output_count = 1,
+        .min_change = 546,
+        .prefer_no_change = 1,
+        ._reserved = @splat(0),
+    };
+    const too_many = @intFromEnum(CoinSelectResult.too_many_utxos);
+    var result: CSelectionResult = undefined;
+    try std.testing.expectEqual(too_many, quantum_coin_select(&utxos, utxos.len, &params, &result));
+    try std.testing.expectEqual(too_many, quantum_coin_select_largest_first(&utxos, utxos.len, &params, &result));
+    try std.testing.expectEqual(too_many, quantum_coin_select_smallest_first(&utxos, utxos.len, &params, &result));
+    try std.testing.expectEqual(too_many, quantum_coin_select_largest_first(&utxos, 257, &params, &result));
+    try std.testing.expectEqual(too_many, quantum_coin_select_smallest_first(&utxos, 257, &params, &result));
+    // Exactly 256 is the limit and still selects.
+    try std.testing.expectEqual(@as(c_int, 0), quantum_coin_select_largest_first(&utxos, 256, &params, &result));
+    try std.testing.expectEqual(@as(c_int, 0), quantum_coin_select_smallest_first(&utxos, 256, &params, &result));
 }
 
 test "calculate fee FFI" {
