@@ -247,9 +247,11 @@ export fn zsss_combine(
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_NO_SHARES };
     }
 
-    // Combine shares
-    const secret = SSS.combine(ffi_allocator, shares_list.items) catch {
-        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INSUFFICIENT_SHARES };
+    // Combine shares. A share beyond the threshold that is off the polynomial reports as a
+    // failed verification; every other refusal keeps the generic code.
+    const secret = SSS.combine(ffi_allocator, shares_list.items) catch |err| {
+        const code = if (err == error.InconsistentShares) ZSSS_ERR_SECRET_VERIFICATION_FAILED else ZSSS_ERR_INSUFFICIENT_SHARES;
+        return .{ .data = null, .len = 0, .error_code = code };
     };
 
     return .{ .data = secret.ptr, .len = secret.len, .error_code = ZSSS_OK };
@@ -989,6 +991,41 @@ test "FFI combine mismatched same-secret shares returns error, no crash" {
     // mapped by the FFI layer to ZSSS_ERR_INSUFFICIENT_SHARES.
     try std.testing.expect(result.error_code != ZSSS_OK);
     try std.testing.expectEqual(ZSSS_ERR_INSUFFICIENT_SHARES, result.error_code);
+}
+
+test "FFI combine refuses a share past the threshold that is not on the shares' polynomial" {
+    const a = std.testing.allocator;
+    const secret = "sixteen-byte-sec";
+    const split = zsss_split(secret.ptr, secret.len, 3, 5);
+    defer zsss_free(split);
+    try std.testing.expectEqual(ZSSS_OK, split.error_code);
+    const buf = split.data.?[0..split.len];
+
+    // Re-serialise the fourth share with one bit flipped, so its CRC is valid again.
+    const frame = nthShareFrame(buf, 3);
+    var share = try Share.deserialize(a, frame[4..]);
+    defer share.deinit(a);
+    share.data[5] ^= 0x01;
+    const tampered = try share.serialize(a);
+    defer a.free(tampered);
+
+    var combo: std.ArrayList(u8) = .empty;
+    defer combo.deinit(a);
+    for (0..3) |i| try combo.appendSlice(a, nthShareFrame(buf, i));
+    var prefix: [4]u8 = undefined;
+    std.mem.writeInt(u32, &prefix, @intCast(tampered.len), .little);
+    try combo.appendSlice(a, &prefix);
+    try combo.appendSlice(a, tampered);
+
+    const r = zsss_combine(combo.items.ptr, combo.items.len);
+    defer zsss_free(r);
+    try std.testing.expectEqual(ZSSS_ERR_SECRET_VERIFICATION_FAILED, r.error_code);
+
+    // The same four frames untampered recover.
+    const ok = zsss_combine(buf.ptr, nthShareFrame(buf, 0).len * 4);
+    defer zsss_free(ok);
+    try std.testing.expectEqual(ZSSS_OK, ok.error_code);
+    try std.testing.expectEqualStrings(secret, ok.data.?[0..ok.len]);
 }
 
 test "FFI SLIP-39 generate and combine, single group" {

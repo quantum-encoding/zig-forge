@@ -354,7 +354,9 @@ pub const SSS = struct {
         return shares;
     }
 
-    /// Combine k or more shares to recover the secret
+    /// Combine k or more shares to recover the secret. The first k shares determine the
+    /// polynomial; every further share must lie on it, or the set is refused with
+    /// InconsistentShares (a corrupt share, or one from another split), never ignored.
     pub fn combine(allocator: Allocator, shares: []const Share) ![]u8 {
         if (shares.len == 0) return error.NoShares;
         if (shares.len < shares[0].threshold) return error.InsufficientShares;
@@ -404,12 +406,26 @@ pub const SSS = struct {
             allocator.free(secret);
         }
 
-        // Use only the first 'threshold' shares (any k shares work)
-        const k = @min(shares.len, @as(usize, threshold));
+        // The first 'threshold' shares determine the polynomial (any k shares work).
+        // shares.len >= threshold was checked above.
+        const basis = shares[0..threshold];
+        var weights: [std.math.maxInt(u8)]u8 = undefined;
 
-        // Reconstruct each byte using Lagrange interpolation
+        // Reconstruct each byte using Lagrange interpolation at x = 0
+        lagrangeWeights(basis, 0, weights[0..threshold]);
         for (0..data_len) |byte_idx| {
-            secret[byte_idx] = interpolate(shares[0..k], byte_idx);
+            secret[byte_idx] = evaluateAt(basis, weights[0..threshold], byte_idx);
+        }
+
+        // Every further share must be the polynomial's value at its own index. The
+        // difference is accumulated over all bytes and tested once.
+        for (shares[threshold..]) |extra| {
+            lagrangeWeights(basis, extra.index, weights[0..threshold]);
+            var diff: u8 = 0;
+            for (0..data_len) |byte_idx| {
+                diff |= evaluateAt(basis, weights[0..threshold], byte_idx) ^ extra.data[byte_idx];
+            }
+            if (diff != 0) return error.InconsistentShares;
         }
 
         // Verify secret ID matches. On mismatch the `errdefer` registered above
@@ -437,34 +453,35 @@ pub const SSS = struct {
         return result;
     }
 
-    /// Lagrange interpolation to find f(0)
-    /// f(0) = sum_i( y_i * L_i(0) )
-    /// where L_i(0) = prod_{j!=i}( x_j / (x_j - x_i) )
-    fn interpolate(shares: []const Share, byte_idx: usize) u8 {
-        var result: u8 = 0;
-
-        for (shares, 0..) |share_i, i| {
+    /// Lagrange basis values L_i(x) for the polynomial through the points at shares[i].index:
+    /// L_i(x) = prod_{j!=i}( (x - x_j) / (x_i - x_j) ), written into weights[i]. Indices are
+    /// public and pairwise distinct (combine checks), so no divisor is zero.
+    fn lagrangeWeights(shares: []const Share, x: u8, weights: []u8) void {
+        for (shares, weights, 0..) |share_i, *weight, i| {
             var numerator: u8 = 1;
             var denominator: u8 = 1;
 
             for (shares, 0..) |share_j, j| {
                 if (i == j) continue;
 
-                // numerator *= x_j
-                numerator = GF256.multiply(numerator, share_j.index);
+                // numerator *= (x - x_j); subtraction in GF(2^8) is XOR
+                numerator = GF256.multiply(numerator, GF256.sub(x, share_j.index));
 
-                // denominator *= (x_i - x_j) = (x_i XOR x_j) in GF(2^8)
+                // denominator *= (x_i - x_j)
                 denominator = GF256.multiply(denominator, GF256.sub(share_i.index, share_j.index));
             }
 
-            // L_i(0) = numerator / denominator
-            const lagrange = GF256.divide(numerator, denominator);
-
-            // result += y_i * L_i(0)
-            const term = GF256.multiply(share_i.data[byte_idx], lagrange);
-            result = GF256.add(result, term);
+            weight.* = GF256.divide(numerator, denominator);
         }
+    }
 
+    /// The polynomial's value for one byte position: sum_i( y_i * L_i(x) ), with the L_i(x)
+    /// from lagrangeWeights. Constant-time in the share bytes.
+    fn evaluateAt(shares: []const Share, weights: []const u8, byte_idx: usize) u8 {
+        var result: u8 = 0;
+        for (shares, weights) |share, weight| {
+            result = GF256.add(result, GF256.multiply(share.data[byte_idx], weight));
+        }
         return result;
     }
 };
@@ -1874,6 +1891,40 @@ test "GF256 basic operations" {
         const inv = GF256.inverse(x);
         try std.testing.expectEqual(@as(u8, 1), GF256.multiply(x, inv));
     }
+}
+
+test "SSS.combine checks every share past the threshold against the recovered polynomial" {
+    const allocator = std.testing.allocator;
+    const secret = "sixteen-byte-sec";
+    const shares = try SSS.split(allocator, secret, 3, 5);
+    defer {
+        for (shares) |*share| share.deinit(allocator);
+        allocator.free(shares);
+    }
+
+    // All five consistent shares recover.
+    const all = try SSS.combine(allocator, shares);
+    defer {
+        crypto.secureZero(u8, all);
+        allocator.free(all);
+    }
+    try std.testing.expectEqualSlices(u8, secret, all);
+
+    // One flipped bit in the fourth share: the first three still interpolate the secret, but
+    // the fourth no longer lies on their polynomial and must not be ignored.
+    shares[3].data[5] ^= 0x01;
+    try std.testing.expectError(error.InconsistentShares, SSS.combine(allocator, shares));
+    try std.testing.expectError(error.InconsistentShares, SSS.combine(allocator, shares[0..4]));
+    // With the corrupt share among the first three the secret itself is wrong; refused either way.
+    try std.testing.expect(std.meta.isError(SSS.combine(allocator, shares[1..5])));
+
+    // Three intact shares still recover.
+    const three = try SSS.combine(allocator, shares[0..3]);
+    defer {
+        crypto.secureZero(u8, three);
+        allocator.free(three);
+    }
+    try std.testing.expectEqualSlices(u8, secret, three);
 }
 
 test "SSS split and combine" {
