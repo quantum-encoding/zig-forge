@@ -109,10 +109,13 @@ setup() {
     mkdir -p "$TEMP_DIR"
     mkdir -p "$TEMP_DIR/shares"
 
-    # Build project
+    # Build project with the forge's Zig ($ZIG, else the patched install, else PATH zig)
     log_verbose "Building zsss..."
+    # shellcheck source=../../../scripts/zig-toolchain.sh
+    . "$PROJECT_DIR/../../scripts/zig-toolchain.sh"
+    forge_zig_require
     cd "$PROJECT_DIR"
-    if ! /usr/local/zig/zig build 2>/dev/null; then
+    if ! "$ZIG" build 2>/dev/null; then
         echo -e "${RED}Build failed!${NC}"
         exit 1
     fi
