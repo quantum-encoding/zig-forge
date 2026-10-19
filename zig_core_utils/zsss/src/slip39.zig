@@ -900,7 +900,11 @@ pub fn generateMnemonics(allocator: Allocator, master_secret: []const u8, opts: 
     const mnemonics = try allocator.alloc([]u8, shares.len);
     var filled: usize = 0;
     errdefer {
-        for (mnemonics[0..filled]) |m| allocator.free(m);
+        // Each mnemonic is a share.
+        for (mnemonics[0..filled]) |m| {
+            std.crypto.secureZero(u8, m);
+            allocator.free(m);
+        }
         allocator.free(mnemonics);
     }
     for (shares, 0..) |share, i| {
@@ -1131,7 +1135,11 @@ pub fn mnemonicToWords(allocator: Allocator, mnemonic: []const u8) ![]u10 {
     }
 
     var words = try allocator.alloc(u10, word_count);
-    errdefer allocator.free(words);
+    errdefer {
+        // The indices decoded so far carry share bits.
+        std.crypto.secureZero(u10, words);
+        allocator.free(words);
+    }
 
     // Parse each word
     var word_idx: usize = 0;
@@ -2648,6 +2656,31 @@ test "combine refuses a repeated share instead of folding it: member indices mus
     const recovered = try combineMnemonics(allocator, &.{ mnemonics[0], mnemonics[1] }, "");
     defer allocator.free(recovered);
     try testing.expectEqualSlices(u8, &ms, recovered);
+}
+
+fn generateCombineAndFree(allocator: Allocator, secret: []const u8) !void {
+    const mnemonics = try generateMnemonics(allocator, secret, .{
+        .group_threshold = 2,
+        .groups = &.{ .{ .member_threshold = 2, .member_count = 3 }, .{ .member_threshold = 1, .member_count = 1 } },
+        .iteration_exponent = 0,
+    });
+    defer freeMnemonics(allocator, mnemonics);
+    const words = try mnemonicToWords(allocator, mnemonics[0]);
+    defer {
+        std.crypto.secureZero(u10, words);
+        allocator.free(words);
+    }
+    const recovered = try combineMnemonics(allocator, &.{ mnemonics[0], mnemonics[2], mnemonics[3] }, "");
+    defer {
+        std.crypto.secureZero(u8, recovered);
+        allocator.free(recovered);
+    }
+    try testing.expectEqualSlices(u8, secret, recovered);
+}
+
+test "generate, decode and combine free exactly what they allocated when any allocation fails" {
+    const secret: [16]u8 = @splat(0x3c);
+    try testing.checkAllAllocationFailures(testing.allocator, generateCombineAndFree, .{&secret});
 }
 
 test "256-bit master secret round-trips through 33-word mnemonics" {

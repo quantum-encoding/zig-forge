@@ -233,6 +233,10 @@ pub const Share = struct {
         if (data_len > bytes.len - pos or bytes.len - pos - data_len < 4) return error.ShareTooShort;
 
         const data = try allocator.alloc(u8, data_len);
+        errdefer {
+            crypto.secureZero(u8, data);
+            allocator.free(data);
+        }
         @memcpy(data, bytes[pos .. pos + data_len]);
         pos += data_len;
 
@@ -243,10 +247,7 @@ pub const Share = struct {
             (@as(u32, bytes[pos + 3]) << 24);
 
         const computed_crc = std.hash.Crc32.hash(bytes[0..pos]);
-        if (stored_crc != computed_crc) {
-            allocator.free(data);
-            return error.ChecksumMismatch;
-        }
+        if (stored_crc != computed_crc) return error.ChecksumMismatch;
 
         return Share{
             .version = version,
@@ -260,8 +261,8 @@ pub const Share = struct {
     }
 
     pub fn deinit(self: *Share, allocator: Allocator) void {
-        // Zero out data before freeing (security)
-        @memset(self.data, 0);
+        // A volatile wipe: a plain @memset before free is a dead store the optimiser may drop.
+        crypto.secureZero(u8, self.data);
         allocator.free(self.data);
     }
 };
@@ -290,14 +291,11 @@ pub const SSS = struct {
         @memcpy(&secret_id, hash[0..4]);
         crypto.secureZero(u8, &hash);
 
-        // Allocate shares
+        // Allocate shares. Only shares[0..initialized] hold an allocated `data`.
         const shares = try allocator.alloc(Share, num_shares);
+        var initialized: usize = 0;
         errdefer {
-            for (shares) |*share| {
-                if (share.data.len > 0) {
-                    allocator.free(share.data);
-                }
-            }
+            for (shares[0..initialized]) |*share| share.deinit(allocator);
             allocator.free(shares);
         }
 
@@ -312,13 +310,13 @@ pub const SSS = struct {
                 .data = try allocator.alloc(u8, secret.len),
                 .checksum = 0,
             };
+            initialized += 1;
         }
 
-        // Allocate polynomial coefficients
+        // Allocate polynomial coefficients; coeffs[0] is a secret byte, the rest determine it.
         var coeffs = try allocator.alloc(u8, threshold);
         defer {
-            // Zero out coefficients (security)
-            @memset(coeffs, 0);
+            crypto.secureZero(u8, coeffs);
             allocator.free(coeffs);
         }
 
@@ -341,7 +339,10 @@ pub const SSS = struct {
         // Compute checksums
         for (shares) |*share| {
             const serialized = try share.serialize(allocator);
-            defer allocator.free(serialized);
+            defer {
+                crypto.secureZero(u8, serialized);
+                allocator.free(serialized);
+            }
             // Checksum is embedded in serialization, extract it
             const len = serialized.len;
             share.checksum = @as(u32, serialized[len - 4]) |
@@ -398,7 +399,10 @@ pub const SSS = struct {
 
         // Allocate secret buffer
         var secret = try allocator.alloc(u8, data_len);
-        errdefer allocator.free(secret);
+        errdefer {
+            crypto.secureZero(u8, secret);
+            allocator.free(secret);
+        }
 
         // Use only the first 'threshold' shares (any k shares work)
         const k = @min(shares.len, @as(usize, threshold));
@@ -408,18 +412,13 @@ pub const SSS = struct {
             secret[byte_idx] = interpolate(shares[0..k], byte_idx);
         }
 
-        // Verify secret ID matches. On mismatch we return an error; the
-        // `errdefer` registered above owns the deallocation of `secret`, so
-        // we MUST NOT free it here as well. Freeing it manually and then
-        // returning an error causes the errdefer to fire on the same buffer,
-        // a double-free that SIGSEGVs under the page allocator. We only zero
-        // the buffer for security and let the errdefer reclaim it.
+        // Verify secret ID matches. On mismatch the `errdefer` registered above
+        // wipes and frees `secret`; it must not be freed here as well (a
+        // double free SIGSEGVs under the page allocator).
         var hash: [32]u8 = undefined;
         crypto.hash.sha2.Sha256.hash(secret, &hash, .{});
         defer crypto.secureZero(u8, &hash);
         if (!crypto.timing_safe.eql([4]u8, hash[0..4].*, secret_id)) {
-            // Zero out on verification failure (errdefer frees it).
-            @memset(secret, 0);
             return error.SecretVerificationFailed;
         }
 
@@ -902,8 +901,7 @@ fn doSplit(allocator: Allocator, config: *const Config) !void {
         return err;
     };
     defer {
-        // Zero out secret before freeing
-        @memset(secret, 0);
+        crypto.secureZero(u8, secret);
         allocator.free(secret);
     }
 
@@ -1172,7 +1170,7 @@ fn doCombine(allocator: Allocator, config: *Config) !void {
         return err;
     };
     defer {
-        @memset(secret, 0);
+        crypto.secureZero(u8, secret);
         allocator.free(secret);
     }
 
@@ -1833,6 +1831,26 @@ test "GF256 needs no initialisation and agrees with the branchless SLIP-39 field
     try std.testing.expectEqual(GF256.multiply(GF256.multiply(0x57, 0x57), 0x57), GF256.power(0x57, 3));
     try std.testing.expectEqual(@as(u8, 1), GF256.power(0, 0));
     try std.testing.expectEqual(@as(u8, 0), GF256.power(0, 5));
+}
+
+fn splitCombineAndFree(allocator: Allocator, secret: []const u8) !void {
+    const shares = try SSS.split(allocator, secret, 3, 5);
+    defer {
+        for (shares) |*share| share.deinit(allocator);
+        allocator.free(shares);
+    }
+    const recovered = try SSS.combine(allocator, shares[1..4]);
+    defer {
+        crypto.secureZero(u8, recovered);
+        allocator.free(recovered);
+    }
+    try std.testing.expectEqualSlices(u8, secret, recovered);
+}
+
+test "SSS.split and SSS.combine free exactly what they allocated when any allocation fails" {
+    // split allocates every share's data in a loop; an errdefer that walked all `n` entries
+    // freed the never-initialised ones after a failure part-way through.
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, splitCombineAndFree, .{"allocation-failure test secret"});
 }
 
 test "GF256 basic operations" {

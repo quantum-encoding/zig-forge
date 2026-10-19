@@ -113,12 +113,13 @@ const FrameReader = struct {
     }
 };
 
-/// Free a buffer returned by zsss functions
+/// Free a buffer returned by zsss functions. The buffer is wiped first: it may hold a
+/// secret, a Shamir share or SLIP-39 mnemonics. secureZero is a volatile store; a plain
+/// @memset before free is a dead store the optimiser is free to drop.
 export fn zsss_free(buf: ZsssBuffer) void {
     if (buf.data) |ptr| {
-        // Zero out before freeing (security)
         const slice = ptr[0..buf.len];
-        @memset(slice, 0);
+        std.crypto.secureZero(u8, slice);
         ffi_allocator.free(slice);
     }
 }
@@ -131,6 +132,44 @@ export fn zsss_version() [*:0]const u8 {
 // =============================================================================
 // Shamir Secret Sharing
 // =============================================================================
+
+/// zsss_split's work on any allocator: split the secret, then serialise every share into one
+/// buffer of `[len: u32 LE][share]` frames. Every intermediate share is wiped before it is
+/// freed, including on a failure part-way through.
+fn splitFramed(allocator: Allocator, secret: []const u8, threshold: u8, num_shares: u8) ![]u8 {
+    const shares = try SSS.split(allocator, secret, threshold, num_shares);
+    defer {
+        for (shares) |*share| share.deinit(allocator);
+        allocator.free(shares);
+    }
+
+    // Only serialized[0..filled] has been allocated.
+    const serialized = try allocator.alloc([]u8, shares.len);
+    var filled: usize = 0;
+    defer {
+        for (serialized[0..filled]) |bytes| {
+            std.crypto.secureZero(u8, bytes);
+            allocator.free(bytes);
+        }
+        allocator.free(serialized);
+    }
+    var total_size: usize = 0;
+    for (shares, serialized) |*share, *slot| {
+        slot.* = try share.serialize(allocator);
+        filled += 1;
+        total_size += 4 + slot.len; // 4 bytes for length prefix
+    }
+
+    const output = try allocator.alloc(u8, total_size);
+    var pos: usize = 0;
+    for (serialized) |bytes| {
+        std.mem.writeInt(u32, output[pos..][0..4], @intCast(bytes.len), .little);
+        pos += 4;
+        @memcpy(output[pos..][0..bytes.len], bytes);
+        pos += bytes.len;
+    }
+    return output;
+}
 
 /// Split a secret into n shares with threshold k
 /// Returns array of serialized shares concatenated with length prefixes
@@ -145,57 +184,12 @@ export fn zsss_split(
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_EMPTY_SECRET };
     }
 
-    const secret = secret_ptr[0..secret_len];
-
-    const shares = SSS.split(ffi_allocator, secret, threshold, num_shares) catch {
-        // Use generic error code - specific errors would require matching against error set
-        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT };
+    const output = splitFramed(ffi_allocator, secret_ptr[0..secret_len], threshold, num_shares) catch |err| {
+        // Threshold and count errors share the generic code; specific ones would need
+        // matching against SSS.split's inferred error set.
+        const code = if (err == error.OutOfMemory) ZSSS_ERR_OUT_OF_MEMORY else ZSSS_ERR_INVALID_INPUT;
+        return .{ .data = null, .len = 0, .error_code = code };
     };
-    defer {
-        for (shares) |*share| {
-            var mutable = share.*;
-            mutable.deinit(ffi_allocator);
-        }
-        ffi_allocator.free(shares);
-    }
-
-    // Serialize all shares with length prefixes
-    var total_size: usize = 0;
-    var serialized_shares = ffi_allocator.alloc([]u8, shares.len) catch {
-        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_OUT_OF_MEMORY };
-    };
-    defer {
-        for (serialized_shares) |s| {
-            if (s.len > 0) ffi_allocator.free(s);
-        }
-        ffi_allocator.free(serialized_shares);
-    }
-
-    for (shares, 0..) |*share, i| {
-        serialized_shares[i] = share.serialize(ffi_allocator) catch {
-            return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_OUT_OF_MEMORY };
-        };
-        total_size += 4 + serialized_shares[i].len; // 4 bytes for length prefix
-    }
-
-    // Allocate output buffer
-    const output = ffi_allocator.alloc(u8, total_size) catch {
-        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_OUT_OF_MEMORY };
-    };
-
-    // Write length-prefixed shares
-    var pos: usize = 0;
-    for (serialized_shares) |s| {
-        const len: u32 = @intCast(s.len);
-        output[pos] = @truncate(len & 0xFF);
-        output[pos + 1] = @truncate((len >> 8) & 0xFF);
-        output[pos + 2] = @truncate((len >> 16) & 0xFF);
-        output[pos + 3] = @truncate((len >> 24) & 0xFF);
-        pos += 4;
-        @memcpy(output[pos..][0..s.len], s);
-        pos += s.len;
-    }
-
     return .{ .data = output.ptr, .len = output.len, .error_code = ZSSS_OK };
 }
 
@@ -834,6 +828,23 @@ export fn zsss_init() void {}
 // =============================================================================
 // Tests
 // =============================================================================
+
+test "zsss_split's framing frees exactly what it allocated when any allocation fails" {
+    const run = struct {
+        fn run(allocator: Allocator) !void {
+            const out = try splitFramed(allocator, "framed allocation-failure secret", 3, 5);
+            defer {
+                std.crypto.secureZero(u8, out);
+                allocator.free(out);
+            }
+            var frames = FrameReader{ .data = out };
+            var n: usize = 0;
+            while (try frames.next()) |_| n += 1;
+            try std.testing.expectEqual(@as(usize, 5), n);
+        }
+    }.run;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
 
 test "FFI split and combine" {
     zsss_init();
