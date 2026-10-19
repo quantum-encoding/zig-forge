@@ -92,6 +92,28 @@ pub const ZSSS_ERR_STEGO_CORRUPTED: i32 = -28;
 pub const ZSSS_ERR_RANDOM_FAILURE: i32 = -29;
 pub const ZSSS_ERR_UNKNOWN: i32 = -99;
 
+/// The `[len: u32 LE][bytes]` frames zsss_split and zsss_slip39_generate emit. `next` returns
+/// null at the end of the buffer and error.MalformedFrames for a length running past the end
+/// or trailing bytes too short to be a length prefix, so a buffer is accepted only when its
+/// frames consume it exactly and no frame is ever built from bytes outside it.
+const FrameReader = struct {
+    data: []const u8,
+    pos: usize = 0,
+
+    fn next(self: *FrameReader) error{MalformedFrames}!?[]const u8 {
+        if (self.pos == self.data.len) return null;
+        if (self.data.len - self.pos < 4) return error.MalformedFrames;
+        const len = std.mem.readInt(u32, self.data[self.pos..][0..4], .little);
+        self.pos += 4;
+        // Compare against what remains, never `pos + len`: on a 32-bit target the sum
+        // wraps for a length near 2^32 and the frame would be read past the end.
+        if (len > self.data.len - self.pos) return error.MalformedFrames;
+        const frame = self.data[self.pos..][0..len];
+        self.pos += len;
+        return frame;
+    }
+};
+
 /// Free a buffer returned by zsss functions
 export fn zsss_free(buf: ZsssBuffer) void {
     if (buf.data) |ptr| {
@@ -199,25 +221,15 @@ export fn zsss_combine(
         shares_list.deinit(ffi_allocator);
     }
 
-    var pos: usize = 0;
-    while (shares_data.len - pos >= 4) {
-        const len: u32 = @as(u32, shares_data[pos]) |
-            (@as(u32, shares_data[pos + 1]) << 8) |
-            (@as(u32, shares_data[pos + 2]) << 16) |
-            (@as(u32, shares_data[pos + 3]) << 24);
-        pos += 4;
-
-        // Compare against what remains, never `pos + len`: on a 32-bit target the
-        // sum wraps for a frame length near 2^32 and the frame is read past the end.
-        if (len > shares_data.len - pos) break;
-
-        const share = Share.deserialize(ffi_allocator, shares_data[pos..][0..len]) catch {
+    var frames = FrameReader{ .data = shares_data };
+    while (frames.next() catch return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT }) |frame| {
+        var share = Share.deserialize(ffi_allocator, frame) catch {
             return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_CHECKSUM_MISMATCH };
         };
         shares_list.append(ffi_allocator, share) catch {
+            share.deinit(ffi_allocator);
             return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_OUT_OF_MEMORY };
         };
-        pos += len;
     }
 
     if (shares_list.items.len == 0) {
@@ -312,6 +324,11 @@ export fn zsss_slip39_generate(
     if (secret_len == 0) {
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_EMPTY_SECRET };
     }
+    // NULL with a length is a caller bug, not the empty passphrase: the shares would be
+    // encrypted under "" while the caller believes they carry a passphrase.
+    if (passphrase_ptr == null and passphrase_len > 0) {
+        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT };
+    }
     if (group_count == 0 or group_count > slip39.MAX_SHARE_COUNT or iteration_exponent > 15) {
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_SLIP39_INVALID_CONFIG };
     }
@@ -360,19 +377,19 @@ export fn zsss_slip39_combine(
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_NO_SHARES };
     }
 
+    // As in zsss_slip39_generate: NULL with a length is not "".
+    if (passphrase_ptr == null and passphrase_len > 0) {
+        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT };
+    }
+
     var mnemonics: std.ArrayList([]const u8) = .empty;
     defer mnemonics.deinit(ffi_allocator);
 
-    const data = mnemonics_ptr[0..mnemonics_len];
-    var pos: usize = 0;
-    while (data.len - pos >= 4) {
-        const len = std.mem.readInt(u32, data[pos..][0..4], .little);
-        pos += 4;
-        if (len > data.len - pos) break; // not `pos + len`: wraps on 32-bit
-        mnemonics.append(ffi_allocator, data[pos..][0..len]) catch {
+    var frames = FrameReader{ .data = mnemonics_ptr[0..mnemonics_len] };
+    while (frames.next() catch return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT }) |frame| {
+        mnemonics.append(ffi_allocator, frame) catch {
             return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_OUT_OF_MEMORY };
         };
-        pos += len;
     }
 
     if (mnemonics.items.len == 0) {
@@ -944,6 +961,57 @@ test "FFI SLIP-39 generate and combine, single group" {
     try std.testing.expectEqual(ZSSS_ERR_SLIP39_INVALID_SHARE_SET, insufficient.error_code);
 }
 
+test "FFI SLIP-39 combine refuses a repeated share, bytes that are not whole frames and a NULL passphrase with a length" {
+    const master_secret: [16]u8 = @splat(0x42);
+    const specs = [_]u8{ 2, 3 };
+    const generated = zsss_slip39_generate(&master_secret, master_secret.len, 1, &specs, 1, null, 0, 0, true);
+    defer zsss_free(generated);
+    try std.testing.expectEqual(ZSSS_OK, generated.error_code);
+    const buf = generated.data.?[0..generated.len];
+    const a = std.testing.allocator;
+
+    var pair: std.ArrayList(u8) = .empty;
+    defer pair.deinit(a);
+    try pair.appendSlice(a, nthShareFrame(buf, 0));
+    try pair.appendSlice(a, nthShareFrame(buf, 1));
+
+    // The report's PoC 3: [s0, s0, s1] for a 2-of-3 group recovered the secret.
+    var dup: std.ArrayList(u8) = .empty;
+    defer dup.deinit(a);
+    try dup.appendSlice(a, nthShareFrame(buf, 0));
+    try dup.appendSlice(a, pair.items);
+    const r_dup = zsss_slip39_combine(dup.items.ptr, dup.items.len, null, 0);
+    defer zsss_free(r_dup);
+    try std.testing.expectEqual(ZSSS_ERR_SLIP39_INVALID_SHARE_SET, r_dup.error_code);
+
+    // [s0, s1] followed by bytes that are not a whole frame: a length running past the end,
+    // and 1-3 stray bytes too short to be a length prefix.
+    for ([_][]const u8{ &.{ 0xff, 0xff, 0xff, 0x7f, 'x' }, &.{ 5, 0, 0, 0, 'a', 'b' }, &.{0}, &.{ 0, 0, 0 } }) |tail| {
+        var trailing: std.ArrayList(u8) = .empty;
+        defer trailing.deinit(a);
+        try trailing.appendSlice(a, pair.items);
+        try trailing.appendSlice(a, tail);
+        const r = zsss_slip39_combine(trailing.items.ptr, trailing.items.len, null, 0);
+        defer zsss_free(r);
+        try std.testing.expectEqual(ZSSS_ERR_INVALID_INPUT, r.error_code);
+    }
+
+    // NULL with a non-zero length is a caller bug, not the empty passphrase: a backup made
+    // that way would be encrypted under "" while the caller believes it has a passphrase.
+    const r_null = zsss_slip39_combine(pair.items.ptr, pair.items.len, null, 5);
+    defer zsss_free(r_null);
+    try std.testing.expectEqual(ZSSS_ERR_INVALID_INPUT, r_null.error_code);
+    const g_null = zsss_slip39_generate(&master_secret, master_secret.len, 1, &specs, 1, null, 5, 0, true);
+    defer zsss_free(g_null);
+    try std.testing.expectEqual(ZSSS_ERR_INVALID_INPUT, g_null.error_code);
+
+    // [s0, s1], exactly framed, recovers.
+    const ok = zsss_slip39_combine(pair.items.ptr, pair.items.len, null, 0);
+    defer zsss_free(ok);
+    try std.testing.expectEqual(ZSSS_OK, ok.error_code);
+    try std.testing.expectEqualSlices(u8, &master_secret, ok.data.?[0..ok.len]);
+}
+
 test "FFI SLIP-39 generate rejects a too-short secret and a bad group spec" {
     const short_secret = [_]u8{ 1, 2, 3, 4 };
     const specs = [_]u8{ 2, 3 };
@@ -1013,21 +1081,22 @@ test "FFI combine cross-secret shares with colliding indices returns error" {
 
 // Crypto test campaign 2026-10-11, track E E-3: a frame length near 2^32 made `pos + len`
 // wrap on the 32-bit Android archives, so the bound passed and the frame was read past the
-// buffer. The parsers now compare the length with what remains. On a 64-bit host this
-// test passes either way; the wasm32 run of the same binary is what proves the fix.
-test "FFI combine: a frame length near 2^32 is dropped, never read, on every target" {
+// buffer. The parsers compare the length with what remains, and a buffer whose frames do
+// not consume it exactly is refused. On a 64-bit host the bound passes either way; the
+// wasm32 run of the same binary is what proves it.
+test "FFI combine: a frame length near 2^32 is refused, never read, on every target" {
     zsss_init();
     for ([_]u32{ 0xFFFFFFFD, 0xFFFFFFFF, 0xFFFFFFF0 }) |len| {
         var buf: [8]u8 = @splat(0);
         std.mem.writeInt(u32, buf[0..4], len, .little);
         const r = zsss_combine(&buf, buf.len);
         defer zsss_free(r);
-        try std.testing.expectEqual(ZSSS_ERR_NO_SHARES, r.error_code);
+        try std.testing.expectEqual(ZSSS_ERR_INVALID_INPUT, r.error_code);
         const s = zsss_slip39_combine(&buf, buf.len, null, 0);
         defer zsss_free(s);
-        try std.testing.expectEqual(ZSSS_ERR_NO_SHARES, s.error_code);
+        try std.testing.expectEqual(ZSSS_ERR_INVALID_INPUT, s.error_code);
     }
-    // The same length after one good frame: that frame still parses, the bad one is dropped.
+    // The same length after one good frame: the whole buffer is refused.
     const secret = "frame-bound-test";
     const split = zsss_split(secret.ptr, secret.len, 2, 3);
     defer zsss_free(split);
@@ -1039,5 +1108,5 @@ test "FFI combine: a frame length near 2^32 is dropped, never read, on every tar
     try mixed.appendSlice(std.testing.allocator, &[_]u8{ 0xFD, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0 });
     const r = zsss_combine(mixed.items.ptr, mixed.items.len);
     defer zsss_free(r);
-    try std.testing.expectEqual(ZSSS_ERR_INSUFFICIENT_SHARES, r.error_code);
+    try std.testing.expectEqual(ZSSS_ERR_INVALID_INPUT, r.error_code);
 }

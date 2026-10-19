@@ -959,15 +959,17 @@ pub fn combineShares(allocator: Allocator, shares: []const Share, passphrase: []
     // combineShares is also reachable with hand-built Share values.
     if (first.group_count < first.group_threshold) return Error.GroupThresholdExceedsCount;
 
-    // Bucket shares by group index. Exact duplicates (same group, same member
-    // index, same value) are folded together, matching the reference
-    // implementation, which keeps shares in a set.
+    // Bucket shares by group index. Member indices within a group MUST be
+    // pairwise distinct (spec: "Combining the shares", check 3), so a repeated
+    // share is refused like any other duplicate index. The reference
+    // implementation keeps shares in a set and folds exact copies; folding here
+    // let a copy skip the member-threshold check and padded a short set.
     var group_indices: [MAX_SHARE_COUNT]u4 = undefined;
     var group_members: [MAX_SHARE_COUNT][MAX_SHARE_COUNT]usize = undefined;
     var group_member_counts: [MAX_SHARE_COUNT]usize = @splat(0);
     var group_count: usize = 0;
 
-    outer: for (shares, 0..) |share, share_pos| {
+    for (shares, 0..) |share, share_pos| {
         var slot: usize = group_count;
         for (group_indices[0..group_count], 0..) |gi, g| {
             if (gi == share.group_index) {
@@ -982,12 +984,7 @@ pub fn combineShares(allocator: Allocator, shares: []const Share, passphrase: []
 
         const members = group_members[slot][0..group_member_counts[slot]];
         for (members) |existing_pos| {
-            const existing = shares[existing_pos];
-            if (existing.member_index != share.member_index) continue;
-            // Same member index: identical share values are a harmless
-            // duplicate, differing values mean the set is inconsistent.
-            if (mem.eql(u8, existing.value, share.value)) continue :outer;
-            return Error.DuplicateMemberIndex;
+            if (shares[existing_pos].member_index == share.member_index) return Error.DuplicateMemberIndex;
         }
         // All shares of a group must agree on the member threshold.
         if (group_member_counts[slot] > 0) {
@@ -2615,7 +2612,7 @@ test "combine rejects a share set assembled from two different splits" {
     try testing.expectError(Error.InvalidDigest, combineMnemonics(allocator, &mixed, ""));
 }
 
-test "combine folds exact duplicate mnemonics and rejects conflicting ones" {
+test "combine refuses a repeated share instead of folding it: member indices must be pairwise distinct" {
     const allocator = testing.allocator;
     const ms: [16]u8 = @splat(0x77);
     const mnemonics = try generateMnemonics(allocator, &ms, .{
@@ -2625,22 +2622,32 @@ test "combine folds exact duplicate mnemonics and rejects conflicting ones" {
     });
     defer freeMnemonics(allocator, mnemonics);
 
-    // The same mnemonic pasted twice alongside a distinct one still recovers,
-    // matching the reference implementation's set semantics.
-    const with_dup = [_][]const u8{ mnemonics[0], mnemonics[0], mnemonics[1] };
-    const recovered = try combineMnemonics(allocator, &with_dup, "");
-    defer allocator.free(recovered);
-    try testing.expectEqualSlices(u8, &ms, recovered);
+    // [s0, s0, s1] for a 2-of-3 group used to recover: the copy was folded away before any
+    // count check ran.
+    try testing.expectError(error.DuplicateMemberIndex, combineMnemonics(allocator, &.{ mnemonics[0], mnemonics[0], mnemonics[1] }, ""));
+    try testing.expectError(error.DuplicateMemberIndex, combineMnemonics(allocator, &.{ mnemonics[0], mnemonics[0] }, ""));
 
-    // A duplicate index carrying a *different* value is an inconsistent set.
+    // A copy of s0 re-encoded with another member threshold was folded before the
+    // member-threshold check could see it.
+    var altered = try Share.fromMnemonic(allocator, mnemonics[0]);
+    defer altered.deinit(allocator);
+    altered.member_threshold = 3;
+    const altered_mnemonic = try altered.toMnemonic(allocator);
+    defer allocator.free(altered_mnemonic);
+    try testing.expectError(error.DuplicateMemberIndex, combineMnemonics(allocator, &.{ mnemonics[0], altered_mnemonic, mnemonics[1] }, ""));
+
+    // A duplicate index carrying a different value is refused the same way.
     var forged = try Share.fromMnemonic(allocator, mnemonics[0]);
     defer forged.deinit(allocator);
     forged.value[0] ^= 0xFF;
     const forged_mnemonic = try forged.toMnemonic(allocator);
     defer allocator.free(forged_mnemonic);
+    try testing.expectError(error.DuplicateMemberIndex, combineMnemonics(allocator, &.{ mnemonics[0], forged_mnemonic }, ""));
 
-    const conflicting = [_][]const u8{ mnemonics[0], forged_mnemonic };
-    try testing.expectError(Error.DuplicateMemberIndex, combineMnemonics(allocator, &conflicting, ""));
+    // Two distinct shares recover.
+    const recovered = try combineMnemonics(allocator, &.{ mnemonics[0], mnemonics[1] }, "");
+    defer allocator.free(recovered);
+    try testing.expectEqualSlices(u8, &ms, recovered);
 }
 
 test "256-bit master secret round-trips through 33-word mnemonics" {
