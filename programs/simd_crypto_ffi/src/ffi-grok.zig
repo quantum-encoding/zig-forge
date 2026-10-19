@@ -3790,6 +3790,28 @@ test "quantum_spv_verify_pow refuses a target above powLimit at the FFI boundary
     try std.testing.expectEqual(@intFromEnum(SpvResult.success), quantum_spv_verify_pow(&genesis));
 }
 
+test "quantum_spv_verify_merkle_proof refuses an odd leaf with a distinct sibling, quantum_spv_difficulty is 0 for nBits 0" {
+    // The report's PoC 6: a 3-tx block whose third leaf is paired with tx3 != tx2.
+    const tx0 = spv.hashDoubleSha256("tx0");
+    const tx1 = spv.hashDoubleSha256("tx1");
+    const tx2 = spv.hashDoubleSha256("tx2");
+    const tx3 = spv.hashDoubleSha256("tx3");
+    const left = spv.hashPair(tx0, tx1);
+    var cproof = CMerkleProof{ .hashes = undefined, .hash_count = 2, .index = 2, .tx_count = 3 };
+    cproof.hashes[0] = tx3;
+    cproof.hashes[1] = left;
+    const forged_root = spv.hashPair(left, spv.hashPair(tx2, tx3));
+    try std.testing.expectEqual(@intFromEnum(SpvResult.invalid_merkle_proof), quantum_spv_verify_merkle_proof(&tx2, &forged_root, &cproof));
+    // With tx2 paired with itself, as Bitcoin builds the tree, it verifies.
+    cproof.hashes[0] = tx2;
+    const root = spv.hashPair(left, spv.hashPair(tx2, tx2));
+    try std.testing.expectEqual(@intFromEnum(SpvResult.success), quantum_spv_verify_merkle_proof(&tx2, &root, &cproof));
+
+    // PoC 4a: invalid nBits read as maximum difficulty.
+    try std.testing.expectEqual(@as(u64, 0), quantum_spv_difficulty(0));
+    try std.testing.expectEqual(@as(u64, 0), quantum_spv_difficulty(0x1d80ffff));
+}
+
 test "quantum_spv_verify_merkle_proof honors caller tx_count (CVE-2012-2459 pin at the FFI boundary)" {
     // 4-tx tree, our tx at index 0 (see spv.zig "Merkle Proof Verification - Valid").
     const tx_hash = spv.hashDoubleSha256("Transaction Data");

@@ -258,8 +258,13 @@ pub fn verifyProofOfWork(header: BlockHeader) bool {
 
 /// Calculate the difficulty from compact bits
 /// Difficulty = max_target / current_target
-/// Returns difficulty as a u64 (truncated for simplicity)
+/// Returns difficulty as a u64 (truncated for simplicity), and 0 for a target mainnet refuses:
+/// an invalid encoding (decoded as the zero target) or one easier than powLimit. The zero
+/// target has 248 leading zero bits and would otherwise read as the maximum difficulty, so a
+/// header chain summed without PoW checks gained the most work from the worst headers.
 pub fn calculateDifficulty(bits: u32) u64 {
+    // The all-zero hash meets every valid target, so this is "is the target valid".
+    if (!checkProofOfWork(@splat(0), bits)) return 0;
     const target = decodeCompactTarget(bits);
 
     // Max target for difficulty 1 (0x1d00ffff)
@@ -327,6 +332,13 @@ pub const SpvError = error{
 /// depth implied by `proof.tx_count`. This prevents the CVE-2012-2459 family of
 /// attacks where a crafted proof presents an internal merkle node as a leaf.
 ///
+/// The proof must also have the shape Bitcoin builds: at every level, a node that is the
+/// last of an odd-width level is paired with itself (its sibling must equal it), and a node
+/// with a real partner must differ from it. Two distinct subtrees never hash equal, so an
+/// equal pair is the duplicated-tail mutation of CVE-2012-2459, which Bitcoin Core flags as
+/// mutated; and a distinct sibling for a self-paired node proves membership in some other,
+/// larger tree than the `tx_count` claimed.
+///
 /// Edge case: when `tx_count == 1`, the root IS the transaction's hash and the
 /// proof must contain zero sibling hashes.
 pub fn verifyMerkleProof(tx_hash: Hash, root: Hash, proof: MerkleProof) bool {
@@ -348,8 +360,12 @@ pub fn verifyMerkleProof(tx_hash: Hash, root: Hash, proof: MerkleProof) bool {
 
     var current_hash = tx_hash;
     var current_index = proof.index;
+    // Nodes on the current level of the tree.
+    var width: u32 = proof.tx_count;
 
     for (proof.hashes) |proof_element| {
+        const self_paired = (current_index ^ 1) >= width;
+        if (std.mem.eql(u8, &proof_element, &current_hash) != self_paired) return false;
         // If current index is even, we're on the LEFT, proof element is RIGHT
         // If current index is odd, we're on the RIGHT, proof element is LEFT
         if ((current_index & 1) == 0) {
@@ -359,6 +375,7 @@ pub fn verifyMerkleProof(tx_hash: Hash, root: Hash, proof: MerkleProof) bool {
         }
         // Move up the tree
         current_index >>= 1;
+        width = width / 2 + (width & 1);
     }
 
     return std.mem.eql(u8, &current_hash, &root);
@@ -869,6 +886,98 @@ test "PoW: a target above powLimit is refused whatever the hash (finding #12 / A
     try std.testing.expect(!checkProofOfWork(zero, 0x1e00ffff));
     // powLimit itself, little-endian, is exactly what the comment on POW_LIMIT says.
     try std.testing.expectEqualSlices(u8, &hashFromBigEndianHex("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"), &POW_LIMIT);
+}
+
+test "calculateDifficulty is 0 for a target Bitcoin mainnet would refuse" {
+    // Zero, negative, zero-mantissa and overflowing encodings decode to the zero target and
+    // used to read as maximum difficulty (all 248 leading bits zero); targets above powLimit
+    // are refused by checkProofOfWork too.
+    for ([_]u32{ 0, 0x1d80ffff, 0x1d000000, 0x22000100, 0xff7fffff, 0x2100ffff, 0x1e00ffff, 0x1d010000 }) |bits| {
+        try std.testing.expectEqual(@as(u64, 0), calculateDifficulty(bits));
+    }
+    try std.testing.expectEqual(@as(u64, 1), calculateDifficulty(0x1d00ffff));
+
+    // So a header chain checked without PoW gains no work from such headers.
+    const header = BlockHeader{ .version = 1, .prev_block_hash = @splat(0), .merkle_root = @splat(0), .timestamp = 0, .bits = 0, .nonce = 0 };
+    try std.testing.expectEqual(@as(u64, 0), try verifyHeaderChain(&[_]BlockHeader{header}, @splat(0), false));
+}
+
+/// Bitcoin's Merkle root: each level pairs nodes left to right, an odd level's last node with
+/// itself (Bitcoin Core consensus/merkle.cpp ComputeMerkleRoot, without the mutation flag).
+fn testMerkleRoot(leaves: []const Hash) Hash {
+    var level: [64]Hash = undefined;
+    @memcpy(level[0..leaves.len], leaves);
+    var width = leaves.len;
+    while (width > 1) {
+        var i: usize = 0;
+        while (i < width) : (i += 2) {
+            level[i / 2] = hashPair(level[i], level[if (i + 1 < width) i + 1 else i]);
+        }
+        width = (width + 1) / 2;
+    }
+    return level[0];
+}
+
+/// The sibling path for `index` under the same rule.
+fn testMerkleProof(leaves: []const Hash, index: usize, out: []Hash) []Hash {
+    var level: [64]Hash = undefined;
+    @memcpy(level[0..leaves.len], leaves);
+    var width = leaves.len;
+    var idx = index;
+    var depth: usize = 0;
+    while (width > 1) {
+        const sibling = idx ^ 1;
+        out[depth] = level[if (sibling < width) sibling else idx];
+        depth += 1;
+        var i: usize = 0;
+        while (i < width) : (i += 2) {
+            level[i / 2] = hashPair(level[i], level[if (i + 1 < width) i + 1 else i]);
+        }
+        width = (width + 1) / 2;
+        idx >>= 1;
+    }
+    return out[0..depth];
+}
+
+test "verifyMerkleProof enforces odd-node self-pairing and refuses equal pairs (CVE-2012-2459)" {
+    var leaves: [17]Hash = undefined;
+    for (&leaves, 0..) |*leaf, i| leaf.* = hashDoubleSha256(&[_]u8{ 't', 'x', @intCast(i) });
+    var path: [8]Hash = undefined;
+
+    // Every genuine proof in blocks of 1 to 17 transactions still verifies.
+    for (1..leaves.len + 1) |count| {
+        const root = testMerkleRoot(leaves[0..count]);
+        for (0..count) |index| {
+            const proof = MerkleProof{ .hashes = testMerkleProof(leaves[0..count], index, &path), .index = @intCast(index), .tx_count = @intCast(count) };
+            try std.testing.expect(verifyMerkleProof(leaves[index], root, proof));
+        }
+    }
+
+    // The report's PoC 6: in a claimed 3-transaction block the third leaf must pair with
+    // itself. A distinct sibling x is the root of [t0, t1, t2, x], a different block.
+    const t = leaves[0..3];
+    const left = hashPair(t[0], t[1]);
+    const x = hashDoubleSha256("not in the block");
+    const root_with_x = hashPair(left, hashPair(t[2], x));
+    try std.testing.expect(!verifyMerkleProof(t[2], root_with_x, .{ .hashes = &[_]Hash{ x, left }, .index = 2, .tx_count = 3 }));
+
+    // The mutated 4-leaf tree [t0, t1, t2, t2] shares the 3-transaction root; claiming it as
+    // a 4-transaction block pairs t2 with an equal sibling, which no real block contains.
+    const root3 = testMerkleRoot(t);
+    try std.testing.expect(verifyMerkleProof(t[2], root3, .{ .hashes = &[_]Hash{ t[2], left }, .index = 2, .tx_count = 3 }));
+    try std.testing.expect(!verifyMerkleProof(t[2], root3, .{ .hashes = &[_]Hash{ t[2], left }, .index = 2, .tx_count = 4 }));
+    try std.testing.expect(!verifyMerkleProof(t[2], root3, .{ .hashes = &[_]Hash{ t[2], left }, .index = 3, .tx_count = 4 }));
+
+    // The same rules one level up: in a 5-transaction block, level 1 has three nodes and the
+    // third must pair with itself.
+    const five = leaves[0..5];
+    const root5 = testMerkleRoot(five);
+    const h4 = hashPair(five[4], five[4]);
+    const h0123 = hashPair(hashPair(five[0], five[1]), hashPair(five[2], five[3]));
+    try std.testing.expect(verifyMerkleProof(five[4], root5, .{ .hashes = &[_]Hash{ five[4], h4, h0123 }, .index = 4, .tx_count = 5 }));
+    const y = hashDoubleSha256("y");
+    const forged = hashPair(h0123, hashPair(h4, y));
+    try std.testing.expect(!verifyMerkleProof(five[4], forged, .{ .hashes = &[_]Hash{ five[4], y, h0123 }, .index = 4, .tx_count = 5 }));
 }
 
 test "Hash Comparison" {
