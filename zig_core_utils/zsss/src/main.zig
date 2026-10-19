@@ -139,9 +139,19 @@ pub const GF256 = struct {
     }
 };
 
-/// The native share format's version byte. Only this version is read or written; any other
-/// is refused with error.UnsupportedVersion.
+/// The native share format's version byte. Only this version is read or written.
 pub const SHARE_FORMAT_VERSION: u8 = 2;
+
+/// The version byte of the format SHARE_FORMAT_VERSION replaced, which carried
+/// SHA256(secret)[0..4] in every share. Such shares are refused with error.LegacyShareFormat:
+/// the backup must be re-made.
+pub const LEGACY_SHARE_FORMAT_VERSION: u8 = 1;
+
+/// True for bytes that are (or claim to be) a version-1 share. Only the version byte is
+/// read: a damaged old share is still reported as an old share, not as a CRC error.
+pub fn isLegacyShare(bytes: []const u8) bool {
+    return bytes.len > 0 and bytes[0] == LEGACY_SHARE_FORMAT_VERSION;
+}
 
 /// Bytes of the random identifier every share of one split carries.
 pub const SET_ID_LEN = 16;
@@ -209,10 +219,12 @@ pub const Share = struct {
         return buffer;
     }
 
-    /// Deserialize share from bytes. Refuses any version but SHARE_FORMAT_VERSION
+    /// Deserialize share from bytes. Refuses a version-1 share (LegacyShareFormat, before
+    /// anything else is checked), any other version but SHARE_FORMAT_VERSION
     /// (UnsupportedVersion), a length that does not match the bytes or is too short to hold
     /// a payload (ShareTooShort), and a CRC mismatch (ChecksumMismatch).
     pub fn deserialize(allocator: Allocator, bytes: []const u8) !Share {
+        if (isLegacyShare(bytes)) return error.LegacyShareFormat;
         if (bytes.len == 0) return error.ShareTooShort;
         if (bytes[0] != SHARE_FORMAT_VERSION) return error.UnsupportedVersion;
         if (bytes.len < SHARE_HEADER_LEN + SHARE_CRC_LEN) return error.ShareTooShort;
@@ -1135,13 +1147,24 @@ fn doCombine(allocator: Allocator, config: *Config) !void {
         shares.deinit(allocator);
     }
 
+    // An old-format share anywhere in the set is named first, whatever else is wrong.
     for (config.share_files.items, contents.items) |share_path, data| {
-        const share = Share.deserialize(allocator, data) catch |err| {
+        if (isLegacyShare(data)) {
+            printLegacyShare(share_path);
+            return error.LegacyShareFormat;
+        }
+    }
+
+    for (config.share_files.items, contents.items) |share_path, data| {
+        var share = Share.deserialize(allocator, data) catch |err| {
             std.debug.print("Error parsing share file '{s}': {}\n", .{ share_path, err });
             return err;
         };
 
-        try shares.append(allocator, share);
+        shares.append(allocator, share) catch |err| {
+            share.deinit(allocator);
+            return err;
+        };
 
         if (config.verbose) {
             std.debug.print("  Loaded share {d} from {s}\n", .{ share.index, share_path });
@@ -1261,6 +1284,17 @@ fn doCombineSlip39(allocator: Allocator, config: *const Config, contents: []cons
     std.debug.print("Note: SLIP-39 cannot verify a passphrase - a wrong one yields a different secret.\n", .{});
 }
 
+/// The CLI's report of a version-1 share, worded as zsss_error_message's
+/// ZSSS_ERR_UNSUPPORTED_FORMAT_VERSION.
+fn printLegacyShare(share_path: []const u8) void {
+    std.debug.print(
+        "{s}: OLD FORMAT - this share is in an older zsss format (version 1) that this " ++
+            "version no longer reads; the backup must be re-made (recover the secret with the " ++
+            "zsss that wrote it, then split it again with this one)\n",
+        .{share_path},
+    );
+}
+
 fn doVerify(allocator: Allocator, config: *Config) !void {
     if (config.share_files.items.len == 0) {
         std.debug.print("Error: share file required (-s)\n", .{});
@@ -1275,7 +1309,10 @@ fn doVerify(allocator: Allocator, config: *Config) !void {
             all_valid = false;
             continue;
         };
-        defer allocator.free(data);
+        defer {
+            std.crypto.secureZero(u8, data);
+            allocator.free(data);
+        }
 
         // A SLIP-39 mnemonic verifies against its RS1024 checksum instead of
         // the binary share's CRC32.
@@ -1302,7 +1339,11 @@ fn doVerify(allocator: Allocator, config: *Config) !void {
         } else |_| {}
 
         const share = Share.deserialize(allocator, data) catch |err| {
-            std.debug.print("{s}: INVALID - {}\n", .{ share_path, err });
+            if (err == error.LegacyShareFormat) {
+                printLegacyShare(share_path);
+            } else {
+                std.debug.print("{s}: INVALID - {}\n", .{ share_path, err });
+            }
             all_valid = false;
             continue;
         };
@@ -1920,16 +1961,30 @@ test "combine refuses shares mixed from two splits of the same secret" {
     try std.testing.expectError(error.SetIdMismatch, SSS.combine(allocator, &mixed));
 }
 
-test "a share in format version 1 (or any version but 2) is refused" {
+/// Shares written by zig-forge ae46b99a (format version 1): `zsss split -t 2 -n 3` of the 64
+/// bytes 0x00..0x3f. That build recovers the secret from any two of them.
+const v1_fixtures = [_][]const u8{
+    @embedFile("testdata/v1-native-share-1.sss"),
+    @embedFile("testdata/v1-native-share-2.sss"),
+    @embedFile("testdata/v1-native-share-3.sss"),
+};
+
+test "a version-1 share is refused as a legacy format, distinct from any other bad share" {
     const allocator = std.testing.allocator;
-    // A well-formed version-1 share: header, secret_id, length 3, data, CRC32.
-    var v1 = [_]u8{ 1, 3, 5, 1, 0xde, 0xad, 0xbe, 0xef, 3, 0, 0, 0, 0x11, 0x22, 0x33, 0, 0, 0, 0 };
-    std.mem.writeInt(u32, v1[15..19], std.hash.Crc32.hash(v1[0..15]), .little);
-    try std.testing.expectError(error.UnsupportedVersion, Share.deserialize(allocator, &v1));
+    for (v1_fixtures) |bytes| {
+        try std.testing.expectEqual(@as(u8, 1), bytes[0]);
+        try std.testing.expectError(error.LegacyShareFormat, Share.deserialize(allocator, bytes));
+        // Damage past the version byte does not turn it into a CRC or length error.
+        var damaged: [80]u8 = bytes[0..80].*;
+        damaged[40] ^= 0xff;
+        try std.testing.expectError(error.LegacyShareFormat, Share.deserialize(allocator, &damaged));
+        try std.testing.expectError(error.LegacyShareFormat, Share.deserialize(allocator, bytes[0..1]));
+    }
+    // Versions that never existed are a different refusal.
+    var other: [80]u8 = v1_fixtures[0][0..80].*;
     for ([_]u8{ 0, 3, 255 }) |version| {
-        v1[0] = version;
-        std.mem.writeInt(u32, v1[15..19], std.hash.Crc32.hash(v1[0..15]), .little);
-        try std.testing.expectError(error.UnsupportedVersion, Share.deserialize(allocator, &v1));
+        other[0] = version;
+        try std.testing.expectError(error.UnsupportedVersion, Share.deserialize(allocator, &other));
     }
 }
 

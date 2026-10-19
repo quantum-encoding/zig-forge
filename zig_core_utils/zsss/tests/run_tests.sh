@@ -198,6 +198,25 @@ test_sss_basic_split_combine() {
     fi
 }
 
+# Shares written by zig-forge ae46b99a in the version-1 format (src/testdata/v1-native-share-*.sss)
+# are refused with their own message, by combine and by verify, never as a parse or CRC error.
+test_sss_v1_shares_refused() {
+    ((TESTS_RUN++))
+    local test_name="SSS: version-1 shares are refused as an old format"
+    local v1_dir="$PROJECT_DIR/src/testdata"
+    local out rc verify_out verify_rc
+    out=$($ZSSS combine -s "$v1_dir/v1-native-share-1.sss" -s "$v1_dir/v1-native-share-3.sss" -o "$TEMP_DIR/v1-recovered.bin" 2>&1)
+    rc=$?
+    verify_out=$($ZSSS verify -s "$v1_dir/v1-native-share-2.sss" 2>&1)
+    verify_rc=$?
+    if [ $rc -ne 0 ] && [ ! -e "$TEMP_DIR/v1-recovered.bin" ] && echo "$out" | grep -q "OLD FORMAT" \
+        && [ $verify_rc -ne 0 ] && echo "$verify_out" | grep -q "OLD FORMAT"; then
+        pass "$test_name"
+    else
+        fail "$test_name" "combine rc=$rc: $out / verify rc=$verify_rc: $verify_out"
+    fi
+}
+
 test_sss_verify_shares() {
     ((TESTS_RUN++))
     local test_name="SSS: Verify share integrity"
@@ -1048,6 +1067,7 @@ run_all_tests() {
     echo -e "${YELLOW}━━━ Shamir Secret Sharing Tests ━━━${NC}"
     test_sss_basic_split_combine
     test_sss_verify_shares
+    test_sss_v1_shares_refused
     test_sss_large_secret
     echo ""
 

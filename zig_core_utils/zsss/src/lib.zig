@@ -90,8 +90,11 @@ pub const ZSSS_ERR_PNG_TOO_LARGE: i32 = -27;
 pub const ZSSS_ERR_STEGO_CORRUPTED: i32 = -28;
 pub const ZSSS_ERR_RANDOM_FAILURE: i32 = -29;
 // Native share format version 2 (zsss_split / zsss_combine).
-pub const ZSSS_ERR_UNSUPPORTED_SHARE_VERSION: i32 = -30;
+/// A version-1 share: an older format this library no longer reads. The backup must be re-made.
+pub const ZSSS_ERR_UNSUPPORTED_FORMAT_VERSION: i32 = -30;
 pub const ZSSS_ERR_SHARE_SET_MISMATCH: i32 = -31;
+/// A share whose version byte is neither 1 nor 2: corrupt, or from a newer zsss.
+pub const ZSSS_ERR_UNKNOWN_SHARE_VERSION: i32 = -32;
 pub const ZSSS_ERR_UNKNOWN: i32 = -99;
 
 /// The `[len: u32 LE][bytes]` frames zsss_split and zsss_slip39_generate emit. `next` returns
@@ -239,11 +242,21 @@ export fn zsss_combine(
         shares_list.deinit(ffi_allocator);
     }
 
+    // A version-1 share anywhere in the set is reported as such before any other share is
+    // judged, so an old backup always gets the "re-make it" answer, never a CRC error.
+    var scan = FrameReader{ .data = shares_data };
+    while (scan.next() catch return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT }) |frame| {
+        if (main.isLegacyShare(frame)) {
+            return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_UNSUPPORTED_FORMAT_VERSION };
+        }
+    }
+
     var frames = FrameReader{ .data = shares_data };
     while (frames.next() catch return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT }) |frame| {
         var share = Share.deserialize(ffi_allocator, frame) catch |err| {
             const code = switch (err) {
-                error.UnsupportedVersion => ZSSS_ERR_UNSUPPORTED_SHARE_VERSION,
+                error.LegacyShareFormat => ZSSS_ERR_UNSUPPORTED_FORMAT_VERSION,
+                error.UnsupportedVersion => ZSSS_ERR_UNKNOWN_SHARE_VERSION,
                 error.OutOfMemory => ZSSS_ERR_OUT_OF_MEMORY,
                 error.ShareTooShort, error.ChecksumMismatch => ZSSS_ERR_CHECKSUM_MISMATCH,
             };
@@ -853,8 +866,9 @@ export fn zsss_error_message(error_code: i32) [*:0]const u8 {
         ZSSS_ERR_PNG_TOO_LARGE => "PNG exceeds the decode budget (16 megapixels, 65536 px per side)",
         ZSSS_ERR_STEGO_CORRUPTED => "Hidden data header is corrupt or from an unsupported version",
         ZSSS_ERR_RANDOM_FAILURE => "System random number source failed",
-        ZSSS_ERR_UNSUPPORTED_SHARE_VERSION => "Share format version not supported (zsss reads and writes version 2 only)",
+        ZSSS_ERR_UNSUPPORTED_FORMAT_VERSION => "Share is in an older zsss format (version 1) that this library no longer reads; the backup must be re-made",
         ZSSS_ERR_SHARE_SET_MISMATCH => "Shares do not form one set (different splits, parameters or a repeated index)",
+        ZSSS_ERR_UNKNOWN_SHARE_VERSION => "Share format version not recognised (corrupt, or written by a newer zsss)",
         else => "Unknown error",
     };
 }
@@ -1067,7 +1081,7 @@ test "FFI combine: version-1 shares, mixed splits and a corrupted share each get
     @memcpy(framed[4..], &v1);
     const r_v1 = zsss_combine(&framed, framed.len);
     defer zsss_free(r_v1);
-    try std.testing.expectEqual(ZSSS_ERR_UNSUPPORTED_SHARE_VERSION, r_v1.error_code);
+    try std.testing.expectEqual(ZSSS_ERR_UNSUPPORTED_FORMAT_VERSION, r_v1.error_code);
 
     const split_a = zsss_split(secret.ptr, secret.len, 2, 3);
     defer zsss_free(split_a);
@@ -1107,6 +1121,78 @@ test "FFI combine: version-1 shares, mixed splits and a corrupted share each get
     defer zsss_free(ok);
     try std.testing.expectEqual(ZSSS_OK, ok.error_code);
     try std.testing.expectEqualStrings(secret, ok.data.?[0..ok.len]);
+}
+
+/// Shares written by zig-forge ae46b99a (format version 1), see main.zig v1_fixtures.
+const v1_fixtures = [_][]const u8{
+    @embedFile("testdata/v1-native-share-1.sss"),
+    @embedFile("testdata/v1-native-share-2.sss"),
+    @embedFile("testdata/v1-native-share-3.sss"),
+};
+
+/// [len: u32 LE][share]... as zsss_split emits and quantum_vault's concat_shares_to_buffer
+/// rebuilds from stored shares.
+fn frameShares(a: Allocator, shares: []const []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    for (shares) |share| {
+        var prefix: [4]u8 = undefined;
+        std.mem.writeInt(u32, &prefix, @intCast(share.len), .little);
+        try out.appendSlice(a, &prefix);
+        try out.appendSlice(a, share);
+    }
+    return out.toOwnedSlice(a);
+}
+
+test "FFI combine reports real version-1 shares with their own code, however they arrive" {
+    const a = std.testing.allocator;
+    const legacy = ZSSS_ERR_UNSUPPORTED_FORMAT_VERSION;
+
+    // Two of the v1 backup, as quantum_vault 1.0.x stored it.
+    const pair = try frameShares(a, &.{ v1_fixtures[0], v1_fixtures[2] });
+    defer a.free(pair);
+    const r = zsss_combine(pair.ptr, pair.len);
+    defer zsss_free(r);
+    try std.testing.expectEqual(legacy, r.error_code);
+    try std.testing.expect(std.mem.startsWith(u8, std.mem.span(zsss_error_message(legacy)), "Share is in an older zsss format"));
+
+    // A v1 share anywhere in the set wins over a v2 share's own error: here a v2 share with
+    // a broken CRC comes first.
+    const secret = "a new v2 secret";
+    const split = zsss_split(secret.ptr, secret.len, 2, 3);
+    defer zsss_free(split);
+    var v2 = try a.dupe(u8, nthShareFrame(split.data.?[0..split.len], 0)[4..]);
+    defer a.free(v2);
+    v2[v2.len - 1] ^= 0xff;
+    const mixed = try frameShares(a, &.{ v2, v1_fixtures[1] });
+    defer a.free(mixed);
+    const r_mixed = zsss_combine(mixed.ptr, mixed.len);
+    defer zsss_free(r_mixed);
+    try std.testing.expectEqual(legacy, r_mixed.error_code);
+
+    // The photo path: a v1 share embedded in one layer of a carrier, as quantum_vault's
+    // shamir_split_to_photos does, and extracted again.
+    const carrier = try a.alloc(u8, 320 * 320 * 3);
+    defer a.free(carrier);
+    for (carrier, 0..) |*px, i| px.* = @truncate(i *% 29);
+    try stego.embedInPixelsWithLayer(a, carrier, v1_fixtures[0], "photo password", 7);
+    const extracted = try stego.extractFromPixelsWithLayer(a, carrier, "photo password", 7);
+    defer a.free(extracted);
+    const from_photos = try frameShares(a, &.{ extracted, v1_fixtures[1] });
+    defer a.free(from_photos);
+    const r_photo = zsss_combine(from_photos.ptr, from_photos.len);
+    defer zsss_free(r_photo);
+    try std.testing.expectEqual(legacy, r_photo.error_code);
+
+    // A version that never existed is a different code from the legacy one.
+    var future = try a.dupe(u8, v1_fixtures[0]);
+    defer a.free(future);
+    future[0] = 3;
+    const unknown = try frameShares(a, &.{future});
+    defer a.free(unknown);
+    const r_unknown = zsss_combine(unknown.ptr, unknown.len);
+    defer zsss_free(r_unknown);
+    try std.testing.expect(r_unknown.error_code != legacy and r_unknown.error_code != ZSSS_OK);
 }
 
 test "FFI SLIP-39 generate and combine, single group" {

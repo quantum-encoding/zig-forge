@@ -71,8 +71,13 @@ extern "C" {
 #define ZSSS_ERR_STEGO_CORRUPTED        -28  /* hidden-data header corrupt / bad version */
 #define ZSSS_ERR_RANDOM_FAILURE         -29  /* OS CSPRNG failed (embed with password, split) */
 /* Native share format, version 2 (zsss_split / zsss_combine) */
-#define ZSSS_ERR_UNSUPPORTED_SHARE_VERSION -30  /* a share in any format version but 2 */
-#define ZSSS_ERR_SHARE_SET_MISMATCH        -31  /* shares of different splits, parameters or a repeated index */
+/* A share in an older format this library no longer reads (version 1, as written
+ * before the version-2 format); the backup must be re-made. Reported for any
+ * version-1 share in the set, before any other share is judged, so an old backup
+ * never comes back as ZSSS_ERR_CHECKSUM_MISMATCH or ZSSS_ERR_INVALID_INPUT. */
+#define ZSSS_ERR_UNSUPPORTED_FORMAT_VERSION -30
+#define ZSSS_ERR_SHARE_SET_MISMATCH         -31  /* shares of different splits, parameters or a repeated index */
+#define ZSSS_ERR_UNKNOWN_SHARE_VERSION      -32  /* version byte neither 1 nor 2: corrupt, or from a newer zsss */
 #define ZSSS_ERR_UNKNOWN                -99
 
 /**
@@ -125,7 +130,10 @@ const char* zsss_error_message(int32_t error_code);
  * HMAC-SHA256(key = R, msg = secret)[0..4] || R(16 random bytes) || secret, so
  * data_len = secret_len + 20 and no share holds any function of the secret.
  * Combining checks the digest in constant time and that every share past the
- * threshold lies on the same polynomial. Only version 2 is read or written.
+ * threshold lies on the same polynomial. Only version 2 is read or written:
+ * version-1 shares (which stored SHA256(secret)[0..4] in every share) are refused
+ * with ZSSS_ERR_UNSUPPORTED_FORMAT_VERSION, and there is no conversion; recover
+ * such a secret with the zsss that wrote the shares, then split it again.
  */
 
 /**
@@ -162,7 +170,8 @@ ZsssBuffer zsss_split(
  * @param shares_len Total length of shares data
  * @return ZsssBuffer containing recovered secret
  *         Errors: ZSSS_ERR_NO_SHARES, ZSSS_ERR_INVALID_INPUT (framing),
- *         ZSSS_ERR_UNSUPPORTED_SHARE_VERSION, ZSSS_ERR_CHECKSUM_MISMATCH (CRC or
+ *         ZSSS_ERR_UNSUPPORTED_FORMAT_VERSION (a version-1 share anywhere in the
+ *         set), ZSSS_ERR_UNKNOWN_SHARE_VERSION, ZSSS_ERR_CHECKSUM_MISMATCH (CRC or
  *         length), ZSSS_ERR_INSUFFICIENT_SHARES (fewer than k),
  *         ZSSS_ERR_SHARE_SET_MISMATCH (not one split),
  *         ZSSS_ERR_SECRET_VERIFICATION_FAILED (digest, or a share past the
