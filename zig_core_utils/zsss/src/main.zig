@@ -1,7 +1,8 @@
 //! zsss - Shamir Secret Sharing
 //!
 //! Cryptographically secure secret splitting using Shamir's Secret Sharing scheme
-//! over GF(2^8). Information-theoretically secure - k-1 shares reveal zero information.
+//! over GF(2^8). The share values of any k-1 shares reveal nothing about the secret; the
+//! format's 4-byte secret_id does (see Share.secret_id).
 //!
 //! Usage:
 //!   zsss split -t 3 -n 5 -i secret.bin -o shares/      # Split into 5 shares, need 3 to recover
@@ -12,7 +13,9 @@
 //!   - Uses GF(2^8) finite field arithmetic (same as SLIP-39)
 //!   - Cryptographic RNG for polynomial coefficients
 //!   - CRC32 checksum for share integrity
-//!   - Constant-time field operations (table lookups)
+//!   - Constant-time field operations (branchless and table-free, slip39.gfMul)
+//!   - Every share stores secret_id = SHA256(secret)[0..4] in the clear, so one share alone
+//!     confirms a guess at a low-entropy secret; see Share.secret_id. SLIP-39 shares do not.
 
 const std = @import("std");
 const crypto = std.crypto;
@@ -82,36 +85,15 @@ fn fillRandomBytes(buf: []u8) RandomError!void {
 }
 
 /// GF(2^8) Finite Field Arithmetic
-/// Irreducible polynomial: x^8 + x^4 + x^3 + x + 1 (0x11B)
+/// Irreducible polynomial: x^8 + x^4 + x^3 + x + 1 (0x11B), the same field as SLIP-39.
+///
+/// Multiplication and inversion are slip39.zig's branchless, table-free gfMul / gfInv: no
+/// secret byte selects a branch or a memory address (a log/exp table indexed by share bytes
+/// is a cache-timing signal), and there is no table, so nothing needs initialising and no
+/// global state is shared between threads.
 pub const GF256 = struct {
-    /// Exponentiation table: exp_table[i] = g^i where g=0x03 is the generator
-    var exp_table: [256]u8 = undefined;
-    /// Logarithm table: log_table[x] = i where g^i = x
-    var log_table: [256]u8 = undefined;
-    var initialized: bool = false;
-
-    /// Initialize the lookup tables (idempotent)
-    pub fn init() void {
-        if (initialized) return;
-
-        // Generate tables using generator 0x03
-        var x: u16 = 1;
-        for (0..255) |i| {
-            exp_table[i] = @intCast(x);
-            log_table[@as(usize, @intCast(x))] = @intCast(i);
-
-            // Multiply by generator 0x03 = x + 1
-            // x * 0x03 = x * (x + 1) = x^2 + x
-            x = x ^ (x << 1);
-            if (x & 0x100 != 0) {
-                x ^= 0x11B; // Reduce by irreducible polynomial
-            }
-        }
-        exp_table[255] = exp_table[0]; // Wrap around for convenience
-        log_table[0] = 0; // Convention: log(0) = 0, but multiply handles 0 specially
-
-        initialized = true;
-    }
+    /// Does nothing: the field has no tables. Kept so existing callers still compile.
+    pub fn init() void {}
 
     /// Addition in GF(2^8) is XOR
     pub inline fn add(a: u8, b: u8) u8 {
@@ -123,40 +105,35 @@ pub const GF256 = struct {
         return a ^ b;
     }
 
-    /// Multiplication using log/exp tables: a * b = g^(log(a) + log(b))
+    /// Multiplication, constant-time in both operands.
     pub fn multiply(a: u8, b: u8) u8 {
-        if (a == 0 or b == 0) return 0;
-        const log_a: u16 = log_table[a];
-        const log_b: u16 = log_table[b];
-        const log_result = (log_a + log_b) % 255;
-        return exp_table[@intCast(log_result)];
+        return slip39.gfMul(a, b);
     }
 
-    /// Division: a / b = a * b^(-1) = g^(log(a) - log(b))
+    /// Division a / b, constant-time in `a`. `b` must be non-zero; at every call site it is a
+    /// product of share-index differences, which are public.
     pub fn divide(a: u8, b: u8) u8 {
-        if (a == 0) return 0;
         if (b == 0) @panic("GF256: division by zero");
-        const log_a: u16 = log_table[a];
-        const log_b: u16 = log_table[b];
-        // Add 255 before subtraction to handle wraparound
-        const log_result = (log_a + 255 - log_b) % 255;
-        return exp_table[@intCast(log_result)];
+        return slip39.gfDiv(a, b);
     }
 
-    /// Multiplicative inverse: a^(-1) = g^(255 - log(a))
+    /// Multiplicative inverse (a^254), constant-time; `a` must be non-zero.
     pub fn inverse(a: u8) u8 {
         if (a == 0) @panic("GF256: inverse of zero");
-        const log_a: u16 = log_table[a];
-        return exp_table[@intCast(255 - log_a)];
+        return slip39.gfInv(a);
     }
 
-    /// Power: a^n using repeated squaring
+    /// Power: base^exp by square-and-multiply. Constant-time in `base`; the loop follows the
+    /// bits of `exp`.
     pub fn power(base: u8, exp: u8) u8 {
-        if (exp == 0) return 1;
-        if (base == 0) return 0;
-        const log_base: u16 = log_table[base];
-        const log_result = (log_base * @as(u16, exp)) % 255;
-        return exp_table[@intCast(log_result)];
+        var result: u8 = 1;
+        var square = base;
+        var e = exp;
+        while (e != 0) : (e >>= 1) {
+            if (e & 1 != 0) result = multiply(result, square);
+            square = multiply(square, square);
+        }
+        return result;
     }
 };
 
@@ -170,7 +147,11 @@ pub const Share = struct {
     total_shares: u8,
     /// This share's index (1-255)
     index: u8,
-    /// Secret identifier (first 4 bytes of SHA256(secret))
+    /// Secret identifier: the first 4 bytes of SHA256(secret), identical in every share of a
+    /// split and checked against the recovered secret by `combine`. Being a function of the
+    /// secret, it lets anyone holding a single share test guesses: a secret with less than
+    /// ~32 bits of entropy (a PIN, a short password) is recoverable from one share. Version 1
+    /// of the share format requires it; removing it needs a new format version.
     secret_id: [4]u8,
     /// The share data (y-values for this x-coordinate)
     data: []u8,
@@ -302,11 +283,12 @@ pub const SSS = struct {
 
         GF256.init();
 
-        // Compute secret identifier (first 4 bytes of SHA256)
+        // Compute secret identifier (first 4 bytes of SHA256); the other 28 are not published.
         var secret_id: [4]u8 = undefined;
         var hash: [32]u8 = undefined;
         crypto.hash.sha2.Sha256.hash(secret, &hash, .{});
         @memcpy(&secret_id, hash[0..4]);
+        crypto.secureZero(u8, &hash);
 
         // Allocate shares
         const shares = try allocator.alloc(Share, num_shares);
@@ -434,7 +416,8 @@ pub const SSS = struct {
         // the buffer for security and let the errdefer reclaim it.
         var hash: [32]u8 = undefined;
         crypto.hash.sha2.Sha256.hash(secret, &hash, .{});
-        if (!mem.eql(u8, hash[0..4], &secret_id)) {
+        defer crypto.secureZero(u8, &hash);
+        if (!crypto.timing_safe.eql([4]u8, hash[0..4].*, secret_id)) {
             // Zero out on verification failure (errdefer frees it).
             @memset(secret, 0);
             return error.SecretVerificationFailed;
@@ -1832,6 +1815,25 @@ pub fn main(init: std.process.Init) !void {
 // =============================================================================
 // Tests
 // =============================================================================
+
+test "GF256 needs no initialisation and agrees with the branchless SLIP-39 field" {
+    // Deliberately no GF256.init(): the arithmetic must not depend on global state that a
+    // caller (or zsss_init, from any thread) has to set up first. FIPS-197 4.2 examples:
+    try std.testing.expectEqual(@as(u8, 0xc1), GF256.multiply(0x57, 0x83));
+    try std.testing.expectEqual(@as(u8, 0xfe), GF256.multiply(0x57, 0x13));
+    for (0..256) |a| {
+        const av: u8 = @intCast(a);
+        for (0..256) |b| {
+            const bv: u8 = @intCast(b);
+            try std.testing.expectEqual(slip39.gfMul(av, bv), GF256.multiply(av, bv));
+            if (bv != 0) try std.testing.expectEqual(av, GF256.multiply(GF256.divide(av, bv), bv));
+        }
+        if (av != 0) try std.testing.expectEqual(@as(u8, 1), GF256.multiply(av, GF256.inverse(av)));
+    }
+    try std.testing.expectEqual(GF256.multiply(GF256.multiply(0x57, 0x57), 0x57), GF256.power(0x57, 3));
+    try std.testing.expectEqual(@as(u8, 1), GF256.power(0, 0));
+    try std.testing.expectEqual(@as(u8, 0), GF256.power(0, 5));
+}
 
 test "GF256 basic operations" {
     GF256.init();

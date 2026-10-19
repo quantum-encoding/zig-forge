@@ -34,7 +34,6 @@ const stego = @import("stego.zig");
 const slip39 = @import("slip39.zig");
 const ticket = @import("ticket.zig");
 
-const GF256 = main.GF256;
 const SSS = main.SSS;
 const Share = main.Share;
 const TicketData = ticket.TicketData;
@@ -828,10 +827,9 @@ export fn zsss_error_message(error_code: i32) [*:0]const u8 {
     };
 }
 
-/// Initialize the library (call once before use)
-export fn zsss_init() void {
-    GF256.init();
-}
+/// Does nothing: the library has no global state to set up. Kept for the C ABI; safe to call
+/// any number of times from any thread, and the other entry points never depend on it.
+export fn zsss_init() void {}
 
 // =============================================================================
 // Tests
