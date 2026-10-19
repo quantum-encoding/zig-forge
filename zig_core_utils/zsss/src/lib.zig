@@ -113,6 +113,23 @@ const FrameReader = struct {
     }
 };
 
+/// The caller's `ptr[0..len]`, or null for a NULL pointer with a non-zero length: a caller
+/// bug the C prototypes cannot exclude, refused with ZSSS_ERR_INVALID_INPUT rather than
+/// dereferenced. NULL with length 0 is the empty slice.
+fn borrow(ptr: ?[*]const u8, len: usize) ?[]const u8 {
+    if (len == 0) return &.{};
+    return (ptr orelse return null)[0..len];
+}
+
+/// An optional input (passphrase, password, seat, tier): NULL with length 0 is "absent",
+/// NULL with a length is error.NullWithLength (never read as absent), anything else the slice.
+fn borrowOptional(ptr: ?[*]const u8, len: usize) error{NullWithLength}!?[]const u8 {
+    const p = ptr orelse return if (len == 0) null else error.NullWithLength;
+    return p[0..len];
+}
+
+const invalid_input: ZsssBuffer = .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT };
+
 /// Free a buffer returned by zsss functions. The buffer is wiped first: it may hold a
 /// secret, a Shamir share or SLIP-39 mnemonics. secureZero is a volatile store; a plain
 /// @memset before free is a dead store the optimiser is free to drop.
@@ -175,7 +192,7 @@ fn splitFramed(allocator: Allocator, secret: []const u8, threshold: u8, num_shar
 /// Returns array of serialized shares concatenated with length prefixes
 /// Format: [len1:u32][share1][len2:u32][share2]...
 export fn zsss_split(
-    secret_ptr: [*]const u8,
+    secret_ptr: ?[*]const u8,
     secret_len: usize,
     threshold: u8,
     num_shares: u8,
@@ -183,8 +200,9 @@ export fn zsss_split(
     if (secret_len == 0) {
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_EMPTY_SECRET };
     }
+    const secret = borrow(secret_ptr, secret_len) orelse return invalid_input;
 
-    const output = splitFramed(ffi_allocator, secret_ptr[0..secret_len], threshold, num_shares) catch |err| {
+    const output = splitFramed(ffi_allocator, secret, threshold, num_shares) catch |err| {
         // Threshold and count errors share the generic code; specific ones would need
         // matching against SSS.split's inferred error set.
         const code = if (err == error.OutOfMemory) ZSSS_ERR_OUT_OF_MEMORY else ZSSS_ERR_INVALID_INPUT;
@@ -196,14 +214,14 @@ export fn zsss_split(
 /// Combine shares to recover secret
 /// shares_ptr: concatenated length-prefixed shares (same format as zsss_split output)
 export fn zsss_combine(
-    shares_ptr: [*]const u8,
+    shares_ptr: ?[*]const u8,
     shares_len: usize,
 ) ZsssBuffer {
     if (shares_len == 0) {
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_NO_SHARES };
     }
 
-    const shares_data = shares_ptr[0..shares_len];
+    const shares_data = borrow(shares_ptr, shares_len) orelse return invalid_input;
 
     // Parse length-prefixed shares
     var shares_list: std.ArrayList(Share) = .empty;
@@ -304,10 +322,10 @@ fn packFrames(items: []const []const u8) !ZsssBuffer {
 /// Returns the mnemonics as length-prefixed UTF-8 strings in the same framing
 /// as zsss_split, ordered group 0 members first. Free with zsss_free().
 export fn zsss_slip39_generate(
-    secret_ptr: [*]const u8,
+    secret_ptr: ?[*]const u8,
     secret_len: usize,
     group_threshold: u8,
-    group_specs_ptr: [*]const u8,
+    group_specs_ptr: ?[*]const u8,
     group_count: usize,
     passphrase_ptr: ?[*]const u8,
     passphrase_len: usize,
@@ -317,27 +335,24 @@ export fn zsss_slip39_generate(
     if (secret_len == 0) {
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_EMPTY_SECRET };
     }
+    const secret = borrow(secret_ptr, secret_len) orelse return invalid_input;
     // NULL with a length is a caller bug, not the empty passphrase: the shares would be
     // encrypted under "" while the caller believes they carry a passphrase.
-    if (passphrase_ptr == null and passphrase_len > 0) {
-        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT };
-    }
+    const passphrase = (borrowOptional(passphrase_ptr, passphrase_len) catch return invalid_input) orelse "";
     if (group_count == 0 or group_count > slip39.MAX_SHARE_COUNT or iteration_exponent > 15) {
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_SLIP39_INVALID_CONFIG };
     }
+    const spec_bytes = borrow(group_specs_ptr, group_count * 2) orelse return invalid_input;
 
     const groups = ffi_allocator.alloc(slip39.GroupSpec, group_count) catch {
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_OUT_OF_MEMORY };
     };
     defer ffi_allocator.free(groups);
-    const spec_bytes = group_specs_ptr[0 .. group_count * 2];
     for (groups, 0..) |*g, i| {
         g.* = .{ .member_threshold = spec_bytes[i * 2], .member_count = spec_bytes[i * 2 + 1] };
     }
 
-    const passphrase: []const u8 = if (passphrase_ptr) |p| p[0..passphrase_len] else "";
-
-    const mnemonics = slip39.generateMnemonics(ffi_allocator, secret_ptr[0..secret_len], .{
+    const mnemonics = slip39.generateMnemonics(ffi_allocator, secret, .{
         .group_threshold = group_threshold,
         .groups = groups,
         .passphrase = passphrase,
@@ -361,7 +376,7 @@ export fn zsss_slip39_generate(
 /// There is no way to verify the passphrase (spec: "Passphrase verification"):
 /// a wrong passphrase returns a different master secret, not an error.
 export fn zsss_slip39_combine(
-    mnemonics_ptr: [*]const u8,
+    mnemonics_ptr: ?[*]const u8,
     mnemonics_len: usize,
     passphrase_ptr: ?[*]const u8,
     passphrase_len: usize,
@@ -369,16 +384,15 @@ export fn zsss_slip39_combine(
     if (mnemonics_len == 0) {
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_NO_SHARES };
     }
+    const data = borrow(mnemonics_ptr, mnemonics_len) orelse return invalid_input;
 
     // As in zsss_slip39_generate: NULL with a length is not "".
-    if (passphrase_ptr == null and passphrase_len > 0) {
-        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT };
-    }
+    const passphrase = (borrowOptional(passphrase_ptr, passphrase_len) catch return invalid_input) orelse "";
 
     var mnemonics: std.ArrayList([]const u8) = .empty;
     defer mnemonics.deinit(ffi_allocator);
 
-    var frames = FrameReader{ .data = mnemonics_ptr[0..mnemonics_len] };
+    var frames = FrameReader{ .data = data };
     while (frames.next() catch return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT }) |frame| {
         mnemonics.append(ffi_allocator, frame) catch {
             return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_OUT_OF_MEMORY };
@@ -388,8 +402,6 @@ export fn zsss_slip39_combine(
     if (mnemonics.items.len == 0) {
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_NO_SHARES };
     }
-
-    const passphrase: []const u8 = if (passphrase_ptr) |p| p[0..passphrase_len] else "";
 
     const secret = slip39.combineMnemonics(ffi_allocator, mnemonics.items, passphrase) catch |err| {
         return .{ .data = null, .len = 0, .error_code = slip39ErrorCode(err) };
@@ -426,12 +438,13 @@ fn stegoErrorCode(err: anyerror) i32 {
 }
 
 /// Embed data into a PNG image
-/// password can be null for no encryption
+/// password can be null (with length 0) for no encryption; NULL with a length is refused,
+/// since reading it as "no password" would embed the data unencrypted
 /// layer_slot: -1 for default (all pixels), 0-255 for specific layer
 export fn zsss_stego_embed(
-    png_ptr: [*]const u8,
+    png_ptr: ?[*]const u8,
     png_len: usize,
-    data_ptr: [*]const u8,
+    data_ptr: ?[*]const u8,
     data_len: usize,
     password_ptr: ?[*]const u8,
     password_len: usize,
@@ -441,9 +454,9 @@ export fn zsss_stego_embed(
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT };
     }
 
-    const png_data = png_ptr[0..png_len];
-    const secret_data = data_ptr[0..data_len];
-    const password: ?[]const u8 = if (password_ptr) |p| p[0..password_len] else null;
+    const png_data = borrow(png_ptr, png_len) orelse return invalid_input;
+    const secret_data = borrow(data_ptr, data_len) orelse return invalid_input;
+    const password = borrowOptional(password_ptr, password_len) catch return invalid_input;
     const layer: ?u8 = if (layer_slot >= 0 and layer_slot <= 255) @intCast(layer_slot) else null;
 
     const output = stego.embedInPngWithLayer(
@@ -460,10 +473,10 @@ export fn zsss_stego_embed(
 }
 
 /// Extract data from a PNG image
-/// password can be null if data was not encrypted
+/// password can be null (with length 0) if data was not encrypted; NULL with a length is refused
 /// layer_slot: -1 for default (all pixels), 0-255 for specific layer
 export fn zsss_stego_extract(
-    png_ptr: [*]const u8,
+    png_ptr: ?[*]const u8,
     png_len: usize,
     password_ptr: ?[*]const u8,
     password_len: usize,
@@ -473,8 +486,8 @@ export fn zsss_stego_extract(
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT };
     }
 
-    const png_data = png_ptr[0..png_len];
-    const password: ?[]const u8 = if (password_ptr) |p| p[0..password_len] else null;
+    const png_data = borrow(png_ptr, png_len) orelse return invalid_input;
+    const password = borrowOptional(password_ptr, password_len) catch return invalid_input;
     const layer: ?u8 = if (layer_slot >= 0 and layer_slot <= 255) @intCast(layer_slot) else null;
 
     const output = stego.extractFromPngWithLayer(
@@ -513,11 +526,11 @@ pub const ZsssTicketInfo = extern struct {
 /// Create and embed a single ticket into a PNG image
 /// Returns the modified PNG image with the ticket embedded
 export fn zsss_ticket_embed(
-    png_ptr: [*]const u8,
+    png_ptr: ?[*]const u8,
     png_len: usize,
-    event_id_ptr: [*]const u8,
+    event_id_ptr: ?[*]const u8,
     event_id_len: usize,
-    password_ptr: [*]const u8,
+    password_ptr: ?[*]const u8,
     password_len: usize,
     layer: u8,
     seat_ptr: ?[*]const u8,
@@ -529,11 +542,11 @@ export fn zsss_ticket_embed(
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT };
     }
 
-    const png_data = png_ptr[0..png_len];
-    const event_id = event_id_ptr[0..event_id_len];
-    const password = password_ptr[0..password_len];
-    const seat: ?[]const u8 = if (seat_ptr) |p| p[0..seat_len] else null;
-    const tier: ?[]const u8 = if (tier_ptr) |p| p[0..tier_len] else null;
+    const png_data = borrow(png_ptr, png_len) orelse return invalid_input;
+    const event_id = borrow(event_id_ptr, event_id_len) orelse return invalid_input;
+    const password = borrow(password_ptr, password_len) orelse return invalid_input;
+    const seat = borrowOptional(seat_ptr, seat_len) catch return invalid_input;
+    const tier = borrowOptional(tier_ptr, tier_len) catch return invalid_input;
 
     // Generate ticket ID and signature
     const ticket_id = ticket.generateTicketId(ffi_allocator) catch {
@@ -579,17 +592,17 @@ export fn zsss_ticket_embed(
 /// Extract and verify a ticket from a PNG image
 /// Returns the raw ticket data bytes
 export fn zsss_ticket_extract(
-    png_ptr: [*]const u8,
+    png_ptr: ?[*]const u8,
     png_len: usize,
-    password_ptr: [*]const u8,
+    password_ptr: ?[*]const u8,
     password_len: usize,
 ) ZsssBuffer {
     if (png_len == 0 or password_len == 0) {
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INVALID_INPUT };
     }
 
-    const png_data = png_ptr[0..png_len];
-    const password = password_ptr[0..password_len];
+    const png_data = borrow(png_ptr, png_len) orelse return invalid_input;
+    const password = borrow(password_ptr, password_len) orelse return invalid_input;
 
     // Try all 256 layers to find the ticket
     for (0..256) |i| {
@@ -616,15 +629,18 @@ export fn zsss_ticket_extract(
 }
 
 /// Get ticket information from a PNG image
-/// Returns structured ticket info
+/// Returns structured ticket info; ZSSS_ERR_INVALID_INPUT, writing nothing, for a NULL out_info
 export fn zsss_ticket_info(
-    png_ptr: [*]const u8,
+    png_ptr: ?[*]const u8,
     png_len: usize,
-    password_ptr: [*]const u8,
+    password_ptr: ?[*]const u8,
     password_len: usize,
-    out_info: *ZsssTicketInfo,
+    maybe_out_info: ?*ZsssTicketInfo,
 ) i32 {
-    if (png_len == 0 or password_len == 0) {
+    const out_info = maybe_out_info orelse return ZSSS_ERR_INVALID_INPUT;
+    const png_data = borrow(png_ptr, png_len);
+    const password = borrow(password_ptr, password_len);
+    if (png_len == 0 or password_len == 0 or png_data == null or password == null) {
         out_info.* = .{
             .event_id = null,
             .event_id_len = 0,
@@ -643,16 +659,13 @@ export fn zsss_ticket_info(
         return ZSSS_ERR_INVALID_INPUT;
     }
 
-    const png_data = png_ptr[0..png_len];
-    const password = password_ptr[0..password_len];
-
     // Try all 256 layers to find the ticket
     for (0..256) |i| {
         const layer: u8 = @intCast(i);
         const extracted = stego.extractFromPngWithLayer(
             ffi_allocator,
-            png_data,
-            password,
+            png_data.?,
+            password.?,
             layer,
         ) catch continue;
         defer ffi_allocator.free(extracted);
@@ -718,8 +731,9 @@ export fn zsss_ticket_info(
     return ZSSS_ERR_TICKET_NOT_FOUND;
 }
 
-/// Free ticket info strings
-export fn zsss_ticket_info_free(info: *ZsssTicketInfo) void {
+/// Free ticket info strings. NULL is a no-op.
+export fn zsss_ticket_info_free(maybe_info: ?*ZsssTicketInfo) void {
+    const info = maybe_info orelse return;
     if (info.event_id) |p| {
         ffi_allocator.free(p[0..info.event_id_len]);
     }
@@ -750,33 +764,27 @@ export fn zsss_ticket_info_free(info: *ZsssTicketInfo) void {
 }
 
 /// Get image ticket capacity
-/// Returns: number of tickets (layers) the image can hold (max 256)
+/// Returns: number of tickets (layers) the image can hold (max 256), 0 for an empty or
+/// unreadable image. bytes_per_ticket (may be NULL) receives the bytes each layer holds.
 export fn zsss_ticket_capacity(
-    png_ptr: [*]const u8,
+    png_ptr: ?[*]const u8,
     png_len: usize,
-    bytes_per_ticket: *usize,
+    bytes_per_ticket: ?*usize,
 ) i32 {
-    if (png_len == 0) {
-        bytes_per_ticket.* = 0;
-        return 0;
-    }
-
-    const png_data = png_ptr[0..png_len];
-    const dims = stego.getPngDimensions(png_data) catch {
-        bytes_per_ticket.* = 0;
-        return 0;
+    var per_ticket: usize = 0;
+    defer if (bytes_per_ticket) |out| {
+        out.* = per_ticket;
     };
+    if (png_len == 0) return 0;
+
+    const png_data = borrow(png_ptr, png_len) orelse return 0;
+    const dims = stego.getPngDimensions(png_data) catch return 0;
 
     // Both are u32 IHDR fields: the product fits a 64-bit usize but wraps a 32-bit one.
-    const total_pixels = std.math.mul(usize, dims.width, dims.height) catch {
-        bytes_per_ticket.* = 0;
-        return 0;
-    };
+    const total_pixels = std.math.mul(usize, dims.width, dims.height) catch return 0;
     const pixels_per_layer = total_pixels / 256;
     const usable_bytes = (pixels_per_layer * 3) / 8;
-    const capacity = if (usable_bytes > stego.HEADER_SIZE) usable_bytes - stego.HEADER_SIZE else 0;
-
-    bytes_per_ticket.* = capacity;
+    per_ticket = if (usable_bytes > stego.HEADER_SIZE) usable_bytes - stego.HEADER_SIZE else 0;
     return 256; // Max layers
 }
 
@@ -844,6 +852,66 @@ test "zsss_split's framing frees exactly what it allocated when any allocation f
         }
     }.run;
     try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "every zsss export refuses NULL with a non-zero length instead of dereferencing it" {
+    const P = ?[*]const u8;
+    const split: *const fn (P, usize, u8, u8) callconv(.c) ZsssBuffer = @ptrCast(&zsss_split);
+    const combine: *const fn (P, usize) callconv(.c) ZsssBuffer = @ptrCast(&zsss_combine);
+    const generate: *const fn (P, usize, u8, P, usize, P, usize, u8, bool) callconv(.c) ZsssBuffer = @ptrCast(&zsss_slip39_generate);
+    const slip_combine: *const fn (P, usize, P, usize) callconv(.c) ZsssBuffer = @ptrCast(&zsss_slip39_combine);
+    const embed: *const fn (P, usize, P, usize, P, usize, i16) callconv(.c) ZsssBuffer = @ptrCast(&zsss_stego_embed);
+    const extract: *const fn (P, usize, P, usize, i16) callconv(.c) ZsssBuffer = @ptrCast(&zsss_stego_extract);
+    const ticket_embed: *const fn (P, usize, P, usize, P, usize, u8, P, usize, P, usize) callconv(.c) ZsssBuffer = @ptrCast(&zsss_ticket_embed);
+    const ticket_extract: *const fn (P, usize, P, usize) callconv(.c) ZsssBuffer = @ptrCast(&zsss_ticket_extract);
+    const ticket_info: *const fn (P, usize, P, usize, ?*ZsssTicketInfo) callconv(.c) i32 = @ptrCast(&zsss_ticket_info);
+    const ticket_info_free: *const fn (?*ZsssTicketInfo) callconv(.c) void = @ptrCast(&zsss_ticket_info_free);
+    const capacity: *const fn (P, usize, ?*usize) callconv(.c) i32 = @ptrCast(&zsss_ticket_capacity);
+
+    const bytes = "0123456789abcdef";
+    const specs = [_]u8{ 2, 3 };
+    const bad = ZSSS_ERR_INVALID_INPUT;
+    const expectRefused = struct {
+        fn check(buf: ZsssBuffer) !void {
+            defer zsss_free(buf);
+            try std.testing.expectEqual(ZSSS_ERR_INVALID_INPUT, buf.error_code);
+            try std.testing.expect(buf.data == null);
+        }
+    }.check;
+
+    try expectRefused(split(null, 16, 2, 3));
+    try expectRefused(combine(null, 16));
+    try expectRefused(generate(null, 16, 1, &specs, 1, null, 0, 0, true));
+    try expectRefused(generate(bytes, 16, 1, null, 1, null, 0, 0, true));
+    try expectRefused(slip_combine(null, 16, null, 0));
+    try expectRefused(embed(null, 16, bytes, 16, null, 0, -1));
+    try expectRefused(embed(bytes, 16, null, 16, null, 0, -1));
+    // A NULL password with a length would have embedded the data unencrypted.
+    try expectRefused(embed(bytes, 16, bytes, 16, null, 4, -1));
+    try expectRefused(extract(null, 16, null, 0, -1));
+    try expectRefused(extract(bytes, 16, null, 4, -1));
+    try expectRefused(ticket_embed(null, 16, bytes, 4, bytes, 4, 0, null, 0, null, 0));
+    try expectRefused(ticket_embed(bytes, 16, null, 4, bytes, 4, 0, null, 0, null, 0));
+    try expectRefused(ticket_embed(bytes, 16, bytes, 4, null, 4, 0, null, 0, null, 0));
+    try expectRefused(ticket_embed(bytes, 16, bytes, 4, bytes, 4, 0, null, 3, null, 0));
+    try expectRefused(ticket_embed(bytes, 16, bytes, 4, bytes, 4, 0, null, 0, null, 3));
+    try expectRefused(ticket_extract(null, 16, bytes, 4));
+    try expectRefused(ticket_extract(bytes, 16, null, 4));
+
+    var info: ZsssTicketInfo = undefined;
+    try std.testing.expectEqual(bad, ticket_info(null, 16, bytes, 4, &info));
+    try std.testing.expectEqual(bad, ticket_info(bytes, 16, null, 4, &info));
+    try std.testing.expectEqual(bad, ticket_info(bytes, 16, bytes, 4, null));
+    ticket_info_free(null);
+    var per_ticket: usize = 99;
+    try std.testing.expectEqual(@as(i32, 0), capacity(null, 16, &per_ticket));
+    try std.testing.expectEqual(@as(usize, 0), per_ticket);
+    try std.testing.expectEqual(@as(i32, 0), capacity(bytes, 16, null));
+
+    // Zero lengths keep their existing codes; NULL is fine there.
+    try std.testing.expectEqual(ZSSS_ERR_EMPTY_SECRET, split(null, 0, 2, 3).error_code);
+    try std.testing.expectEqual(ZSSS_ERR_NO_SHARES, combine(null, 0).error_code);
+    try std.testing.expectEqual(ZSSS_ERR_NO_SHARES, slip_combine(null, 0, null, 0).error_code);
 }
 
 test "FFI split and combine" {

@@ -9,10 +9,20 @@
  * Build: zig build (produces libzsss.a and libzsss.so)
  *
  * Usage:
- *   1. Call zsss_init() once before using other functions
- *   2. All returned buffers must be freed with zsss_free()
+ *   1. zsss_init() does nothing and is optional; it is kept for existing callers
+ *   2. All returned buffers must be freed with zsss_free(), which wipes them first
  *   3. Check error_code in ZsssBuffer for success/failure
  *   4. For tickets, free ZsssTicketInfo with zsss_ticket_info_free()
+ *
+ * Pointers: a NULL pointer with a non-zero length is refused with
+ * ZSSS_ERR_INVALID_INPUT, never dereferenced and never read as "absent". NULL is
+ * accepted with length 0, and for the optional inputs documented as such
+ * (passphrase, password, seat, tier) it means "none" only with length 0.
+ *
+ * Frames: a buffer of length-prefixed frames ([len:u32le][bytes]...) passed to
+ * zsss_combine or zsss_slip39_combine must consist of whole frames exactly; a
+ * length running past the end or trailing bytes shorter than a prefix is
+ * ZSSS_ERR_INVALID_INPUT.
  */
 
 #ifndef ZSSS_H
@@ -73,7 +83,8 @@ typedef struct {
 } ZsssBuffer;
 
 /**
- * Initialize the library. Call once before using other functions.
+ * Does nothing: the library keeps no global state. Kept for the ABI; safe to call
+ * any number of times from any thread.
  */
 void zsss_init(void);
 
@@ -172,7 +183,7 @@ ZsssBuffer zsss_combine(
  *                           member_threshold 1 must have member_count 1.
  * @param group_count        Number of groups (1..16). For a plain k-of-n backup
  *                           pass group_threshold 1 and a single {k, n} pair.
- * @param passphrase_ptr     Passphrase, or NULL for none. Printable ASCII only
+ * @param passphrase_ptr     Passphrase, or NULL (with length 0) for none. Printable ASCII only
  *                           (code points 32-126).
  * @param passphrase_len     Passphrase length in bytes
  * @param iteration_exponent 0..15; total PBKDF2 iterations are 10000 << e.
@@ -206,12 +217,13 @@ ZsssBuffer zsss_slip39_generate(
  * @param mnemonics_ptr  Length-prefixed UTF-8 mnemonic strings, same framing as
  *                       zsss_slip39_generate output
  * @param mnemonics_len  Total length of the mnemonics buffer
- * @param passphrase_ptr Passphrase, or NULL for none
+ * @param passphrase_ptr Passphrase, or NULL (with length 0) for none
  * @param passphrase_len Passphrase length in bytes
  * @return ZsssBuffer holding the recovered master secret. Free with zsss_free().
  *
  * Exactly group_threshold groups must be supplied, and exactly each of those
- * groups' member_threshold shares — no more and no fewer.
+ * groups' member_threshold shares — no more and no fewer, and no share twice:
+ * a repeated share is ZSSS_ERR_SLIP39_INVALID_SHARE_SET.
  *
  * SLIP-0039 provides no way to verify the passphrase: a wrong passphrase
  * returns a DIFFERENT master secret with ZSSS_OK, it does not error. This is
@@ -237,8 +249,8 @@ ZsssBuffer zsss_slip39_combine(
  * @param png_len Length of PNG data
  * @param data_ptr Pointer to data to embed
  * @param data_len Length of data to embed
- * @param password_ptr Password for encryption (NULL for no encryption)
- * @param password_len Length of password (ignored if password_ptr is NULL)
+ * @param password_ptr Password for encryption (NULL with length 0 for no encryption)
+ * @param password_len Length of password (must be 0 if password_ptr is NULL)
  * @param layer_slot Layer slot for multi-layer embedding (-1 for default, 0-255 for specific layer)
  * @return ZsssBuffer containing new PNG with embedded data
  *
@@ -274,8 +286,8 @@ ZsssBuffer zsss_stego_embed(
  *
  * @param png_ptr Pointer to PNG image data
  * @param png_len Length of PNG data
- * @param password_ptr Password for decryption (NULL if data wasn't encrypted)
- * @param password_len Length of password (ignored if password_ptr is NULL)
+ * @param password_ptr Password for decryption (NULL with length 0 if data wasn't encrypted)
+ * @param password_len Length of password (must be 0 if password_ptr is NULL)
  * @param layer_slot Layer slot to extract from (-1 for default, 0-255 for specific layer)
  * @return ZsssBuffer containing extracted data
  *
@@ -435,7 +447,7 @@ void zsss_ticket_info_free(ZsssTicketInfo* info);
  *
  * @param png_ptr Pointer to PNG image data
  * @param png_len Length of PNG data
- * @param bytes_per_ticket Output: max bytes per ticket layer
+ * @param bytes_per_ticket Output: max bytes per ticket layer (may be NULL)
  * @return Number of ticket layers (max 256)
  *
  * Example:
