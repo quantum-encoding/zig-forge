@@ -833,7 +833,26 @@ pub const SignedInput = struct {
     pubkey: [33]u8,
 };
 
-/// Serialize a signed transaction to bytes
+/// Exact number of bytes `serializeSignedTransaction` writes for this builder and these
+/// witnesses. Every `sig_len` must be at most `SignedInput.signature.len`; with at most 256
+/// inputs and 256 outputs of at most 83-byte scripts the sum cannot overflow a 32-bit usize.
+pub fn serializedSignedSize(builder: *const TxBuilder, signed_inputs: []const SignedInput) usize {
+    var size: usize = 4 + 2; // version, SegWit marker and flag
+    // Each input: txid, vout, empty scriptSig length, nSequence.
+    size += varintSize(builder.input_count) + builder.input_count * (32 + 4 + 1 + 4);
+    size += varintSize(builder.output_count);
+    for (builder.outputs[0..builder.output_count]) |output| {
+        size += 8 + varintSize(output.script_pubkey.len) + output.script_pubkey.len;
+    }
+    // Each witness: item count, signature push, 33-byte pubkey push.
+    for (signed_inputs) |signed| {
+        size += 1 + varintSize(signed.sig_len) + signed.sig_len + 1 + 33;
+    }
+    return size + 4; // locktime
+}
+
+/// Serialize a signed transaction to bytes. Refuses with `BufferTooSmall`, writing nothing,
+/// unless `out` holds at least `serializedSignedSize` bytes.
 pub fn serializeSignedTransaction(
     builder: *const TxBuilder,
     signed_inputs: []const SignedInput,
@@ -842,7 +861,11 @@ pub fn serializeSignedTransaction(
     if (builder.input_count == 0) return TxBuilderError.NoInputs;
     if (builder.output_count == 0) return TxBuilderError.NoOutputs;
     if (signed_inputs.len != builder.input_count) return TxBuilderError.NoInputs;
-    if (out.len < 100) return TxBuilderError.BufferTooSmall;
+    for (signed_inputs) |signed| {
+        if (signed.sig_len > signed.signature.len) return TxBuilderError.SerializationFailed;
+    }
+    const size = serializedSignedSize(builder, signed_inputs);
+    if (out.len < size) return TxBuilderError.BufferTooSmall;
 
     var pos: usize = 0;
 
@@ -915,7 +938,16 @@ pub fn serializeSignedTransaction(
     std.mem.writeInt(u32, out[pos..][0..4], builder.locktime, .little);
     pos += 4;
 
+    std.debug.assert(pos == size);
     return pos;
+}
+
+/// Bytes `writeVarint` uses for `value`.
+fn varintSize(value: usize) usize {
+    if (value < 0xfd) return 1;
+    if (value <= 0xffff) return 3;
+    if (value <= 0xffffffff) return 5;
+    return 9;
 }
 
 /// Write a varint to buffer, return bytes written
@@ -1328,6 +1360,39 @@ test "BIP-143 native P2WPKH published vector: intermediate hashes, sighash, pubk
     // if this verifies, signHash is signing SHA256(sighash) and every
     // signature it emits is consensus-invalid.
     try std.testing.expectError(error.SignatureVerificationFailed, sig.verify(&sighash, pk));
+}
+
+test "serializeSignedTransaction: the exact size fits, one byte less is refused, nothing is written past the buffer" {
+    // Three inputs spendable by the BIP-143 "Native P2WPKH" key (its hash160 is 1d0f172a...)
+    // and outputs of every script size the builder emits.
+    var privkey: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&privkey, "619c335025c7f4012e556c2a58b2506e30b8511b53ade95ea316fd8c3286feb9");
+    var pkh: [20]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&pkh, "1d0f172a0ecb48aee1be1f2687d2963ae33f71a1");
+
+    var builder = TxBuilder.init();
+    for (0..3) |i| {
+        try builder.addInput(.{ .txid = @splat(@intCast(i + 1)), .vout = @intCast(i), .value = 100_000, .pubkey_hash = pkh, .derivation_index = 0 });
+    }
+    const h20: [20]u8 = @splat(0x33);
+    const x32: [32]u8 = @splat(0x44);
+    try builder.addP2wpkhOutput(10_000, &h20);
+    try builder.addP2pkhOutput(10_000, &h20);
+    try builder.addP2trOutput(10_000, &x32);
+    try builder.addOpReturnOutput(&@as([80]u8, @splat(0x55)));
+    const keys = [_][32]u8{privkey};
+
+    var buf: [4096]u8 = @splat(0xAA);
+    const need = try signTransaction(&builder, &keys, &buf);
+
+    for ([_]usize{ 0, 99, 100, need / 2, need - 1 }) |cap| {
+        @memset(&buf, 0xAA);
+        try std.testing.expectError(TxBuilderError.BufferTooSmall, signTransaction(&builder, &keys, buf[0..cap]));
+        for (buf[cap..]) |b| try std.testing.expectEqual(@as(u8, 0xAA), b);
+    }
+    @memset(&buf, 0xAA);
+    try std.testing.expectEqual(need, try signTransaction(&builder, &keys, buf[0..need]));
+    for (buf[need..]) |b| try std.testing.expectEqual(@as(u8, 0xAA), b);
 }
 
 test "SpendableUtxo default sequence is DEFAULT_SEQUENCE" {

@@ -3098,6 +3098,44 @@ test "tx builder handle API (2.2): independent handles, counts, fee, null-safety
     quantum_tx_builder_free(null);
 }
 
+/// A handle holding one P2WPKH input spendable by the BIP-143 "Native P2WPKH" key
+/// (619c3350..., whose hash160 is 1d0f172a...) and one P2WPKH output.
+fn bip143KeyedBuilder(key: *[32]u8) !?*anyopaque {
+    _ = try std.fmt.hexToBytes(key, "619c335025c7f4012e556c2a58b2506e30b8511b53ade95ea316fd8c3286feb9");
+    const h = quantum_tx_builder_new() orelse return error.OutOfMemory;
+    errdefer quantum_tx_builder_free(h);
+    var utxo = CSpendableUtxo{ .txid = @splat(0x01), .vout = 0, .value = 100_000, .pubkey_hash = undefined, .derivation_index = 0 };
+    _ = try std.fmt.hexToBytes(&utxo.pubkey_hash, "1d0f172a0ecb48aee1be1f2687d2963ae33f71a1");
+    try std.testing.expectEqual(@as(c_int, 0), quantum_tx_builder_add_input_ctx(h, &utxo));
+    const dest: [20]u8 = @splat(0x03);
+    try std.testing.expectEqual(@as(c_int, 0), quantum_tx_builder_add_p2wpkh_output_ctx(h, 90_000, &dest));
+    return h;
+}
+
+test "quantum_tx_sign_ctx refuses an output buffer smaller than the signed transaction and writes nothing past it" {
+    var key: [32]u8 = undefined;
+    const h = try bip143KeyedBuilder(&key);
+    defer quantum_tx_builder_free(h);
+    const keys = [_][32]u8{key};
+    const too_small = @intFromEnum(TxResult.buffer_too_small);
+
+    // 100 bytes claimed for a 1-in/1-out P2WPKH transaction of about 192: refused, and the
+    // canary after the claimed capacity is untouched.
+    var buf: [512]u8 = @splat(0xAA);
+    var written: usize = 0;
+    try std.testing.expectEqual(too_small, quantum_tx_sign_ctx(h, &keys, 1, &buf, 100, &written));
+    for (buf[100..]) |b| try std.testing.expectEqual(@as(u8, 0xAA), b);
+
+    // The exact size fits; one byte less is refused without touching the byte after it.
+    try std.testing.expectEqual(@as(c_int, 0), quantum_tx_sign_ctx(h, &keys, 1, &buf, buf.len, &written));
+    const need = written;
+    @memset(&buf, 0xAA);
+    try std.testing.expectEqual(too_small, quantum_tx_sign_ctx(h, &keys, 1, &buf, need - 1, &written));
+    for (buf[need - 1 ..]) |b| try std.testing.expectEqual(@as(u8, 0xAA), b);
+    try std.testing.expectEqual(@as(c_int, 0), quantum_tx_sign_ctx(h, &keys, 1, &buf, need, &written));
+    try std.testing.expectEqual(need, written);
+}
+
 test "derive pubkey" {
     const private_key = [_]u8{
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
