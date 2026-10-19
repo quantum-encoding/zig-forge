@@ -24,6 +24,8 @@ pub const CoinSelectError = error{
     TargetBelowDust,
     TooManyUtxos,
     SelectionFailed,
+    /// The UTXO values sum past 2^64 - 1: no real UTXO set does, so the list is corrupt.
+    AmountOutOfRange,
 };
 
 /// Result of coin selection
@@ -125,14 +127,55 @@ const CHANGE_OUTPUT_COST: usize = OUTPUT_VSIZE_P2WPKH + INPUT_VSIZE_P2WPKH;
 // =============================================================================
 // Main Selection Function
 // =============================================================================
+//
+// Overflow discipline. UTXO values arrive from a block explorer and the target and fee rate
+// from the caller, and the Apple slices compile overflow checks out, so no amount here is
+// added or multiplied with a bare operator:
+//   * the UTXO values are summed once with std.math.add; a list that sums past 2^64 - 1 is
+//     corrupt and refused with AmountOutOfRange, which bounds every later partial sum;
+//   * a fee or a target + fee that does not fit in 64 bits exceeds any total that does, so
+//     it is InsufficientFunds, exactly;
+//   * search bounds and greedy stopping points saturate (`+|`), because "at least
+//     2^64 - 1" is exactly what they mean; the final funding check is always the checked one.
+
+/// Sum of every UTXO's value; AmountOutOfRange if it does not fit in a u64.
+fn totalValue(utxos: []const CoinUtxo) CoinSelectError!u64 {
+    var total: u64 = 0;
+    for (utxos) |utxo| {
+        total = std.math.add(u64, total, utxo.value) catch return CoinSelectError.AmountOutOfRange;
+    }
+    return total;
+}
+
+/// The fee for a transaction shape; one past 2^64 - 1 sats can never be paid.
+fn feeFor(input_count: usize, output_count: usize, fee_rate: u64) CoinSelectError!u64 {
+    return calculateFee(input_count, output_count, fee_rate) catch CoinSelectError.InsufficientFunds;
+}
+
+/// target + fee; a sum past 2^64 - 1 exceeds every total a UTXO list can have.
+fn amountNeeded(target: u64, fee: u64) CoinSelectError!u64 {
+    return std.math.add(u64, target, fee) catch CoinSelectError.InsufficientFunds;
+}
+
+/// Fill change_amount and is_exact_match for a selection holding at least `needed`.
+fn settleChange(result: *SelectionResult, needed: u64, min_change: u64) void {
+    const excess = result.total_value - needed;
+    if (excess < min_change) {
+        // Excess too small for a change output: it goes to the fee.
+        result.change_amount = 0;
+        result.is_exact_match = (excess == 0);
+    } else {
+        result.change_amount = excess;
+        result.is_exact_match = false;
+    }
+}
 
 /// Select UTXOs to fund a transaction
 ///
 /// Uses Branch and Bound as primary algorithm, falls back to Largest-First.
 ///
 /// Parameters:
-/// - utxos: Available UTXOs to select from
-/// - utxo_count: Number of UTXOs
+/// - utxos: Available UTXOs to select from (at most SelectionResult.MAX_SELECTION)
 /// - params: Selection parameters (target, fee rate, etc.)
 /// - result: Output selection result
 ///
@@ -153,21 +196,16 @@ pub fn selectCoins(
         return CoinSelectError.TargetBelowDust;
     }
 
-    // Calculate total available
-    var total_available: u64 = 0;
-    for (utxos) |utxo| {
-        total_available += utxo.value;
-    }
+    const total_available = try totalValue(utxos);
 
     // Quick check: do we have enough total?
-    const min_fee = calculateFee(1, params.output_count, params.fee_rate);
-    if (total_available < params.target_amount + min_fee) {
+    const min_fee = try feeFor(1, params.output_count, params.fee_rate);
+    if (total_available < try amountNeeded(params.target_amount, min_fee)) {
         return CoinSelectError.InsufficientFunds;
     }
 
     // Try Branch and Bound first (for exact matches)
-    const bnb_result = branchAndBound(utxos, params);
-    if (bnb_result) |bnb| {
+    if (try branchAndBound(utxos, params)) |bnb| {
         result.* = bnb;
         return;
     }
@@ -185,11 +223,14 @@ pub fn selectCoins(
 /// Attempts to find an exact match (no change) or minimal change.
 /// Based on Bitcoin Core's implementation.
 ///
+/// Only called by selectCoins, after totalValue(utxos) succeeded, so no sum of a subset of
+/// the values can overflow.
+///
 /// Returns null if no solution found within iteration limit.
 fn branchAndBound(
     utxos: []const CoinUtxo,
     params: SelectionParams,
-) ?SelectionResult {
+) CoinSelectError!?SelectionResult {
     if (utxos.len == 0 or utxos.len > SelectionResult.MAX_SELECTION) {
         return null;
     }
@@ -197,7 +238,7 @@ fn branchAndBound(
     // Sort UTXOs by value descending for better pruning
     var sorted_indices: [SelectionResult.MAX_SELECTION]usize = undefined;
     var sorted_values: [SelectionResult.MAX_SELECTION]u64 = undefined;
-    const n = @min(utxos.len, SelectionResult.MAX_SELECTION);
+    const n = utxos.len;
 
     for (0..n) |i| {
         sorted_indices[i] = i;
@@ -218,14 +259,24 @@ fn branchAndBound(
         sorted_values[j] = key_val;
     }
 
+    // remaining_from[i]: the value of sorted UTXOs i..n-1, for the reachability prune.
+    var remaining_from: [SelectionResult.MAX_SELECTION + 1]u64 = undefined;
+    remaining_from[n] = 0;
+    var k: usize = n;
+    while (k > 0) {
+        k -= 1;
+        remaining_from[k] = remaining_from[k + 1] + sorted_values[k];
+    }
+
     // Calculate target with fee (no change output)
-    const target_no_change = params.target_amount + calculateFee(1, params.output_count, params.fee_rate);
+    const target_no_change = try amountNeeded(params.target_amount, try feeFor(1, params.output_count, params.fee_rate));
 
-    // Calculate target with change output
-    const target_with_change = params.target_amount + calculateFee(1, params.output_count + 1, params.fee_rate);
+    // Target with a change output: only an upper pruning bound, so it saturates.
+    const fee_with_change = calculateFee(1, params.output_count +| 1, params.fee_rate) catch std.math.maxInt(u64);
+    const target_with_change = params.target_amount +| fee_with_change;
 
-    // Cost of creating change (output + future spending)
-    const change_cost = CHANGE_OUTPUT_COST * params.fee_rate;
+    // Cost of creating change (output + future spending), saturating like any waste figure.
+    const change_cost = std.math.mul(u64, CHANGE_OUTPUT_COST, params.fee_rate) catch std.math.maxInt(u64);
 
     // Search state
     var current_selection: [SelectionResult.MAX_SELECTION]bool = @splat(false);
@@ -234,8 +285,7 @@ fn branchAndBound(
 
     // Best solution found
     var best_selection: [SelectionResult.MAX_SELECTION]bool = @splat(false);
-    var best_value: u64 = 0;
-    var best_waste: i64 = std.math.maxInt(i64);
+    var best_waste: u64 = std.math.maxInt(u64);
     var found_solution = false;
 
     // Depth-first search with pruning
@@ -266,37 +316,28 @@ fn branchAndBound(
         }
 
         if (depth >= n) {
-            // Leaf node: evaluate solution
-            if (current_value >= target_no_change) {
-                // Calculate fee for this selection
-                const fee = calculateFee(current_input_count, params.output_count, params.fee_rate);
+            // Leaf node: evaluate solution. A fee or need past 64 bits cannot be met here.
+            const fee = feeFor(current_input_count, params.output_count, params.fee_rate) catch null;
+            const needed = if (fee) |f| amountNeeded(params.target_amount, f) catch null else null;
+            if (needed != null and current_value >= target_no_change and current_value >= needed.?) {
+                const excess = current_value - needed.?;
 
-                if (current_value >= params.target_amount + fee) {
-                    const excess = current_value - params.target_amount - fee;
+                // "Waste": excess that becomes either change or fee
+                const waste: u64 = if (excess == 0)
+                    0 // Perfect match - no waste
+                else if (excess < params.min_change)
+                    excess // Excess too small for change, added to the fee
+                else
+                    change_cost; // Create change output
 
-                    // Calculate "waste" - excess that becomes either change or fee
-                    var waste: i64 = undefined;
-                    if (excess == 0) {
-                        // Perfect match - no waste
-                        waste = 0;
-                    } else if (excess < params.min_change) {
-                        // Excess too small for change, add to fee
-                        waste = @intCast(excess);
-                    } else {
-                        // Create change output
-                        waste = @intCast(change_cost);
-                    }
+                if (!found_solution or waste < best_waste) {
+                    best_waste = waste;
+                    best_selection = current_selection;
+                    found_solution = true;
 
-                    if (waste < best_waste) {
-                        best_waste = waste;
-                        best_value = current_value;
-                        best_selection = current_selection;
-                        found_solution = true;
-
-                        // Perfect match? Stop searching
-                        if (waste == 0) {
-                            break;
-                        }
+                    // Perfect match? Stop searching
+                    if (waste == 0) {
+                        break;
                     }
                 }
             }
@@ -304,20 +345,14 @@ fn branchAndBound(
             continue;
         }
 
-        // Calculate remaining value from unprocessed UTXOs
-        var remaining: u64 = 0;
-        for (depth..n) |i| {
-            remaining += sorted_values[i];
-        }
-
         // Pruning: if we can't reach target even with all remaining, backtrack
-        if (current_value + remaining < target_no_change) {
+        if (current_value + remaining_from[depth] < target_no_change) {
             backtrack = true;
             continue;
         }
 
         // Pruning: if current value already exceeds target + max acceptable waste
-        if (current_value > target_with_change + @as(u64, @intCast(@max(0, best_waste)))) {
+        if (current_value > target_with_change +| best_waste) {
             backtrack = true;
             continue;
         }
@@ -351,35 +386,23 @@ fn branchAndBound(
         }
     }
 
-    // Calculate change
-    const final_fee = calculateFee(result.selected_count, params.output_count, params.fee_rate);
-    const excess = result.total_value - params.target_amount - final_fee;
-
-    if (excess < params.min_change) {
-        // Add excess to fee (no change output)
-        result.change_amount = 0;
-        result.is_exact_match = (excess == 0);
-    } else {
-        // Create change output
-        result.change_amount = excess;
-        result.is_exact_match = false;
-    }
-
+    const needed = try amountNeeded(params.target_amount, try feeFor(result.selected_count, params.output_count, params.fee_rate));
+    if (result.total_value < needed) return CoinSelectError.SelectionFailed;
+    settleChange(&result, needed, params.min_change);
     return result;
 }
 
 // =============================================================================
-// Largest-First Algorithm
+// Greedy Algorithms (Largest-First, Smallest-First)
 // =============================================================================
 
-/// Largest-First coin selection
-///
-/// Simple greedy algorithm: select largest UTXOs until target is met.
-/// Always succeeds if sufficient funds are available.
-pub fn largestFirst(
+const GreedyOrder = enum { largest_first, smallest_first };
+
+fn greedySelect(
     utxos: []const CoinUtxo,
     params: SelectionParams,
     result: *SelectionResult,
+    comptime order: GreedyOrder,
 ) CoinSelectError!void {
     if (utxos.len == 0) {
         return CoinSelectError.NoUtxosAvailable;
@@ -388,10 +411,11 @@ pub fn largestFirst(
     if (utxos.len > SelectionResult.MAX_SELECTION) {
         return CoinSelectError.TooManyUtxos;
     }
+    // Refuse a corrupt list up front; every running total below is then bounded by it.
+    _ = try totalValue(utxos);
 
     const n = utxos.len;
 
-    // Sort by value descending
     var sorted_indices: [SelectionResult.MAX_SELECTION]usize = undefined;
     var sorted_values: [SelectionResult.MAX_SELECTION]u64 = undefined;
 
@@ -400,12 +424,15 @@ pub fn largestFirst(
         sorted_values[i] = utxos[i].value;
     }
 
-    // Insertion sort descending
+    // Insertion sort, descending for largest-first and ascending for smallest-first
     for (1..n) |i| {
         const key_idx = sorted_indices[i];
         const key_val = sorted_values[i];
         var j: usize = i;
-        while (j > 0 and sorted_values[j - 1] < key_val) {
+        while (j > 0 and switch (order) {
+            .largest_first => sorted_values[j - 1] < key_val,
+            .smallest_first => sorted_values[j - 1] > key_val,
+        }) {
             sorted_indices[j] = sorted_indices[j - 1];
             sorted_values[j] = sorted_values[j - 1];
             j -= 1;
@@ -417,12 +444,16 @@ pub fn largestFirst(
     // Select UTXOs until we have enough
     result.selected_count = 0;
     result.total_value = 0;
-    result.algorithm_used = .largest_first;
+    result.algorithm_used = switch (order) {
+        .largest_first => .largest_first,
+        .smallest_first => .smallest_first,
+    };
 
     for (0..n) |i| {
-        // Calculate required amount with current selection
-        const fee = calculateFee(result.selected_count + 1, params.output_count + 1, params.fee_rate);
-        const required = params.target_amount + fee + params.min_change;
+        // Enough for the target, the fee with one more input and a change output, and the
+        // minimum change. Saturating: a requirement past 2^64 - 1 only means keep selecting.
+        const fee = calculateFee(result.selected_count + 1, params.output_count +| 1, params.fee_rate) catch std.math.maxInt(u64);
+        const required = params.target_amount +| fee +| params.min_change;
 
         if (result.total_value >= required) {
             break; // We have enough
@@ -435,25 +466,24 @@ pub fn largestFirst(
     }
 
     // Check if we have enough
-    const final_fee = calculateFee(result.selected_count, params.output_count, params.fee_rate);
-    if (result.total_value < params.target_amount + final_fee) {
+    const needed = try amountNeeded(params.target_amount, try feeFor(result.selected_count, params.output_count, params.fee_rate));
+    if (result.total_value < needed) {
         return CoinSelectError.InsufficientFunds;
     }
-
-    // Calculate change
-    const excess = result.total_value - params.target_amount - final_fee;
-    if (excess < params.min_change) {
-        result.change_amount = 0;
-        result.is_exact_match = (excess == 0);
-    } else {
-        result.change_amount = excess;
-        result.is_exact_match = false;
-    }
+    settleChange(result, needed, params.min_change);
 }
 
-// =============================================================================
-// Smallest-First Algorithm
-// =============================================================================
+/// Largest-First coin selection
+///
+/// Simple greedy algorithm: select largest UTXOs until target is met.
+/// Always succeeds if sufficient funds are available.
+pub fn largestFirst(
+    utxos: []const CoinUtxo,
+    params: SelectionParams,
+    result: *SelectionResult,
+) CoinSelectError!void {
+    return greedySelect(utxos, params, result, .largest_first);
+}
 
 /// Smallest-First coin selection
 ///
@@ -464,89 +494,25 @@ pub fn smallestFirst(
     params: SelectionParams,
     result: *SelectionResult,
 ) CoinSelectError!void {
-    if (utxos.len == 0) {
-        return CoinSelectError.NoUtxosAvailable;
-    }
-    // A selection over only the first MAX_SELECTION UTXOs would ignore the rest silently.
-    if (utxos.len > SelectionResult.MAX_SELECTION) {
-        return CoinSelectError.TooManyUtxos;
-    }
-
-    const n = utxos.len;
-
-    // Sort by value ascending
-    var sorted_indices: [SelectionResult.MAX_SELECTION]usize = undefined;
-    var sorted_values: [SelectionResult.MAX_SELECTION]u64 = undefined;
-
-    for (0..n) |i| {
-        sorted_indices[i] = i;
-        sorted_values[i] = utxos[i].value;
-    }
-
-    // Insertion sort ascending
-    for (1..n) |i| {
-        const key_idx = sorted_indices[i];
-        const key_val = sorted_values[i];
-        var j: usize = i;
-        while (j > 0 and sorted_values[j - 1] > key_val) {
-            sorted_indices[j] = sorted_indices[j - 1];
-            sorted_values[j] = sorted_values[j - 1];
-            j -= 1;
-        }
-        sorted_indices[j] = key_idx;
-        sorted_values[j] = key_val;
-    }
-
-    // Select UTXOs until we have enough
-    result.selected_count = 0;
-    result.total_value = 0;
-    result.algorithm_used = .smallest_first;
-
-    for (0..n) |i| {
-        const fee = calculateFee(result.selected_count + 1, params.output_count + 1, params.fee_rate);
-        const required = params.target_amount + fee + params.min_change;
-
-        if (result.total_value >= required) {
-            break;
-        }
-
-        result.selected_indices[result.selected_count] = utxos[sorted_indices[i]].original_index;
-        result.total_value += sorted_values[i];
-        result.selected_count += 1;
-    }
-
-    const final_fee = calculateFee(result.selected_count, params.output_count, params.fee_rate);
-    if (result.total_value < params.target_amount + final_fee) {
-        return CoinSelectError.InsufficientFunds;
-    }
-
-    const excess = result.total_value - params.target_amount - final_fee;
-    if (excess < params.min_change) {
-        result.change_amount = 0;
-        result.is_exact_match = (excess == 0);
-    } else {
-        result.change_amount = excess;
-        result.is_exact_match = false;
-    }
+    return greedySelect(utxos, params, result, .smallest_first);
 }
 
 // =============================================================================
 // Utility Functions
 // =============================================================================
 
-/// Calculate transaction fee in satoshis
+/// Calculate transaction fee in satoshis; error.Overflow if it does not fit in a u64.
 ///
 /// Parameters:
 /// - input_count: Number of inputs
 /// - output_count: Number of outputs
 /// - fee_rate: Satoshis per virtual byte
-pub fn calculateFee(input_count: usize, output_count: usize, fee_rate: u64) u64 {
-    const vsize = estimateVsize(input_count, output_count);
-    return vsize * fee_rate;
+pub fn calculateFee(input_count: usize, output_count: usize, fee_rate: u64) error{Overflow}!u64 {
+    return std.math.mul(u64, try estimateVsize(input_count, output_count), fee_rate);
 }
 
-/// Estimate transaction virtual size
-pub fn estimateVsize(input_count: usize, output_count: usize) u64 {
+/// Estimate transaction virtual size; error.Overflow if it does not fit in a u64.
+pub fn estimateVsize(input_count: usize, output_count: usize) error{Overflow}!u64 {
     // P2WPKH transaction structure:
     // - 4 bytes version
     // - 1 byte marker (0x00)
@@ -557,9 +523,9 @@ pub fn estimateVsize(input_count: usize, output_count: usize) u64 {
     // - outputs: 31 bytes each for P2WPKH
     // - 4 bytes locktime
     const base: u64 = TX_OVERHEAD_VSIZE;
-    const inputs: u64 = @as(u64, @intCast(input_count)) * INPUT_VSIZE_P2WPKH;
-    const outputs: u64 = @as(u64, @intCast(output_count)) * OUTPUT_VSIZE_P2WPKH;
-    return base + inputs + outputs;
+    const inputs = try std.math.mul(u64, input_count, INPUT_VSIZE_P2WPKH);
+    const outputs = try std.math.mul(u64, output_count, OUTPUT_VSIZE_P2WPKH);
+    return std.math.add(u64, try std.math.add(u64, base, inputs), outputs);
 }
 
 /// Check if a value is above dust threshold
@@ -567,14 +533,19 @@ pub fn isAboveDust(value: u64) bool {
     return value >= tx_builder.DUST_LIMIT;
 }
 
-/// Calculate effective value of a UTXO at given fee rate
-/// (value minus cost to spend it)
+/// Calculate effective value of a UTXO at given fee rate (value minus cost to spend it),
+/// clamped to i64: a value above maxInt(i64) or a spend cost that sinks it below
+/// minInt(i64) saturates instead of wrapping.
 pub fn effectiveValue(utxo: CoinUtxo, fee_rate: u64) i64 {
-    const spend_cost = @as(u64, @intCast(utxo.input_vsize)) * fee_rate;
-    if (utxo.value < spend_cost) {
-        return -@as(i64, @intCast(spend_cost - utxo.value));
+    // (2^64 - 1)^2 fits in a u128, so the cost is exact.
+    const spend_cost = @as(u128, utxo.input_vsize) * fee_rate;
+    const value: u128 = utxo.value;
+    if (value >= spend_cost) {
+        return std.math.cast(i64, value - spend_cost) orelse std.math.maxInt(i64);
     }
-    return @as(i64, @intCast(utxo.value - spend_cost));
+    const deficit = spend_cost - value;
+    if (deficit >= @as(u128, 1) << 63) return std.math.minInt(i64);
+    return -@as(i64, @intCast(deficit));
 }
 
 // =============================================================================
@@ -584,7 +555,7 @@ pub fn effectiveValue(utxo: CoinUtxo, fee_rate: u64) i64 {
 test "calculate fee" {
     // 1 input, 1 output at 10 sat/vbyte
     // vsize = 11 (overhead) + 68 (input) + 31 (output) = 110
-    const fee = calculateFee(1, 1, 10);
+    const fee = try calculateFee(1, 1, 10);
     try std.testing.expectEqual(@as(u64, 1100), fee);
 }
 
@@ -648,7 +619,7 @@ test "branch and bound exact match" {
     // Target 48900 + 1100 fee = 50000 exactly
     const params = SelectionParams.default(48900, 10);
 
-    const maybe_result = branchAndBound(&utxos, params);
+    const maybe_result = try branchAndBound(&utxos, params);
     try std.testing.expect(maybe_result != null);
 
     const result = maybe_result.?;
@@ -667,6 +638,45 @@ test "selection over more than MAX_SELECTION UTXOs is refused, not truncated" {
     try std.testing.expectError(CoinSelectError.TooManyUtxos, largestFirst(&utxos, params, &result));
     try std.testing.expectError(CoinSelectError.TooManyUtxos, smallestFirst(&utxos, params, &result));
     try std.testing.expectError(CoinSelectError.TooManyUtxos, selectCoins(&utxos, params, &result));
+}
+
+test "amounts, fees and values that overflow 64 bits are refused or saturated, never wrapped" {
+    const max = std.math.maxInt(u64);
+    var result: SelectionResult = undefined;
+
+    // The report's PoC 5: target u64::MAX - 100 against one 10 000-sat UTXO wrapped
+    // target + fee, selected the UTXO and reported change 9001.
+    var one = [_]CoinUtxo{CoinUtxo.p2wpkh(10_000, 0)};
+    const huge_target = SelectionParams.default(max - 100, 10);
+    try std.testing.expectError(error.InsufficientFunds, selectCoins(&one, huge_target, &result));
+    try std.testing.expectError(error.InsufficientFunds, largestFirst(&one, huge_target, &result));
+    try std.testing.expectError(error.InsufficientFunds, smallestFirst(&one, huge_target, &result));
+
+    // A fee rate whose fee does not fit in 64 bits can never be paid.
+    var rich = [_]CoinUtxo{CoinUtxo.p2wpkh(max - 1, 0)};
+    const huge_rate = SelectionParams.default(10_000, max / 50);
+    try std.testing.expectError(error.InsufficientFunds, selectCoins(&rich, huge_rate, &result));
+    try std.testing.expectError(error.InsufficientFunds, largestFirst(&rich, huge_rate, &result));
+    try std.testing.expectError(error.InsufficientFunds, smallestFirst(&rich, huge_rate, &result));
+
+    // UTXO values from an explorer that sum past 64 bits are a corrupt list, not 0 sats.
+    var two = [_]CoinUtxo{ CoinUtxo.p2wpkh(1 << 63, 0), CoinUtxo.p2wpkh(1 << 63, 1) };
+    const small = SelectionParams.default(1_000, 1);
+    try std.testing.expectError(error.AmountOutOfRange, selectCoins(&two, small, &result));
+    try std.testing.expectError(error.AmountOutOfRange, largestFirst(&two, small, &result));
+    try std.testing.expectError(error.AmountOutOfRange, smallestFirst(&two, small, &result));
+
+    // Effective value saturates at the ends of i64.
+    try std.testing.expectEqual(@as(i64, std.math.maxInt(i64)), effectiveValue(CoinUtxo.p2wpkh(max, 0), 0));
+    try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), effectiveValue(CoinUtxo.p2wpkh(0, 0), max));
+    try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), effectiveValue(CoinUtxo.p2wpkh(0, 0), (1 << 63) / INPUT_VSIZE_P2WPKH + 1));
+}
+
+test "calculateFee and estimateVsize report overflow" {
+    try std.testing.expectError(error.Overflow, calculateFee(1, 1, std.math.maxInt(u64)));
+    try std.testing.expectError(error.Overflow, estimateVsize(std.math.maxInt(usize), 1));
+    try std.testing.expectError(error.Overflow, estimateVsize(1, std.math.maxInt(usize)));
+    try std.testing.expectEqual(@as(u64, 110), try estimateVsize(1, 1));
 }
 
 test "effective value" {

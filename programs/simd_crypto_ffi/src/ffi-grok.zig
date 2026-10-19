@@ -3276,6 +3276,8 @@ pub const CoinSelectResult = enum(c_int) {
     too_many_utxos = -4,
     selection_failed = -5,
     null_pointer = -6,
+    /// The UTXO values sum past 2^64 - 1 (a corrupt or hostile UTXO list).
+    amount_out_of_range = -7,
 };
 
 /// Select UTXOs to fund a transaction
@@ -3341,6 +3343,7 @@ export fn quantum_coin_select(
             error.TargetBelowDust => @intFromEnum(CoinSelectResult.target_below_dust),
             error.TooManyUtxos => @intFromEnum(CoinSelectResult.too_many_utxos),
             error.SelectionFailed => @intFromEnum(CoinSelectResult.selection_failed),
+            error.AmountOutOfRange => @intFromEnum(CoinSelectResult.amount_out_of_range),
         };
     };
 
@@ -3402,6 +3405,7 @@ export fn quantum_coin_select_largest_first(
             error.TargetBelowDust => @intFromEnum(CoinSelectResult.target_below_dust),
             error.TooManyUtxos => @intFromEnum(CoinSelectResult.too_many_utxos),
             error.SelectionFailed => @intFromEnum(CoinSelectResult.selection_failed),
+            error.AmountOutOfRange => @intFromEnum(CoinSelectResult.amount_out_of_range),
         };
     };
 
@@ -3462,6 +3466,7 @@ export fn quantum_coin_select_smallest_first(
             error.TargetBelowDust => @intFromEnum(CoinSelectResult.target_below_dust),
             error.TooManyUtxos => @intFromEnum(CoinSelectResult.too_many_utxos),
             error.SelectionFailed => @intFromEnum(CoinSelectResult.selection_failed),
+            error.AmountOutOfRange => @intFromEnum(CoinSelectResult.amount_out_of_range),
         };
     };
 
@@ -3477,25 +3482,26 @@ export fn quantum_coin_select_smallest_first(
     return @intFromEnum(CoinSelectResult.success);
 }
 
-/// Calculate transaction fee in satoshis
+/// Calculate transaction fee in satoshis. Saturates at UINT64_MAX when the fee does not
+/// fit in 64 bits, which no balance can pay.
 export fn quantum_calculate_fee(
     input_count: usize,
     output_count: usize,
     fee_rate: u64,
 ) u64 {
-    return coin_select.calculateFee(input_count, output_count, fee_rate);
+    return coin_select.calculateFee(input_count, output_count, fee_rate) catch std.math.maxInt(u64);
 }
 
-/// Estimate transaction virtual size in vbytes
+/// Estimate transaction virtual size in vbytes. Saturates at UINT64_MAX.
 export fn quantum_estimate_tx_vsize(
     input_count: usize,
     output_count: usize,
 ) u64 {
-    return coin_select.estimateVsize(input_count, output_count);
+    return coin_select.estimateVsize(input_count, output_count) catch std.math.maxInt(u64);
 }
 
 /// Calculate effective value of a UTXO at given fee rate
-/// Returns value minus cost to spend it (can be negative)
+/// Returns value minus cost to spend it (can be negative), clamped to INT64_MIN..INT64_MAX
 export fn quantum_effective_value(
     utxo_value: u64,
     fee_rate: u64,
@@ -3600,6 +3606,50 @@ test "every coin-select export refuses more than 256 UTXOs before copying any of
     // Exactly 256 is the limit and still selects.
     try std.testing.expectEqual(@as(c_int, 0), quantum_coin_select_largest_first(&utxos, 256, &params, &result));
     try std.testing.expectEqual(@as(c_int, 0), quantum_coin_select_smallest_first(&utxos, 256, &params, &result));
+}
+
+test "coin-select exports refuse a target or fee past 64 bits instead of wrapping (PoC 5)" {
+    const max = std.math.maxInt(u64);
+    const utxos = [_]CCoinUtxo{.{ .value = 10_000, .original_index = 0, ._reserved = 0 }};
+    const params = CSelectionParams{
+        .target_amount = max - 100,
+        .fee_rate = 10,
+        .output_count = 1,
+        .min_change = 546,
+        .prefer_no_change = 1,
+        ._reserved = @splat(0),
+    };
+    var result: CSelectionResult = undefined;
+    const insufficient = @intFromEnum(CoinSelectResult.insufficient_funds);
+    try std.testing.expectEqual(insufficient, quantum_coin_select(&utxos, 1, &params, &result));
+    try std.testing.expectEqual(insufficient, quantum_coin_select_largest_first(&utxos, 1, &params, &result));
+    try std.testing.expectEqual(insufficient, quantum_coin_select_smallest_first(&utxos, 1, &params, &result));
+
+    // The fee, size and effective-value helpers saturate rather than wrap.
+    try std.testing.expectEqual(max, quantum_calculate_fee(1, 1, max));
+    try std.testing.expectEqual(max, quantum_estimate_tx_vsize(std.math.maxInt(usize), 1));
+    try std.testing.expectEqual(@as(i64, std.math.maxInt(i64)), quantum_effective_value(max, 0));
+    try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), quantum_effective_value(0, max));
+}
+
+test "coin-select exports report amount_out_of_range for UTXO values summing past 64 bits" {
+    const utxos = [_]CCoinUtxo{
+        .{ .value = 1 << 63, .original_index = 0, ._reserved = 0 },
+        .{ .value = 1 << 63, .original_index = 1, ._reserved = 0 },
+    };
+    const params = CSelectionParams{
+        .target_amount = 1_000,
+        .fee_rate = 1,
+        .output_count = 1,
+        .min_change = 546,
+        .prefer_no_change = 1,
+        ._reserved = @splat(0),
+    };
+    var result: CSelectionResult = undefined;
+    const out_of_range = @intFromEnum(CoinSelectResult.amount_out_of_range);
+    try std.testing.expectEqual(out_of_range, quantum_coin_select(&utxos, 2, &params, &result));
+    try std.testing.expectEqual(out_of_range, quantum_coin_select_largest_first(&utxos, 2, &params, &result));
+    try std.testing.expectEqual(out_of_range, quantum_coin_select_smallest_first(&utxos, 2, &params, &result));
 }
 
 test "calculate fee FFI" {
