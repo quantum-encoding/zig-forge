@@ -377,7 +377,7 @@ pub const ExtendedKey = struct {
         } else {
             // Public key derivation: point(il) + parent_public_key
             child.private_key = @splat(0);
-            child.public_key = addPublicKeys(&self.public_key, il) catch return Bip32Error.PointAtInfinity;
+            child.public_key = try addPublicKeys(&self.public_key, il);
         }
 
         return child;
@@ -525,6 +525,8 @@ pub fn encodeP2pkhAddress(public_key: *const [PUBLIC_KEY_LENGTH]u8, mainnet: boo
 // ============================================================================
 
 const BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+/// BIP-173: a Bech32 string is at most 90 characters.
+const BECH32_MAX_LENGTH = 90;
 const BECH32M_CONST: u32 = 0x2bc830a3;
 const BECH32_CONST: u32 = 1;
 
@@ -556,9 +558,10 @@ fn bech32HrpExpand(hrp: []const u8, out: []u5) void {
     }
 }
 
-/// Create Bech32 checksum
+/// Create Bech32 checksum. `hrp.len + 1 + data.len + 6` must be at most 90, which bounds the
+/// expanded HRP plus data plus checksum below 2 * 90 values.
 fn bech32CreateChecksum(hrp: []const u8, data: []const u5, is_bech32m: bool) [6]u5 {
-    var values: [128]u5 = undefined;
+    var values: [2 * BECH32_MAX_LENGTH]u5 = undefined;
     const hrp_len = hrp.len * 2 + 1;
 
     bech32HrpExpand(hrp, values[0..hrp_len]);
@@ -597,19 +600,48 @@ fn convertBits8to5(input: []const u8, output: []u5) usize {
     return out_idx;
 }
 
-/// Encode a SegWit address (P2WPKH or P2WSH)
+pub const Bech32Error = error{
+    /// Witness version above 16 (BIP-141).
+    InvalidWitnessVersion,
+    /// A witness program outside 2..40 bytes, or a version-0 program that is not 20 or
+    /// 32 bytes (BIP-141).
+    InvalidProgramLength,
+    /// An empty HRP, or one with a character outside 33..126 or an uppercase letter:
+    /// BIP-173 encoders emit lowercase only.
+    InvalidHrp,
+    /// The address would be longer than BIP-173's 90 characters.
+    AddressTooLong,
+    /// `output` is shorter than the address.
+    BufferTooSmall,
+};
+
+/// Encode a SegWit address (P2WPKH, P2WSH, P2TR or any v0-v16 program) into `output` and
+/// return its length. Refuses, writing nothing, whatever BIP-141/173 forbid and an `output`
+/// shorter than the address.
 pub fn encodeBech32Address(
     witness_program: []const u8,
     witness_version: u8,
     hrp: []const u8,
     output: []u8,
-) usize {
-    // Convert witness program to 5-bit groups
-    var data5: [65]u5 = undefined; // Max: 1 (version) + 52 (32 bytes * 8/5 ceil) + padding
-    data5[0] = @truncate(witness_version);
+) Bech32Error!usize {
+    if (witness_version > 16) return Bech32Error.InvalidWitnessVersion;
+    if (witness_program.len < 2 or witness_program.len > 40) return Bech32Error.InvalidProgramLength;
+    if (witness_version == 0 and witness_program.len != 20 and witness_program.len != 32) {
+        return Bech32Error.InvalidProgramLength;
+    }
+    if (hrp.len == 0) return Bech32Error.InvalidHrp;
+    for (hrp) |c| {
+        if (c < 33 or c > 126 or (c >= 'A' and c <= 'Z')) return Bech32Error.InvalidHrp;
+    }
+    // Version, then the program in 5-bit groups (40 bytes -> 64), then the 6-group checksum.
+    const data_len = 1 + (witness_program.len * 8 + 4) / 5;
+    const total = hrp.len + 1 + data_len + 6;
+    if (total > BECH32_MAX_LENGTH) return Bech32Error.AddressTooLong;
+    if (output.len < total) return Bech32Error.BufferTooSmall;
 
-    const converted_len = convertBits8to5(witness_program, data5[1..]);
-    const data_len = 1 + converted_len;
+    var data5: [1 + 64]u5 = undefined;
+    data5[0] = @truncate(witness_version);
+    std.debug.assert(convertBits8to5(witness_program, data5[1..]) == data_len - 1);
 
     // Use bech32m for witness version 1+ (Taproot), bech32 for version 0
     const is_bech32m = witness_version > 0;
@@ -638,15 +670,17 @@ pub fn encodeBech32Address(
         out_idx += 1;
     }
 
+    std.debug.assert(out_idx == total);
     return out_idx;
 }
 
-/// Generate P2WPKH address (bc1q...)
+/// Generate P2WPKH address (bc1q...). The key is hashed as given; callers holding an
+/// untrusted key check it is a curve point first (Secp256k1.fromSec1).
 pub fn generateP2wpkhAddress(
     public_key: *const [PUBLIC_KEY_LENGTH]u8,
     mainnet: bool,
     output: []u8,
-) usize {
+) Bech32Error!usize {
     const program = p2wpkhProgram(public_key);
     const hrp = if (mainnet) "bc" else "tb";
     return encodeBech32Address(&program, WITNESS_VERSION_0, hrp, output);
@@ -699,17 +733,17 @@ fn addPrivateKeys(a: *const [32]u8, b: *const [32]u8) ![32]u8 {
     return result.toBytes(.big);
 }
 
-/// Add public key point to point derived from scalar
-fn addPublicKeys(public_key: *const [33]u8, scalar_bytes: *const [32]u8) ![33]u8 {
-    // Parse the existing public key point
-    const point_a = Secp256k1.fromSec1(public_key) catch return error.InvalidKey;
+/// Public child key: point(scalar) + public_key (BIP-32 CKDpub). InvalidKey when the parent
+/// key is not a curve point or the scalar is not in [1, n-1]; PointAtInfinity when the sum is
+/// the identity, which has no SEC1 encoding (toCompressedSec1 would return off-curve bytes).
+fn addPublicKeys(public_key: *const [33]u8, scalar_bytes: *const [32]u8) Bip32Error![33]u8 {
+    const point_a = Secp256k1.fromSec1(public_key) catch return Bip32Error.InvalidKey;
 
-    // Derive point from scalar (scalar * G)
-    const scalar = Secp256k1.scalar.Scalar.fromBytes(scalar_bytes.*, .big) catch return error.InvalidKey;
-    const point_b = Secp256k1.basePoint.mul(scalar.toBytes(.big), .big) catch return error.InvalidKey;
+    const scalar = Secp256k1.scalar.Scalar.fromBytes(scalar_bytes.*, .big) catch return Bip32Error.InvalidKey;
+    const point_b = Secp256k1.basePoint.mul(scalar.toBytes(.big), .big) catch return Bip32Error.InvalidKey;
 
-    // Add points
     const result = point_a.add(point_b);
+    result.rejectIdentity() catch return Bip32Error.PointAtInfinity;
     return result.toCompressedSec1();
 }
 
@@ -871,6 +905,49 @@ test "BIP32 public key derivation fails for hardened" {
     try std.testing.expectError(Bip32Error.HardenedPublicDerivation, result);
 }
 
+test "addPublicKeys refuses a sum that is the point at infinity" {
+    // -G (the generator with the odd-y prefix) plus 1*G is the identity, which has no SEC1
+    // encoding; toCompressedSec1 used to return an off-curve 03 00..00 for it.
+    var neg_g: [33]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&neg_g, "0379be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+    const one: [32]u8 = @as([31]u8, @splat(0)) ++ [_]u8{1};
+    try std.testing.expectError(error.PointAtInfinity, addPublicKeys(&neg_g, &one));
+    // -G + 2G = G.
+    const two: [32]u8 = @as([31]u8, @splat(0)) ++ [_]u8{2};
+    var g: [33]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&g, "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+    try std.testing.expectEqualSlices(u8, &g, &(try addPublicKeys(&neg_g, &two)));
+}
+
+test "encodeBech32Address refuses what BIP-141/173 forbid instead of writing past its buffers" {
+    var out: [100]u8 = undefined;
+    const prog: [41]u8 = @splat(0x75);
+    // BIP-0350's invalid-address rationales, from the encoder's side.
+    try std.testing.expectError(error.InvalidProgramLength, encodeBech32Address(prog[0..41], 1, "bc", &out));
+    try std.testing.expectError(error.InvalidProgramLength, encodeBech32Address(prog[0..1], 1, "bc", &out));
+    try std.testing.expectError(error.InvalidProgramLength, encodeBech32Address(prog[0..16], 0, "bc", &out));
+    try std.testing.expectError(error.InvalidProgramLength, encodeBech32Address(prog[0..21], 0, "bc", &out));
+    try std.testing.expectError(error.InvalidWitnessVersion, encodeBech32Address(prog[0..20], 17, "bc", &out));
+    try std.testing.expectError(error.InvalidHrp, encodeBech32Address(prog[0..20], 0, "", &out));
+    try std.testing.expectError(error.InvalidHrp, encodeBech32Address(prog[0..20], 0, "BC", &out));
+    try std.testing.expectError(error.InvalidHrp, encodeBech32Address(prog[0..20], 0, "b c", &out));
+    const hrp84: [84]u8 = @splat('a');
+    try std.testing.expectError(error.AddressTooLong, encodeBech32Address(prog[0..20], 0, &hrp84, &out));
+    try std.testing.expectError(error.AddressTooLong, encodeBech32Address(prog[0..40], 16, hrp84[0..19], &out));
+
+    // BIP-173's P2WPKH example needs 42 bytes: 41 is refused with nothing written past it.
+    var buf: [64]u8 = @splat(0xAA);
+    var g_hash: [20]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&g_hash, "751e76e8199196d454941c45d1b3a323f1433bd6");
+    try std.testing.expectError(error.BufferTooSmall, encodeBech32Address(&g_hash, 0, "bc", buf[0..41]));
+    for (buf) |b| try std.testing.expectEqual(@as(u8, 0xAA), b);
+    const len = try encodeBech32Address(&g_hash, 0, "bc", buf[0..42]);
+    try std.testing.expectEqualStrings("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", buf[0..len]);
+
+    // The longest legal address: a 40-byte v16 program under an 18-character HRP is 90.
+    try std.testing.expectEqual(@as(usize, 90), try encodeBech32Address(prog[0..40], 16, hrp84[0..18], &out));
+}
+
 test "Hash160" {
     // Test vector: SHA256(SHA256(0x02...pubkey)) then RIPEMD160
     const test_data = [_]u8{0x02} ++ @as([32]u8, @splat(0x00));
@@ -883,7 +960,7 @@ test "Bech32 address generation" {
     const test_pubkey = [_]u8{0x02} ++ @as([32]u8, @splat(0x01));
 
     var output: [90]u8 = undefined;
-    const len = generateP2wpkhAddress(&test_pubkey, true, &output);
+    const len = try generateP2wpkhAddress(&test_pubkey, true, &output);
 
     // Mainnet P2WPKH addresses start with "bc1q"
     try std.testing.expect(std.mem.startsWith(u8, output[0..len], "bc1q"));
@@ -895,7 +972,7 @@ test "Bech32 testnet address" {
     const test_pubkey = [_]u8{0x02} ++ @as([32]u8, @splat(0x02));
 
     var output: [90]u8 = undefined;
-    const len = generateP2wpkhAddress(&test_pubkey, false, &output);
+    const len = try generateP2wpkhAddress(&test_pubkey, false, &output);
 
     // Testnet P2WPKH addresses start with "tb1q"
     try std.testing.expect(std.mem.startsWith(u8, output[0..len], "tb1q"));
@@ -913,7 +990,7 @@ test "Full BIP44 derivation and address" {
     const account = try master.derivePath("m/84'/0'/0'/0/0");
 
     var output: [90]u8 = undefined;
-    const len = generateP2wpkhAddress(&account.public_key, true, &output);
+    const len = try generateP2wpkhAddress(&account.public_key, true, &output);
 
     try std.testing.expect(std.mem.startsWith(u8, output[0..len], "bc1q"));
 }
@@ -1116,18 +1193,18 @@ test "BIP84 official vectors: first receive/change addresses" {
     try std.testing.expectEqualSlices(u8, &expected_pubkey, &key0.public_key);
 
     var addr0: [90]u8 = undefined;
-    const len0 = generateP2wpkhAddress(&key0.public_key, true, &addr0);
+    const len0 = try generateP2wpkhAddress(&key0.public_key, true, &addr0);
     try std.testing.expectEqualSlices(u8, "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", addr0[0..len0]);
 
     // Second receiving address: m/84'/0'/0'/0/1
     const key1 = try master.derivePath("m/84'/0'/0'/0/1");
     var addr1: [90]u8 = undefined;
-    const len1 = generateP2wpkhAddress(&key1.public_key, true, &addr1);
+    const len1 = try generateP2wpkhAddress(&key1.public_key, true, &addr1);
     try std.testing.expectEqualSlices(u8, "bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g", addr1[0..len1]);
 
     // First change address: m/84'/0'/0'/1/0
     const key_change = try master.derivePath("m/84'/0'/0'/1/0");
     var addr_change: [90]u8 = undefined;
-    const len_change = generateP2wpkhAddress(&key_change.public_key, true, &addr_change);
+    const len_change = try generateP2wpkhAddress(&key_change.public_key, true, &addr_change);
     try std.testing.expectEqualSlices(u8, "bc1q8c6fshw2dlwun7ekn9qwf37cu2rn755upcp6el", addr_change[0..len_change]);
 }

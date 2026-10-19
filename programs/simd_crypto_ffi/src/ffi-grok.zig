@@ -2153,10 +2153,20 @@ export fn quantum_bip32_serialize(
     return 82;
 }
 
+/// A caller's 33 bytes as a compressed public key, or null unless they encode a point on
+/// secp256k1 (02/03 prefix, canonical x, x^3 + 7 a square). Hashing anything else gives a
+/// well-formed address no private key can spend from.
+fn compressedPublicKey(public_key: [*c]const u8) ?[33]u8 {
+    const key = public_key[0..33].*;
+    _ = crypto.ecc.Secp256k1.fromSec1(&key) catch return null;
+    return key;
+}
+
 /// Generate P2WPKH (native SegWit) address from public key
 ///
 /// Parameters:
-/// - public_key: 33-byte compressed public key
+/// - public_key: 33-byte compressed public key; anything that is not a secp256k1 point is
+///   refused with invalid_key (-2)
 /// - mainnet: 1 for mainnet (bc1q...), 0 for testnet (tb1q...)
 /// - out_address: Output buffer for address string (at least 90 bytes)
 ///
@@ -2170,11 +2180,11 @@ export fn quantum_bip32_p2wpkh_address(
         return @intFromEnum(Bip32Result.null_pointer);
     }
 
-    var pubkey_arr: [33]u8 = undefined;
-    @memcpy(&pubkey_arr, public_key[0..33]);
+    const pubkey_arr = compressedPublicKey(public_key) orelse return @intFromEnum(Bip32Result.invalid_key);
 
     var output: [90]u8 = undefined;
-    const len = bip32.generateP2wpkhAddress(&pubkey_arr, mainnet != 0, &output);
+    const len = bip32.generateP2wpkhAddress(&pubkey_arr, mainnet != 0, &output) catch
+        return @intFromEnum(Bip32Result.buffer_too_small);
 
     @memcpy(out_address[0..len], output[0..len]);
     return @intCast(len);
@@ -2183,7 +2193,8 @@ export fn quantum_bip32_p2wpkh_address(
 /// Get Hash160 of a public key (for P2PKH/P2WPKH addresses)
 ///
 /// Parameters:
-/// - public_key: 33-byte compressed public key
+/// - public_key: 33-byte compressed public key; anything that is not a secp256k1 point is
+///   refused with invalid_key (-2)
 /// - out_hash: Output buffer for 20-byte hash
 ///
 /// Returns: 0 on success
@@ -2195,8 +2206,7 @@ export fn quantum_bip32_hash160(
         return @intFromEnum(Bip32Result.null_pointer);
     }
 
-    var pubkey_arr: [33]u8 = undefined;
-    @memcpy(&pubkey_arr, public_key[0..33]);
+    const pubkey_arr = compressedPublicKey(public_key) orelse return @intFromEnum(Bip32Result.invalid_key);
 
     const hash = bip32.hash160(&pubkey_arr);
     @memcpy(out_hash[0..20], &hash);
@@ -2261,6 +2271,29 @@ fn convertFromCKey(c_key: *const CExtendedKey) bip32.ExtendedKey {
         .child_index = c_key.child_index,
         .is_private = c_key.is_private != 0,
     };
+}
+
+test "quantum_bip32_p2wpkh_address and quantum_bip32_hash160 refuse a public key that is not a curve point" {
+    var addr: [90]u8 = undefined;
+    var h160: [20]u8 = undefined;
+    const invalid_key = @intFromEnum(Bip32Result.invalid_key);
+    // The report's PoC 2c: the all-zero "key" produced bc1q988uvdmz2kncg50wkjcjnmvw4nl69lh0ynpvgh,
+    // an address nobody holds a key for. Also: x = 0 (not on secp256k1), the uncompressed
+    // prefix on 33 bytes, and x = p (non-canonical).
+    var bad: [4][33]u8 = .{ @splat(0), @splat(0), @splat(0), @splat(0xff) };
+    bad[1][0] = 0x02;
+    bad[2] = [_]u8{0x04} ++ @as([32]u8, @splat(0x11));
+    bad[3][0] = 0x02;
+    for (&bad) |*pk| {
+        try std.testing.expectEqual(invalid_key, quantum_bip32_p2wpkh_address(pk, 1, &addr));
+        try std.testing.expectEqual(invalid_key, quantum_bip32_hash160(pk, &h160));
+    }
+    // The generator's compressed key gives BIP-173's example address.
+    var g: [33]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&g, "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+    const len = quantum_bip32_p2wpkh_address(&g, 1, &addr);
+    try std.testing.expectEqualStrings("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", addr[0..@intCast(len)]);
+    try std.testing.expectEqual(@as(c_int, 0), quantum_bip32_hash160(&g, &h160));
 }
 
 test "quantum_bip32_derive_path refuses m/2147483648 and quantum_bip32_derive_child refuses depth 255" {

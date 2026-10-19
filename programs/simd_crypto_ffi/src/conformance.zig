@@ -405,7 +405,7 @@ test "BIP-0350 valid segwit addresses (v0 bech32, v1-v16 bech32m): scriptPubKey 
         const addr = std.ascii.lowerString(&lower, r.str("address"));
         const sep = std.mem.lastIndexOfScalar(u8, addr, '1').?;
         var out: [100]u8 = undefined;
-        const len = bip32.encodeBech32Address(script[2..], version, addr[0..sep], &out);
+        const len = try bip32.encodeBech32Address(script[2..], version, addr[0..sep], &out);
         try testing.expectEqualStrings(addr, out[0..len]);
         n += 1;
     }
