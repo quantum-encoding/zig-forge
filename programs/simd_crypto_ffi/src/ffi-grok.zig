@@ -2697,14 +2697,15 @@ export fn quantum_tx_sign(
     return @intFromEnum(TxResult.success);
 }
 
-/// Compute BIP143 sighash for a specific input (for external signing)
-///
-/// Use this when you need to sign with an external device (e.g., hardware wallet).
-/// The returned hash should be signed with ECDSA over secp256k1.
+/// Compute the BIP143 SIGHASH_ALL digest for one input, to be signed separately with ECDSA
+/// over secp256k1.
 ///
 /// Parameters:
 /// - input_index: Index of the input to compute sighash for
-/// - private_key: Private key (used only to derive pubkey for scriptCode)
+/// - private_key: The key that owns the input. The digest does not depend on it (the
+///   scriptCode comes from the input's pubkey_hash), but a key whose hash160(pubkey) is
+///   not that pubkey_hash is refused with invalid_private_key: its signature could never
+///   spend the input.
 /// - sighash_out: Output buffer for 32-byte sighash
 ///
 /// Returns: 0 on success, negative error code on failure
