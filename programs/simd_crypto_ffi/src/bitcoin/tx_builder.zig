@@ -659,7 +659,9 @@ pub fn signHash(hash: *const [32]u8, private_key: *const [32]u8) TxBuilderError!
             drbg.reseed();
             continue;
         }
-        const point = Secp256k1.basePoint.mul(k.toBytes(.big), .big) catch return TxBuilderError.SigningFailed;
+        var k_be = k.toBytes(.big);
+        defer crypto.secureZero(u8, &k_be);
+        const point = Secp256k1.basePoint.mul(k_be, .big) catch return TxBuilderError.SigningFailed;
         const r = Scalar.fromBytes48(zero16 ++ point.affineCoordinates().x.toBytes(.big), .big);
         const s = k.invert().mul(z.add(r.mul(d)));
         if (r.isZero() or s.isZero()) {
@@ -684,6 +686,7 @@ const Rfc6979 = struct {
         var self = Rfc6979{ .v = @splat(0x01), .k = @splat(0x00) };
         for ([_]u8{ 0x00, 0x01 }) |sep| {
             var mac = Hmac.init(&self.k);
+            defer crypto.secureZero(u8, std.mem.asBytes(&mac));
             mac.update(&self.v);
             mac.update(&[_]u8{sep});
             mac.update(x);
@@ -703,6 +706,7 @@ const Rfc6979 = struct {
     /// Step h.3: K = HMAC_K(V || 0x00); V = HMAC_K(V).
     fn reseed(self: *Rfc6979) void {
         var mac = Hmac.init(&self.k);
+        defer crypto.secureZero(u8, std.mem.asBytes(&mac));
         mac.update(&self.v);
         mac.update(&[_]u8{0x00});
         mac.final(&self.k);
@@ -720,11 +724,13 @@ pub fn derivePublicKey(private_key: *const [32]u8) TxBuilderError![33]u8 {
     // Use ECDSA to derive public key
     const Ecdsa = crypto.sign.ecdsa.Ecdsa(Secp256k1, Sha256);
 
-    const secret_key = Ecdsa.SecretKey.fromBytes(private_key.*) catch
+    var secret_key = Ecdsa.SecretKey.fromBytes(private_key.*) catch
         return TxBuilderError.InvalidPrivateKey;
+    defer crypto.secureZero(u8, std.mem.asBytes(&secret_key));
 
-    const key_pair = Ecdsa.KeyPair.fromSecretKey(secret_key) catch
+    var key_pair = Ecdsa.KeyPair.fromSecretKey(secret_key) catch
         return TxBuilderError.InvalidPrivateKey;
+    defer crypto.secureZero(u8, std.mem.asBytes(&key_pair.secret_key));
 
     return key_pair.public_key.toCompressedSec1();
 }

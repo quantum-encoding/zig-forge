@@ -2173,7 +2173,9 @@ export fn quantum_bip32_serialize(
 
     var internal_key = convertFromCKey(key);
     defer internal_key.secureZero();
-    const serialized = internal_key.serialize(mainnet != 0);
+    // An xprv's serialization carries the private key.
+    var serialized = internal_key.serialize(mainnet != 0);
+    defer crypto.secureZero(u8, &serialized);
     @memcpy(out_bytes[0..82], &serialized);
     return 82;
 }

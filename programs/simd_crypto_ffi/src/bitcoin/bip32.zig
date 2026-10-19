@@ -299,9 +299,12 @@ pub const ExtendedKey = struct {
         var output: [64]u8 = undefined;
         hmac.final(&output);
         defer std.crypto.secureZero(u8, &output);
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&hmac));
 
-        const private_key = output[0..32].*;
-        const chain_code = output[32..64].*;
+        var private_key = output[0..32].*;
+        defer std.crypto.secureZero(u8, &private_key);
+        var chain_code = output[32..64].*;
+        defer std.crypto.secureZero(u8, &chain_code);
 
         // Validate private key is valid (non-zero and less than curve order)
         if (!isValidPrivateKey(&private_key)) {
@@ -333,6 +336,7 @@ pub const ExtendedKey = struct {
         }
 
         var data: [37]u8 = undefined;
+        defer std.crypto.secureZero(u8, &data);
 
         if (hardened) {
             // Hardened: 0x00 || private_key || index
@@ -348,8 +352,10 @@ pub const ExtendedKey = struct {
 
         // HMAC-SHA512(chain_code, data)
         var hmac = HmacSha512.init(&self.chain_code);
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&hmac));
         hmac.update(&data);
         var output: [64]u8 = undefined;
+        defer std.crypto.secureZero(u8, &output);
         hmac.final(&output);
 
         const il = output[0..32];
@@ -364,6 +370,7 @@ pub const ExtendedKey = struct {
             .child_index = index,
             .is_private = self.is_private,
         };
+        errdefer child.secureZero();
 
         if (self.is_private) {
             // Private key derivation: (il + parent_key) mod n
@@ -389,14 +396,20 @@ pub const ExtendedKey = struct {
     /// InvalidPath rather than shorter paths.
     pub fn derivePath(self: Self, path: []const u8) Bip32Error!Self {
         var current = self;
+        // Every intermediate key, and the copy of `self`, is scrubbed once it is replaced.
+        errdefer current.secureZero();
         var iter = std.mem.splitScalar(u8, path, '/');
 
         const first = iter.first();
         if (!std.mem.eql(u8, first, "m")) {
-            current = try current.deriveChild(try parsePathComponent(first));
+            const next = try current.deriveChild(try parsePathComponent(first));
+            current.secureZero();
+            current = next;
         }
         while (iter.next()) |component| {
-            current = try current.deriveChild(try parsePathComponent(component));
+            const next = try current.deriveChild(try parsePathComponent(component));
+            current.secureZero();
+            current = next;
         }
 
         return current;
@@ -690,46 +703,35 @@ pub fn generateP2wpkhAddress(
 // SECP256K1 HELPERS
 // ============================================================================
 
-/// Check if a private key is valid (non-zero, less than curve order)
+/// Check if a private key is valid: non-zero and below the curve order n. Constant-time in
+/// the key's bytes: Scalar.fromBytes compares against n with crypto.timing_safe.compare and
+/// isZero ORs the limbs, so neither test stops at the first byte that decides it (which
+/// leaked how many leading 0x00 or 0xFF bytes a derived key has). Only the verdict, which
+/// the caller acts on anyway, is observable.
 fn isValidPrivateKey(key: *const [32]u8) bool {
-    // Check non-zero
-    var is_zero = true;
-    for (key) |b| {
-        if (b != 0) {
-            is_zero = false;
-            break;
-        }
-    }
-    if (is_zero) return false;
-
-    // Check less than curve order
-    // secp256k1 order n = FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFE BAAEDCE6 AF48A03B BFD25E8C D0364141
-    const order = [_]u8{
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
-        0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B,
-        0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
-    };
-
-    for (key, order) |k, o| {
-        if (k < o) return true;
-        if (k > o) return false;
-    }
-    return false; // Equal to order, invalid
+    var scalar = Secp256k1.scalar.Scalar.fromBytes(key.*, .big) catch return false;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&scalar));
+    return !scalar.isZero();
 }
 
 /// Derive compressed public key from private key
 fn derivePublicKey(private_key: *const [32]u8) ![33]u8 {
-    const scalar = Secp256k1.scalar.Scalar.fromBytes(private_key.*, .big) catch return error.InvalidKey;
-    const point = Secp256k1.basePoint.mul(scalar.toBytes(.big), .big) catch return error.InvalidKey;
+    var scalar = Secp256k1.scalar.Scalar.fromBytes(private_key.*, .big) catch return error.InvalidKey;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&scalar));
+    var scalar_be = scalar.toBytes(.big);
+    defer std.crypto.secureZero(u8, &scalar_be);
+    const point = Secp256k1.basePoint.mul(scalar_be, .big) catch return error.InvalidKey;
     return point.toCompressedSec1();
 }
 
 /// Add two private keys modulo curve order
 fn addPrivateKeys(a: *const [32]u8, b: *const [32]u8) ![32]u8 {
-    const scalar_a = Secp256k1.scalar.Scalar.fromBytes(a.*, .big) catch return error.InvalidKey;
-    const scalar_b = Secp256k1.scalar.Scalar.fromBytes(b.*, .big) catch return error.InvalidKey;
-    const result = scalar_a.add(scalar_b);
+    var scalar_a = Secp256k1.scalar.Scalar.fromBytes(a.*, .big) catch return error.InvalidKey;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&scalar_a));
+    var scalar_b = Secp256k1.scalar.Scalar.fromBytes(b.*, .big) catch return error.InvalidKey;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&scalar_b));
+    var result = scalar_a.add(scalar_b);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&result));
     return result.toBytes(.big);
 }
 
@@ -903,6 +905,24 @@ test "BIP32 public key derivation fails for hardened" {
     // Should fail for hardened derivation from public key
     const result = public_only.deriveChild(HARDENED_OFFSET);
     try std.testing.expectError(Bip32Error.HardenedPublicDerivation, result);
+}
+
+test "isValidPrivateKey accepts exactly 1 .. n-1" {
+    var key: [32]u8 = undefined;
+    const cases = [_]struct { hex: *const [64]u8, valid: bool }{
+        .{ .hex = "0000000000000000000000000000000000000000000000000000000000000000", .valid = false },
+        .{ .hex = "0000000000000000000000000000000000000000000000000000000000000001", .valid = true },
+        .{ .hex = "0100000000000000000000000000000000000000000000000000000000000000", .valid = true },
+        .{ .hex = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140", .valid = true },
+        .{ .hex = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141", .valid = false },
+        .{ .hex = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364142", .valid = false },
+        .{ .hex = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364041", .valid = true },
+        .{ .hex = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", .valid = false },
+    };
+    for (cases) |c| {
+        _ = try std.fmt.hexToBytes(&key, c.hex);
+        try std.testing.expectEqual(c.valid, isValidPrivateKey(&key));
+    }
 }
 
 test "addPublicKeys refuses a sum that is the point at infinity" {
