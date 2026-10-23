@@ -4,10 +4,12 @@
 //!
 //! This is a port of `templates/beacon_solar_report/build_report.py`: the same
 //! A4-canvas layout, the same Adobe AFM Helvetica metrics, the same word-wrap,
-//! now taking a small `CrgQuote` (the ~28 per-lead fields) as JSON and emitting
-//! the PDF directly — no 2.66 MB template JSON, no Python at deploy. The 12
-//! brand assets are @embedFile'd, so the module is self-contained (works in the
-//! freestanding browser WASM build too).
+//! taking a `CrgQuote` as JSON (the per-lead figures plus the installer's own
+//! company, accreditation and bank details) and emitting the PDF directly — no
+//! 2.66 MB template JSON, no Python at deploy. The installer details default to
+//! fictional values, so a deployment must supply its own. The 12 brand assets
+//! are @embedFile'd, so the module is self-contained (works in the freestanding
+//! browser WASM build too).
 //!
 //! Layout is built as `presentation.PresentationData` structs in an arena and
 //! rendered by the existing canvas renderer, so the drawing path is unchanged.
@@ -66,6 +68,7 @@ fn glyphW(cp: u21, bold: bool) u16 {
         0x2018, 0x2019 => if (bold) @as(u16, 238) else 191, // ' '
         0x201C, 0x201D => if (bold) @as(u16, 474) else 333, // " "
         0x00B0 => 400, // °
+        0x00D7 => 584, // ×
         0x2022 => 350, // •
         else => 556,
     };
@@ -181,36 +184,101 @@ fn buildAssets(a: std.mem.Allocator) !Assets {
     };
 }
 
-// ---- the per-lead data (all strings, mirrors the Python QUOTE dict) --------
+// ---- the per-lead data (display strings, formatted by the caller) ----------
+// Every field has a default, so a caller sets only what it knows. The defaults
+// form one consistent fictional sample (the --beacon-report-demo output).
 pub const CrgQuote = struct {
     ref: []const u8 = "PO4 Joe",
     client: []const u8 = "Joe Bloggs",
     address: []const u8 = "N/A",
-    postcode: []const u8 = "PO4 9nx",
+    postcode: []const u8 = "PO4 9NX",
+    /// ISO date (YYYY-MM-DD) the quote was issued; also selects the VAT wording.
     date: []const u8 = "2026-03-05",
     kw: []const u8 = "4.92",
-    annual_saving: []const u8 = "0",
+    annual_saving: []const u8 = "1,183",
     total_price: []const u8 = "7,430",
     net_price: []const u8 = "7,430",
     total_price_dec: []const u8 = "7430.00",
-    lifetime_saving: []const u8 = "0",
+    lifetime_saving: []const u8 = "29,575",
     panel_count: []const u8 = "12",
     panel_model: []const u8 = "Cs3l-355ms-ab",
     panel_model_raw: []const u8 = "cs3l-355ms-ab",
     panel_watt: []const u8 = "410",
+    has_battery: bool = true,
     battery: []const u8 = "5.3 Sunsynk Battery",
-    battery_kwh: []const u8 = "5.3Kw",
+    battery_kwh: []const u8 = "5.3 kWh",
     inverter: []const u8 = "Sun-3.6-ecco Inverter",
     inverter_raw: []const u8 = "sunsynk sun-3.6-ecco",
+    iboost: bool = false,
+    birdguard: bool = false,
     annual_usage_kwh: []const u8 = "7450",
-    tariff_p: []const u8 = "0.34",
-    annual_gen_kwh: []const u8 = "0",
+    /// Unit rate in pence per kWh, e.g. "34".
+    tariff_p: []const u8 = "34",
+    annual_gen_kwh: []const u8 = "4182",
     deposit: []const u8 = "1,115",
     stage: []const u8 = "2,972",
-    balance: []const u8 = "3,344",
-    payback_years: []const u8 = "0",
+    balance: []const u8 = "3,343",
+    payback_years: []const u8 = "6.3",
     array_sqm: []const u8 = "22.44",
+
+    // ---- performance estimate (pages 10–13) ----
+    /// Roof orientation as the customer gave it ("South"); empty when unknown.
+    orientation: []const u8 = "South",
+    /// Orientation for the MCS table, e.g. "0° (South)".
+    orientation_deg: []const u8 = "0° (South)",
+    /// Specific yield, kWh per kWp per year.
+    kk: []const u8 = "850",
+    shade_factor: []const u8 = "1.00",
+    shading_loss_pct: []const u8 = "0",
+    /// Share of generation used in the home, all measures included.
+    self_use_pct: []const u8 = "70",
+    export_pct: []const u8 = "30",
+    bill_saving: []const u8 = "995",
+    export_income: []const u8 = "188",
+    /// Smart Export Guarantee rate, £ per kWh.
+    seg_rate: []const u8 = "0.15",
+    pv_self_use_kwh: []const u8 = "1464",
+    pv_independence_pct: []const u8 = "20",
+    eess_self_use_kwh: []const u8 = "2927",
+    eess_independence_pct: []const u8 = "39",
+    battery_discharge_kwh: []const u8 = "1463",
+    diverter_kwh: []const u8 = "0",
+
+    // ---- the installer (fictional defaults; each deployment supplies its own) ----
+    brand: []const u8 = "Beacon Renewables",
+    company_name: []const u8 = "Beacon Renewables Ltd",
+    company_number: []const u8 = "00000000",
+    registered_office: []const u8 = "1 Example Way, Testerton, EX1 2MP",
+    trading_address: []const u8 = "2 Sample Street, Demoford, DE1 4MO",
+    phone: []const u8 = "0330 000 0000",
+    email: []const u8 = "hello@beacon-renewables.example",
+    website: []const u8 = "www.beacon-renewables.example",
+    mcs_number: []const u8 = "NIC000000",
+    hies_number: []const u8 = "BEACON/A/000",
+    trustmark_number: []const u8 = "0000000",
+    bank_name: []const u8 = "Example Bank",
+    bank_sort_code: []const u8 = "00-00-00",
+    bank_account_no: []const u8 = "00000000",
+    signatory: []const u8 = "Alex Example – Managing Director",
 };
+
+/// The page the performance estimate starts on, for cross-references.
+const PERFORMANCE_PAGE = "10";
+
+/// VAT on installed energy-saving materials in Great Britain for a quote issued
+/// on `iso_date`: 0% to 31 March 2027, 5% from 1 April 2027 (HMRC VAT Notice 708/6).
+pub fn vatRate(iso_date: []const u8) []const u8 {
+    return if (std.mem.order(u8, iso_date, "2027-04-01") == .lt) "0%" else "5%";
+}
+
+/// Width ÷ height of a PNG from its IHDR chunk; null when the bytes are not a PNG.
+fn pngAspect(png: []const u8) ?f64 {
+    if (png.len < 24 or !std.mem.eql(u8, png[1..4], "PNG")) return null;
+    const w = std.mem.readInt(u32, png[16..20], .big);
+    const h = std.mem.readInt(u32, png[20..24], .big);
+    if (w == 0 or h == 0) return null;
+    return @as(f64, @floatFromInt(w)) / @as(f64, @floatFromInt(h));
+}
 
 // ---- table cell / row types (mirror the Python grid dicts) -----------------
 const Cell = struct {
@@ -328,6 +396,20 @@ const B = struct {
         } });
     }
 
+    fn rrect(self: *B, x: f64, y: f64, w: f64, h: f64, r: f64, fill: ?[]const u8, stroke: ?[]const u8, sw: f64) !void {
+        try self.els.append(self.a, .{ .shape = .{
+            .shape = .rounded_rectangle,
+            .x = @floatCast(x),
+            .y = @floatCast(y),
+            .width = @floatCast(w),
+            .height = @floatCast(h),
+            .fill_color = fill,
+            .stroke_color = stroke,
+            .stroke_width = @floatCast(sw),
+            .corner_radius = @floatCast(r),
+        } });
+    }
+
     fn hline(self: *B, x1: f64, x2: f64, y: f64, color: []const u8, w: f64) !void {
         try self.els.append(self.a, .{ .shape = .{
             .shape = .line,
@@ -380,6 +462,23 @@ const B = struct {
             self.y += 2;
         }
         self.y += o.gap_after;
+    }
+
+    /// Bullets split across two columns, the first column taking the extra item.
+    fn bullets2(self: *B, items: []const []const u8, o: BulletsOpts) !void {
+        const gutter: f64 = 16;
+        const colw = (o.maxw - gutter) / 2;
+        const half = (items.len + 1) / 2;
+        const top = self.y;
+        var col = o;
+        col.maxw = colw;
+        col.gap_after = 0;
+        try self.bullets(items[0..half], col);
+        const left_end = self.y;
+        self.y = top;
+        col.x = o.x + colw + gutter;
+        try self.bullets(items[half..], col);
+        self.y = @max(left_end, self.y) + o.gap_after;
     }
 
     fn link(self: *B, url: []const u8, size: f64, gap_after: f64) !void {
@@ -457,35 +556,34 @@ fn p01(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
 // PAGE 2 — INTRODUCTION
 // ============================================================================
 fn p02(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
-    _ = q;
-    _ = A;
     var b = B{ .a = a };
-    try b.heading("Introduction", .{ .gap_after = 6 });
-    b.y = 430;
-    try b.para("Welcome to Beacon Renewables. Here’s your bespoke solar quote. In this " ++
+    try b.heading("Introduction", .{ .gap_after = 8 });
+    try b.para(b.f("Welcome to {s}. Here’s your bespoke solar quote. In this " ++
         "quote, you’ll find the cost of your system, your estimated savings " ++
         "using MCS calculations, and more information about your recommended " ++
-        "solar system.", .{ .size = 16, .lh = 1.28, .gap_after = 26 });
+        "solar system.", .{q.brand}), .{ .size = 16, .lh = 1.28, .gap_after = 22 });
+    const ph_h = PW * (251.0 / 926.0);
+    try b.image(A.quote_photo, 0, b.y, PW, ph_h);
+    b.y += ph_h + 26;
     const top = b.y;
     const colw = (CW - 30) / 2;
-    b.y = top;
-    try b.para("At Beacon Renewables, we believe in delivering quality service that goes " ++
+    try b.para(b.f("At {s}, we believe in delivering quality service that goes " ++
         "above and beyond for our customers. Our dedicated team works " ++
         "tirelessly to ensure that every installation is done efficiently and " ++
         "with the utmost care. We understand the importance of clear " ++
         "communication and transparency, which is why we make sure our " ++
-        "pricing is always straightforward and competitive.", .{ .size = 9.5, .maxw = colw, .gap_after = 8 });
+        "pricing is always straightforward and competitive.", .{q.brand}), .{ .size = 10.5, .maxw = colw, .gap_after = 8 });
     try b.para("Customer satisfaction is our top priority, and we are proud of our " ++
         "5-star reviews on Google. These reviews are a testament to our " ++
         "commitment to excellence and our unwavering dedication to providing " ++
-        "the best service possible.", .{ .size = 9.5, .maxw = colw });
+        "the best service possible.", .{ .size = 10.5, .maxw = colw });
     b.y = top;
     const rx = ML + colw + 30;
-    try b.para("If you are considering Beacon Renewables for your next project, we encourage " ++
-        "you to visit our website at www.beacon-renewables.example for more information. " ++
+    try b.para(b.f("If you are considering {s} for your next project, we encourage " ++
+        "you to visit our website at {s} for more information. " ++
         "And remember, if you have any questions at all, our friendly team is " ++
-        "always here to help. Thank you for considering Beacon Renewables for your " ++
-        "solar and home improvement needs.", .{ .size = 9.5, .x = rx, .maxw = colw });
+        "always here to help. Thank you for considering {s} for your " ++
+        "solar and home improvement needs.", .{ q.brand, q.website, q.brand }), .{ .size = 10.5, .x = rx, .maxw = colw });
     return b.page();
 }
 
@@ -493,66 +591,66 @@ fn p02(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
 // PAGE 3 — YOUR QUOTE
 // ============================================================================
 fn p03(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
+    _ = A;
     var b = B{ .a = a };
     try b.heading("Your quote", .{ .gap_after = 10 });
     try b.hline(ML, PW - MR, b.y, HAIR, 1.0);
-    b.gap(24);
+    b.gap(28);
     try b.text(PW / 2, b.y, "Recommended System Option", .{ .size = 15, .al = .center });
-    b.gap(30);
-    const Metric = struct { val: []const u8, lab: []const u8 };
-    const labels = [_]Metric{
-        .{ .val = b.f("{s} kW", .{q.kw}), .lab = "System Size" },
-        .{ .val = b.f("£ {s}", .{q.annual_saving}), .lab = "Estimated Annual\nElectricity Bill Savings" },
-        .{ .val = b.f("£ {s}", .{q.total_price}), .lab = "Total System Price" },
-        .{ .val = b.f("£ {s}", .{q.net_price}), .lab = "Net System Price" },
+    b.gap(16);
+
+    // Four figure cards; the price card is filled so it reads first.
+    const Metric = struct { val: []const u8, lab: []const u8, hero: bool = false };
+    const fourth: Metric = if (std.mem.eql(u8, q.net_price, q.total_price))
+        .{ .val = b.f("{s} years", .{q.payback_years}), .lab = "Estimated Payback Period" }
+    else
+        .{ .val = b.f("£{s}", .{q.net_price}), .lab = "Net System Price" };
+    const cards = [_]Metric{
+        .{ .val = b.f("{s} kWp", .{q.kw}), .lab = "System Size" },
+        .{ .val = b.f("£{s}", .{q.total_price}), .lab = "Total System Price", .hero = true },
+        .{ .val = b.f("£{s}", .{q.annual_saving}), .lab = "Estimated Annual Savings" },
+        fourth,
     };
-    const n: f64 = 4;
-    const vy = b.y;
-    for (labels, 0..) |m, i| {
-        const cx = ML + CW * (@as(f64, @floatFromInt(i)) + 0.5) / n;
-        try b.text(cx, vy, m.val, .{ .size = 15, .al = .center });
-        const ly = vy + 26;
-        var jt = std.mem.splitScalar(u8, m.lab, '\n');
-        var j: f64 = 0;
-        while (jt.next()) |part| : (j += 1) {
-            try b.text(cx, ly + j * 11, part, .{ .size = 8, .color = GREY, .al = .center });
+    const gutter: f64 = 10;
+    const card_w = (CW - gutter * 3) / 4;
+    const card_h: f64 = 74;
+    for (cards, 0..) |m, i| {
+        const cx = ML + @as(f64, @floatFromInt(i)) * (card_w + gutter);
+        const fill = if (m.hero) GREEN else "#f2f6ef";
+        const ink = if (m.hero) "#ffffff" else BODY;
+        const sub = if (m.hero) "#ffffff" else GREY;
+        try b.rrect(cx, b.y, card_w, card_h, 6, fill, if (m.hero) null else "#d7e4cf", 0.8);
+        try b.text(cx + card_w / 2, b.y + 31, m.val, .{ .size = 17, .bold = true, .color = ink, .al = .center });
+        for (try wrap(a, m.lab, 8.5, card_w - 12, false), 0..) |part, j| {
+            try b.text(cx + card_w / 2, b.y + 50 + @as(f64, @floatFromInt(j)) * 10.5, part, .{ .size = 8.5, .color = sub, .al = .center });
         }
     }
-    b.y = vy + 52;
-    const sum = [_][]const u8{
-        b.f("System Size: {s} KWp", .{q.kw}),
-        b.f("Total System Price:  £ {s}", .{q.total_price}),
-        b.f("Estimated Annual Electricity Bill Savings:  £ {s}", .{q.annual_saving}),
-        b.f("Estimated Lifetime Savings:  £ {s}", .{q.lifetime_saving}),
-    };
-    for (sum) |line| {
-        b.gap(20);
-        try b.text(ML, b.y, line, .{ .size = 12.5 });
-    }
-    b.gap(16);
-    try b.hline(ML, PW - MR, b.y, HAIR, 1.0);
-    b.gap(22);
-    try b.text(ML, b.y, "Your system is made up of:", .{});
-    const made = [_][]const u8{ b.f("{s} {s} Panels", .{ q.panel_count, q.panel_model }), q.battery, q.inverter };
-    for (made) |line| {
-        b.gap(18);
-        try b.text(ML, b.y, line, .{});
-    }
-    b.gap(16);
-    try b.para(b.f("We’ve estimated you’ll save £ {s} over the lifetime of your " ++
+    b.y += card_h + 26;
+
+    try b.text(ML, b.y, "Your system is made up of:", .{ .size = 12, .color = GREEN });
+    b.gap(8);
+    var made: std.ArrayListUnmanaged(Row) = .empty;
+    const cw2 = [_]f64{ 190, CW - 190 };
+    try made.append(a, .{ .cells = cs(a, &.{ .{ .t = "Solar panels", .bg = BAND_LT }, .{ .t = b.f("{s} × {s} Panels", .{ q.panel_count, q.panel_model }) } }) });
+    if (q.has_battery) try made.append(a, .{ .cells = cs(a, &.{ .{ .t = "Battery", .bg = BAND_LT }, .{ .t = b.f("{s} ({s})", .{ q.battery, q.battery_kwh }) } }) });
+    try made.append(a, .{ .cells = cs(a, &.{ .{ .t = "Inverter", .bg = BAND_LT }, .{ .t = q.inverter } }) });
+    try made.append(a, .{ .cells = cs(a, &.{ .{ .t = "Estimated annual generation", .bg = BAND_LT }, .{ .t = b.f("{s} kWh", .{q.annual_gen_kwh}) } }) });
+    try made.append(a, .{ .cells = cs(a, &.{ .{ .t = "Estimated lifetime savings", .bg = BAND_LT }, .{ .t = b.f("£{s}", .{q.lifetime_saving}) } }) });
+    try b.grid(ML, &cw2, made.items, .{ .border = "#d0d0d0", .sw = 0.6, .size = 10.5, .pad = 6 });
+    b.gap(14);
+
+    try b.para(b.f("We’ve estimated you’ll save £{s} over the lifetime of your " ++
         "system using regulated MCS calculations. You’ll see a breakdown of " ++
-        "this on page 7.", .{q.lifetime_saving}), .{ .gap_after = 6 });
+        "this from page {s}.", .{ q.lifetime_saving, PERFORMANCE_PAGE }), .{ .gap_after = 6 });
     try b.para("Your total cost includes installation fees and more. We’ll also " ++
         "handle your DNO application. All equipment is MCS certified.", .{ .gap_after = 6 });
-    try b.para("These modules comply with the following international standards:", .{ .gap_after = 6 });
-    try b.para("Carry CE mark", .{ .gap_after = 6 });
-    try b.para(b.f("You are using {s} of electricity per year at {s}p. We estimate your new " ++
-        "system will produce {s} KWH of electricity per annum, giving approx’ " ++
-        "£ {s} worth of savings per annum.", .{ q.annual_usage_kwh, q.tariff_p, q.annual_gen_kwh, q.annual_saving }), .{ .gap_after = 6 });
-    try b.para(b.f("The total cost of the system is £ {s} MCS calculations predict you " ++
-        "will use 95% of the energy produced.", .{q.total_price_dec}), .{ .gap_after = 6 });
-    const ph_h: f64 = 150;
-    try b.image(A.quote_photo, 0, PH - ph_h, PW, ph_h);
+    try b.para("These modules comply with the following international standards: " ++
+        "IEC 61730, IEC 61215 and the CE mark.", .{ .gap_after = 6 });
+    try b.para(b.f("You are using {s} kWh of electricity per year at {s}p per kWh. We estimate your new " ++
+        "system will produce {s} kWh of electricity per annum, giving approx " ++
+        "£{s} worth of savings per annum.", .{ q.annual_usage_kwh, q.tariff_p, q.annual_gen_kwh, q.annual_saving }), .{ .gap_after = 6 });
+    try b.para(b.f("The total cost of the system is £{s}. MCS calculations predict you " ++
+        "will use {s}% of the energy produced.", .{ q.total_price, q.self_use_pct }), .{ .gap_after = 6 });
     return b.page();
 }
 
@@ -580,57 +678,56 @@ fn p05(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     try b.heading("Details & Info", .{ .gap_after = 10 });
     try b.image(A.logo, PW - MR - 150, 34, 150, 65);
     b.gap(4);
-    try b.text(ML, b.y, "Beacon Renewables Ltd", .{ .size = 10.5, .color = GREEN });
-    b.gap(22);
+    try b.text(ML, b.y, q.company_name, .{ .size = 10.5, .color = GREEN });
+    b.gap(18);
     try b.text(ML, b.y, "Integrated Management System", .{ .size = 10.5, .color = GREEN });
-    b.gap(24);
+    b.gap(20);
+
+    const kw = [_]f64{ 175, CW - 175 };
     const KV = struct { k: []const u8, v: []const u8 };
-    const rows = [_]KV{
-        .{ .k = "Document Title :", .v = "Customer Quote" },
-        .{ .k = "Ref. No. :", .v = q.ref },
-        .{ .k = "Next Review Date :", .v = "One Year" },
-        .{ .k = "MCS Accredited Company:", .v = "BEACON RENEWABLES LTD" },
-        .{ .k = "MCS Accredited Number", .v = "NIC600310(Company Registration Number: 10546909)" },
-        .{ .k = "Registered Office Address:", .v = "1 Example Way, Testerton, EX1 2MP" },
-        .{ .k = "Principal Trading Address:", .v = "2 Sample Street, Demoford, DE1 4MO" },
-        .{ .k = "Contact Details:", .v = "Tel: 0330 000 0000/07700900123\nhello@beacon-renewables.example" },
-        .{ .k = "Website:", .v = "www.beacon-renewables.example" },
-        .{ .k = "HIES Membership Number:", .v = "Beacon/A/088" },
-        .{ .k = "MCS Accredited Company:", .v = "BEACON RENEWABLES LTD" },
-        .{ .k = "Trustmark", .v = "2855428" },
-        .{ .k = "MCS Certification Number:", .v = "NIC600310" },
-        .{ .k = "Project Reference:", .v = q.ref },
-        .{ .k = "Client:", .v = q.client },
-        .{ .k = "Address:", .v = q.address },
-        .{ .k = "Postcode:", .v = q.postcode },
-        .{ .k = "Date:", .v = q.date },
+    const company = [_]KV{
+        .{ .k = "Document Title", .v = "Customer Quote" },
+        .{ .k = "Next Review Date", .v = "One Year" },
+        .{ .k = "MCS Accredited Company", .v = std.ascii.allocUpperString(a, q.company_name) catch q.company_name },
+        .{ .k = "MCS Certification Number", .v = q.mcs_number },
+        .{ .k = "Company Registration Number", .v = q.company_number },
+        .{ .k = "Registered Office Address", .v = q.registered_office },
+        .{ .k = "Principal Trading Address", .v = q.trading_address },
+        .{ .k = "Contact Details", .v = b.f("Tel: {s}\n{s}", .{ q.phone, q.email }) },
+        .{ .k = "Website", .v = q.website },
+        .{ .k = "HIES Membership Number", .v = q.hies_number },
+        .{ .k = "TrustMark", .v = q.trustmark_number },
     };
-    const vx = ML + 175;
-    for (rows) |kv| {
-        try b.text(ML, b.y, kv.k, .{ .size = 9.5, .color = GREEN });
-        var vt = std.mem.splitScalar(u8, kv.v, '\n');
-        var j: f64 = 0;
-        var nlines: f64 = 0;
-        while (vt.next()) |vl| : (j += 1) {
-            try b.text(vx, b.y + j * 12, vl, .{ .size = 9.5, .color = BODY });
-            nlines += 1;
-        }
-        b.gap(19 + (nlines - 1) * 12);
+    const project = [_]KV{
+        .{ .k = "Quote Reference", .v = q.ref },
+        .{ .k = "Client", .v = q.client },
+        .{ .k = "Address", .v = q.address },
+        .{ .k = "Postcode", .v = q.postcode },
+        .{ .k = "Date", .v = q.date },
+    };
+    const Group = struct { title: []const u8, rows: []const KV };
+    for ([_]Group{ .{ .title = "Company", .rows = &company }, .{ .title = "Your project", .rows = &project } }, 0..) |g, gi| {
+        if (gi > 0) b.gap(12);
+        var rows: std.ArrayListUnmanaged(Row) = .empty;
+        try rows.append(a, .{ .cells = cs(a, &.{.{ .t = g.title, .bg = BAND_LT, .bold = true }}), .widths = ws(a, &.{CW}), .h = 20 });
+        for (g.rows) |kv| try rows.append(a, .{ .cells = cs(a, &.{ .{ .t = kv.k, .color = GREEN }, .{ .t = kv.v } }) });
+        try b.grid(ML, &kw, rows.items, .{ .border = "#dedede", .sw = 0.5, .size = 9.5, .pad = 4 });
     }
-    b.gap(6);
-    try b.para("Really nice to meet you and thanks for allowing me the opportunity to " ++
-        "provide a quotation for your proposed Solar PV installation.", .{ .size = 9.5, .gap_after = 8 });
+    b.gap(14);
+
+    try b.para("Thank you for the opportunity to provide a quotation for your " ++
+        "proposed Solar PV installation.", .{ .size = 9.5, .gap_after = 6 });
     try b.para("We endeavour to deliver the equipment as specified but due to global " ++
-        "pressure these may have to be amended.We are obligated to provide you " ++
+        "pressure these may have to be amended. We are obligated to provide you " ++
         "with certain Pre-Sale Information as part of our compliance with the " ++
         "Microgeneration Certification Scheme and in particular the Solar PV " ++
-        "Standard MIS-3002 and MIS-3012 The Battery Standard including " ++
+        "Standard MIS 3002 and the Battery Standard MIS 3012, including " ++
         "performance estimates and potential shade effects (if any).", .{ .size = 9.5, .gap_after = 8 });
-    try b.text(ML, b.y + 6, b.f("Quote Reference: {s}", .{q.ref}), .{});
-    b.gap(6);
-    const aw = CW;
-    const ah = aw * (106.0 / 902.0);
-    try b.image(A.accreditation, ML, PH - 55, aw, ah);
+
+    const strip_h: f64 = 46;
+    const aspect = pngAspect(beacon_assets.accreditation) orelse 1.0;
+    const strip_w = @min(CW, strip_h * aspect);
+    try b.image(A.accreditation, (PW - strip_w) / 2, PH - strip_h - 22, strip_w, strip_h);
     return b.page();
 }
 
@@ -643,30 +740,30 @@ fn p06(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     try b.para("All our work is backed by HIES, the Home Insulation and Energy " ++
         "Systems insurance backed guarantee and we are fully MCS accredited.", .{ .size = 10.5, .gap_after = 8 });
     try b.heading("OVERVIEW:", .{ .size = 17, .gap_before = 2, .gap_after = 8 });
-    try b.bullets(&.{
-        b.f("{s} canadian_solar {s} {s},output per panel is {s}", .{ q.panel_count, q.panel_model_raw, q.panel_watt, q.panel_watt }),
-        b.f("watts Inverter is a {s}", .{q.inverter_raw}),
-        b.f("Total system generation of{s} KWp", .{q.kw}),
-        b.f("System cost is £{s}", .{q.total_price_dec}),
-        b.f("Predicted annual electricity produce is {s} Kwh", .{q.annual_gen_kwh}),
-        "If you also have opted for a battery it is",
-        b.f("Battery Storage System {s}", .{q.battery_kwh}),
-    }, .{ .size = 10.5, .gap_after = 6 });
+    var overview: std.ArrayListUnmanaged([]const u8) = .empty;
+    try overview.append(a, b.f("{s} Canadian Solar {s} panels, output per panel {s} W", .{ q.panel_count, q.panel_model_raw, q.panel_watt }));
+    try overview.append(a, b.f("Inverter is a {s}", .{q.inverter_raw}));
+    try overview.append(a, b.f("Total system size of {s} kWp", .{q.kw}));
+    try overview.append(a, b.f("System cost is £{s}", .{q.total_price}));
+    try overview.append(a, b.f("Predicted annual electricity produced is {s} kWh", .{q.annual_gen_kwh}));
+    if (q.has_battery) try overview.append(a, b.f("Battery Storage System {s}", .{q.battery_kwh}));
+    try b.bullets(overview.items, .{ .size = 10.5, .gap_after = 6 });
     try b.heading("SYSTEM DETAIL:", .{ .size = 17, .gap_before = 2, .gap_after = 8 });
-    try b.para(b.f("Having visited your property we are able to fit {s} panels on your " ++
-        "South facing roof by using {s} panels creating a {s} KWH system.We are " ++
-        "proposing to supply MCS approved canadian_solar {s} {s} panels. These " ++
+    const roof = if (q.orientation.len != 0) b.f("{s} facing roof", .{q.orientation}) else "roof";
+    try b.para(b.f("Based on the details you have given us, we are able to fit {s} panels on your " ++
+        "{s} using {s} W panels, creating a {s} kWp system. We are " ++
+        "proposing to supply MCS approved Canadian Solar {s} panels. These " ++
         "panels achieve a higher cell efficiency which means more energy per " ++
         "square meter. Use of first-class materials result in an increased " ++
         "durability so they reach a higher reliability, assured by a 25 year " ++
-        "performance guarantee.", .{ q.panel_count, q.panel_watt, q.kw, q.panel_model_raw, q.panel_watt }), .{ .size = 10.5, .gap_after = 8 });
+        "performance guarantee.", .{ q.panel_count, roof, q.panel_watt, q.kw, q.panel_model_raw }), .{ .size = 10.5, .gap_after = 8 });
     try b.para("These modules comply with the following international standards:", .{ .size = 10.5, .gap_after = 4 });
     try b.bullets(&.{ "IEC 61730 – Safety Qualification", "IEC 61215", "Carry CE mark" }, .{ .size = 10.5, .gap_after = 8 });
-    try b.para(b.f("You are using {s} of electricity per year at {s}p. We estimate your new " ++
-        "system will produce {s} KWH of electricity per annum, giving approx’ " ++
+    try b.para(b.f("You are using {s} kWh of electricity per year at {s}p per kWh. We estimate your new " ++
+        "system will produce {s} kWh of electricity per annum, giving approx " ++
         "£{s} worth of savings per annum.", .{ q.annual_usage_kwh, q.tariff_p, q.annual_gen_kwh, q.annual_saving }), .{ .size = 10.5, .gap_after = 8 });
-    try b.para(b.f("The total cost of the system is £{s} MCS calculations predict you " ++
-        "will use 95% of the energy produced.", .{q.total_price_dec}), .{ .size = 10.5, .gap_after = 10 });
+    try b.para(b.f("The total cost of the system is £{s}. MCS calculations predict you " ++
+        "will use {s}% of the energy produced.", .{ q.total_price, q.self_use_pct }), .{ .size = 10.5, .gap_after = 10 });
     const img_y = b.y;
     var dw: f64 = 250;
     var dh = dw * (1754.0 / 1240.0);
@@ -698,11 +795,11 @@ fn p06(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
 fn p07(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     var b = B{ .a = a };
     try b.heading("INVERTER", .{ .size = 17, .gap_after = 8 });
-    try b.para(b.f("The inverter we are proposing is a {s} panels on your inverter. The " ++
+    try b.para(b.f("The inverter we are proposing is a {s}. The " ++
         "data sheet below shows the capabilities and limitations of your " ++
-        "inverter, be advised if you have an inverter that does not support " ++
+        "inverter. Be advised that if you have an inverter that does not support " ++
         "battery storage and at some point in the future you require battery " ++
-        "storage you will need to upgrade your inverter..", .{q.inverter_raw}), .{ .size = 10.5, .gap_after = 16 });
+        "storage, you will need to upgrade your inverter.", .{q.inverter_raw}), .{ .size = 10.5, .gap_after = 16 });
     var iw: f64 = 430;
     var ih = iw * (1600.0 / 1131.0);
     if (b.y + ih > PH - 30) {
@@ -719,13 +816,26 @@ fn p07(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
 fn p08(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     _ = A;
     var b = B{ .a = a };
-    b.y = 170;
     try b.heading("PRICE", .{ .size = 17, .gap_after = 10 });
-    try b.para(b.f("The price for this {s} Kwh system fully fitted including VAT (where " ++
-        "applicable) is  £{s}", .{ q.kw, q.total_price }), .{ .size = 10.5, .gap_after = 10 });
+
+    // The price panel: the sentence on the left, the figure large on the right.
+    const box_h: f64 = 70;
+    try b.rrect(ML, b.y, CW, box_h, 6, "#f2f6ef", GREEN, 1.0);
+    const sentence = b.f("The price for this {s} kWp system fully fitted including VAT (where applicable) is", .{q.kw});
+    const lines = try wrap(a, sentence, 11, CW * 0.58, false);
+    const line_step: f64 = 15;
+    var ly = b.y + box_h / 2 - line_step * @as(f64, @floatFromInt(lines.len)) / 2 + 11;
+    for (lines) |ln| {
+        try b.text(ML + 16, ly, ln, .{ .size = 11 });
+        ly += line_step;
+    }
+    try b.text(PW - MR - 18, b.y + box_h / 2 + 11, b.f("£{s}", .{q.total_price}), .{ .size = 30, .bold = true, .color = GREEN, .al = .right });
+    b.y += box_h + 16;
+
     try b.para("This price includes the following:", .{ .size = 10.5, .gap_after = 4 });
-    try b.bullets(&.{
-        b.f("Battery Storage System {s}", .{q.battery_kwh}),
+    var incl: std.ArrayListUnmanaged([]const u8) = .empty;
+    if (q.has_battery) try incl.append(a, b.f("Battery Storage System {s}", .{q.battery_kwh}));
+    try incl.appendSlice(a, &.{
         "Panels, inverter, mounting frame",
         "Additional electrical work, cabling etc",
         "Delivery",
@@ -733,62 +843,57 @@ fn p08(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
         "Scaffolding",
         "Roof Survey",
         "Generation Meter – a means of recording and displaying the total AC generation",
-        "Handover Pack and MCS Certificate (if a valid Mpan is submitted)",
+        "Handover Pack and MCS Certificate (if a valid MPAN is submitted)",
         "Guarantees and Warranties",
         "Registration with DNO",
-        "iBoost",
-        "BirdGuard no",
-        "Number of optimisers to be installed 0",
-        "EPS no",
-        "UPS no",
-    }, .{ .size = 10.5, .gap_after = 12 });
-    try b.heading("SCHEDULE FOR PAYMENT", .{ .size = 17, .gap_after = 10 });
-    try b.para("This price includes the following:", .{ .size = 10.5, .gap_after = 4 });
-    try b.bullets(&.{
-        "Deposit of 15% upon placing of order.",
-        "Stage payment of 40% on agreed install date",
-        "Final payment of balance on completion of install and commissioning",
-    }, .{ .size = 10.5, .gap_after = 10 });
+    });
+    if (q.iboost) try incl.append(a, "iBoost");
+    if (q.birdguard) try incl.append(a, "BirdGuard");
+    try b.bullets2(incl.items, .{ .size = 10, .gap_after = 6 });
+    const yn = struct {
+        fn f(v: bool) []const u8 {
+            return if (v) "yes" else "no";
+        }
+    }.f;
+    try b.para(b.f("Options: iBoost {s}, BirdGuard {s}, optimisers to be installed 0, EPS no, UPS no.", .{ yn(q.iboost), yn(q.birdguard) }), .{ .size = 9.5, .color = GREY, .gap_after = 14 });
+
+    try b.heading("SCHEDULE FOR PAYMENT", .{ .size = 17, .gap_after = 8 });
+    try b.para("Payment is made in three stages:", .{ .size = 10.5, .gap_after = 6 });
+    const cw3 = [_]f64{ 92, CW - 92 - 80, 80 };
+    const rows = [_]Row{
+        .{ .cells = cs(a, &.{ .{ .t = "Deposit", .bg = BAND_LT }, .{ .t = "Deposit (Maximum 15% of the total sum inc VAT) payable on confirmation of order" }, .{ .t = b.f("£{s}", .{q.deposit}), .al = .right } }) },
+        .{ .cells = cs(a, &.{ .{ .t = "Advance Payment", .bg = BAND_LT }, .{ .t = "Further advance payment payable when an install date agreed 40% of the total sum inc VAT" }, .{ .t = b.f("£{s}", .{q.stage}), .al = .right } }) },
+        .{ .cells = cs(a, &.{ .{ .t = "Balance", .bg = BAND_LT }, .{ .t = "Balance payable following final commissioning" }, .{ .t = b.f("£{s}", .{q.balance}), .al = .right } }) },
+        .{ .cells = cs(a, &.{ .{ .t = "Total", .bg = BAND_MD, .bold = true }, .{ .t = "", .bg = BAND_MD }, .{ .t = b.f("£{s}", .{q.total_price}), .al = .right, .bg = BAND_MD, .bold = true } }) },
+    };
+    try b.grid(ML, &cw3, &rows, .{ .border = "#9a9a9a", .sw = 0.6, .size = 9.5, .pad = 6 });
+    b.gap(12);
     try b.para("Our estimated costs include the supply, delivery, installation, " ++
         "testing and commissioning of the solar array, including any works to " ++
         "the existing electrical consumer unit to enable the installation of " ++
         "the solar system. Our costs also include scaffolding as required while " ++
-        "carrying out works on the roof.", .{ .size = 10.5, .gap_after = 8 });
+        "carrying out works on the roof.", .{ .size = 10, .gap_after = 6 });
     try b.para("All systems we supply are installed by professional fitters. An MCS " ++
-        "Certificate will be provided.", .{ .size = 10.5, .gap_after = 18 });
-    try b.text(ML, b.y, "Account Details:", .{ .size = 10.5 });
-    b.gap(20);
-    try b.text(ML, b.y, "Bank", .{ .size = 9.5 });
-    try b.text(ML + 70, b.y, "Natwest", .{ .size = 9.5 });
-    try b.text(ML + 300, b.y, "Sort Code", .{ .size = 9.5 });
-    try b.text(ML + 375, b.y, "52-41-20", .{ .size = 9.5 });
-    b.gap(24);
-    try b.text(ML, b.y, "Account", .{ .size = 9.5 });
-    try b.text(ML, b.y + 11, "Name", .{ .size = 9.5 });
-    try b.text(ML + 70, b.y, "Beacon Renewables Ltd", .{ .size = 9.5 });
-    try b.text(ML + 300, b.y, "Account", .{ .size = 9.5 });
-    try b.text(ML + 300, b.y + 11, "No.", .{ .size = 9.5 });
-    try b.text(ML + 375, b.y, "43634435", .{ .size = 9.5 });
-    b.gap(24);
-    try b.rect(ML, b.y - 12, CW, 20, BAND_LT, "#999999", 0.6);
-    try b.text(PW / 2, b.y + 2, "Payment Terms", .{ .size = 10.5, .al = .center });
+        "Certificate will be provided.", .{ .size = 10, .gap_after = 12 });
+    b.gap(10);
+    try b.text(ML, b.y, "Account Details:", .{ .size = 10.5, .color = GREEN });
+    b.gap(8);
+    const half = CW / 2;
+    const cw4 = [_]f64{ 90, half - 90, 90, half - 90 };
+    const acct = [_]Row{
+        .{ .cells = cs(a, &.{ .{ .t = "Bank", .bg = BAND_LT }, .{ .t = q.bank_name }, .{ .t = "Sort Code", .bg = BAND_LT }, .{ .t = q.bank_sort_code } }) },
+        .{ .cells = cs(a, &.{ .{ .t = "Account Name", .bg = BAND_LT }, .{ .t = q.company_name }, .{ .t = "Account No.", .bg = BAND_LT }, .{ .t = q.bank_account_no } }) },
+    };
+    try b.grid(ML, &cw4, &acct, .{ .border = "#c8c8c8", .sw = 0.6, .size = 9.5, .pad = 6 });
     return b.page();
 }
 
 // ============================================================================
-// PAGE 9 — PAYMENT TERMS TABLE + CANCELLATION + SIGNATURE
+// PAGE 9 — QUOTE VALIDITY + CHANGES + SIGNATURE
 // ============================================================================
 fn p09(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     var b = B{ .a = a };
     b.y = 40;
-    const cw3 = [_]f64{ 78, 350, CW - 428 };
-    const rows = [_]Row{
-        .{ .cells = cs(a, &.{ .{ .t = "Deposit:" }, .{ .t = "Deposit (Maximum 15% of the total sum inc VAT) payable on confirmation of order" }, .{ .t = b.f("£{s}", .{q.deposit}), .al = .right } }) },
-        .{ .cells = cs(a, &.{ .{ .t = "Advance\nPayment:" }, .{ .t = "Further advance payment payable when an install date agreed 40% of the total sum inc VAT" }, .{ .t = b.f("£{s}", .{q.stage}), .al = .right } }) },
-        .{ .cells = cs(a, &.{ .{ .t = "Balance:" }, .{ .t = "Balance payable following final commissioning" }, .{ .t = b.f("£{s}", .{q.balance}), .al = .right } }) },
-    };
-    try b.grid(ML, &cw3, &rows, .{ .border = "#888888", .sw = 0.7, .size = 9.0, .pad = 6 });
-    b.gap(8);
     try b.para("It is important that this quotation is read in conjunction with the " ++
         "full performance estimate that forms part of it in the following " ++
         "pages. If you require clarification on any point please do not " ++
@@ -822,7 +927,7 @@ fn p09(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     b.gap(6);
     try b.image(A.signature, ML, b.y, 120, 32);
     b.gap(40);
-    try b.text(ML, b.y, "Lance Pearson – Managing Director", .{ .size = 10.5 });
+    try b.text(ML, b.y, q.signatory, .{ .size = 10.5 });
     return b.page();
 }
 
@@ -839,35 +944,37 @@ fn p10(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
         "“Determining the Electrical Self-Consumption of Domestic Solar " ++
         "Photovoltaic (PV) Installations with and without Electrical Energy " ++
         "Storage”.", .{ .size = 10, .gap_after = 8 });
-    try b.para(b.f("Electricity Per Year – {s} Kwh solar PV array.", .{q.kw}), .{ .size = 10, .gap_after = 10 });
+    try b.para(b.f("Electricity Per Year – {s} kWp solar PV array.", .{q.kw}), .{ .size = 10, .gap_after = 10 });
     try b.para("PV PERFORMANCE ESTIMATION", .{ .size = 13, .gap_after = 8 });
     const lc = CW * 0.62;
     const rc = CW * 0.38;
     const SZ: f64 = 9.0;
+    const na = "N/A (no battery)";
+    const outward = std.mem.sliceTo(q.postcode, ' ');
     var rows: std.ArrayListUnmanaged(Row) = .empty;
-    try rows.append(a, perfBand(a, "A. Installation Cost", SZ));
-    try rows.append(a, perfRow(a, "Installed capacity of PV system - kWP (stc)", b.f("{s} Kwh", .{q.kw}), true, SZ));
-    try rows.append(a, perfRow(a, "Orientation of the PV system - degrees from South", "", false, SZ));
+    try rows.append(a, perfBand(a, "A. Installation Data", SZ));
+    try rows.append(a, perfRow(a, "Installed capacity of PV system - kWp (stc)", b.f("{s} kWp", .{q.kw}), true, SZ));
+    try rows.append(a, perfRow(a, "Orientation of the PV system - degrees from South", q.orientation_deg, false, SZ));
     try rows.append(a, perfRow(a, "Inclination of system - degrees from horizontal", "35°", true, SZ));
-    try rows.append(a, perfRow(a, "Postcode region", "SOUTHERN ENGLAND", false, SZ));
+    try rows.append(a, perfRow(a, "Postcode region", outward, false, SZ));
     try rows.append(a, perfBand(a, "B. Performance Calculations", SZ));
-    try rows.append(a, perfRow(a, "kWh/kWp (Kk) from table", "0", true, SZ));
-    try rows.append(a, perfRow(a, "Shade factor (SF)", "0 %", false, SZ));
-    try rows.append(a, perfRow(a, "Estimated annual output (kWp x Kk x SF)", "0", true, SZ));
+    try rows.append(a, perfRow(a, "kWh/kWp (Kk) from table", q.kk, true, SZ));
+    try rows.append(a, perfRow(a, "Shade factor (SF)", q.shade_factor, false, SZ));
+    try rows.append(a, perfRow(a, "Estimated annual output (kWp x Kk x SF)", b.f("{s} kWh", .{q.annual_gen_kwh}), true, SZ));
     try rows.append(a, perfBand(a, "C. Estimated PV self-consumption-PV Only", SZ));
     try rows.append(a, perfRow(a, "Assumed occupancy archetype", "Out all day", true, SZ));
     try rows.append(a, perfRow(a, "Assumed annual electricity consumption, kWh", q.annual_usage_kwh, false, SZ));
-    try rows.append(a, perfRow(a, "Assumed annual electricity generation from solar PV system, kWh", "0", true, SZ));
-    try rows.append(a, perfRow(a, "Expected solar PV self-consumption (PV Only)", "0", false, SZ));
-    try rows.append(a, perfRow(a, "Grid electricity independence /Self-sufficiency (PV Only)", "0%", true, SZ));
+    try rows.append(a, perfRow(a, "Assumed annual electricity generation from solar PV system, kWh", q.annual_gen_kwh, true, SZ));
+    try rows.append(a, perfRow(a, "Expected solar PV self-consumption (PV Only), kWh", q.pv_self_use_kwh, false, SZ));
+    try rows.append(a, perfRow(a, "Grid electricity independence /Self-sufficiency (PV Only)", b.f("{s}%", .{q.pv_independence_pct}), true, SZ));
     try rows.append(a, perfBand(a, "D. Estimated PV self-consumption-with EESS", SZ));
-    try rows.append(a, perfRow(a, "Assumed usable capacity of electrical energy storage device, which is used for self-consumption, kWh", b.f("Battery Storage System {s}", .{q.battery_kwh}), true, SZ));
-    try rows.append(a, perfRow(a, "Expected solar PV self-consumption (with EESS) Kwh", "0", false, SZ));
-    try rows.append(a, perfRow(a, "Grid electricity independence /Self-sufficiency (with EESS)", "0%", true, SZ));
+    try rows.append(a, perfRow(a, "Assumed usable capacity of electrical energy storage device, which is used for self-consumption, kWh", if (q.has_battery) q.battery_kwh else na, true, SZ));
+    try rows.append(a, perfRow(a, "Expected solar PV self-consumption (with EESS), kWh", if (q.has_battery) q.eess_self_use_kwh else na, false, SZ));
+    try rows.append(a, perfRow(a, "Grid electricity independence /Self-sufficiency (with EESS)", if (q.has_battery) b.f("{s}%", .{q.eess_independence_pct}) else na, true, SZ));
     try rows.append(a, perfBand(a, "E. Additional benefits from PV and EESS", SZ));
-    try rows.append(a, perfRow(a, "EESS capacity NOT used for self-consumption", "0", true, SZ));
-    try rows.append(a, perfRow(a, "Total energy discharged per annum approx (will degrade annually)", "1855", false, SZ));
-    try rows.append(a, perfRow(a, "Additional self-consumption from EV, heat pumps, diverters (only when presnt)", "0", true, SZ));
+    try rows.append(a, perfRow(a, "EESS capacity NOT used for self-consumption", if (q.has_battery) "0" else na, true, SZ));
+    try rows.append(a, perfRow(a, "Total energy discharged per annum approx (will degrade annually), kWh", if (q.has_battery) q.battery_discharge_kwh else na, false, SZ));
+    try rows.append(a, perfRow(a, "Additional self-consumption from EV, heat pumps, diverters (only when present), kWh", q.diverter_kwh, true, SZ));
     try b.grid(ML, &[_]f64{ lc, rc }, rows.items, .{ .border = "#c8c8c8", .sw = 0.6, .size = SZ, .pad = 5, .min_h = 26 });
     return b.page();
 }
@@ -876,7 +983,6 @@ fn p10(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
 // PAGE 11 — performance notes + THE FIGURES
 // ============================================================================
 fn p11(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
-    _ = q;
     _ = A;
     var b = B{ .a = a };
     b.y = 40;
@@ -909,29 +1015,34 @@ fn p11(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     };
     for (notes) |pp| try b.para(pp, .{ .size = 9.5, .gap_after = 8 });
     try b.heading("THE FIGURES", .{ .size = 15, .gap_before = 2, .gap_after = 8 });
-    try b.para("If the system performs in line with our predictions the following " ++
-        "would apply, remember, we have assumed that you are Out all day We have " ++
-        "assumed you will self-consume 0% of the energy produced by your PV " ++
+    try b.para(b.f("If the system performs in line with our predictions the following " ++
+        "would apply, remember, we have assumed that you are Out all day. We have " ++
+        "assumed you will self-consume {s}% of the energy produced by your PV " ++
         "system, as determined by the method set out in MGD 003, therefore " ++
-        "exporting 100%", .{ .size = 9.5, .gap_after = 10 });
+        "exporting {s}%.", .{ q.self_use_pct, q.export_pct }), .{ .size = 9.5, .gap_after = 10 });
     const w3 = [_]f64{ CW - 90, 45, 45 };
     const rows = [_]Row{
         .{ .cells = cs(a, &.{.{ .t = "ANNUAL BENEFITS", .al = .center, .bg = BAND_MD, .size = 9.5 }}), .widths = ws(a, &.{CW}), .h = 20 },
         .{ .cells = cs(a, &.{
             .{ .t = "Grid independence: Estimated annual electricity savings % grid independence of PV output = total x electricity tariff (p/kWh) / 100 (e.g. 22% (grid independence) of 2491 (PV output) = 548.02 x 15p (electricity tariff) /100 = £82.20", .bg = "#d9d9d9", .size = 8.3 },
-            .{ .t = "0", .al = .center, .bg = "#d9d9d9" },
+            .{ .t = b.f("£{s}", .{q.bill_saving}), .al = .center, .bg = "#d9d9d9" },
             .{ .t = "per\nyear", .al = .center, .bg = "#d9d9d9" },
         }) },
         .{ .cells = cs(a, &.{
             .{ .t = "\"Annual income generated from Smart Export Guarantee % export of PV output x SEG rate from Energy Provider / 100 e.g. 69% (to be exported) of 2491 (PV output)) = 1,718.79 x 5.5p (SEG rate) / 100 = £94.53\"", .bg = "#d9d9d9", .size = 8.3 },
-            .{ .t = "0", .al = .center, .bg = "#d9d9d9" },
+            .{ .t = b.f("£{s}", .{q.export_income}), .al = .center, .bg = "#d9d9d9" },
             .{ .t = "per\nyear", .al = .center, .bg = "#d9d9d9" },
         }) },
         .{ .cells = cs(a, &.{
             .{ .t = "SMART EXPORT GUARANTEE RATE", .bg = "#d9d9d9", .size = 8.3 },
-            .{ .t = "£0.32", .al = .center, .bg = "#d9d9d9" },
-            .{ .t = "per\nkwh", .al = .center, .bg = "#d9d9d9" },
+            .{ .t = b.f("£{s}", .{q.seg_rate}), .al = .center, .bg = "#d9d9d9" },
+            .{ .t = "per\nkWh", .al = .center, .bg = "#d9d9d9" },
         }), .h = 40 },
+        .{ .cells = cs(a, &.{
+            .{ .t = "TOTAL ESTIMATED ANNUAL BENEFIT", .bg = BAND_MD, .size = 8.3, .bold = true },
+            .{ .t = b.f("£{s}", .{q.annual_saving}), .al = .center, .bg = BAND_MD, .bold = true },
+            .{ .t = "per\nyear", .al = .center, .bg = BAND_MD },
+        }) },
     };
     try b.grid(ML, &w3, &rows, .{ .border = "#7f7f7f", .sw = 0.7, .size = 8.3, .pad = 5 });
     return b.page();
@@ -965,7 +1076,7 @@ fn p12(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     };
     try b.grid(ML, &half, &rows, .{ .border = "#bfbfbf", .sw = 0.7, .size = 9.5, .pad = 7 });
     b.gap(6);
-    try b.text(ML, b.y, b.f("Array Surface Area ={s} Sqm", .{q.array_sqm}), .{ .size = 10 });
+    try b.text(ML, b.y, b.f("Array Surface Area = {s} sq m", .{q.array_sqm}), .{ .size = 10 });
     b.gap(16);
     const WV = struct { k: []const u8, v: []const u8 };
     var wind: std.ArrayListUnmanaged(Row) = .empty;
@@ -994,18 +1105,17 @@ fn p12(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
 // PAGE 13 — SUN PATH + SEG TARIFF
 // ============================================================================
 fn p13(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
-    _ = q;
     var b = B{ .a = a };
     b.y = 30;
     const iw: f64 = 430;
     const ih = iw * (226.0 / 577.0);
     try b.image(A.sunpath, (PW - iw) / 2, b.y, iw, ih);
     b.y += ih + 20;
-    try b.text(ML, b.y, "Sun Path Chart - 0%", .{ .size = 11 });
+    try b.text(ML, b.y, b.f("Sun Path Chart – estimated shading loss {s}% (shade factor {s})", .{ q.shading_loss_pct, q.shade_factor }), .{ .size = 11, .bold = true });
     b.gap(14);
     try b.para("This shade assessment has been undertaken using the standard MCS " ++
         "procedure – it is estimated that this method will yield results within " ++
-        "10% of the actual annual yield or most systems. Where there is an " ++
+        "10% of the actual annual yield for most systems. Where there is an " ++
         "obvious clear horizon and no near or far shading, the assessment of SF " ++
         "has been omitted and an SF value of 1 used.", .{ .size = 10, .gap_after = 12 });
     try b.heading("SMART EXPORT GUARANTEE (SEG) TARIFF", .{ .size = 14, .gap_after = 10 });
@@ -1033,10 +1143,10 @@ fn p13(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
         "Octopus Energy offer Outgoing Octopus which is described as a smart export " ++
             "tariff and their successor to the feed-in tariff (FIT). Perfect for homes " ++
             "with solar panels, battery storage, or any other way of sharing energy back " ++
-            "to the grid. Outgoing Octopus comes in two flavours – Fixed or Agile. " ++
-            "Outgoing Fixed guarantees 5.5p per kWh for every unit you export. Outgoing " ++
-            "Agile matches your half-hourly prices with day-ahead wholesale rates, " ++
-            "helping you make the most of the energy you generate.",
+            "to the grid. Outgoing Octopus pays a set rate for every unit you export, " ++
+            "and Agile Outgoing Octopus matches your half-hourly prices with day-ahead " ++
+            "wholesale rates, helping you make the most of the energy you generate. " ++
+            "Their current rates are on the page below.",
     };
     for (paras) |pp| try b.para(pp, .{ .size = 9.5, .gap_after = 7 });
     try b.link("https://octopus.energy/outgoing/", 10.5, 6);
@@ -1257,7 +1367,6 @@ fn p16(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
 // PAGE 17
 // ============================================================================
 fn p17(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
-    _ = q;
     _ = A;
     var b = B{ .a = a };
     try b.heading("WARRANTIES", .{ .size = 13, .gap_before = 0, .gap_after = 10 });
@@ -1301,8 +1410,8 @@ fn p17(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     try b.para("If we are unable resolve your complaint, you may be able to complain to " ++
         "HIES. You can read about this here:", .{ .size = 10, .gap_after = 2 });
     try b.link("https://www.hiesscheme.org.uk/what-we-do/alternative-dispute-resolution/=how-to-complain-and-who-to-complain-to", 10.5, 6);
-    try b.para("VAT - This is charged at the reduced rate of 0% on the installation of " ++
-        "solar panels in, or in the curtilage of residential accommodation.", .{ .size = 10, .gap_after = 6 });
+    try b.para(b.f("VAT - This is charged at the reduced rate of {s} on the installation of " ++
+        "solar panels in, or in the curtilage of residential accommodation.", .{vatRate(q.date)}), .{ .size = 10, .gap_after = 6 });
     try b.para("DELIVERY - Approximately 2 to 3 weeks from order, subject to " ++
         "availability of components. To be confirmed at the time of order.", .{ .size = 10, .gap_after = 6 });
     try b.para("PRIVACY - Using Your Personal Information", .{ .size = 10, .gap_after = 4 });
@@ -1374,10 +1483,10 @@ fn p19(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     _ = A;
     var b = B{ .a = a };
     b.y = 30;
-    try b.bullets(&.{ "The system size is", b.f("Battery Storage System {s}", .{q.battery_kwh}) }, .{ .size = 10, .gap_after = 2 });
-    try b.para("Kwh and if the battery developes a problem you must inform the " ++
-        "manufacturer immediately see data sheet for all specifications.", .{ .size = 10, .gap_after = 8 });
-    try b.para("The battery will be situated in the {%loc_battery%}", .{ .size = 10, .gap_after = 8 });
+    try b.para(b.f("The battery storage system is {s}. If the battery develops a problem you " ++
+        "must inform the manufacturer immediately; see the data sheet for all " ++
+        "specifications.", .{q.battery_kwh}), .{ .size = 10, .gap_after = 8 });
+    try b.para("The battery’s location will be agreed with you before installation.", .{ .size = 10, .gap_after = 8 });
     try b.para("The useable storage capacity in kilowatt-hours (kWh) accounting for the " ++
         "maximum allowable depth of discharge.", .{ .size = 10, .gap_after = 8 });
     try b.para("Battery Modules can be stacked up to three high and a Power Module that " ++
@@ -1404,8 +1513,7 @@ fn p19(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
             "existing system won’t create a warranty issue.",
         "The Battery is water-resistant and can be installed outdoors. Its IP rating " ++
             "— or Ingress Protection rating — is IP66. This means it’s dust-tight and " ++
-            "able to resist jets of water from all directions. This means if your idiot " ++
-            "cousin decides to hose down your home battery, it should be fine.",
+            "able to resist jets of water from all directions.",
         "Note: It would be helpful for consumers if the useable storage capacity " ++
             "could be expressed in terms of the time that particular devices could be " ++
             "run. Use the formula (10 x battery capacity in amp hours) divided by " ++
@@ -1480,27 +1588,19 @@ fn p20(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
         .{ .cells = cs(a, &.{ .{ .t = "Date:", .al = .center, .bg = "#d9d9d9" }, .{ .t = "" } }), .h = 30 },
     };
     try b.grid(ML, &[_]f64{ CW * 0.4, CW * 0.6 }, &decl, .{ .border = "#7f7f7f", .sw = 0.7, .size = 10, .pad = 7 });
-    b.gap(18);
-    try b.text(ML, b.y, "The next steps", .{ .size = 10.5 });
-    b.gap(13);
+    b.gap(22);
+    try b.heading("THE NEXT STEPS", .{ .size = 13, .gap_after = 6 });
     try b.para("Below are the steps both of us will take to give you a complete solar " ++
         "system under your control.", .{ .size = 10, .gap_after = 8 });
-    try b.para("Check the quotation ensure everything suits your needs and you are happy " ++
-        "with the costings", .{ .size = 10, .gap_after = 12 });
-    try b.text(ML, b.y, "Sign the attached agreement and return to us with your deposit of 15%", .{ .size = 10 });
-    try b.text(PW - MR, b.y, b.f("£{s}", .{q.deposit}), .{ .size = 10, .al = .right });
-    b.gap(20);
-    try b.text(ML, b.y, "Once we have an install date we will contact you and take the second payment of 40%", .{ .size = 10 });
-    try b.text(PW - MR, b.y, b.f("£{s}", .{q.stage}), .{ .size = 10, .al = .right });
-    b.gap(18);
-    try b.para("Day of installation; Teams arrive and brief you on the plan then install " ++
-        "and commission your system, install team will then demonstrate and answer " ++
-        "any questions you may have on your system. Final payment of the " ++
-        "outstanding balance is due at this point.", .{ .size = 10, .gap_after = 8 });
-    try b.para("Within 14 days of install post installation pack warranties, product " ++
-        "information and post install support certification delivered to you.", .{ .size = 10, .gap_after = 18 });
-    try b.text(ML, b.y, "Your Surveyor was: -", .{ .size = 10 });
-    b.gap(24);
+    const steps = [_]Row{
+        .{ .cells = cs(a, &.{ .{ .t = "1", .al = .center, .bold = true, .color = GREEN }, .{ .t = "Check the quotation, ensure everything suits your needs and you are happy with the costings." }, .{ .t = "" } }) },
+        .{ .cells = cs(a, &.{ .{ .t = "2", .al = .center, .bold = true, .color = GREEN }, .{ .t = "Sign the attached agreement and return it to us with your deposit of 15%." }, .{ .t = b.f("£{s}", .{q.deposit}), .al = .right, .bold = true } }) },
+        .{ .cells = cs(a, &.{ .{ .t = "3", .al = .center, .bold = true, .color = GREEN }, .{ .t = "Once we have an install date we will contact you and take the second payment of 40%." }, .{ .t = b.f("£{s}", .{q.stage}), .al = .right, .bold = true } }) },
+        .{ .cells = cs(a, &.{ .{ .t = "4", .al = .center, .bold = true, .color = GREEN }, .{ .t = "Day of installation: teams arrive and brief you on the plan, then install and commission your system. The install team will then demonstrate it and answer any questions you may have. Final payment of the outstanding balance is due at this point." }, .{ .t = b.f("£{s}", .{q.balance}), .al = .right, .bold = true } }) },
+        .{ .cells = cs(a, &.{ .{ .t = "5", .al = .center, .bold = true, .color = GREEN }, .{ .t = "Within 14 days of install, your post-installation pack (warranties, product information and post-install support certification) is delivered to you." }, .{ .t = "" } }) },
+    };
+    try b.grid(ML, &[_]f64{ 30, CW - 30 - 80, 80 }, &steps, .{ .border = "#d0d0d0", .sw = 0.6, .size = 10, .pad = 7 });
+    b.gap(30);
     try b.text(PW / 2, b.y, "Many thanks for your time and for your interest in our " ++
         "products.", .{ .size = 13, .color = GREEN, .al = .center });
     return b.page();

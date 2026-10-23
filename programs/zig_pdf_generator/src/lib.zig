@@ -605,6 +605,7 @@ test {
     _ = @import("letter.zig");
     _ = @import("legend_letter_tests.zig");
     _ = @import("solar_letter_tests.zig");
+    _ = @import("beacon_solar_report_tests.zig");
     _ = @import("docx_bridge_tests.zig");
     _ = @import("pdf_crypt.zig");
     // seal.zig imports the `ml_dsa` module (native targets only). Importing it
