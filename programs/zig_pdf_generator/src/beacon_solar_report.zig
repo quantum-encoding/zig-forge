@@ -1090,15 +1090,17 @@ fn p12(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
         .{ .cells = cs(a, &.{ .{ .t = "Payback Period (installation cost divided by estimated annual benefit) :", .bg = "#d9d9d9" }, .{ .t = b.f("{s} Years", .{q.payback_years}) } }), .h = 36 },
     };
     try b.grid(ML, &half, &rows, .{ .border = "#bfbfbf", .sw = 0.7, .size = 9.5, .pad = 7 });
-    b.gap(6);
+    // b.y is the table's bottom edge and text sits on its baseline, so clear
+    // the text's height before drawing it.
+    b.gap(18);
     try b.text(ML, b.y, b.f("Array Surface Area = {s} sq m", .{q.array_sqm}), .{ .size = 10 });
-    b.gap(16);
+    b.gap(14);
     const WV = struct { k: []const u8, v: []const u8 };
     var wind: std.ArrayListUnmanaged(Row) = .empty;
     try wind.append(a, .{ .cells = cs(a, &.{.{ .t = "MCS Wind Loading Calculation", .al = .center, .bg = BLUE_LT, .size = 10 }}), .widths = ws(a, &.{CW}), .h = 22 });
     const wind_rows = [_]WV{
         .{ .k = "Wind Zone:", .v = "1-SU" },                  .{ .k = "Peak Pressure:", .v = "1,009Pa" },
-        .{ .k = "Altitude Correction Factor:", .v = "NONE" }, .{ .k = "Typography Correction Factor:", .v = "NONE" },
+        .{ .k = "Altitude Correction Factor:", .v = "NONE" }, .{ .k = "Topography Correction Factor:", .v = "NONE" },
         .{ .k = "Peak Velocity Pressure:", .v = "1009Pa" },   .{ .k = "Pressure Coefficient:", .v = "-0.5" },
         .{ .k = "Wind Pressure:", .v = "-681Pa" },
     };
@@ -1106,7 +1108,7 @@ fn p12(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     try b.grid(ML, &half, wind.items, .{ .border = "#a6a6a6", .sw = 0.7, .size = 9.5, .pad = 7 });
     b.gap(4);
     var snow: std.ArrayListUnmanaged(Row) = .empty;
-    try snow.append(a, .{ .cells = cs(a, &.{.{ .t = "Snow Landing Calculation", .al = .center, .bg = BLUE_LT, .size = 10 }}), .widths = ws(a, &.{CW}), .h = 22 });
+    try snow.append(a, .{ .cells = cs(a, &.{.{ .t = "Snow Loading Calculation", .al = .center, .bg = BLUE_LT, .size = 10 }}), .widths = ws(a, &.{CW}), .h = 22 });
     const snow_rows = [_]WV{
         .{ .k = "Snow Load:", .v = "500Pa" },       .{ .k = "Altitude Correction:", .v = "NONE" },
         .{ .k = "Pitch Adjustment:", .v = "1000" }, .{ .k = "Adjust Snow Load:", .v = "500Pa" },
