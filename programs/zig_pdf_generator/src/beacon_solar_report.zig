@@ -194,32 +194,43 @@ pub const CrgQuote = struct {
     postcode: []const u8 = "PO4 9NX",
     /// ISO date (YYYY-MM-DD) the quote was issued; also selects the VAT wording.
     date: []const u8 = "2026-03-05",
-    kw: []const u8 = "4.92",
-    annual_saving: []const u8 = "1,183",
+    kw: []const u8 = "5.40",
+    annual_saving: []const u8 = "1,299",
     total_price: []const u8 = "7,430",
     net_price: []const u8 = "7,430",
     total_price_dec: []const u8 = "7430.00",
-    lifetime_saving: []const u8 = "29,575",
+    lifetime_saving: []const u8 = "32,475",
     panel_count: []const u8 = "12",
-    panel_model: []const u8 = "Cs3l-355ms-ab",
-    panel_model_raw: []const u8 = "cs3l-355ms-ab",
-    panel_watt: []const u8 = "410",
+    /// Product name for the quote summary, brand included.
+    panel_model: []const u8 = "Canadian Solar TOPHiKu6 450 W All-Black",
+    /// Brand and model code for the system detail page.
+    panel_model_raw: []const u8 = "Canadian Solar CS6.2-48TD-450",
+    panel_watt: []const u8 = "450",
     has_battery: bool = true,
-    battery: []const u8 = "5.3 Sunsynk Battery",
-    battery_kwh: []const u8 = "5.3 kWh",
-    inverter: []const u8 = "Sun-3.6-ecco Inverter",
-    inverter_raw: []const u8 = "sunsynk sun-3.6-ecco",
+    battery: []const u8 = "Example 5 kWh Battery",
+    battery_kwh: []const u8 = "5.12 kWh",
+    /// Usable capacity at the recommended depth of discharge (MCS section D).
+    battery_usable_kwh: []const u8 = "4.6 kWh",
+    /// Product facts for the battery page, one paragraph each.
+    battery_facts: []const []const u8 = &.{
+        "The battery uses lithium iron phosphate (LiFePO4) cells.",
+        "See the manufacturer's data sheet for its rated cycle life and warranty.",
+    },
+    inverter: []const u8 = "Example 3.6kW Hybrid Inverter",
+    inverter_raw: []const u8 = "example 3.6kW single-phase hybrid inverter",
+    /// Whether the embedded inverter data sheet image is for this inverter.
+    show_inverter_datasheet: bool = true,
     iboost: bool = false,
     birdguard: bool = false,
     annual_usage_kwh: []const u8 = "7450",
     /// Unit rate in pence per kWh, e.g. "34".
     tariff_p: []const u8 = "34",
-    annual_gen_kwh: []const u8 = "4182",
+    annual_gen_kwh: []const u8 = "4590",
     deposit: []const u8 = "1,115",
     stage: []const u8 = "2,972",
     balance: []const u8 = "3,343",
-    payback_years: []const u8 = "6.3",
-    array_sqm: []const u8 = "22.44",
+    payback_years: []const u8 = "5.7",
+    array_sqm: []const u8 = "24.00",
 
     // ---- performance estimate (pages 10–13) ----
     /// Roof orientation as the customer gave it ("South"); empty when unknown.
@@ -233,15 +244,15 @@ pub const CrgQuote = struct {
     /// Share of generation used in the home, all measures included.
     self_use_pct: []const u8 = "70",
     export_pct: []const u8 = "30",
-    bill_saving: []const u8 = "995",
-    export_income: []const u8 = "188",
+    bill_saving: []const u8 = "1,092",
+    export_income: []const u8 = "207",
     /// Smart Export Guarantee rate, £ per kWh.
     seg_rate: []const u8 = "0.15",
-    pv_self_use_kwh: []const u8 = "1464",
-    pv_independence_pct: []const u8 = "20",
-    eess_self_use_kwh: []const u8 = "2927",
-    eess_independence_pct: []const u8 = "39",
-    battery_discharge_kwh: []const u8 = "1463",
+    pv_self_use_kwh: []const u8 = "1607",
+    pv_independence_pct: []const u8 = "22",
+    eess_self_use_kwh: []const u8 = "3213",
+    eess_independence_pct: []const u8 = "43",
+    battery_discharge_kwh: []const u8 = "1606",
     diverter_kwh: []const u8 = "0",
 
     // ---- the installer (fictional defaults; each deployment supplies its own) ----
@@ -741,7 +752,7 @@ fn p06(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
         "Systems insurance backed guarantee and we are fully MCS accredited.", .{ .size = 10.5, .gap_after = 8 });
     try b.heading("OVERVIEW:", .{ .size = 17, .gap_before = 2, .gap_after = 8 });
     var overview: std.ArrayListUnmanaged([]const u8) = .empty;
-    try overview.append(a, b.f("{s} Canadian Solar {s} panels, output per panel {s} W", .{ q.panel_count, q.panel_model_raw, q.panel_watt }));
+    try overview.append(a, b.f("{s} {s} panels, output per panel {s} W", .{ q.panel_count, q.panel_model_raw, q.panel_watt }));
     try overview.append(a, b.f("Inverter is a {s}", .{q.inverter_raw}));
     try overview.append(a, b.f("Total system size of {s} kWp", .{q.kw}));
     try overview.append(a, b.f("System cost is £{s}", .{q.total_price}));
@@ -752,7 +763,7 @@ fn p06(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     const roof = if (q.orientation.len != 0) b.f("{s} facing roof", .{q.orientation}) else "roof";
     try b.para(b.f("Based on the details you have given us, we are able to fit {s} panels on your " ++
         "{s} using {s} W panels, creating a {s} kWp system. We are " ++
-        "proposing to supply MCS approved Canadian Solar {s} panels. These " ++
+        "proposing to supply MCS approved {s} panels. These " ++
         "panels achieve a higher cell efficiency which means more energy per " ++
         "square meter. Use of first-class materials result in an increased " ++
         "durability so they reach a higher reliability, assured by a 25 year " ++
@@ -795,11 +806,15 @@ fn p06(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
 fn p07(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     var b = B{ .a = a };
     try b.heading("INVERTER", .{ .size = 17, .gap_after = 8 });
-    try b.para(b.f("The inverter we are proposing is a {s}. The " ++
-        "data sheet below shows the capabilities and limitations of your " ++
-        "inverter. Be advised that if you have an inverter that does not support " ++
-        "battery storage and at some point in the future you require battery " ++
-        "storage, you will need to upgrade your inverter.", .{q.inverter_raw}), .{ .size = 10.5, .gap_after = 16 });
+    const datasheet = if (q.show_inverter_datasheet)
+        "The data sheet below shows the capabilities and limitations of your inverter."
+    else
+        "The data sheet for your inverter, showing its capabilities and limitations, is available from us on request.";
+    try b.para(b.f("The inverter we are proposing is a {s}. {s} Be advised that if you " ++
+        "have an inverter that does not support battery storage and at some point in " ++
+        "the future you require battery storage, you will need to upgrade your " ++
+        "inverter.", .{ q.inverter_raw, datasheet }), .{ .size = 10.5, .gap_after = 16 });
+    if (!q.show_inverter_datasheet) return b.page();
     var iw: f64 = 430;
     var ih = iw * (1600.0 / 1131.0);
     if (b.y + ih > PH - 30) {
@@ -968,7 +983,7 @@ fn p10(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     try rows.append(a, perfRow(a, "Expected solar PV self-consumption (PV Only), kWh", q.pv_self_use_kwh, false, SZ));
     try rows.append(a, perfRow(a, "Grid electricity independence /Self-sufficiency (PV Only)", b.f("{s}%", .{q.pv_independence_pct}), true, SZ));
     try rows.append(a, perfBand(a, "D. Estimated PV self-consumption-with EESS", SZ));
-    try rows.append(a, perfRow(a, "Assumed usable capacity of electrical energy storage device, which is used for self-consumption, kWh", if (q.has_battery) q.battery_kwh else na, true, SZ));
+    try rows.append(a, perfRow(a, "Assumed usable capacity of electrical energy storage device, which is used for self-consumption, kWh", if (q.has_battery) q.battery_usable_kwh else na, true, SZ));
     try rows.append(a, perfRow(a, "Expected solar PV self-consumption (with EESS), kWh", if (q.has_battery) q.eess_self_use_kwh else na, false, SZ));
     try rows.append(a, perfRow(a, "Grid electricity independence /Self-sufficiency (with EESS)", if (q.has_battery) b.f("{s}%", .{q.eess_independence_pct}) else na, true, SZ));
     try rows.append(a, perfBand(a, "E. Additional benefits from PV and EESS", SZ));
@@ -1487,33 +1502,12 @@ fn p19(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
         "must inform the manufacturer immediately; see the data sheet for all " ++
         "specifications.", .{q.battery_kwh}), .{ .size = 10, .gap_after = 8 });
     try b.para("The battery’s location will be agreed with you before installation.", .{ .size = 10, .gap_after = 8 });
-    try b.para("The useable storage capacity in kilowatt-hours (kWh) accounting for the " ++
-        "maximum allowable depth of discharge.", .{ .size = 10, .gap_after = 8 });
-    try b.para("Battery Modules can be stacked up to three high and a Power Module that " ++
-        "controls them is placed on top. When connected to a compatible inverter " ++
-        "this gives the following energy storage capacity and continuous power " ++
-        "output:", .{ .size = 10, .gap_after = 6 });
-    try b.bullets(&.{
-        "Battery Module = 5 kilowatt-hour of energy storage and 2.5 kilowatts of power output.",
-        "Battery Modules = 10 kilowatt-hours of energy storage and 5 kilowatts of power output.",
-        "Battery Modules = 15 kilowatt-hours of energy storage and 5 kilowatts of power output.",
-    }, .{ .size = 10, .gap_after = 10 });
+    try b.para(b.f("The useable storage capacity, accounting for the maximum allowable " ++
+        "depth of discharge, is {s}.", .{q.battery_usable_kwh}), .{ .size = 10, .gap_after = 8 });
+    for (q.battery_facts) |fact| try b.para(fact, .{ .size = 10, .gap_after = 8 });
     const paras = [_][]const u8{
         "Note: if the inverter is under 5 kilowatts the power output will be limited " ++
             "by the inverter’s capacity.",
-        "If you want more than 15 kilowatt-hours of storage, two Luna2000s can be " ++
-            "installed in parallel to provide up to 30 kilowatt-hours of storage. More " ++
-            "modules won’t improve the power output beyond 5 kilowatts:",
-        "Each 5 kilowatt-hour Battery Module operates separately from the others. " ++
-            "This means if a fault develops in one module the others can still be used " ++
-            "until the defective unit is repaired or replaced.",
-        "The independent operation makes it easy to add an extra module to expand " ++
-            "storage capacity or compensate for capacity deteriorating over time. As each " ++
-            "battery module is covered by its own warranty, adding a new one to an " ++
-            "existing system won’t create a warranty issue.",
-        "The Battery is water-resistant and can be installed outdoors. Its IP rating " ++
-            "— or Ingress Protection rating — is IP66. This means it’s dust-tight and " ++
-            "able to resist jets of water from all directions.",
         "Note: It would be helpful for consumers if the useable storage capacity " ++
             "could be expressed in terms of the time that particular devices could be " ++
             "run. Use the formula (10 x battery capacity in amp hours) divided by " ++

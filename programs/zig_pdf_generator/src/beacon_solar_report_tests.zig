@@ -35,6 +35,8 @@ test "no template placeholder or survey-visit wording reaches the customer" {
         "Having visited your property",
         "approx’",
         "5.5p per kWh",
+        "Luna2000",
+        "Battery Module",
     };
     for (banned) |s| {
         if (std.mem.indexOf(u8, text, s) != null) {
@@ -64,10 +66,22 @@ test "the figures come from the quote" {
 
 test "a quote without a battery offers none" {
     const a = testing.allocator;
-    const text = try renderedText(a, .{ .has_battery = false });
+    const text = try renderedText(a, .{ .has_battery = false, .show_inverter_datasheet = false });
     defer a.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "Battery Storage System") == null);
     try testing.expect(std.mem.indexOf(u8, text, "N/A (no battery)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "available from us on request") != null);
+}
+
+test "the battery page carries the caller's product facts" {
+    const a = testing.allocator;
+    const text = try renderedText(a, .{
+        .battery_usable_kwh = "4.79 kWh",
+        .battery_facts = &.{"It is rated for at least 6,000 cycles."},
+    });
+    defer a.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "4.79 kWh") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "at least 6,000 cycles") != null);
 }
 
 test "the VAT rate follows the quote date" {
