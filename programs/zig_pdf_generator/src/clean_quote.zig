@@ -519,20 +519,22 @@ pub const CleanQuoteRenderer = struct {
     fn drawMetricsSection(self: *CleanQuoteRenderer, content: *document.ContentStream, section: ProposalSection) !void {
         if (section.metric_items.len == 0) return;
 
+        // Compute card dimensions
+        const item_h: f32 = 22;
+        const card_padding: f32 = 14;
+        const card_h: f32 = @as(f32, @floatFromInt(section.metric_items.len)) * item_h + card_padding * 2 - 6;
+        const label_h: f32 = if (section.heading.len > 0) 16 else 0;
+
+        // The label and its card move to the next page together.
+        try self.checkPageBreak(content, label_h + card_h + 10);
+
         // Label
         if (section.heading.len > 0) {
             const upper = try std.ascii.allocUpperString(self.allocator, section.heading);
             defer self.allocator.free(upper);
             try self.drawUppercaseLabel(content, upper, self.margin_left, self.current_y);
-            self.current_y -= 16;
+            self.current_y -= label_h;
         }
-
-        // Compute card dimensions
-        const item_h: f32 = 22;
-        const card_padding: f32 = 14;
-        const card_h: f32 = @as(f32, @floatFromInt(section.metric_items.len)) * item_h + card_padding * 2 - 6;
-
-        try self.checkPageBreak(content, card_h + 10);
 
         const card_x = self.margin_left;
         const card_w = self.usable_width;
@@ -596,7 +598,7 @@ pub const CleanQuoteRenderer = struct {
 
             // Amount right-aligned on first row
             var amt_buf: [32]u8 = undefined;
-            const amt_str = try std.fmt.bufPrint(&amt_buf, "\u{00A3}{d:.2}", .{item.total});
+            const amt_str = try formatGbp(&amt_buf, item.total);
             const amt_w = document.Font.helvetica.measureText(amt_str, 11);
             try content.drawText(amt_str, amount_x - amt_w, row_top, self.font_regular, 11, INK_BLACK);
 
@@ -614,7 +616,7 @@ pub const CleanQuoteRenderer = struct {
         if (section.subtotal > 0 or section.tax_rate > 0) {
             try self.drawTextConverted(content, self.data.labels.subtotal, label_x, self.current_y, self.font_regular, 11, MUTED_GREY);
             var sub_buf: [32]u8 = undefined;
-            const sub_str = try std.fmt.bufPrint(&sub_buf, "\u{00A3}{d:.2}", .{section.subtotal});
+            const sub_str = try formatGbp(&sub_buf, section.subtotal);
             const sub_w = document.Font.helvetica.measureText(sub_str, 11);
             try content.drawText(sub_str, amount_x - sub_w, self.current_y, self.font_regular, 11, MUTED_GREY);
             self.current_y -= 16;
@@ -626,7 +628,7 @@ pub const CleanQuoteRenderer = struct {
                 try self.drawTextConverted(content, vat_lbl, label_x, self.current_y, self.font_regular, 11, MUTED_GREY);
                 const vat_amount = section.subtotal * section.tax_rate;
                 var vat_buf: [32]u8 = undefined;
-                const vat_str = try std.fmt.bufPrint(&vat_buf, "\u{00A3}{d:.2}", .{vat_amount});
+                const vat_str = try formatGbp(&vat_buf, vat_amount);
                 const vat_w = document.Font.helvetica.measureText(vat_str, 11);
                 try content.drawText(vat_str, amount_x - vat_w, self.current_y, self.font_regular, 11, MUTED_GREY);
                 self.current_y -= 16;
@@ -640,7 +642,7 @@ pub const CleanQuoteRenderer = struct {
         if (section.total > 0) {
             try self.drawTextConverted(content, self.data.labels.total, label_x, self.current_y, self.font_bold, 12, INK_BLACK);
             var tot_buf: [32]u8 = undefined;
-            const tot_str = try std.fmt.bufPrint(&tot_buf, "\u{00A3}{d:.2}", .{section.total});
+            const tot_str = try formatGbp(&tot_buf, section.total);
             const tot_w = document.Font.helvetica_bold.measureText(tot_str, 12);
             try content.drawText(tot_str, amount_x - tot_w, self.current_y, self.font_bold, 12, INK_BLACK);
             self.current_y -= 20;
@@ -957,4 +959,40 @@ fn fieldNamesOf(comptime T: type) []const [:0]const u8 {
         },
         else => unreachable,
     };
+}
+
+/// "£1,234.50": pounds with thousands separators and two decimals.
+fn formatGbp(buf: []u8, amount: f64) ![]const u8 {
+    const total_pence: u64 = @intFromFloat(@round(@abs(amount) * 100.0));
+    var digits_buf: [24]u8 = undefined;
+    const digits = try std.fmt.bufPrint(&digits_buf, "{d}", .{total_pence / 100});
+    const pound = "\u{00A3}";
+    if (buf.len < 1 + pound.len + digits.len + digits.len / 3 + 3) return error.NoSpaceLeft;
+    var w: usize = 0;
+    if (amount < 0 and total_pence > 0) {
+        buf[w] = '-';
+        w += 1;
+    }
+    @memcpy(buf[w .. w + pound.len], pound);
+    w += pound.len;
+    for (digits, 0..) |d, i| {
+        if (i > 0 and (digits.len - i) % 3 == 0) {
+            buf[w] = ',';
+            w += 1;
+        }
+        buf[w] = d;
+        w += 1;
+    }
+    const frac = try std.fmt.bufPrint(buf[w..], ".{d:0>2}", .{total_pence % 100});
+    return buf[0 .. w + frac.len];
+}
+
+test "formatGbp groups thousands and keeps pence" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("\u{00A3}7,500.00", try formatGbp(&buf, 7500));
+    try std.testing.expectEqualStrings("\u{00A3}24,500.00", try formatGbp(&buf, 24500));
+    try std.testing.expectEqualStrings("\u{00A3}960.00", try formatGbp(&buf, 960));
+    try std.testing.expectEqualStrings("\u{00A3}1,234,567.89", try formatGbp(&buf, 1234567.891));
+    try std.testing.expectEqualStrings("-\u{00A3}660.00", try formatGbp(&buf, -660));
+    try std.testing.expectEqualStrings("\u{00A3}0.00", try formatGbp(&buf, 0));
 }
