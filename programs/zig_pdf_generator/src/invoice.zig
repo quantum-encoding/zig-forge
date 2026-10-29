@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const document = @import("document.zig");
+const glass = @import("glass.zig");
 const image = @import("image.zig");
 const qrcode = @import("qrcode.zig");
 const identicon = @import("identicon.zig");
@@ -954,36 +955,21 @@ pub const InvoiceRenderer = struct {
     // Liquid Glass materials
     // -------------------------------------------------------------------------
 
-    /// Linear blend from `a` to `b` by `t` in [0,1] (t=0 → a, t=1 → b).
+    /// Linear blend from `a` to `b` by `t` in [0,1] (glass.zig).
     fn mixColor(a: document.Color, b: document.Color, t: f32) document.Color {
-        return .{
-            .r = a.r + (b.r - a.r) * t,
-            .g = a.g + (b.g - a.g) * t,
-            .b = a.b + (b.b - a.b) * t,
-        };
+        return glass.mix(a, b, t);
     }
 
-    /// Paint the page "environment": a soft vertical wash from a light tint of
-    /// the primary colour at the top fading to white by the lower third. Drawn
-    /// first into the background layer of every glass page.
+    /// The glass page wash, drawn first into the background layer of every
+    /// glass page (glass.zig).
     fn drawGlassWash(self: *InvoiceRenderer, bg: *document.ContentStream) !void {
-        const primary = document.Color.fromHex(self.data.primary_color);
-        const wash_top = mixColor(document.Color.white, primary, 0.10); // ~10% tint
-        const top_y = self.page_height;
-        const fade_y = self.page_height * 0.34; // white by the lower third
-        const sh = self.doc.getAxialShadingId(wash_top, document.Color.white, 0, top_y, 0, fade_y);
-        try bg.saveState();
-        try bg.clipRect(0, 0, self.page_width, self.page_height);
-        try bg.paintShading(sh);
-        try bg.restoreState();
+        try glass.drawWash(&self.doc, bg, self.page_width, self.page_height, document.Color.fromHex(self.data.primary_color));
     }
 
-    /// Draw one glass panel into the background layer: a translucent rounded
-    /// fill over the wash, a bright top-edge sheen (an axial gradient confined
-    /// to the top band), and an optional hairline border. Because the whole
-    /// background layer is composited beneath the page text, panels never
-    /// obscure the content drawn over them — including dynamic-height panels
-    /// (the items-table container) closed after their rows are laid down.
+    /// One glass panel in the background layer (glass.zig). Because the whole
+    /// layer is composited beneath the page text, panels never obscure the
+    /// content drawn over them, including dynamic-height panels (the
+    /// items-table container) closed after their rows are laid down.
     fn drawGlassPanel(
         self: *InvoiceRenderer,
         bg: *document.ContentStream,
@@ -999,28 +985,7 @@ pub const InvoiceRenderer = struct {
         border: ?document.Color,
         border_w: f32,
     ) !void {
-        // Translucent base fill — the wash shows through.
-        try bg.saveState();
-        try bg.setExtGState(self.doc.getOpacityExtGStateId(base_alpha));
-        try bg.drawRoundedRectEx(x, y, w, h, radius, base, null, 1.0);
-        try bg.restoreState();
-
-        // Top-edge sheen: white at the very top fading to `sheen_end`, clipped
-        // to the panel silhouette. The fade runs the full panel height, so
-        // there is no seam — the gradient's end IS the panel's bottom border.
-        if (h > 1.0) {
-            const sh = self.doc.getAxialShadingId(document.Color.white, sheen_end, x, y + h, x, y);
-            try bg.saveState();
-            try bg.setExtGState(self.doc.getOpacityExtGStateId(sheen_alpha));
-            try bg.clipRoundedRect(x, y, w, h, radius);
-            try bg.paintShading(sh);
-            try bg.restoreState();
-        }
-
-        // Hairline border — opaque, drawn last so the edge stays crisp.
-        if (border) |bc| {
-            try bg.drawRoundedRectEx(x, y, w, h, radius, null, bc, border_w);
-        }
+        try glass.drawPanel(&self.doc, bg, x, y, w, h, radius, base, base_alpha, sheen_end, sheen_alpha, border, border_w);
     }
 
     // -------------------------------------------------------------------------

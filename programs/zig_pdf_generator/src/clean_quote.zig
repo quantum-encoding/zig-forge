@@ -25,9 +25,16 @@
 //!
 //! If title_color is empty, falls back to primary_color → #DC2626.
 //! Fixed roles use the neutral palette constants below.
+//!
+//! `"theme": "glass"` adds the invoice's Liquid Glass materials (glass.zig):
+//! a primary-tinted wash on every page, a frosted panel behind the header,
+//! each table in a frosted card under a tinted header band, and a frosted
+//! TOTAL chip. Panels go into a per-page background layer composited beneath
+//! the content. Without a theme the output is unchanged.
 
 const std = @import("std");
 const document = @import("document.zig");
+const glass = @import("glass.zig");
 const proposal = @import("proposal.zig");
 const qrcode = @import("qrcode.zig");
 const image = @import("image.zig");
@@ -131,6 +138,13 @@ pub const CleanQuoteRenderer = struct {
     logo_w: f32 = 0,
     logo_h: f32 = 0,
 
+    // Glass theme: the current page's background layer (wash + panels),
+    // composited beneath its content when the page is committed. Null for the
+    // plain theme, which therefore never writes one.
+    bg: ?document.ContentStream = null,
+    // Glass theme: top of the open table card on this page.
+    table_top: f32 = 0,
+
     pub fn init(allocator: std.mem.Allocator, data: ProposalData) CleanQuoteRenderer {
         var r = CleanQuoteRenderer{
             .allocator = allocator,
@@ -176,6 +190,7 @@ pub const CleanQuoteRenderer = struct {
     }
 
     pub fn deinit(self: *CleanQuoteRenderer) void {
+        if (self.bg) |*bg| bg.deinit();
         if (self.qr_pixels) |px| self.allocator.free(px);
         if (self.logo_decoded) |d| self.allocator.free(d);
         for (self.pages.items) |*page| page.deinit();
@@ -198,10 +213,63 @@ pub const CleanQuoteRenderer = struct {
 
     fn checkPageBreak(self: *CleanQuoteRenderer, content: *document.ContentStream, needed_height: f32) !void {
         if (self.current_y - needed_height >= self.margin_bottom) return;
-        // Save current page and start new one
-        try self.pages.append(self.allocator, content.*);
+        try self.commitPage(content);
         content.* = document.ContentStream.init(self.allocator);
         self.current_y = self.page_height - self.margin_top;
+        if (self.bg != null) try self.drawWash();
+    }
+
+    /// Keep the page: in glass, its background layer goes first and the
+    /// content over it; plain pages are kept as they are. Takes ownership of
+    /// `content`'s buffer.
+    fn commitPage(self: *CleanQuoteRenderer, content: *document.ContentStream) !void {
+        if (self.bg) |*bg| {
+            try bg.buffer.appendSlice(self.allocator, content.getContent());
+            try self.pages.append(self.allocator, bg.*);
+            bg.* = document.ContentStream.init(self.allocator);
+            content.deinit();
+        } else {
+            try self.pages.append(self.allocator, content.*);
+        }
+    }
+
+    // ─── Glass materials ────────────────────────────────────────
+
+    fn glassPrimary(self: *CleanQuoteRenderer) document.Color {
+        return resolveColor(self.data.primary_color, ACCENT_RED);
+    }
+
+    fn glassInk(self: *CleanQuoteRenderer) document.Color {
+        return resolveColor(self.data.secondary_color, INK_BLACK);
+    }
+
+    fn drawWash(self: *CleanQuoteRenderer) !void {
+        try glass.drawWash(&self.doc, &self.bg.?, self.page_width, self.page_height, self.glassPrimary());
+    }
+
+    /// A frosted white panel with the accent-tinted sheen and hairline border.
+    fn drawFrostedPanel(self: *CleanQuoteRenderer, x: f32, y: f32, w: f32, h: f32, radius: f32, alpha: f32) !void {
+        const primary = self.glassPrimary();
+        try glass.drawPanel(&self.doc, &self.bg.?, x, y, w, h, radius, document.Color.white, alpha, glass.mix(document.Color.white, primary, 0.22), 0.50, glass.mix(document.Color.white, primary, 0.14), 1.0);
+    }
+
+    /// Table column titles on a tinted band. The card composited over the band
+    /// washes it pale, so the titles use the dark ink, as the invoice's do.
+    fn drawGlassTableHeader(self: *CleanQuoteRenderer, content: *document.ContentStream) !void {
+        const primary = self.glassPrimary();
+        const ink = self.glassInk();
+        const amount_x = self.page_width - self.margin_right;
+        try glass.drawPanel(&self.doc, &self.bg.?, self.margin_left - 4, self.current_y - 5, self.usable_width + 8, 22, 7, primary, 0.90, primary, 0.50, null, 0);
+        self.table_top = self.current_y + 17 + 8;
+        try self.drawTextConverted(content, self.data.labels.description, self.margin_left, self.current_y, self.font_bold, 10, ink);
+        const amt_hdr_width = document.Font.helvetica_bold.measureText(self.data.labels.amount, 10);
+        try self.drawTextConverted(content, self.data.labels.amount, amount_x - amt_hdr_width, self.current_y, self.font_bold, 10, ink);
+        self.current_y -= 28;
+    }
+
+    /// Close the frosted card around the table rows drawn since table_top.
+    fn closeTableCard(self: *CleanQuoteRenderer, bottom_y: f32) !void {
+        try self.drawFrostedPanel(self.margin_left - 8, bottom_y, self.usable_width + 16, self.table_top - bottom_y, 10, 0.70);
     }
 
     // ─── Header ─────────────────────────────────────────────────
@@ -273,8 +341,14 @@ pub const CleanQuoteRenderer = struct {
         // Bottom of header = whichever side went lower
         self.current_y = @min(left_y, top_y - 50) - 6;
 
-        // Accent hairline separator
-        try content.drawLine(self.margin_left, self.current_y, right_x, self.current_y, self.accent_color, 0.5);
+        if (self.bg != null) {
+            // Glass: a frosted masthead panel behind the header stands in for
+            // the hairline.
+            try self.drawFrostedPanel(self.margin_left - 8, self.current_y, self.usable_width + 16, top_y + 18 - self.current_y, 12, 0.72);
+        } else {
+            // Accent hairline separator
+            try content.drawLine(self.margin_left, self.current_y, right_x, self.current_y, self.accent_color, 0.5);
+        }
         self.current_y -= 22;
 
         // Prepared-for / dates two-column block
@@ -564,26 +638,42 @@ pub const CleanQuoteRenderer = struct {
     fn drawTableSection(self: *CleanQuoteRenderer, content: *document.ContentStream, section: ProposalSection) !void {
         try self.checkPageBreak(content, 80);
 
+        const glass_on = self.bg != null;
+
         // Section label
         if (section.heading.len > 0) {
             const upper = try std.ascii.allocUpperString(self.allocator, section.heading);
             defer self.allocator.free(upper);
             try self.drawUppercaseLabel(content, upper, self.margin_left, self.current_y);
-            self.current_y -= 20;
+            // Glass: the card's top sits 25pt above the band titles, so the
+            // label needs more room to stay clear of it.
+            self.current_y -= if (glass_on) 36 else 20;
         }
 
-        // Column header — bold text with grey underline
         const desc_x = self.margin_left;
         const amount_x = self.page_width - self.margin_right;
-        try self.drawTextConverted(content, self.data.labels.description, desc_x, self.current_y, self.font_bold, 10, INK_BLACK);
-        const amt_hdr_width = document.Font.helvetica_bold.measureText(self.data.labels.amount, 10);
-        try self.drawTextConverted(content, self.data.labels.amount, amount_x - amt_hdr_width, self.current_y, self.font_bold, 10, INK_BLACK);
-        self.current_y -= 6;
-        try content.drawLine(desc_x, self.current_y, amount_x, self.current_y, BORDER_GREY, 0.5);
-        self.current_y -= 12;
+        if (glass_on) {
+            try self.drawGlassTableHeader(content);
+        } else {
+            // Column header — bold text with grey underline
+            try self.drawTextConverted(content, self.data.labels.description, desc_x, self.current_y, self.font_bold, 10, INK_BLACK);
+            const amt_hdr_width = document.Font.helvetica_bold.measureText(self.data.labels.amount, 10);
+            try self.drawTextConverted(content, self.data.labels.amount, amount_x - amt_hdr_width, self.current_y, self.font_bold, 10, INK_BLACK);
+            self.current_y -= 6;
+            try content.drawLine(desc_x, self.current_y, amount_x, self.current_y, BORDER_GREY, 0.5);
+            self.current_y -= 12;
+        }
 
-        // Items — each with 1px hairline separator beneath
-        for (section.table_items) |item| {
+        // Items — each with 1px hairline separator beneath (in glass, not the
+        // last: the card's edge closes the table)
+        for (section.table_items, 0..) |item, item_index| {
+            if (glass_on and self.current_y - 30 < self.margin_bottom) {
+                // The rows carry on overleaf: close this page's card and open
+                // a new one under a fresh header band.
+                try self.closeTableCard(self.current_y + 2);
+                try self.checkPageBreak(content, 30);
+                try self.drawGlassTableHeader(content);
+            }
             try self.checkPageBreak(content, 30);
 
             // Wrap description if too long
@@ -606,8 +696,15 @@ pub const CleanQuoteRenderer = struct {
             self.current_y = row_top - row_height;
 
             // Hairline separator
-            try content.drawLine(desc_x, self.current_y, amount_x, self.current_y, BORDER_GREY, 0.4);
+            if (!glass_on or item_index + 1 < section.table_items.len) {
+                try content.drawLine(desc_x, self.current_y, amount_x, self.current_y, BORDER_GREY, 0.4);
+            }
             self.current_y -= 10;
+        }
+
+        if (glass_on) {
+            try self.closeTableCard(self.current_y + 2);
+            self.current_y -= 14;
         }
 
         // Subtotal / Tax / Total
@@ -634,18 +731,29 @@ pub const CleanQuoteRenderer = struct {
                 self.current_y -= 16;
             }
 
-            // Hairline above total
-            try content.drawLine(label_x, self.current_y + 4, amount_x, self.current_y + 4, BORDER_GREY, 0.6);
-            self.current_y -= 4;
+            if (glass_on) {
+                self.current_y -= 6;
+            } else {
+                // Hairline above total
+                try content.drawLine(label_x, self.current_y + 4, amount_x, self.current_y + 4, BORDER_GREY, 0.6);
+                self.current_y -= 4;
+            }
         }
 
         if (section.total > 0) {
-            try self.drawTextConverted(content, self.data.labels.total, label_x, self.current_y, self.font_bold, 12, INK_BLACK);
+            var total_color = INK_BLACK;
+            if (glass_on) {
+                // Frosted chip in a deeper tint of the accent; dark ink on it.
+                const primary = self.glassPrimary();
+                try glass.drawPanel(&self.doc, &self.bg.?, label_x - 10, self.current_y - 6, amount_x + 8 - (label_x - 10), 22, 7, glass.mix(document.Color.white, primary, 0.30), 0.85, glass.mix(document.Color.white, primary, 0.22), 0.50, glass.mix(document.Color.white, primary, 0.14), 1.0);
+                total_color = self.glassInk();
+            }
+            try self.drawTextConverted(content, self.data.labels.total, label_x, self.current_y, self.font_bold, 12, total_color);
             var tot_buf: [32]u8 = undefined;
             const tot_str = try formatGbp(&tot_buf, section.total);
             const tot_w = document.Font.helvetica_bold.measureText(tot_str, 12);
-            try content.drawText(tot_str, amount_x - tot_w, self.current_y, self.font_bold, 12, INK_BLACK);
-            self.current_y -= 20;
+            try content.drawText(tot_str, amount_x - tot_w, self.current_y, self.font_bold, 12, total_color);
+            self.current_y -= if (glass_on) 26 else 20;
         }
 
         // Notes prose
@@ -720,6 +828,11 @@ pub const CleanQuoteRenderer = struct {
         var content = document.ContentStream.init(self.allocator);
         errdefer content.deinit();
 
+        if (self.data.theme == .glass) {
+            self.bg = document.ContentStream.init(self.allocator);
+            try self.drawWash();
+        }
+
         try self.drawHeader(&content);
         try self.drawSections(&content);
 
@@ -729,7 +842,7 @@ pub const CleanQuoteRenderer = struct {
         }
 
         // Save final page
-        try self.pages.append(self.allocator, content);
+        try self.commitPage(&content);
         content.buffer = .empty;
 
         self.total_pages = @intCast(self.pages.items.len);
@@ -817,6 +930,9 @@ fn parseProposalJsonLocal(allocator: std.mem.Allocator, json_str: []const u8) !P
     }
     if (root.get("title_color")) |v| {
         if (v == .string) data.title_color = try allocator.dupe(u8, v.string);
+    }
+    if (root.get("theme")) |v| {
+        if (v == .string and std.ascii.eqlIgnoreCase(v.string, "glass")) data.theme = .glass;
     }
 
     // Fixed drawn labels — optional "labels" object; any field present
@@ -995,4 +1111,77 @@ test "formatGbp groups thousands and keeps pence" {
     try std.testing.expectEqualStrings("\u{00A3}1,234,567.89", try formatGbp(&buf, 1234567.891));
     try std.testing.expectEqualStrings("-\u{00A3}660.00", try formatGbp(&buf, -660));
     try std.testing.expectEqualStrings("\u{00A3}0.00", try formatGbp(&buf, 0));
+}
+
+// ─── Glass theme ─────────────────────────────────────────────────────────────
+
+const TestItem = struct { description: []const u8, quantity: f64 = 1, unit_price: f64, total: f64 };
+const TestSection = struct {
+    type: []const u8 = "table",
+    heading: []const u8,
+    table_items: []const TestItem,
+    subtotal: f64,
+    tax_rate: f64 = 0,
+    total: f64,
+};
+const TestQuote = struct {
+    company_name: []const u8 = "CRG Direct",
+    primary_color: []const u8 = "#2f6b3a",
+    secondary_color: []const u8 = "#1e3a2f",
+    theme: ?[]const u8 = null,
+    sections: []const TestSection,
+};
+
+/// A clean quote with one table of `rows` lines, rendered to PDF bytes.
+fn renderTestQuote(allocator: std.mem.Allocator, theme: ?[]const u8, rows: usize) ![]u8 {
+    const items = try allocator.alloc(TestItem, rows);
+    defer allocator.free(items);
+    for (items) |*it| it.* = .{ .description = "Canadian Solar 455W panel", .unit_price = 75.6, .total = 75.6 };
+    const sections = [_]TestSection{.{ .heading = "Components", .table_items = items, .subtotal = 75.6 * @as(f64, @floatFromInt(rows)), .total = 75.6 * @as(f64, @floatFromInt(rows)) }};
+    const json = try std.json.Stringify.valueAlloc(allocator, TestQuote{ .theme = theme, .sections = &sections }, .{ .emit_null_optional_fields = false });
+    defer allocator.free(json);
+    return generateCleanQuoteFromJson(allocator, json);
+}
+
+test "glass is opt-in: only theme glass turns it on" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = "\"company_name\": \"A\", \"sections\": [{\"type\": \"text\", \"heading\": \"h\", \"content\": \"c\"}]";
+    try std.testing.expectEqual(proposal.CleanTheme.glass, (try parseProposalJsonLocal(a, "{" ++ body ++ ", \"theme\": \"glass\"}")).theme);
+    try std.testing.expectEqual(proposal.CleanTheme.glass, (try parseProposalJsonLocal(a, "{" ++ body ++ ", \"theme\": \"Glass\"}")).theme);
+    try std.testing.expectEqual(proposal.CleanTheme.plain, (try parseProposalJsonLocal(a, "{" ++ body ++ "}")).theme);
+    try std.testing.expectEqual(proposal.CleanTheme.plain, (try parseProposalJsonLocal(a, "{" ++ body ++ ", \"theme\": \"squircle\"}")).theme);
+    try std.testing.expectEqual(proposal.CleanTheme.plain, (try parseProposalJsonLocal(a, "{" ++ body ++ ", \"theme\": 3}")).theme);
+}
+
+test "a plain clean quote paints no glass, whatever unknown theme it names" {
+    const allocator = std.testing.allocator;
+    const plain = try renderTestQuote(allocator, null, 5);
+    defer allocator.free(plain);
+    const unknown = try renderTestQuote(allocator, "squircle", 5);
+    defer allocator.free(unknown);
+    try std.testing.expectEqualSlices(u8, plain, unknown);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, plain, " sh\n"));
+}
+
+test "glass washes every page and gives each page of rows its own card" {
+    const allocator = std.testing.allocator;
+    // Enough rows to run the table over several pages.
+    const pdf = try renderTestQuote(allocator, "glass", 90);
+    defer allocator.free(pdf);
+
+    const pages = std.mem.count(u8, pdf, "/Type /Page /Parent");
+    try std.testing.expect(pages >= 3);
+
+    // The wash is the only shading painted inside a full-page clip.
+    var clip = document.ContentStream.init(allocator);
+    defer clip.deinit();
+    try clip.clipRect(0, 0, document.A4_WIDTH, document.A4_HEIGHT);
+    try std.testing.expectEqual(pages, std.mem.count(u8, pdf, clip.getContent()));
+
+    // Sheens: one per glass panel. Page 1 has the masthead, every page a
+    // header band and a table card, and the last page the TOTAL chip.
+    const sheens = std.mem.count(u8, pdf, " sh\n") - pages;
+    try std.testing.expectEqual(1 + 2 * pages + 1, sheens);
 }

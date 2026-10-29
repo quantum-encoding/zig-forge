@@ -380,6 +380,7 @@ A structured, multi-section A4 proposal/quote document with first-class support 
 * **`client_name`** / **`client_address`** (`string`)
 * **`reference`** / **`date`** / **`valid_until`** (`string`)
 * **`primary_color`** (`string`, default `"#16a34a"`) / **`secondary_color`** (`string`, default `"#1e3a2f"`) / **`title_color`** (`string`, optional)
+* **`theme`** (`string`, optional, `--minimalist` only): `"glass"` lays the invoice template's Liquid Glass materials over the clean page: a `primary_color` wash on every page, a frosted masthead panel, each table section in a frosted card under a tinted header band (cards reopen on a continuation page), and a frosted TOTAL chip, with `secondary_color` as the ink on the tinted surfaces. Anything else, or no `theme`, renders the plain clean quote unchanged. `--proposal` ignores it.
 * **`property_image_base64`** (`string`, optional): e.g. a satellite property view.
 * **`footer`** (`object`, optional): `phone`, `email`, `website`, `dashboard_text`, `dashboard_url`.
 * **`crypto_payment`** (`object`, optional): see the shared Cryptocurrency Payment Block below.

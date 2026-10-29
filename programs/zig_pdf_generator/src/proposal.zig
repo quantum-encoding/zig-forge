@@ -186,6 +186,11 @@ pub const QuoteLabels = struct {
     scan_to_view: []const u8 = "Scan to view", // default
 };
 
+/// The clean-quote template's look. `plain` is the hairline-ruled white page;
+/// `glass` lays the invoice's Liquid Glass materials over it (glass.zig). The
+/// proposal template has its own look and ignores this.
+pub const CleanTheme = enum { plain, glass };
+
 pub const ProposalData = struct {
     company_name: []const u8 = "",
     company_address: []const u8 = "",
@@ -206,6 +211,8 @@ pub const ProposalData = struct {
     /// Fixed drawn labels — consumed by the clean-quote template; the
     /// brand-heavy proposal template keeps its own wording.
     labels: QuoteLabels = .{},
+    /// Clean-quote look; JSON `"theme": "glass"`, anything else is plain.
+    theme: CleanTheme = .plain,
 };
 
 // =============================================================================
