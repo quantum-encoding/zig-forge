@@ -15,71 +15,123 @@
 
 const std = @import("std");
 const document = @import("document.zig");
+const invoice = @import("invoice.zig");
 const image = @import("image.zig");
 const qrcode = @import("qrcode.zig");
 const types = @import("types.zig");
 const crypto_receipt = @import("crypto_receipt.zig");
 
 // =============================================================================
-// UTF-8 to WinAnsiEncoding
+// Text the standard fonts can draw
 // =============================================================================
 
-/// PDF standard fonts use WinAnsiEncoding, not UTF-8.
-/// This converts common multi-byte UTF-8 sequences to their WinAnsi single-byte equivalents.
-/// Without this, £ appears as Â£, bullet as garbage, etc.
-fn utf8ToWinAnsi(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    var result: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer result.deinit(allocator);
+/// U+2713 CHECK MARK. `drawableText` keeps it (and folds the other tick
+/// characters into it); `drawPrepared` strokes it as a vector tick, since
+/// WinAnsiEncoding has no tick glyph.
+const tick = "\u{2713}";
 
+/// `text` (UTF-8) rewritten so that every code point is one the
+/// WinAnsiEncoding standard fonts draw (ContentStream.drawText encodes it),
+/// except U+2713, which `drawPrepared` draws as a vector tick. Tick
+/// characters become U+2713; common characters outside WinAnsi become their
+/// nearest drawable form (arrows "->", "≥" ">=", "₂" "2", "−" "-", "●" "•",
+/// typographic spaces " "); any other code point, and any byte that is not
+/// valid UTF-8, is dropped, so nothing is ever drawn as "?". Caller frees.
+pub fn drawableText(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, text.len);
     var i: usize = 0;
     while (i < text.len) {
-        if (i + 1 < text.len and text[i] == 0xC2) {
-            // 2-byte sequences starting with 0xC2 (U+0080..U+00FF)
-            // These map directly: WinAnsi byte = second byte
-            const b2 = text[i + 1];
-            if (b2 >= 0xA0) {
-                // U+00A0..U+00FF — most map 1:1 in WinAnsi
-                // £ (U+00A3) = 0xA3, © (U+00A9) = 0xA9, etc.
-                try result.append(allocator, b2);
-                i += 2;
-                continue;
-            }
+        const n = std.unicode.utf8ByteSequenceLength(text[i]) catch {
+            i += 1;
+            continue;
+        };
+        if (i + n > text.len) break;
+        const seq = text[i .. i + n];
+        i += n;
+        const cp = std.unicode.utf8Decode(seq) catch continue;
+        if (cp < 0x80 or winAnsiDraws(seq)) {
+            try out.appendSlice(allocator, seq);
+        } else {
+            try out.appendSlice(allocator, substitute(cp));
         }
-        if (i + 2 < text.len and text[i] == 0xE2) {
-            // 3-byte sequences starting with 0xE2 (common symbols)
-            const b2 = text[i + 1];
-            const b3 = text[i + 2];
-            if (b2 == 0x80) {
-                const mapped: ?u8 = switch (b3) {
-                    0x93 => 0x96, // – (en dash)
-                    0x94 => 0x97, // — (em dash)
-                    0x98 => 0x91, // ' (left single quote)
-                    0x99 => 0x92, // ' (right single quote)
-                    0x9C => 0x93, // " (left double quote)
-                    0x9D => 0x94, // " (right double quote)
-                    0xA2 => 0x95, // • (bullet)
-                    0xA6 => 0x85, // … (ellipsis)
-                    else => null,
-                };
-                if (mapped) |m| {
-                    try result.append(allocator, m);
-                    i += 3;
-                    continue;
-                }
-            }
-            if (b2 == 0x82 and b3 == 0xAC) {
-                // € (euro sign) = 0x80 in WinAnsi
-                try result.append(allocator, 0x80);
-                i += 3;
-                continue;
-            }
-        }
-        // Pass through ASCII and anything else unchanged
-        try result.append(allocator, text[i]);
-        i += 1;
     }
+    return out.toOwnedSlice(allocator);
+}
 
-    return result.toOwnedSlice(allocator);
+/// True when the encoder maps this one-code-point sequence to a real glyph.
+fn winAnsiDraws(seq: []const u8) bool {
+    var pos: usize = 0;
+    return document.utf8ToWinAnsi(seq, &pos) != '?';
+}
+
+/// The drawable stand-in for a code point WinAnsiEncoding lacks ("" drops it).
+fn substitute(cp: u21) []const u8 {
+    return switch (cp) {
+        0x2713, 0x2714, 0x2705, 0x2611, 0x1F5F8 => tick,
+        0x2717, 0x2718, 0x2715, 0x2716, 0x274C => "\u{00D7}", // ×
+        0x2023, 0x2043, 0x2219, 0x25AA, 0x25A0, 0x25CF, 0x25E6, 0x25B8, 0x25BA => "\u{2022}", // •
+        0x2192, 0x27A1, 0x2794 => "->",
+        0x2190 => "<-",
+        0x2194 => "<->",
+        0x21D2 => "=>",
+        0x2264 => "<=",
+        0x2265 => ">=",
+        0x2260 => "!=",
+        0x2248 => "~",
+        0x2212, 0x2010, 0x2011 => "-",
+        0x2012 => "\u{2013}", // –
+        0x2015 => "\u{2014}", // —
+        0x2032, 0x201B => "'",
+        0x2033, 0x201F => "\"",
+        0x2044 => "/",
+        0x2605, 0x2606 => "*",
+        0x2103 => "\u{00B0}C",
+        0x2109 => "\u{00B0}F",
+        0x2116 => "No.",
+        0x2070 => "0",
+        0x2074 => "4",
+        0x2075 => "5",
+        0x2076 => "6",
+        0x2077 => "7",
+        0x2078 => "8",
+        0x2079 => "9",
+        0x2080 => "0",
+        0x2081 => "1",
+        0x2082 => "2",
+        0x2083 => "3",
+        0x2084 => "4",
+        0x2085 => "5",
+        0x2086 => "6",
+        0x2087 => "7",
+        0x2088 => "8",
+        0x2089 => "9",
+        0x2002...0x200A, 0x202F, 0x205F, 0x3000 => " ",
+        else => "",
+    };
+}
+
+/// A check mark stroked into the glyph box [x, x + w] on baseline `y`, sized
+/// for `size`-point text.
+fn drawTick(content: *document.ContentStream, x: f32, y: f32, w: f32, size: f32, color: document.Color) !void {
+    try content.saveState();
+    try content.setStrokeColor(color);
+    try content.setLineWidth(size * 0.11);
+    try content.buffer.appendSlice(content.allocator, "1 J 1 j\n");
+    try content.moveTo(x + w * 0.10, y + size * 0.33);
+    try content.lineTo(x + w * 0.40, y + size * 0.05);
+    try content.lineTo(x + w * 0.95, y + size * 0.68);
+    try content.stroke();
+    try content.restoreState();
+}
+
+/// `text` cut to at most `max` bytes without splitting a UTF-8 sequence.
+fn cutUtf8(text: []const u8, max: usize) []const u8 {
+    if (text.len <= max) return text;
+    var n = max;
+    while (n > 0 and (text[n] & 0xC0) == 0x80) n -= 1;
+    return text[0..n];
 }
 
 // =============================================================================
@@ -290,11 +342,39 @@ pub const ProposalRenderer = struct {
         self.doc.deinit();
     }
 
-    /// Draw text with UTF-8 to WinAnsi conversion
-    fn drawTextConverted(self: *ProposalRenderer, content: *document.ContentStream, text: []const u8, x: f32, y: f32, font_id: []const u8, size: f32, color: document.Color) !void {
-        const converted = try utf8ToWinAnsi(self.allocator, text);
-        defer self.allocator.free(converted);
-        try content.drawText(converted, x, y, font_id, size, color);
+    /// The measurable font behind one of the renderer's font ids.
+    fn fontOf(self: *const ProposalRenderer, font_id: []const u8) document.Font {
+        if (std.mem.eql(u8, font_id, self.font_bold)) return .helvetica_bold;
+        if (std.mem.eql(u8, font_id, self.font_oblique)) return .helvetica_oblique;
+        return .helvetica;
+    }
+
+    /// Draw caller text (UTF-8) at (x, y) through `drawableText`.
+    fn drawStr(self: *ProposalRenderer, content: *document.ContentStream, text: []const u8, x: f32, y: f32, font_id: []const u8, size: f32, color: document.Color) !void {
+        const t = try drawableText(self.allocator, text);
+        defer self.allocator.free(t);
+        try self.drawPrepared(content, t, x, y, font_id, size, color);
+    }
+
+    /// Draw text already passed through `drawableText`. Each U+2713 is a
+    /// vector tick as wide as the measurer counts it, so wrapped and centred
+    /// text lines up; text without one is a single text run.
+    fn drawPrepared(self: *ProposalRenderer, content: *document.ContentStream, text: []const u8, x: f32, y: f32, font_id: []const u8, size: f32, color: document.Color) !void {
+        if (std.mem.indexOf(u8, text, tick) == null) return content.drawText(text, x, y, font_id, size, color);
+        const font = self.fontOf(font_id);
+        const tick_w = font.measureText(tick, size);
+        var cx = x;
+        var rest = text;
+        while (std.mem.indexOf(u8, rest, tick)) |at| {
+            if (at > 0) {
+                try content.drawText(rest[0..at], cx, y, font_id, size, color);
+                cx += font.measureText(rest[0..at], size);
+            }
+            try drawTick(content, cx, y, tick_w, size, color);
+            cx += tick_w;
+            rest = rest[at + tick.len ..];
+        }
+        if (rest.len > 0) try content.drawText(rest, cx, y, font_id, size, color);
     }
 
     // ─── Page Management ─────────────────────────────────────────────────
@@ -324,10 +404,10 @@ pub const ProposalRenderer = struct {
             name_x = self.margin_left + 60;
         }
 
-        try content.drawText(self.data.company_name, name_x, self.page_height - 40, self.font_bold, 18, secondary);
+        try self.drawStr(content, self.data.company_name, name_x, self.page_height - 40, self.font_bold, 18, secondary);
 
         if (self.data.company_address.len > 0) {
-            try content.drawText(self.data.company_address, name_x, self.page_height - 55, self.font_regular, 9, document.Color.fromHex("#666666"));
+            try self.drawStr(content, self.data.company_address, name_x, self.page_height - 55, self.font_regular, 9, document.Color.fromHex("#666666"));
         }
 
         // "PROPOSAL" label right-aligned
@@ -347,13 +427,13 @@ pub const ProposalRenderer = struct {
         // Left: Client
         try content.drawText("Prepared for:", self.margin_left, self.current_y, self.font_regular, 9, document.Color.fromHex("#888888"));
         self.current_y -= 14;
-        try content.drawText(self.data.client_name, self.margin_left, self.current_y, self.font_bold, 12, document.Color.black);
+        try self.drawStr(content, self.data.client_name, self.margin_left, self.current_y, self.font_bold, 12, document.Color.black);
         self.current_y -= 16;
 
         if (self.data.client_address.len > 0) {
             var lines = std.mem.splitScalar(u8, self.data.client_address, '\n');
             while (lines.next()) |line| {
-                try content.drawText(line, self.margin_left, self.current_y, self.font_regular, 10, document.Color.black);
+                try self.drawStr(content, line, self.margin_left, self.current_y, self.font_regular, 10, document.Color.black);
                 self.current_y -= 14;
             }
         }
@@ -365,21 +445,21 @@ pub const ProposalRenderer = struct {
         if (self.data.reference.len > 0) {
             try content.drawText("Reference:", right_x, right_y, self.font_regular, 9, document.Color.fromHex("#888888"));
             right_y -= 14;
-            try content.drawText(self.data.reference, right_x, right_y, self.font_bold, 10, document.Color.black);
+            try self.drawStr(content, self.data.reference, right_x, right_y, self.font_bold, 10, document.Color.black);
             right_y -= 18;
         }
 
         if (self.data.date.len > 0) {
             try content.drawText("Date:", right_x, right_y, self.font_regular, 9, document.Color.fromHex("#888888"));
             right_y -= 14;
-            try content.drawText(self.data.date, right_x, right_y, self.font_regular, 10, document.Color.black);
+            try self.drawStr(content, self.data.date, right_x, right_y, self.font_regular, 10, document.Color.black);
             right_y -= 18;
         }
 
         if (self.data.valid_until.len > 0) {
             try content.drawText("Valid until:", right_x, right_y, self.font_regular, 9, document.Color.fromHex("#888888"));
             right_y -= 14;
-            try content.drawText(self.data.valid_until, right_x, right_y, self.font_regular, 10, document.Color.black);
+            try self.drawStr(content, self.data.valid_until, right_x, right_y, self.font_regular, 10, document.Color.black);
         }
 
         // Take the lower of the two columns
@@ -419,25 +499,28 @@ pub const ProposalRenderer = struct {
         // Heading
         if (section.heading.len > 0) {
             try self.checkPageBreak(content, 30);
-            try self.drawTextConverted(content, section.heading, self.margin_left, self.current_y, self.font_bold, 14, primary);
+            try self.drawStr(content, section.heading, self.margin_left, self.current_y, self.font_bold, 14, primary);
             self.current_y -= 21;
         }
 
-        // Content with word wrap and bullet support
+        // Content with word wrap and bullets: a paragraph opening "- " or
+        // "• " is a bullet item, one opening with a tick a checklist item.
         if (section.content.len > 0) {
-            const converted = try utf8ToWinAnsi(self.allocator, section.content);
-            defer self.allocator.free(converted);
+            const prepared = try drawableText(self.allocator, section.content);
+            defer self.allocator.free(prepared);
 
-            var paragraphs = std.mem.splitScalar(u8, converted, '\n');
+            var paragraphs = std.mem.splitScalar(u8, prepared, '\n');
             while (paragraphs.next()) |paragraph| {
                 if (paragraph.len == 0) {
                     self.current_y -= 5;
                     continue;
                 }
 
-                const is_bullet = paragraph.len > 2 and paragraph[0] == '-' and paragraph[1] == ' ';
-                const text_content = if (is_bullet) paragraph[2..] else paragraph;
-                const indent: f32 = if (is_bullet) 15 else 0;
+                const marker: ?[]const u8 = for ([_][]const u8{ "- ", "\u{2022} ", tick ++ " " }) |m| {
+                    if (paragraph.len > m.len and std.mem.startsWith(u8, paragraph, m)) break m;
+                } else null;
+                const text_content = if (marker) |m| paragraph[m.len..] else paragraph;
+                const indent: f32 = if (marker != null) 15 else 0;
 
                 var wrapped = try document.wrapText(self.allocator, text_content, font, 10.5, self.usable_width - indent);
                 defer wrapped.deinit();
@@ -445,12 +528,14 @@ pub const ProposalRenderer = struct {
                 for (wrapped.lines, 0..) |line, line_idx| {
                     try self.checkPageBreak(content, 15);
 
-                    if (is_bullet and line_idx == 0) {
-                        // WinAnsi bullet = 0x95
-                        try content.drawText(&[_]u8{0x95}, self.margin_left, self.current_y, self.font_regular, 10, document.Color.black);
+                    if (marker) |m| {
+                        if (line_idx == 0) {
+                            const glyph = if (std.mem.eql(u8, m, tick ++ " ")) tick else "\u{2022}";
+                            try self.drawPrepared(content, glyph, self.margin_left, self.current_y, self.font_regular, 10, document.Color.black);
+                        }
                     }
 
-                    try content.drawText(line, self.margin_left + indent, self.current_y, self.font_regular, 10.5, document.Color.black);
+                    try self.drawPrepared(content, line, self.margin_left + indent, self.current_y, self.font_regular, 10.5, document.Color.black);
                     self.current_y -= 15;
                 }
             }
@@ -469,7 +554,7 @@ pub const ProposalRenderer = struct {
         // Heading
         if (section.heading.len > 0) {
             try self.checkPageBreak(content, 110);
-            try self.drawTextConverted(content, section.heading, self.margin_left, self.current_y, self.font_bold, 14, primary);
+            try self.drawStr(content, section.heading, self.margin_left, self.current_y, self.font_bold, 14, primary);
             self.current_y -= 22;
         } else {
             try self.checkPageBreak(content, 90);
@@ -497,21 +582,21 @@ pub const ProposalRenderer = struct {
             try content.drawRoundedRect(card_x, card_y, card_width, card_height, 6, card_color);
 
             // Label (small, near top of card)
-            try self.drawTextConverted(content, item.label, card_x + 12, card_y + card_height - 22, self.font_regular, 9, document.Color.white);
+            try self.drawStr(content, item.label, card_x + 12, card_y + card_height - 22, self.font_regular, 9, document.Color.white);
 
             // Value (large, lower in card) — auto-scale if text is too wide
             const max_text_width = card_width - 24;
             const value_font = document.Font.helvetica_bold;
             var value_size: f32 = 20;
-            const converted_val = try utf8ToWinAnsi(self.allocator, item.value);
-            defer self.allocator.free(converted_val);
+            const value = try drawableText(self.allocator, item.value);
+            defer self.allocator.free(value);
             // Scale down if needed to fit the card
             while (value_size > 12) {
-                const w = value_font.measureText(converted_val, value_size);
+                const w = value_font.measureText(value, value_size);
                 if (w <= max_text_width) break;
                 value_size -= 1;
             }
-            try content.drawText(converted_val, card_x + 12, card_y + 16, self.font_bold, value_size, document.Color.white);
+            try self.drawPrepared(content, value, card_x + 12, card_y + 16, self.font_bold, value_size, document.Color.white);
 
             card_x += card_width + gap;
         }
@@ -551,7 +636,7 @@ pub const ProposalRenderer = struct {
         // Heading
         if (section.heading.len > 0) {
             try self.checkPageBreak(content, 60);
-            try self.drawTextConverted(content, section.heading, self.margin_left, self.current_y, self.font_bold, 14, primary);
+            try self.drawStr(content, section.heading, self.margin_left, self.current_y, self.font_bold, 14, primary);
             self.current_y -= 21;
         } else {
             try self.checkPageBreak(content, 40);
@@ -589,21 +674,20 @@ pub const ProposalRenderer = struct {
 
             const text_y = self.current_y - row_height + 7;
 
-            // Description
-            const desc_display = if (item.description.len > 50) item.description[0..50] else item.description;
-            try self.drawTextConverted(content, desc_display, col_desc_x + padding, text_y, self.font_regular, 9, document.Color.black);
+            // Description, cut to 50 bytes on a character boundary
+            const desc = try drawableText(self.allocator, item.description);
+            defer self.allocator.free(desc);
+            try self.drawPrepared(content, cutUtf8(desc, 50), col_desc_x + padding, text_y, self.font_regular, 9, document.Color.black);
 
             // Quantity
             var qty_buf: [32]u8 = undefined;
             const qty_str = std.fmt.bufPrint(&qty_buf, "{d:.0}", .{item.quantity}) catch "0";
             try content.drawText(qty_str, col_qty_x + padding, text_y, self.font_regular, 9, document.Color.black);
 
-            // Unit price — WinAnsi £
             var price_buf: [32]u8 = undefined;
             const price_str = formatCurrency(&price_buf, item.unit_price);
             try content.drawText(price_str, col_price_x + padding, text_y, self.font_regular, 9, document.Color.black);
 
-            // Total — WinAnsi £
             var total_buf: [32]u8 = undefined;
             const total_str = formatCurrency(&total_buf, item.total);
             try content.drawText(total_str, col_total_x + padding, text_y, self.font_regular, 9, document.Color.black);
@@ -633,7 +717,8 @@ pub const ProposalRenderer = struct {
         if (section.tax_rate > 0) {
             try self.checkPageBreak(content, 20);
             var tax_label_buf: [48]u8 = undefined;
-            const tax_label = std.fmt.bufPrint(&tax_label_buf, "VAT ({d:.0}%):", .{section.tax_rate * 100}) catch "VAT:";
+            var pct_buf: [32]u8 = undefined;
+            const tax_label = std.fmt.bufPrint(&tax_label_buf, "VAT ({s}%):", .{invoice.fmtQty(&pct_buf, section.tax_rate * 100)}) catch "VAT:";
             try content.drawText(tax_label, totals_x, self.current_y, self.font_regular, 10, document.Color.black);
             var tax_buf: [32]u8 = undefined;
             const tax_amount = section.subtotal * section.tax_rate;
@@ -660,7 +745,7 @@ pub const ProposalRenderer = struct {
             if (notes.len > 0) {
                 try self.checkPageBreak(content, 16);
                 self.current_y -= 2;
-                try self.drawTextConverted(content, notes, self.margin_left, self.current_y, self.font_oblique, 8, document.Color.fromHex("#888888"));
+                try self.drawStr(content, notes, self.margin_left, self.current_y, self.font_oblique, 8, document.Color.fromHex("#888888"));
                 self.current_y -= 14;
             }
         }
@@ -711,7 +796,7 @@ pub const ProposalRenderer = struct {
         // Heading
         if (section.heading.len > 0) {
             try self.checkPageBreak(content, 40);
-            try self.drawTextConverted(content, section.heading, self.margin_left, self.current_y, self.font_bold, 14, primary);
+            try self.drawStr(content, section.heading, self.margin_left, self.current_y, self.font_bold, 14, primary);
             self.current_y -= 21;
         }
 
@@ -804,7 +889,7 @@ pub const ProposalRenderer = struct {
             // Label + percentage
             var label_buf: [128]u8 = undefined;
             const label = std.fmt.bufPrint(&label_buf, "{s}  {d:.1}%", .{ seg.label, pct }) catch seg.label;
-            try content.drawText(label, legend_x + 14, legend_y, self.font_regular, 9, gray);
+            try self.drawStr(content, label, legend_x + 14, legend_y, self.font_regular, 9, gray);
 
             legend_y -= 16;
         }
@@ -871,7 +956,7 @@ pub const ProposalRenderer = struct {
 
             // Category label — below negative bars (or below baseline if no negatives)
             const label_y = baseline_y - neg_h - 14;
-            try content.drawText(cat, cat_x + group_w / 2 - 10, label_y, self.font_regular, 8, gray);
+            try self.drawStr(content, cat, cat_x + group_w / 2 - 10, label_y, self.font_regular, 8, gray);
 
             for (series_list, 0..) |s, si| {
                 if (ci >= s.values.len) continue;
@@ -895,7 +980,7 @@ pub const ProposalRenderer = struct {
         for (series_list, 0..) |s, si| {
             const color = chart_palette[si % chart_palette.len];
             try content.drawRect(lx, ly - 7, 8, 8, color, null);
-            try content.drawText(s.name, lx + 14, ly, self.font_regular, 9, gray);
+            try self.drawStr(content, s.name, lx + 14, ly, self.font_regular, 9, gray);
             lx += 100;
         }
 
@@ -920,7 +1005,7 @@ pub const ProposalRenderer = struct {
             const color = if (seg.color) |hex| document.Color.fromHex(hex) else chart_palette[i % chart_palette.len];
 
             // Label
-            try content.drawText(seg.label, self.margin_left, y, self.font_regular, 9, gray);
+            try self.drawStr(content, seg.label, self.margin_left, y, self.font_regular, 9, gray);
 
             // Background bar
             try content.drawRect(bar_left, y - 8, bar_w, 12, bg, null);
@@ -957,10 +1042,12 @@ pub const ProposalRenderer = struct {
         }) catch "";
 
         if (footer_text.len > 0) {
+            const prepared = try drawableText(self.allocator, footer_text);
+            defer self.allocator.free(prepared);
             const font = document.Font.helvetica;
-            const text_width = font.measureText(footer_text, 8);
+            const text_width = font.measureText(prepared, 8);
             const text_x = (self.page_width - text_width) / 2;
-            try content.drawText(footer_text, text_x, 10, self.font_regular, 8, document.Color.white);
+            try self.drawPrepared(content, prepared, text_x, 10, self.font_regular, 8, document.Color.white);
         }
 
         // QR code + dashboard text area (above footer bar)
@@ -980,14 +1067,14 @@ pub const ProposalRenderer = struct {
             try content.drawText(scan_label, qr_x + (qr_display_size - scan_w) / 2, qr_y - 8, self.font_regular, 6, document.Color.fromHex("#888888"));
 
             // Dashboard text to the left of QR
-            const converted = try utf8ToWinAnsi(self.allocator, footer.dashboard_text);
-            defer self.allocator.free(converted);
+            const prepared = try drawableText(self.allocator, footer.dashboard_text);
+            defer self.allocator.free(prepared);
             const text_area_width = qr_x - self.margin_left - 15;
-            var wrapped = try document.wrapText(self.allocator, converted, document.Font.helvetica_oblique, 7.5, text_area_width);
+            var wrapped = try document.wrapText(self.allocator, prepared, document.Font.helvetica_oblique, 7.5, text_area_width);
             defer wrapped.deinit();
             var text_y: f32 = 62;
             for (wrapped.lines) |line| {
-                try content.drawText(line, self.margin_left, text_y, self.font_oblique, 7.5, document.Color.fromHex("#666666"));
+                try self.drawPrepared(content, line, self.margin_left, text_y, self.font_oblique, 7.5, document.Color.fromHex("#666666"));
                 text_y -= 10;
             }
         } else if (has_qr) {
@@ -1003,11 +1090,11 @@ pub const ProposalRenderer = struct {
         } else if (footer.dashboard_text.len > 0) {
             // Dashboard text only, centered
             const dash_font = document.Font.helvetica_oblique;
-            const converted = try utf8ToWinAnsi(self.allocator, footer.dashboard_text);
-            defer self.allocator.free(converted);
-            const dash_width = dash_font.measureText(converted, 7);
+            const prepared = try drawableText(self.allocator, footer.dashboard_text);
+            defer self.allocator.free(prepared);
+            const dash_width = dash_font.measureText(prepared, 7);
             const dash_x = (self.page_width - dash_width) / 2;
-            try content.drawText(converted, dash_x, 35, self.font_oblique, 7, document.Color.fromHex("#888888"));
+            try self.drawPrepared(content, prepared, dash_x, 35, self.font_oblique, 7, document.Color.fromHex("#888888"));
         }
 
         // Page number (right-aligned above QR/dashboard area)
@@ -1229,20 +1316,20 @@ pub const ProposalRenderer = struct {
         else
             std.fmt.bufPrint(&details_buf, "Pay {s} on {s} network", .{ symbol, network_name }) catch "Crypto Payment";
 
-        try content.drawText(details_text, text_x, text_y, self.font_regular, 9.5, document.Color.fromHex("#475569"));
+        try self.drawStr(content, details_text, text_x, text_y, self.font_regular, 9.5, document.Color.fromHex("#475569"));
         text_y -= 18;
 
         // To Address
         try content.drawText("To Address:", text_x, text_y, self.font_bold, 8.5, document.Color.fromHex("#64748b"));
         text_y -= 12;
 
-        try content.drawText(wallet, text_x, text_y, self.font_regular, 8, network_color);
+        try self.drawStr(content, wallet, text_x, text_y, self.font_regular, 8, network_color);
         text_y -= 15;
 
         if (cp.from_address.len > 0) {
             try content.drawText("From Address:", text_x, text_y, self.font_bold, 8.5, document.Color.fromHex("#64748b"));
             text_y -= 12;
-            try content.drawText(cp.from_address, text_x, text_y, self.font_regular, 8, document.Color.fromHex("#475569"));
+            try self.drawStr(content, cp.from_address, text_x, text_y, self.font_regular, 8, document.Color.fromHex("#475569"));
         }
 
         // Right section: QR code
@@ -1280,28 +1367,10 @@ pub const ProposalRenderer = struct {
 // Currency Formatting
 // =============================================================================
 
+/// "£1,234.50": pounds, grouped thousands, two decimals rounded half away
+/// from zero, a leading minus for a negative figure (invoice.formatMoney).
 fn formatCurrency(buf: *[32]u8, amount: f64) []const u8 {
-    // WinAnsiEncoding: £ = single byte 0xA3
-    const abs_amount = @abs(amount);
-    const pounds: u64 = @intFromFloat(abs_amount);
-    const pence: u64 = @intFromFloat((abs_amount - @as(f64, @floatFromInt(pounds))) * 100 + 0.5);
-
-    if (pounds >= 1_000_000) {
-        return std.fmt.bufPrint(buf, "\xa3{d},{d:0>3},{d:0>3}.{d:0>2}", .{
-            pounds / 1_000_000,
-            (pounds / 1000) % 1000,
-            pounds % 1000,
-            pence,
-        }) catch "0.00";
-    } else if (pounds >= 1000) {
-        return std.fmt.bufPrint(buf, "\xa3{d},{d:0>3}.{d:0>2}", .{
-            pounds / 1000,
-            pounds % 1000,
-            pence,
-        }) catch "0.00";
-    } else {
-        return std.fmt.bufPrint(buf, "\xa3{d}.{d:0>2}", .{ pounds, pence }) catch "0.00";
-    }
+    return invoice.formatMoney(buf, "\u{00A3}", amount, .{});
 }
 
 // =============================================================================
@@ -1505,7 +1574,10 @@ fn parseProposalJson(allocator: std.mem.Allocator, json_str: []const u8) !Parsed
                 if (obj.get("chart_spec")) |cs| {
                     if (cs == .object) {
                         var chart = ChartSpec{};
-                        if (cs.object.get("chart_type")) |ct| if (ct == .string) { chart.chart_type = ct.string; };
+                        // Duplicated: the parsed JSON is freed when this function returns.
+                        if (cs.object.get("chart_type")) |ct| {
+                            if (ct == .string) chart.chart_type = try allocator.dupe(u8, ct.string);
+                        }
                         if (cs.object.get("width")) |w| chart.width = getJsonFloat(w);
                         if (cs.object.get("height")) |h| chart.height = getJsonFloat(h);
 

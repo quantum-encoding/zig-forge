@@ -401,6 +401,13 @@ pub const ShareCertificateRenderer = struct {
     border_width: f32 = 3,
     inner_border_offset: f32 = 8,
 
+    // Set by fitToPage when the body would run past the inner border: the
+    // title, company details and body move up by `lift` (up to 110pt, into
+    // the space a logo would take, so only without one), and the gap for each
+    // signature narrows from 64pt to no less than 40pt.
+    lift: f32 = 0,
+    sig_gap: f32 = 64,
+
     // Font IDs
     font_regular: []const u8 = "F0",
     font_bold: []const u8 = "F1",
@@ -545,7 +552,7 @@ pub const ShareCertificateRenderer = struct {
     /// Draw the main title
     fn drawTitle(self: *ShareCertificateRenderer, content: *document.ContentStream) !void {
         const color = document.Color.fromHex(self.data.template.style.accent_color);
-        var y = self.page_height - self.margin - 200;
+        var y = self.page_height - self.margin - 200 + self.lift;
 
         const title = self.data.custom.title orelse "SHARE CERTIFICATE";
         const title_width = document.Font.helvetica_bold.measureText(title, 36);
@@ -562,7 +569,7 @@ pub const ShareCertificateRenderer = struct {
 
     /// Draw company details
     fn drawCompanyDetails(self: *ShareCertificateRenderer, content: *document.ContentStream) !void {
-        var y = self.page_height - self.margin - 255;
+        var y = self.page_height - self.margin - 255 + self.lift;
         const center_x = self.page_width / 2;
         const text_color = document.Color{ .r = 0.1, .g = 0.1, .b = 0.1 };
 
@@ -591,7 +598,7 @@ pub const ShareCertificateRenderer = struct {
     /// Draw the certification text (custom or default share cert text).
     /// Returns the Y position after the last line (for positioning signatures below).
     fn drawCertificationText(self: *ShareCertificateRenderer, content: *document.ContentStream) !f32 {
-        var y = self.page_height - self.margin - 310;
+        var y = self.page_height - self.margin - 310 + self.lift;
         const left_margin = self.margin + 40;
         const right_margin = self.page_width - self.margin - 40;
         const max_width = right_margin - left_margin;
@@ -664,14 +671,66 @@ pub const ShareCertificateRenderer = struct {
         return y - 20; // Return Y below the signing statement
     }
 
-    /// Draw signature blocks. sig_y_hint: Y position from cert text (0 = use default).
+    /// Baseline of the first signature row: `sig_y_hint` (just below the
+    /// signing statement) when that is higher than the fixed default.
+    fn signatureTop(self: *const ShareCertificateRenderer, sig_y_hint: f32) f32 {
+        const default_y = self.page_height - self.margin - 380;
+        return if (sig_y_hint > 0 and sig_y_hint < default_y) sig_y_hint else default_y;
+    }
+
+    /// How far below the signature row's baseline the lowest signature line
+    /// (date, or the last of up to four address lines) sits, for `gap`.
+    fn signatureDepth(self: *const ShareCertificateRenderer, gap: f32) !f32 {
+        var deepest: f32 = 0;
+        for (self.data.signatories[0..@min(self.data.signatories.len, 4)]) |sig| {
+            var d = gap + 10 + 14 + 12;
+            if (sig.address) |addr| {
+                const lines = try addr.formatMultiLine(self.allocator);
+                defer self.allocator.free(lines);
+                var n: f32 = 0;
+                var it = std.mem.splitScalar(u8, lines, '\n');
+                while (it.next()) |_| n += 1;
+                n = @min(n, 4);
+                if (n > 0) d += 12 + (n - 1) * 10;
+            }
+            deepest = @max(deepest, d);
+        }
+        return deepest;
+    }
+
+    /// Keep everything above the inner border: lay the body out once off the
+    /// page, and when the lowest line would fall within 12pt of the inner
+    /// border, set `lift` and then `sig_gap` to make room. A certificate that
+    /// still does not fit is refused rather than drawn off the page.
+    fn fitToPage(self: *ShareCertificateRenderer) !void {
+        var scratch = document.ContentStream.init(self.allocator);
+        defer scratch.deinit();
+        const body_end = try self.drawCertificationText(&scratch);
+        const floor = self.margin + self.inner_border_offset + 12;
+        const has_sigs = self.data.signatories.len > 0;
+        // A hint at or below 0 already overlaps the default row; plan from it.
+        const top = if (has_sigs) @min(body_end, self.signatureTop(body_end)) else body_end + 20;
+        const lowest = top - (if (has_sigs) try self.signatureDepth(self.sig_gap) else 4);
+        var short = floor - lowest;
+        if (short <= 0) return;
+
+        const max_lift: f32 = if (self.data.company.logo == null) 110 else 0;
+        self.lift = @min(short, max_lift);
+        short -= self.lift;
+        if (short > 0 and has_sigs) {
+            const cut = @min(short, self.sig_gap - 40);
+            self.sig_gap -= cut;
+            short -= cut;
+        }
+        if (short > 0) return error.CertificateTooLong;
+    }
+
+    /// Draw signature blocks below `sig_y_hint` (the end of the body text).
     fn drawSignatures(self: *ShareCertificateRenderer, content: *document.ContentStream, sig_y_hint: f32) !void {
         const num_sigs = @min(self.data.signatories.len, 4);
         if (num_sigs == 0) return;
 
-        // Use hint from cert text if provided, otherwise fixed position
-        const default_y = self.page_height - self.margin - 380;
-        const sig_start_y = if (sig_y_hint > 0 and sig_y_hint < default_y) sig_y_hint else default_y;
+        const sig_start_y = self.signatureTop(sig_y_hint);
         const content_width = self.page_width - 2 * self.margin - 80;
         const text_color = document.Color{ .r = 0.1, .g = 0.1, .b = 0.1 };
         const gray_color = document.Color{ .r = 0.3, .g = 0.3, .b = 0.3 };
@@ -692,7 +751,7 @@ pub const ShareCertificateRenderer = struct {
             const role_width = document.Font.helvetica_bold.measureText(role_text, 10);
             try content.drawText(role_text, col_x - role_width / 2, y, self.font_bold, 10, text_color);
 
-            y -= 64; // Space for signature (increased for more room to paste signatures)
+            y -= self.sig_gap; // Space for the signature
 
             // Draw signature image if provided
             const line_width: f32 = 120;
@@ -762,6 +821,8 @@ pub const ShareCertificateRenderer = struct {
 
         // Set page size to A4 landscape
         self.doc.setPageSize(.{ .width = 842, .height = 595 });
+
+        try self.fitToPage();
 
         // Draw all elements
         try self.drawBorder(&content);
@@ -961,7 +1022,8 @@ fn parseShareCertificateJson(allocator: std.mem.Allocator, json_str: []const u8)
                 .role = if (sig_val.object.get("role")) |v| SignatoryRole.fromString(v.string) else .Director,
                 .name = if (sig_val.object.get("name")) |v| try allocator.dupe(u8, v.string) else "",
                 .date = if (sig_val.object.get("date")) |v| try allocator.dupe(u8, v.string) else "",
-                .address = try parseAddress(allocator, sig_val.object.get("address")),
+                // No "address" key: no address block (not a lone default country).
+                .address = if (sig_val.object.get("address")) |a| try parseAddress(allocator, a) else null,
                 .signature = try parseImage(allocator, sig_val.object.get("signature")),
             };
         }
@@ -1130,4 +1192,66 @@ test "share certificate embeds base64 images (leak-checked)" {
         if (std.mem.eql(u8, w, "/Subtype /Image")) count += 1;
     }
     try std.testing.expect(count >= 2);
+}
+
+/// Lowest baseline of any text run (`x y Td`) in an unencrypted PDF.
+fn lowestTextBaseline(pdf: []const u8) f32 {
+    var lowest: f32 = std.math.inf(f32);
+    var it = std.mem.splitScalar(u8, pdf, '\n');
+    while (it.next()) |line| {
+        if (!std.mem.endsWith(u8, line, " Td")) continue;
+        var parts = std.mem.tokenizeScalar(u8, line, ' ');
+        _ = parts.next() orelse continue;
+        const y = std.fmt.parseFloat(f32, parts.next() orelse continue) catch continue;
+        lowest = @min(lowest, y);
+    }
+    return lowest;
+}
+
+const warranty_json =
+    \\{
+    \\  "certificate": { "number": "WRC-2026-00001", "issue_date": "2026-11-03" },
+    \\  "company": { "name": "Example Energy Ltd", "registration_number": "00000000" },
+    \\  "holder": { "name": "A. Customer" },
+    \\  "shares": { "quantity": 10, "class": "Year", "nominal_value": 0 },
+    \\  "signatories": [ { "name": "Example Energy Ltd", "role": "Director" } ],
+    \\  "custom": {
+    \\    "title": "WARRANTY CERTIFICATE", "subtitle": "10-Year Workmanship Guarantee",
+    \\    "header_left": "Certificate No: WRC-2026-00001", "header_right": "Issue Date: 2026-11-03",
+    \\    "detail_rows": [ ["Property:", "2 Test Road, Exampletown EX2 3CD"], ["Customer:", "A. Customer"],
+    \\      ["System:", "4.55kWp solar"], ["Installed:", "2026-11-03"],
+    \\      ["Warranty Period:", "10 Years (expires 2036-11-03)"], ["Job Reference:", "J-0000"] ],
+    \\    "certification_text": "This is to certify that the renewable energy system described above, installed at the specified property by Example Energy Ltd, is covered by our 10-year workmanship warranty. This warranty covers defects arising from the installation work and is provided in addition to any manufacturer warranties on individual components and equipment.",
+    \\    "signing_statement": "Signed on behalf of Example Energy Ltd:"
+    \\  }
+    \\}
+;
+
+test "a certificate with six detail rows keeps its signature block inside the inner border" {
+    const allocator = std.testing.allocator;
+    const pdf = try generateShareCertificateFromJson(allocator, warranty_json);
+    defer allocator.free(pdf);
+    // Inner border at margin 30 + offset 8 = 38pt; nothing drawn within 8pt of it.
+    try std.testing.expect(lowestTextBaseline(pdf) >= 46);
+    // The signatory's name and the signature label are on the page.
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "(Example Energy Ltd) Tj") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "(\\(Signature\\)) Tj") != null);
+    // A signatory without an address draws no address lines.
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "(United Kingdom) Tj") == null);
+}
+
+test "a certificate too long for the page is refused, not drawn past the border" {
+    const allocator = std.testing.allocator;
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(allocator);
+    try json.appendSlice(allocator,
+        \\{"certificate": {"number": "X"}, "company": {"name": "Example Energy Ltd"},
+        \\ "signatories": [{"name": "A", "role": "Director"}], "custom": {"detail_rows": [
+    );
+    for (0..20) |i| {
+        if (i > 0) try json.append(allocator, ',');
+        try json.appendSlice(allocator, "[\"Row:\", \"value\"]");
+    }
+    try json.appendSlice(allocator, "]}}");
+    try std.testing.expectError(error.CertificateTooLong, generateShareCertificateFromJson(allocator, json.items));
 }

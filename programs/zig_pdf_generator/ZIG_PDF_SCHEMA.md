@@ -973,8 +973,17 @@ Refer to the **clean_quote** tables above for the full field list —
 - `secondary_color` default is `#1e3a2f` (dark green) — this is the company-name colour in proposal_legacy, unlike clean_quote where it's unused
 - `company_logo_base64` IS rendered top-left (unlike clean_quote)
 - `property_image_base64` IS rendered centred below the header (unlike clean_quote)
-- `footer.phone` / `footer.email` are accepted but **not currently displayed** in the rendered footer (website only)
-- `chart_spec` — same as clean_quote, **unsupported** and degrades to text
+- `footer.phone`, `footer.email` and `footer.website` are drawn centred in the footer bar as `phone  |  email  |  website`
+- `chart_spec` (`chart_type` `pie`/`donut`/`bar`/`progress`) is drawn as a vector chart
+- Text is drawn in Helvetica's WinAnsiEncoding: `£ € – — ‘ ’ “ ” • …` and the
+  Latin-1 range draw as themselves; `✓ ✔ ☑ ✅` draw as a stroked tick; a few
+  common symbols outside WinAnsi draw as their nearest form (`→` `->`, `≥`
+  `>=`, `₂` `2`, `−` `-`, `★` `*`, typographic spaces as a space); any other
+  character is left out. Nothing is drawn as `?` (`proposal.drawableText`)
+- A text-section paragraph opening `- ` or `• ` is a bullet item (`•`); one
+  opening `✓ ` is a ticked item; both hang-indent their wrapped lines
+- Money reads `£1,234.50`: grouped thousands, two decimals rounded half away
+  from zero, `-£` for a negative figure
 
 ### UI gap (proposal_legacy)
 
