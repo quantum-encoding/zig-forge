@@ -221,8 +221,9 @@ Quantities print with up to two decimals, trailing zeros trimmed (`3`, `2.5`, `0
 Figures you supply are drawn exactly as given — even `0`. Figures you **omit**
 are derived: `subtotal` = sum of the item totals; `tax_amount` = `tax_rate` ×
 (subtotal + adjustments), `0` when `show_tax` is false; `total` = subtotal +
-adjustments + tax − IRPF. When any item carries its own `tax_rate`, `tax_amount`
-is worked per rate instead (see **Mixed tax rates**).
+adjustments + tax − IRPF. When items carry their own `tax_rate` and resolve to
+more than one rate, the totals are worked per rate instead (see **Mixed tax
+rates**).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -260,21 +261,28 @@ at 20%:
 }
 ```
 
-When **any** item sets `tax_rate`, the totals are worked per rate:
+Each line's effective rate is its own `tax_rate`, else the document
+`tax_rate`; the adjustments are taxed at the document `tax_rate`. Rates are
+grouped in basis points, `bp = round(rate × 10000)` (`0.2` → 2000, `0.175` →
+1750). When the lines and adjustments resolve to **more than one rate** the
+totals are worked in integer pence (cents):
 
-1. Each line's effective rate is its own `tax_rate`, else the document `tax_rate`.
-2. Each line total and each adjustment is rounded to whole cents. The
-   adjustments are taxed at the document `tax_rate` and join that rate's group.
-3. Each rate's tax = (sum of its line totals, plus the adjustments for the
-   document rate) × rate, rounded **half away from zero** to a whole cent. The
-   arithmetic is exact (cents × the rate in millionths), so `20.70` at 5% is
-   `1.035` → `1.04`.
-4. `tax_amount` = the sum of the per-rate taxes; `total` = subtotal +
-   adjustments + `tax_amount` − IRPF.
+1. Each line's net pence = `round_half_away(total × 100)`; each adjustment the
+   same. A rate's net pence = the integer sum of its lines' pence, plus the
+   adjustments' pence for the document rate.
+2. A rate's tax pence = `(net × bp + sign(net × bp) × 5000) / 10000`, with
+   truncating integer division (half away from zero): `123.50` at 5% is
+   `(12350 × 500 + 5000) / 10000` = 618 → `6.18`; `20.70` at 5% → `1.04`.
+3. `tax_amount` = the sum of the per-rate tax pence; `subtotal` = the sum of
+   the line pence; `total` = subtotal + adjustments + tax − IRPF, all in
+   pence, converted to currency units only to print.
 
-Absent figures are derived this way; a figure you supply is kept, as on any
-invoice. When the lines and adjustments resolve to **more than one rate** and
-tax is shown, the document draws:
+A document whose lines and adjustments resolve to **one** rate is totalled
+exactly as a document with that `tax_rate` and no `items[].tax_rate`
+(`tax_amount` = rate × (subtotal + adjustments), rounded to cents), so its PDF
+is byte-identical to that document's. Absent figures are derived; a figure you
+supply is kept, as on any invoice. A document taxed at more than one rate,
+with tax shown, draws:
 
 - a `VAT` column in the item table (header `labels.vat_column`) with each
   line's rate (`0%`, `5%`, `17.5%`);
@@ -294,10 +302,9 @@ outside `0`–`1` is refused once a line or adjustment uses it
 `zigpdf_get_error()`, e.g. `JSON parse error: "tax_amount" is not the sum of
 the per-rate tax (omit it to derive it)`.
 
-Every line at one rate draws the single `Tax (x%)` row naming that rate; when
-it is the document rate the PDF is byte-identical to the same payload without
-`items[].tax_rate`. `show_tax: false` still suppresses every tax row and the
-rate column. A `blackbox` document draws the per-rate rows but no column.
+A one-rate document draws the single `Tax (x%)` row naming that rate.
+`show_tax: false` still suppresses every tax row and the rate column. A
+`blackbox` document draws the per-rate rows but no column.
 
 ### Optional Sections
 | Field | Type | Description |

@@ -503,23 +503,7 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
         }
     }
 
-    // Totals the payload leaves out are derived; a key that is present —
-    // even an explicit 0 — is drawn verbatim. `subtotal` = sum of the line
-    // totals (each already net of its discount); `tax_amount` = tax_rate x
-    // (subtotal + adjustments), 0 when tax is not shown; `total` = subtotal +
-    // adjustments + tax - IRPF. Derived figures build on supplied ones.
-    // A document whose items carry their own tax_rate is totalled per rate
-    // instead, once every field is read (deriveLineRateTotals).
-    if (!invoice.hasLineRates(data.items)) {
-        const derived = invoice.computeTotals(data.items, data.adjustments, data.tax_rate, data.show_tax, data.irpf_amount);
-        if (obj.get("subtotal") == null) data.subtotal = derived.subtotal;
-        const base = data.subtotal + derived.adjustments;
-        if (obj.get("tax_amount") == null) data.tax_amount = if (data.show_tax) invoice.roundCents(base * data.tax_rate) else 0;
-        if (obj.get("total") == null) {
-            const tax = if (data.show_tax) data.tax_amount else 0;
-            data.total = invoice.roundCents(base + tax - @abs(data.irpf_amount));
-        }
-    }
+    // The totals are derived once every field is read (deriveTotals).
 
     // ---- Block toggles and document-system fields --------------------------
     data.show_client = getJsonBool(obj, "show_client") orelse true;
@@ -557,27 +541,55 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     data.signature_title = try dupeJsonString(allocator, obj, "signature_title") orelse try allocator.dupe(u8, "");
     data.signature_image_base64 = try dupeJsonString(allocator, obj, "signature_image_base64");
 
-    deriveLineRateTotals(&data, obj) catch |err| {
+    deriveTotals(&data, obj) catch |err| {
         freeInvoiceData(allocator, &data);
         return err;
     };
     return data;
 }
 
-/// Totals for a document whose items carry their own tax_rate: absent
-/// figures are derived per rate (invoice.computeTotalsByRate), a present key
-/// is kept, and the derived total builds on a supplied subtotal or
-/// tax_amount. A document taxed at more than one rate is then refused unless
-/// its subtotal, tax_amount and total reconcile with the per-rate figures
-/// (invoice.checkMixedRateTotals). No-op when no item carries a rate.
-fn deriveLineRateTotals(data: *invoice.InvoiceData, obj: std.json.ObjectMap) !void {
-    if (!invoice.hasLineRates(data.items)) return;
-    const derived = try invoice.computeTotalsByRate(data.items, data.adjustments, data.tax_rate, data.show_tax, data.irpf_amount);
+/// Totals the payload leaves out are derived; a key that is present — even
+/// an explicit 0 — is drawn verbatim, and derived figures build on supplied
+/// ones. A single-rate document (no item carries a tax_rate, or every line
+/// and adjustment resolves to one rate) derives `subtotal` = sum of the line
+/// totals (each already net of its discount), `tax_amount` = rate x
+/// (subtotal + adjustments) rounded to cents, 0 when tax is not shown, and
+/// `total` = subtotal + adjustments + tax - IRPF. A document taxed at more
+/// than one rate is totalled per rate in whole cents
+/// (invoice.computeTotalsByRate) and refused unless its subtotal, tax_amount
+/// and total reconcile with the per-rate figures
+/// (invoice.checkMixedRateTotals).
+fn deriveTotals(data: *invoice.InvoiceData, obj: std.json.ObjectMap) !void {
+    var rate = data.tax_rate;
+    if (invoice.hasLineRates(data.items)) {
+        const b = try invoice.taxBreakdown(data.items, data.adjustments, data.tax_rate);
+        if (b.len > 1) return deriveMixedRateTotals(data, obj);
+        if (b.len == 1) rate = b.buf[0].rate_given;
+    }
+    const derived = invoice.computeTotals(data.items, data.adjustments, rate, data.show_tax, data.irpf_amount);
     if (obj.get("subtotal") == null) data.subtotal = derived.subtotal;
-    if (obj.get("tax_amount") == null) data.tax_amount = derived.tax;
+    const base = data.subtotal + derived.adjustments;
+    if (obj.get("tax_amount") == null) data.tax_amount = if (data.show_tax) invoice.roundCents(base * rate) else 0;
     if (obj.get("total") == null) {
         const tax = if (data.show_tax) data.tax_amount else 0;
-        data.total = invoice.roundCents(data.subtotal + derived.adjustments + tax - @abs(data.irpf_amount));
+        data.total = invoice.roundCents(base + tax - @abs(data.irpf_amount));
+    }
+}
+
+/// deriveTotals for a document taxed at more than one rate. With neither
+/// subtotal nor tax_amount supplied, the total is the whole-cent sum.
+fn deriveMixedRateTotals(data: *invoice.InvoiceData, obj: std.json.ObjectMap) !void {
+    const derived = try invoice.computeTotalsByRate(data.items, data.adjustments, data.tax_rate, data.show_tax, data.irpf_amount);
+    const own_subtotal = obj.get("subtotal") != null;
+    const own_tax = obj.get("tax_amount") != null;
+    if (!own_subtotal) data.subtotal = derived.subtotal;
+    if (!own_tax) data.tax_amount = derived.tax;
+    if (obj.get("total") == null) {
+        const tax = if (data.show_tax) data.tax_amount else 0;
+        data.total = if (own_subtotal or own_tax)
+            invoice.roundCents(data.subtotal + derived.adjustments + tax - @abs(data.irpf_amount))
+        else
+            derived.total;
     }
     try invoice.checkMixedRateTotals(data.*);
 }
@@ -1230,6 +1242,34 @@ test "items[].tax_rate: per-line rates are read and the totals derived per rate"
     try std.testing.expectApproxEqAbs(@as(f64, 9001.40), data.subtotal, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 215.18), data.tax_amount, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 9266.58), data.total, 1e-9);
+}
+
+test "items[].tax_rate: 123.50 at 5% beside a 0% line derives 6.18" {
+    const allocator = std.testing.allocator;
+    const data = try parseInvoiceJson(allocator,
+        \\{"tax_rate": 0.2, "items": [{"description": "A", "quantity": 1, "unit_price": 123.50, "tax_rate": 0.05},
+        \\  {"description": "B", "quantity": 1, "unit_price": 100, "tax_rate": 0}]}
+    );
+    defer freeInvoiceData(allocator, &data);
+    try std.testing.expectEqual(@as(f64, 6.18), data.tax_amount);
+    try std.testing.expectEqual(@as(f64, 229.68), data.total);
+}
+
+test "items[].tax_rate: lines at one rate derive the totals of a single-rate document" {
+    const allocator = std.testing.allocator;
+    // 20.70 at 5% is 1.04 on a mixed-rate document; at one rate it derives
+    // exactly what the same document with only `"tax_rate": 0.05` derives.
+    const rated = try parseInvoiceJson(allocator,
+        \\{"items": [{"description": "A", "quantity": 1, "unit_price": 20.70, "tax_rate": 0.05}]}
+    );
+    defer freeInvoiceData(allocator, &rated);
+    const plain = try parseInvoiceJson(allocator,
+        \\{"tax_rate": 0.05, "items": [{"description": "A", "quantity": 1, "unit_price": 20.70}]}
+    );
+    defer freeInvoiceData(allocator, &plain);
+    try std.testing.expectEqual(plain.subtotal, rated.subtotal);
+    try std.testing.expectEqual(plain.tax_amount, rated.tax_amount);
+    try std.testing.expectEqual(plain.total, rated.total);
 }
 
 test "items[].tax_rate: absent or null keeps the single-rate derivation" {

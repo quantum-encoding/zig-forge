@@ -162,11 +162,11 @@ test "one shared line rate other than the document rate names that rate" {
     const a = testing.allocator;
     for (themes) |theme| {
         const p1 = try withTheme(a, theme,
-            \\"tax_rate": 0.05, "items": [{"description": "Insulation", "quantity": 1, "unit_price": 100}]
+            \\"tax_rate": 0.05, "items": [{"description": "Insulation", "quantity": 1, "unit_price": 20.70}]
         );
         defer a.free(p1);
         const p2 = try withTheme(a, theme,
-            \\"items": [{"description": "Insulation", "quantity": 1, "unit_price": 100, "tax_rate": 0.05}]
+            \\"items": [{"description": "Insulation", "quantity": 1, "unit_price": 20.70, "tax_rate": 0.05}]
         );
         defer a.free(p2);
         const pdf1 = try renderJson(a, p1);

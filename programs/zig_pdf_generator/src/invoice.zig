@@ -34,8 +34,8 @@ pub const LineItem = struct {
     /// any item has one; the JSON parser applies it when it derives `total`.
     discount: f64 = 0,
     /// The line's own tax rate as a fraction (0 = 0%, 0.05 = 5%, 0.2 = 20%).
-    /// Null: the document `tax_rate` applies. When any line sets one, the
-    /// document is taxed per rate (see `taxBreakdown`).
+    /// Null: the document `tax_rate` applies. Lines resolving to more than
+    /// one rate are taxed per rate (see `taxBreakdown`).
     tax_rate: ?f64 = null,
 };
 
@@ -129,19 +129,18 @@ pub const MixedRateError = error{
     TotalMismatch,
 };
 
-/// One rate's share of a per-rate document. Integer cents and parts per
-/// million, so the arithmetic is exact.
+/// One rate's share of a document. Integer cents and basis points, so the
+/// arithmetic is exact.
 pub const TaxGroup = struct {
-    /// The rate in millionths (0.2 -> 200000, 0.175 -> 175000).
-    rate_ppm: i64,
+    /// The rate in basis points (0.2 -> 2000, 0.175 -> 1750, 0.05 -> 500).
+    rate_bp: i64,
+    /// The rate as the first line (or the document rate) in the group gave it.
+    rate_given: f64,
     /// The lines at this rate, plus the adjustments for the document rate.
     net_cents: i64,
     /// net x rate, rounded half away from zero to a whole cent.
     tax_cents: i64,
 
-    pub fn rate(self: TaxGroup) f64 {
-        return @as(f64, @floatFromInt(self.rate_ppm)) / 1e6;
-    }
     pub fn net(self: TaxGroup) f64 {
         return @as(f64, @floatFromInt(self.net_cents)) / 100.0;
     }
@@ -169,15 +168,16 @@ pub const TaxBreakdown = struct {
         return t;
     }
 
-    fn add(self: *TaxBreakdown, rate_ppm: i64, cents: i64) TaxError!void {
+    fn add(self: *TaxBreakdown, rate: f64, cents: i64) TaxError!void {
+        const bp = try rateBp(rate);
         for (self.buf[0..self.len]) |*g| {
-            if (g.rate_ppm == rate_ppm) {
+            if (g.rate_bp == bp) {
                 g.net_cents += cents;
                 return;
             }
         }
         if (self.len == MAX_TAX_RATES) return error.TooManyTaxRates;
-        self.buf[self.len] = .{ .rate_ppm = rate_ppm, .net_cents = cents, .tax_cents = 0 };
+        self.buf[self.len] = .{ .rate_bp = bp, .rate_given = rate, .net_cents = cents, .tax_cents = 0 };
         self.len += 1;
     }
 };
@@ -188,19 +188,19 @@ pub fn toCents(x: f64) TaxError!i64 {
     return @intFromFloat(@round(x * 100.0));
 }
 
-/// A tax rate fraction in millionths, rounded half away from zero; refused
-/// outside 0..1.
-pub fn ratePpm(rate: f64) TaxError!i64 {
+/// A tax rate fraction in basis points: round(rate x 10000), half away from
+/// zero; refused outside 0..1.
+pub fn rateBp(rate: f64) TaxError!i64 {
     if (!std.math.isFinite(rate) or rate < 0 or rate > 1) return error.InvalidTaxRate;
-    return @intFromFloat(@round(rate * 1e6));
+    return @intFromFloat(@round(rate * 10000.0));
 }
 
-/// net_cents x rate_ppm / 1e6, rounded half away from zero, exactly.
-pub fn rateTaxCents(net_cents: i64, rate_ppm: i64) i64 {
-    const p: i128 = @as(i128, net_cents) * rate_ppm;
-    const mag: u128 = @abs(p);
-    const q: i128 = @intCast((mag + 500_000) / 1_000_000);
-    return @intCast(if (p < 0) -q else q);
+/// net_cents x rate_bp / 10000 rounded half away from zero, in integers:
+/// (n*bp + sign(n*bp)*5000) / 10000 with truncating division.
+pub fn rateTaxCents(net_cents: i64, rate_bp: i64) i64 {
+    const p: i128 = @as(i128, net_cents) * rate_bp;
+    const half: i128 = if (p < 0) -5000 else 5000;
+    return @intCast(@divTrunc(p + half, 10000));
 }
 
 /// True when any line carries its own tax rate.
@@ -210,36 +210,38 @@ pub fn hasLineRates(items: []const LineItem) bool {
 }
 
 /// Group the document by effective rate (a line's own `tax_rate`, else
-/// `doc_rate`). Each line total and adjustment is first rounded to whole
-/// cents; the adjustments join the `doc_rate` group. Each group's tax is its
-/// net x rate rounded half away from zero to a cent, so the document tax is
-/// the sum of the group taxes. Groups come back ascending by rate.
+/// `doc_rate`), keyed by basis points. Each line total and adjustment is
+/// first rounded to whole cents; the adjustments join the `doc_rate` group.
+/// Each group's tax is rateTaxCents(net, bp), so the document tax is the sum
+/// of the group taxes. Groups come back ascending by rate. A document whose
+/// breakdown has one group is totalled as a single-rate document instead
+/// (computeTotals at that group's rate_given).
 pub fn taxBreakdown(items: []const LineItem, adjustments: []const Adjustment, doc_rate: f64) TaxError!TaxBreakdown {
     var b = TaxBreakdown{};
     for (items) |it| {
         const cents = try toCents(it.total);
         b.items_cents += cents;
-        try b.add(try ratePpm(it.tax_rate orelse doc_rate), cents);
+        try b.add(it.tax_rate orelse doc_rate, cents);
     }
     if (adjustments.len > 0) {
         for (adjustments) |a| b.adjustments_cents += try toCents(a.amount);
-        try b.add(try ratePpm(doc_rate), b.adjustments_cents);
+        try b.add(doc_rate, b.adjustments_cents);
     }
     // Insertion sort: at most MAX_TAX_RATES entries.
     var i: usize = 1;
     while (i < b.len) : (i += 1) {
         const g = b.buf[i];
         var j = i;
-        while (j > 0 and b.buf[j - 1].rate_ppm > g.rate_ppm) : (j -= 1) b.buf[j] = b.buf[j - 1];
+        while (j > 0 and b.buf[j - 1].rate_bp > g.rate_bp) : (j -= 1) b.buf[j] = b.buf[j - 1];
         b.buf[j] = g;
     }
-    for (b.buf[0..b.len]) |*g| g.tax_cents = rateTaxCents(g.net_cents, g.rate_ppm);
+    for (b.buf[0..b.len]) |*g| g.tax_cents = rateTaxCents(g.net_cents, g.rate_bp);
     return b;
 }
 
-/// Document totals when lines carry their own rates: the subtotal and the
-/// adjustments in whole cents, tax the sum of the per-rate taxes (0 when tax
-/// is not shown), and IRPF withheld from the total.
+/// Document totals for a document taxed at more than one rate, all in whole
+/// cents: the subtotal and the adjustments, tax the sum of the per-rate taxes
+/// (0 when tax is not shown), and IRPF withheld from the total.
 pub fn computeTotalsByRate(items: []const LineItem, adjustments: []const Adjustment, doc_rate: f64, show_tax: bool, irpf_amount: f64) TaxError!Totals {
     const b = try taxBreakdown(items, adjustments, doc_rate);
     const tax_cents: i64 = if (show_tax) b.taxCents() else 0;
@@ -1029,21 +1031,22 @@ pub const InvoiceRenderer = struct {
     /// when they carry their own, else the document rate.
     fn singleTaxRate(self: *const InvoiceRenderer) f64 {
         if (self.tax) |t| {
-            if (t.len == 1) return t.buf[0].rate();
+            if (t.len == 1) return t.buf[0].rate_given;
         }
         return self.data.tax_rate;
     }
 
-    /// A rate fraction as a percentage, to at most two decimals with the
-    /// document's decimal mark: 0.2 -> "20", 0.175 -> "17.5".
-    fn pctText(self: *const InvoiceRenderer, buf: []u8, rate: f64) []const u8 {
-        return self.decimalText(buf, @round(rate * 1e6) / 1e4);
+    /// A rate in basis points as a percentage with the document's decimal
+    /// mark: 2000 -> "20", 1750 -> "17.5".
+    fn bpText(self: *const InvoiceRenderer, buf: []u8, bp: i64) []const u8 {
+        return self.decimalText(buf, @as(f64, @floatFromInt(bp)) / 100.0);
     }
 
-    /// "20%" for a line's effective rate.
+    /// "20%" for a line's effective rate, in the basis points it is taxed at.
     fn lineRateText(self: *const InvoiceRenderer, buf: []u8, item: LineItem) []const u8 {
         var pb: [32]u8 = undefined;
-        return std.fmt.bufPrint(buf, "{s}%", .{self.pctText(&pb, item.tax_rate orelse self.data.tax_rate)}) catch "";
+        const bp = rateBp(item.tax_rate orelse self.data.tax_rate) catch return "";
+        return std.fmt.bufPrint(buf, "{s}%", .{self.bpText(&pb, bp)}) catch "";
     }
 
     /// The "Total VAT" row label: labels.tax_total, else "Total <tax_prefix>:".
@@ -2380,7 +2383,7 @@ pub const InvoiceRenderer = struct {
             } else {
                 var tax_label_buf: [96]u8 = undefined;
                 var pb: [32]u8 = undefined;
-                const tax_label = std.fmt.bufPrint(&tax_label_buf, "{s} ({s}%):", .{ self.data.labels.tax_prefix, self.pctText(&pb, self.singleTaxRate()) }) catch self.data.labels.tax_prefix;
+                const tax_label = std.fmt.bufPrint(&tax_label_buf, "{s} ({s}%):", .{ self.data.labels.tax_prefix, self.decimalText(&pb, self.singleTaxRate() * 100) }) catch self.data.labels.tax_prefix;
                 try content.drawText(tax_label, col_price, self.current_y, self.font_regular, 10, document.Color.black);
                 var tax_buf: [48]u8 = undefined;
                 const tax_str = self.money(&tax_buf, self.data.tax_amount);
@@ -2491,7 +2494,7 @@ pub const InvoiceRenderer = struct {
         var widest: f32 = 0;
         for (groups, 0..) |g, i| {
             var pb: [32]u8 = undefined;
-            const pct = self.decimalText(&pb, @as(f64, @floatFromInt(g.rate_ppm)) / 1e4);
+            const pct = self.bpText(&pb, g.rate_bp);
             labels[i] = std.fmt.bufPrint(&label_bufs[i], "{s} {s}%", .{ prefix, pct }) catch prefix;
             widest = @max(widest, reg.measureText(labels[i], size));
         }
@@ -2583,7 +2586,7 @@ pub const InvoiceRenderer = struct {
                 y = try self.drawRateRows(content, lx, right, y, 9.5, 17, body, ink, self.taxTotalLabel(&tl));
             } else {
                 var qb: [32]u8 = undefined;
-                const tax_label = std.fmt.bufPrint(&buf, "{s} ({s}%)", .{ self.data.labels.tax_prefix, self.pctText(&qb, self.singleTaxRate()) }) catch self.data.labels.tax_prefix;
+                const tax_label = std.fmt.bufPrint(&buf, "{s} ({s}%)", .{ self.data.labels.tax_prefix, self.decimalText(&qb, self.singleTaxRate() * 100) }) catch self.data.labels.tax_prefix;
                 try content.drawText(tax_label, lx, y, self.font_regular, 9.5, body);
                 try content.drawTextRightAligned(self.money(&mb, self.data.tax_amount), right, y, self.font_regular, reg, 9.5, ink);
                 y -= 17;
@@ -3515,8 +3518,8 @@ test "line totals, document totals and balance" {
 
 // Expected figures in the per-rate tests are worked by hand in whole pence.
 
-fn expectGroup(g: TaxGroup, rate_ppm: i64, net_cents: i64, tax_cents: i64) !void {
-    try std.testing.expectEqual(rate_ppm, g.rate_ppm);
+fn expectGroup(g: TaxGroup, rate_bp: i64, net_cents: i64, tax_cents: i64) !void {
+    try std.testing.expectEqual(rate_bp, g.rate_bp);
     try std.testing.expectEqual(net_cents, g.net_cents);
     try std.testing.expectEqual(tax_cents, g.tax_cents);
 }
@@ -3532,7 +3535,7 @@ test "per-rate tax rounds each rate's total, not each line" {
     const b = try taxBreakdown(&items, &.{}, 0.2);
     try std.testing.expectEqual(@as(usize, 2), b.len);
     try expectGroup(b.groups()[0], 0, 1000, 0);
-    try expectGroup(b.groups()[1], 200_000, 6, 1);
+    try expectGroup(b.groups()[1], 2000, 6, 1);
     try std.testing.expectEqual(@as(i64, 1), b.taxCents());
 }
 
@@ -3545,7 +3548,7 @@ test "per-rate tax: 0% and 20%" {
     const b = try taxBreakdown(&items, &.{}, 0.2);
     try std.testing.expectEqual(@as(usize, 2), b.len);
     try expectGroup(b.groups()[0], 0, 796_000, 0);
-    try expectGroup(b.groups()[1], 200_000, 100_000, 20_000);
+    try expectGroup(b.groups()[1], 2000, 100_000, 20_000);
 
     const t = try computeTotalsByRate(&items, &.{}, 0.2, true, 0);
     try std.testing.expectEqual(@as(f64, 8960), t.subtotal);
@@ -3564,13 +3567,36 @@ test "per-rate tax: 0%, 5% and 20%, ascending, half a penny rounds up" {
     const b = try taxBreakdown(&items, &.{}, 0.2);
     try std.testing.expectEqual(@as(usize, 3), b.len);
     try expectGroup(b.groups()[0], 0, 100_000, 0);
-    try expectGroup(b.groups()[1], 50_000, 2070, 104);
-    try expectGroup(b.groups()[2], 200_000, 12_345, 2469);
+    try expectGroup(b.groups()[1], 500, 2070, 104);
+    try expectGroup(b.groups()[2], 2000, 12_345, 2469);
 
     const t = try computeTotalsByRate(&items, &.{}, 0.2, true, 0);
     try std.testing.expectApproxEqAbs(@as(f64, 1144.15), t.subtotal, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 25.73), t.tax, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 1169.88), t.total, 1e-9);
+}
+
+test "per-rate tax is integer pence x basis points" {
+    // 123.50 at 5%: 12350p x 500bp = 6,175,000; + 5000, / 10000 -> 618p = 6.18.
+    // 20.70 at 5%: 2070p x 500bp = 1,035,000 -> 104p = 1.04, where
+    // roundCents(20.70 * 0.05) in f64 is 1.03.
+    const items = [_]LineItem{
+        .{ .description = "a", .quantity = 1, .unit_price = 123.50, .total = 123.50, .tax_rate = 0.05 },
+        .{ .description = "b", .quantity = 1, .unit_price = 100, .total = 100, .tax_rate = 0 },
+    };
+    const b = try taxBreakdown(&items, &.{}, 0.2);
+    try expectGroup(b.groups()[1], 500, 12_350, 618);
+    try std.testing.expectEqual(@as(f64, 6.18), b.groups()[1].tax());
+    const t = try computeTotalsByRate(&items, &.{}, 0.2, true, 0);
+    try std.testing.expectEqual(@as(f64, 6.18), t.tax);
+    try std.testing.expectEqual(@as(f64, 229.68), t.total);
+
+    try std.testing.expectEqual(@as(i64, 104), rateTaxCents(2070, try rateBp(0.05)));
+    try std.testing.expectEqual(@as(f64, 1.03), roundCents(20.70 * 0.05));
+    // Rates key and draw in basis points: 17.5% is 1750, 5.5% is 550.
+    try std.testing.expectEqual(@as(i64, 1750), try rateBp(0.175));
+    try std.testing.expectEqual(@as(i64, 550), try rateBp(0.055));
+    try std.testing.expectError(error.InvalidTaxRate, rateBp(1.01));
 }
 
 test "per-rate tax: adjustments are taxed at the document rate" {
@@ -3585,7 +3611,7 @@ test "per-rate tax: adjustments are taxed at the document rate" {
     const b = try taxBreakdown(&items, &adj, 0.2);
     try std.testing.expectEqual(@as(usize, 2), b.len);
     try expectGroup(b.groups()[0], 0, 10_000, 0);
-    try expectGroup(b.groups()[1], 200_000, 28_000, 5600);
+    try expectGroup(b.groups()[1], 2000, 28_000, 5600);
 
     const t = try computeTotalsByRate(&items, &adj, 0.2, true, 0);
     try std.testing.expectEqual(@as(f64, 350), t.subtotal);
@@ -3597,7 +3623,7 @@ test "per-rate tax: adjustments are taxed at the document rate" {
     const zero = [_]LineItem{.{ .description = "Zero", .quantity = 1, .unit_price = 100, .total = 100, .tax_rate = 0 }};
     const b2 = try taxBreakdown(&zero, &adj, 0.2);
     try std.testing.expectEqual(@as(usize, 2), b2.len);
-    try expectGroup(b2.groups()[1], 200_000, 3000, 600);
+    try expectGroup(b2.groups()[1], 2000, 3000, 600);
 }
 
 test "per-rate tax: half a cent rounds away from zero, credits included" {
@@ -3607,12 +3633,12 @@ test "per-rate tax: half a cent rounds away from zero, credits included" {
         .{ .description = "charge", .quantity = 1, .unit_price = 0.25, .total = 0.25, .tax_rate = 0.15 },
     };
     const b = try taxBreakdown(&items, &.{}, 0.2);
-    try expectGroup(b.groups()[0], 100_000, -25, -3);
+    try expectGroup(b.groups()[0], 1000, -25, -3);
     // 25p x 15% = 3.75p -> 4p.
-    try expectGroup(b.groups()[1], 150_000, 25, 4);
-    try std.testing.expectEqual(@as(i64, 3), rateTaxCents(25, 100_000));
-    try std.testing.expectEqual(@as(i64, -3), rateTaxCents(-25, 100_000));
-    try std.testing.expectEqual(@as(i64, 2), rateTaxCents(24, 100_000));
+    try expectGroup(b.groups()[1], 1500, 25, 4);
+    try std.testing.expectEqual(@as(i64, 3), rateTaxCents(25, 1000));
+    try std.testing.expectEqual(@as(i64, -3), rateTaxCents(-25, 1000));
+    try std.testing.expectEqual(@as(i64, 2), rateTaxCents(24, 1000));
 }
 
 test "per-rate tax: limits and refusals" {
