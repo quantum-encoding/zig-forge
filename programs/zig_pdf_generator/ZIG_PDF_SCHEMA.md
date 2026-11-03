@@ -114,7 +114,7 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 | `blackbox_description`         | string                           | No        | `""`                              | One-line summary used when `display_mode="blackbox"`                         |
 | `subtotal`                     | number                           | No        | derived                           | Pre-tax total. Absent → sum of the line totals. A present key (even `0`) is drawn verbatim |
 | `tax_rate`                     | number                           | No        | `0.21`                            | Fraction (`0.0`–`1.0`); 21% default                                          |
-| `tax_amount`                   | number                           | No        | derived                           | Absent → `(subtotal + Σadjustments) × tax_rate`, rounded to cents; `0` when `show_tax` is false |
+| `tax_amount`                   | number                           | No        | derived                           | Absent → `(subtotal + Σadjustments) × tax_rate`, rounded to cents; `0` when `show_tax` is false. When any item sets `tax_rate`: the sum of the per-rate taxes (see **Per-line tax rates**) |
 | `total`                        | number                           | No        | derived                           | Absent → `subtotal + Σadjustments + tax_amount − |irpf_amount|`, rounded to cents |
 | `currency_symbol`              | string                           | No        | `""`                              | Prepended to every money figure (e.g. `"£"`, `"€"`), after the minus sign (`-£120.00`). Empty renders bare numbers |
 | `number_format`                | `{thousands, decimal}`           | No        | `{"thousands": ",", "decimal": "."}` | Digit grouping and decimal mark for every money figure (`£1,234.50`); `decimal` also applies to quantities and percentages (`2,5 hrs`, `12,5%`). Spanish/German: `{"thousands": ".", "decimal": ","}` → `2.400,00`. `thousands: ""` disables grouping; each value is at most 4 bytes (longer, non-string or an empty `decimal` keeps the default). Nothing switches convention implicitly. Money rounds half away from zero (`1.005` → `1.01`); figures ≥ 1e11 print ungrouped |
@@ -231,7 +231,10 @@ are the top-level `title` and `number_label`.
 | `line_total` | `"Total"` |  |
 | **Totals block** | | |
 | `subtotal` | `"Subtotal:"` |  |
-| `tax_prefix` | `"Tax"` | Rendered as `"Tax (21%):"` — the percentage is appended |
+| `tax_prefix` | `"Tax"` | Rendered as `"Tax (21%):"` — the percentage is appended. Also prefixes each per-rate row (`"VAT 20%"`) |
+| `vat_column` | `"VAT"` | Rate-column header, mixed-rate documents only |
+| `tax_on` | `"on"` | Word before each rate's net amount (`VAT 20% on £1,000.00`) |
+| `tax_total` | `""` | Row under the per-rate rows; empty draws `"Total <tax_prefix>:"` |
 | `total` | `"TOTAL:"` |  |
 | **Footer sections** | | |
 | `notes` | `"Notes:"` |  |
@@ -291,6 +294,40 @@ WASI build, or the CLI.
 | `total`       | number | No        | derived  | `quantity * unit_price * (1 - discount/100)`, rounded to cents, if omitted |
 | `unit`        | string | No        | `""`     | Unit after the quantity in the Qty column (`"hrs"`, `"m²"`) |
 | `discount`    | number | No        | `0`      | Percent off the line. Any non-zero discount adds a `Disc.` column (`10%`) |
+| `tax_rate`    | number or `null` | No | document `tax_rate` | The line's own tax rate, a fraction `0`–`1` (`0.2` = 20%). Omitted/`null` → the document rate; anything else is refused (`InvalidItemTaxRate`, before anything is allocated). Any item setting one switches the document to **Per-line tax rates** |
+
+#### Per-line tax rates
+
+When any item sets `tax_rate` the document is totalled per effective rate
+(`invoice.taxBreakdown` / `invoice.computeTotalsByRate`):
+
+- effective rate = the item's `tax_rate`, else the document `tax_rate`; rates
+  are compared and drawn to six decimal places (millionths);
+- every line total and adjustment is rounded to whole cents; the adjustments
+  are taxed at the document `tax_rate` and join that rate's group;
+- each rate's tax = its net cents × rate, rounded half away from zero to a
+  whole cent, in exact integer arithmetic (`20.70` at 5% → `1.04`);
+- `tax_amount` = Σ per-rate tax; `subtotal` = Σ line totals; `total` =
+  subtotal + Σadjustments + `tax_amount` − |`irpf_amount`|.
+
+Absent figures are derived this way and a supplied figure is kept, except on
+a **mixed-rate document** — tax shown and more than one rate in play — where
+`tax_amount`, `subtotal` and `total` must each reconcile with the breakdown to
+within half a cent or the parse (and the renderer) refuses it:
+`TaxAmountMismatch`, `SubtotalMismatch`, `TotalMismatch`. At most 8 distinct
+rates (`TooManyTaxRates`); a document `tax_rate` outside `0`–`1` that a line or
+adjustment uses is `InvalidTaxRate`; a line total or adjustment that is not a
+finite amount below 1e13 is `AmountOutOfRange`.
+
+A mixed-rate document draws a rate column left of the line total in every
+theme (header `labels.vat_column`; the other columns narrow to make room) and,
+in place of the single `Tax (x%)` row, one row per rate in ascending order —
+`<tax_prefix> 20%  on £1,000.00 … £200.00` — then `labels.tax_total`
+(`Total <tax_prefix>:`). Classic, squircle and glass widen the totals block by
+50pt to fit the rows. With one rate, the single tax row names that rate, and
+lines that all carry the document rate render byte-identically to lines that
+carry none. `show_tax: false` suppresses the rows and the column; `blackbox`
+draws the rows without the column.
 
 ### UI gap (invoice)
 

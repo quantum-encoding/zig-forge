@@ -124,6 +124,13 @@ pub fn describeInvoiceError(err: anyerror) ?[]const u8 {
         error.UnknownPreset => "unknown \"preset\" (valid: " ++ preset_names ++ ")",
         error.TooManyLineItems => std.fmt.comptimePrint("too many \"items\" (max {d})", .{MAX_LINE_ITEMS}),
         error.TooManyAdjustments => std.fmt.comptimePrint("too many \"adjustments\" (max {d})", .{MAX_ADJUSTMENTS}),
+        error.InvalidItemTaxRate => "\"items[].tax_rate\" must be null or a number from 0 to 1 (0.2 = 20%)",
+        error.InvalidTaxRate => "\"tax_rate\" must be from 0 to 1 when items carry their own tax_rate",
+        error.TooManyTaxRates => std.fmt.comptimePrint("more than {d} distinct tax rates across the items and adjustments", .{invoice.MAX_TAX_RATES}),
+        error.AmountOutOfRange => "an item total or adjustment is not a finite amount below 1e13",
+        error.TaxAmountMismatch => "\"tax_amount\" is not the sum of the per-rate tax (omit it to derive it)",
+        error.SubtotalMismatch => "\"subtotal\" is not the sum of the item totals (omit it to derive it)",
+        error.TotalMismatch => "\"total\" is not subtotal + adjustments + tax_amount - irpf (omit it to derive it)",
         else => null,
     };
 }
@@ -166,6 +173,19 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     if (obj.get("adjustments")) |adj_val| {
         if (adj_val == .array and adj_val.array.items.len > MAX_ADJUSTMENTS) {
             return error.TooManyAdjustments;
+        }
+    }
+    // A line's own tax rate: absent or null uses the document rate; anything
+    // else must be a number from 0 to 1.
+    if (obj.get("items")) |items_val| {
+        if (items_val == .array) {
+            for (items_val.array.items) |item_val| {
+                if (item_val != .object) continue;
+                const v = item_val.object.get("tax_rate") orelse continue;
+                if (v == .null) continue;
+                const rate = getJsonFloat(item_val.object, "tax_rate") orelse return error.InvalidItemTaxRate;
+                if (!(rate >= 0 and rate <= 1)) return error.InvalidItemTaxRate;
+            }
         }
     }
 
@@ -457,6 +477,7 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
                         .total = getJsonFloat(item_obj, "total") orelse invoice.lineTotal(quantity, unit_price, discount),
                         .unit = try dupeJsonString(allocator, item_obj, "unit") orelse "",
                         .discount = discount,
+                        .tax_rate = getJsonFloat(item_obj, "tax_rate"),
                     };
                 }
             }
@@ -487,7 +508,9 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     // totals (each already net of its discount); `tax_amount` = tax_rate x
     // (subtotal + adjustments), 0 when tax is not shown; `total` = subtotal +
     // adjustments + tax - IRPF. Derived figures build on supplied ones.
-    {
+    // A document whose items carry their own tax_rate is totalled per rate
+    // instead, once every field is read (deriveLineRateTotals).
+    if (!invoice.hasLineRates(data.items)) {
         const derived = invoice.computeTotals(data.items, data.adjustments, data.tax_rate, data.show_tax, data.irpf_amount);
         if (obj.get("subtotal") == null) data.subtotal = derived.subtotal;
         const base = data.subtotal + derived.adjustments;
@@ -534,7 +557,29 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     data.signature_title = try dupeJsonString(allocator, obj, "signature_title") orelse try allocator.dupe(u8, "");
     data.signature_image_base64 = try dupeJsonString(allocator, obj, "signature_image_base64");
 
+    deriveLineRateTotals(&data, obj) catch |err| {
+        freeInvoiceData(allocator, &data);
+        return err;
+    };
     return data;
+}
+
+/// Totals for a document whose items carry their own tax_rate: absent
+/// figures are derived per rate (invoice.computeTotalsByRate), a present key
+/// is kept, and the derived total builds on a supplied subtotal or
+/// tax_amount. A document taxed at more than one rate is then refused unless
+/// its subtotal, tax_amount and total reconcile with the per-rate figures
+/// (invoice.checkMixedRateTotals). No-op when no item carries a rate.
+fn deriveLineRateTotals(data: *invoice.InvoiceData, obj: std.json.ObjectMap) !void {
+    if (!invoice.hasLineRates(data.items)) return;
+    const derived = try invoice.computeTotalsByRate(data.items, data.adjustments, data.tax_rate, data.show_tax, data.irpf_amount);
+    if (obj.get("subtotal") == null) data.subtotal = derived.subtotal;
+    if (obj.get("tax_amount") == null) data.tax_amount = derived.tax;
+    if (obj.get("total") == null) {
+        const tax = if (data.show_tax) data.tax_amount else 0;
+        data.total = invoice.roundCents(data.subtotal + derived.adjustments + tax - @abs(data.irpf_amount));
+    }
+    try invoice.checkMixedRateTotals(data.*);
 }
 
 fn parseTheme(name: []const u8) invoice.Theme {
@@ -1164,6 +1209,119 @@ test "line discount, adjustments and receipts feed the derived totals" {
     try std.testing.expectEqual(@as(f64, 0), invoice.balanceDue(rct.total, rct.amount_paid.?));
 }
 
+test "items[].tax_rate: per-line rates are read and the totals derived per rate" {
+    const allocator = std.testing.allocator;
+    const data = try parseInvoiceJson(allocator,
+        \\{"tax_rate": 0.2, "items": [
+        \\  {"description": "Panels", "quantity": 1, "unit_price": 4160, "tax_rate": 0},
+        \\  {"description": "Battery", "quantity": 1, "unit_price": 3800, "tax_rate": 0},
+        \\  {"description": "Charger", "quantity": 1, "unit_price": 1000, "tax_rate": 0.2},
+        \\  {"description": "Survey", "quantity": 1, "unit_price": 20.70, "tax_rate": null},
+        \\  {"description": "Insulation", "quantity": 1, "unit_price": 20.70, "tax_rate": 0.05}],
+        \\ "adjustments": [{"label": "Delivery", "amount": 50}]}
+    );
+    defer freeInvoiceData(allocator, &data);
+    try std.testing.expectEqual(@as(?f64, 0), data.items[0].tax_rate);
+    try std.testing.expectEqual(@as(?f64, 0.2), data.items[2].tax_rate);
+    try std.testing.expectEqual(@as(?f64, null), data.items[3].tax_rate);
+    try std.testing.expectEqual(@as(?f64, 0.05), data.items[4].tax_rate);
+    // 0%: 7960.00 -> 0. 5%: 20.70 -> 103.5p -> 1.04. 20%: 1000 + 20.70
+    // (document rate) + 50 delivery = 1070.70 -> 214.14. Tax 215.18.
+    try std.testing.expectApproxEqAbs(@as(f64, 9001.40), data.subtotal, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 215.18), data.tax_amount, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 9266.58), data.total, 1e-9);
+}
+
+test "items[].tax_rate: absent or null keeps the single-rate derivation" {
+    const allocator = std.testing.allocator;
+    const data = try parseInvoiceJson(allocator,
+        \\{"tax_rate": 0.2, "items": [{"description": "A", "quantity": 1, "unit_price": 100, "tax_rate": null},
+        \\  {"description": "B", "quantity": 1, "unit_price": 50}]}
+    );
+    defer freeInvoiceData(allocator, &data);
+    try std.testing.expect(!invoice.hasLineRates(data.items));
+    try std.testing.expectApproxEqAbs(@as(f64, 30), data.tax_amount, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 180), data.total, 1e-9);
+}
+
+test "items[].tax_rate: anything but null or a number from 0 to 1 is refused" {
+    const allocator = std.testing.allocator;
+    const bad = [_][]const u8{
+        \\{"items": [{"description": "A", "unit_price": 1, "tax_rate": 1.5}]}
+        ,
+        \\{"items": [{"description": "A", "unit_price": 1, "tax_rate": -0.01}]}
+        ,
+        \\{"items": [{"description": "A", "unit_price": 1, "tax_rate": "0.2"}]}
+        ,
+        \\{"items": [{"description": "A", "unit_price": 1, "tax_rate": true}]}
+        ,
+        \\{"items": [{"description": "A", "unit_price": 1, "tax_rate": 20}]}
+    };
+    for (bad) |json| try std.testing.expectError(error.InvalidItemTaxRate, parseInvoiceJson(allocator, json));
+    try std.testing.expect(describeInvoiceError(error.InvalidItemTaxRate) != null);
+
+    // The bounds themselves are valid rates.
+    const edges = try parseInvoiceJson(allocator,
+        \\{"items": [{"description": "A", "unit_price": 1, "tax_rate": 0}, {"description": "B", "unit_price": 1, "tax_rate": 1}]}
+    );
+    defer freeInvoiceData(allocator, &edges);
+    try std.testing.expectEqual(@as(?f64, 1), edges.items[1].tax_rate);
+}
+
+test "items[].tax_rate: a mixed-rate document's supplied totals must reconcile" {
+    const allocator = std.testing.allocator;
+    const items =
+        \\"items": [{"description": "Panels", "quantity": 1, "unit_price": 7960, "tax_rate": 0},
+        \\  {"description": "Charger", "quantity": 1, "unit_price": 1000, "tax_rate": 0.2}]
+    ;
+    // Every refusal frees what the parse allocated (std.testing.allocator
+    // fails the test on a leak).
+    try std.testing.expectError(error.TaxAmountMismatch, parseInvoiceJson(allocator, "{\"tax_rate\": 0.2, \"tax_amount\": 210, " ++ items ++ "}"));
+    try std.testing.expectError(error.SubtotalMismatch, parseInvoiceJson(allocator, "{\"tax_rate\": 0.2, \"subtotal\": 9000, \"tax_amount\": 200, " ++ items ++ "}"));
+    try std.testing.expectError(error.TotalMismatch, parseInvoiceJson(allocator, "{\"tax_rate\": 0.2, \"total\": 9999, " ++ items ++ "}"));
+    for ([_]anyerror{ error.TaxAmountMismatch, error.SubtotalMismatch, error.TotalMismatch, error.TooManyTaxRates, error.InvalidTaxRate, error.AmountOutOfRange }) |e| {
+        const msg = describeInvoiceError(e).?;
+        // Fits the 128-byte "JSON parse error: <detail>" buffer of the C/WASM exports.
+        try std.testing.expect(msg.len + "JSON parse error: ".len <= 128);
+    }
+
+    // Within half a penny of the per-rate sum is accepted and drawn as given.
+    const close = try parseInvoiceJson(allocator, "{\"tax_rate\": 0.2, \"subtotal\": 8960, \"tax_amount\": 200.004, \"total\": 9160.004, " ++ items ++ "}");
+    defer freeInvoiceData(allocator, &close);
+    try std.testing.expectEqual(@as(f64, 200.004), close.tax_amount);
+
+    // Tax hidden: no per-rate rows are drawn, so a stray tax_amount is kept.
+    const hidden = try parseInvoiceJson(allocator, "{\"show_tax\": false, \"tax_amount\": 210, " ++ items ++ "}");
+    defer freeInvoiceData(allocator, &hidden);
+    try std.testing.expectApproxEqAbs(@as(f64, 8960), hidden.total, 1e-9);
+
+    // A single rate (every line at 20%): supplied figures are drawn verbatim,
+    // as on a document without line rates.
+    const single = try parseInvoiceJson(allocator,
+        \\{"tax_rate": 0.2, "tax_amount": 999, "items": [{"description": "A", "quantity": 1, "unit_price": 100, "tax_rate": 0.2}]}
+    );
+    defer freeInvoiceData(allocator, &single);
+    try std.testing.expectEqual(@as(f64, 999), single.tax_amount);
+    try std.testing.expectApproxEqAbs(@as(f64, 1099), single.total, 1e-9);
+}
+
+test "items[].tax_rate: more than eight rates, or an unusable document rate, is refused" {
+    const allocator = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "{\"items\":[");
+    for (0..9) |i| {
+        if (i > 0) try buf.append(allocator, ',');
+        try buf.print(allocator, "{{\"description\":\"x\",\"unit_price\":1,\"tax_rate\":0.0{d}}}", .{i});
+    }
+    try buf.appendSlice(allocator, "]}");
+    try std.testing.expectError(error.TooManyTaxRates, parseInvoiceJson(allocator, buf.items));
+
+    try std.testing.expectError(error.InvalidTaxRate, parseInvoiceJson(allocator,
+        \\{"tax_rate": 20, "items": [{"description": "A", "unit_price": 1, "tax_rate": 0}, {"description": "B", "unit_price": 1}]}
+    ));
+}
+
 test "block toggles default from the document type and preset" {
     const allocator = std.testing.allocator;
 
@@ -1209,11 +1367,14 @@ test "style and theme select every visual style; receipt is not forced classic" 
     const names = [_][]const u8{ "classic", "squircle", "glass", "minimal", "letterhead" };
     const themes = [_]invoice.Theme{ .classic, .squircle, .glass, .minimal, .letterhead };
     for (names, themes) |n, t| {
-        var buf: [64]u8 = undefined;
-        const a = try parseInvoiceJson(allocator, try std.fmt.bufPrint(&buf, "{{\"style\": \"{s}\"}}", .{n}));
+        const style_json = try std.json.Stringify.valueAlloc(allocator, .{ .style = n }, .{});
+        defer allocator.free(style_json);
+        const a = try parseInvoiceJson(allocator, style_json);
         defer freeInvoiceData(allocator, &a);
         try std.testing.expectEqual(t, a.theme);
-        const b = try parseInvoiceJson(allocator, try std.fmt.bufPrint(&buf, "{{\"theme\": \"{s}\"}}", .{n}));
+        const theme_json = try std.json.Stringify.valueAlloc(allocator, .{ .theme = n }, .{});
+        defer allocator.free(theme_json);
+        const b = try parseInvoiceJson(allocator, theme_json);
         defer freeInvoiceData(allocator, &b);
         try std.testing.expectEqual(t, b.theme);
     }

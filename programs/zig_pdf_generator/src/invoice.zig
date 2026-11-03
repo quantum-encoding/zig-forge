@@ -33,6 +33,10 @@ pub const LineItem = struct {
     /// Line discount in percent (10 = 10% off). Shown in its own column when
     /// any item has one; the JSON parser applies it when it derives `total`.
     discount: f64 = 0,
+    /// The line's own tax rate as a fraction (0 = 0%, 0.05 = 5%, 0.2 = 20%).
+    /// Null: the document `tax_rate` applies. When any line sets one, the
+    /// document is taxed per rate (see `taxBreakdown`).
+    tax_rate: ?f64 = null,
 };
 
 /// One extra row between Subtotal and Tax (e.g. Shipping +12.50, Deposit
@@ -96,6 +100,179 @@ pub fn computeTotals(items: []const LineItem, adjustments: []const Adjustment, t
         .tax = tax,
         .total = roundCents(subtotal + adj + tax - @abs(irpf_amount)),
     };
+}
+
+// -----------------------------------------------------------------------------
+// Per-rate tax (a line carries its own tax_rate)
+// -----------------------------------------------------------------------------
+
+/// Most distinct tax rates one document may carry.
+pub const MAX_TAX_RATES: usize = 8;
+
+/// Largest money figure (in currency units) the per-rate arithmetic accepts.
+/// Below it every amount converts to whole cents exactly.
+pub const MAX_TAX_MONEY: f64 = 1e13;
+
+pub const TaxError = error{
+    /// More than MAX_TAX_RATES distinct rates.
+    TooManyTaxRates,
+    /// A rate in use is not a number from 0 to 1.
+    InvalidTaxRate,
+    /// A line total or adjustment is not finite or not below MAX_TAX_MONEY.
+    AmountOutOfRange,
+};
+
+/// The totals a caller supplied disagree with the per-rate breakdown.
+pub const MixedRateError = error{
+    TaxAmountMismatch,
+    SubtotalMismatch,
+    TotalMismatch,
+};
+
+/// One rate's share of a per-rate document. Integer cents and parts per
+/// million, so the arithmetic is exact.
+pub const TaxGroup = struct {
+    /// The rate in millionths (0.2 -> 200000, 0.175 -> 175000).
+    rate_ppm: i64,
+    /// The lines at this rate, plus the adjustments for the document rate.
+    net_cents: i64,
+    /// net x rate, rounded half away from zero to a whole cent.
+    tax_cents: i64,
+
+    pub fn rate(self: TaxGroup) f64 {
+        return @as(f64, @floatFromInt(self.rate_ppm)) / 1e6;
+    }
+    pub fn net(self: TaxGroup) f64 {
+        return @as(f64, @floatFromInt(self.net_cents)) / 100.0;
+    }
+    pub fn tax(self: TaxGroup) f64 {
+        return @as(f64, @floatFromInt(self.tax_cents)) / 100.0;
+    }
+};
+
+/// The rate groups of a document, ascending by rate.
+pub const TaxBreakdown = struct {
+    buf: [MAX_TAX_RATES]TaxGroup = undefined,
+    len: usize = 0,
+    /// Sum of the line totals, in cents.
+    items_cents: i64 = 0,
+    /// Sum of the adjustments, in cents.
+    adjustments_cents: i64 = 0,
+
+    pub fn groups(self: *const TaxBreakdown) []const TaxGroup {
+        return self.buf[0..self.len];
+    }
+
+    pub fn taxCents(self: *const TaxBreakdown) i64 {
+        var t: i64 = 0;
+        for (self.groups()) |g| t += g.tax_cents;
+        return t;
+    }
+
+    fn add(self: *TaxBreakdown, rate_ppm: i64, cents: i64) TaxError!void {
+        for (self.buf[0..self.len]) |*g| {
+            if (g.rate_ppm == rate_ppm) {
+                g.net_cents += cents;
+                return;
+            }
+        }
+        if (self.len == MAX_TAX_RATES) return error.TooManyTaxRates;
+        self.buf[self.len] = .{ .rate_ppm = rate_ppm, .net_cents = cents, .tax_cents = 0 };
+        self.len += 1;
+    }
+};
+
+/// A money figure as whole cents: x * 100 rounded half away from zero.
+pub fn toCents(x: f64) TaxError!i64 {
+    if (!std.math.isFinite(x) or @abs(x) >= MAX_TAX_MONEY) return error.AmountOutOfRange;
+    return @intFromFloat(@round(x * 100.0));
+}
+
+/// A tax rate fraction in millionths, rounded half away from zero; refused
+/// outside 0..1.
+pub fn ratePpm(rate: f64) TaxError!i64 {
+    if (!std.math.isFinite(rate) or rate < 0 or rate > 1) return error.InvalidTaxRate;
+    return @intFromFloat(@round(rate * 1e6));
+}
+
+/// net_cents x rate_ppm / 1e6, rounded half away from zero, exactly.
+pub fn rateTaxCents(net_cents: i64, rate_ppm: i64) i64 {
+    const p: i128 = @as(i128, net_cents) * rate_ppm;
+    const mag: u128 = @abs(p);
+    const q: i128 = @intCast((mag + 500_000) / 1_000_000);
+    return @intCast(if (p < 0) -q else q);
+}
+
+/// True when any line carries its own tax rate.
+pub fn hasLineRates(items: []const LineItem) bool {
+    for (items) |it| if (it.tax_rate != null) return true;
+    return false;
+}
+
+/// Group the document by effective rate (a line's own `tax_rate`, else
+/// `doc_rate`). Each line total and adjustment is first rounded to whole
+/// cents; the adjustments join the `doc_rate` group. Each group's tax is its
+/// net x rate rounded half away from zero to a cent, so the document tax is
+/// the sum of the group taxes. Groups come back ascending by rate.
+pub fn taxBreakdown(items: []const LineItem, adjustments: []const Adjustment, doc_rate: f64) TaxError!TaxBreakdown {
+    var b = TaxBreakdown{};
+    for (items) |it| {
+        const cents = try toCents(it.total);
+        b.items_cents += cents;
+        try b.add(try ratePpm(it.tax_rate orelse doc_rate), cents);
+    }
+    if (adjustments.len > 0) {
+        for (adjustments) |a| b.adjustments_cents += try toCents(a.amount);
+        try b.add(try ratePpm(doc_rate), b.adjustments_cents);
+    }
+    // Insertion sort: at most MAX_TAX_RATES entries.
+    var i: usize = 1;
+    while (i < b.len) : (i += 1) {
+        const g = b.buf[i];
+        var j = i;
+        while (j > 0 and b.buf[j - 1].rate_ppm > g.rate_ppm) : (j -= 1) b.buf[j] = b.buf[j - 1];
+        b.buf[j] = g;
+    }
+    for (b.buf[0..b.len]) |*g| g.tax_cents = rateTaxCents(g.net_cents, g.rate_ppm);
+    return b;
+}
+
+/// Document totals when lines carry their own rates: the subtotal and the
+/// adjustments in whole cents, tax the sum of the per-rate taxes (0 when tax
+/// is not shown), and IRPF withheld from the total.
+pub fn computeTotalsByRate(items: []const LineItem, adjustments: []const Adjustment, doc_rate: f64, show_tax: bool, irpf_amount: f64) TaxError!Totals {
+    const b = try taxBreakdown(items, adjustments, doc_rate);
+    const tax_cents: i64 = if (show_tax) b.taxCents() else 0;
+    const irpf_cents = try toCents(@abs(irpf_amount));
+    const cents = struct {
+        fn f(c: i64) f64 {
+            return @as(f64, @floatFromInt(c)) / 100.0;
+        }
+    }.f;
+    return .{
+        .subtotal = cents(b.items_cents),
+        .adjustments = cents(b.adjustments_cents),
+        .tax = cents(tax_cents),
+        .total = cents(b.items_cents + b.adjustments_cents + tax_cents - irpf_cents),
+    };
+}
+
+/// A document prints one tax row per rate (and a tax column in the item
+/// table) when tax is shown and its lines and adjustments resolve to more
+/// than one rate. Then the drawn figures must reconcile: `tax_amount` with the
+/// sum of the per-rate taxes, `subtotal` with the line totals, and `total`
+/// with subtotal + adjustments + tax - IRPF, each to within half a cent.
+pub fn checkMixedRateTotals(data: InvoiceData) (TaxError || MixedRateError)!void {
+    if (!data.show_tax or !hasLineRates(data.items)) return;
+    const b = try taxBreakdown(data.items, data.adjustments, data.tax_rate);
+    if (b.len < 2) return;
+    const tol = 0.005 + 1e-9;
+    const tax = @as(f64, @floatFromInt(b.taxCents())) / 100.0;
+    const items = @as(f64, @floatFromInt(b.items_cents)) / 100.0;
+    const adj = @as(f64, @floatFromInt(b.adjustments_cents)) / 100.0;
+    if (@abs(data.tax_amount - tax) > tol) return error.TaxAmountMismatch;
+    if (@abs(data.subtotal - items) > tol) return error.SubtotalMismatch;
+    if (@abs(data.total - (data.subtotal + adj + data.tax_amount - @abs(data.irpf_amount))) > tol) return error.TotalMismatch;
 }
 
 /// Amount still owed after `amount_paid`, never negative.
@@ -195,6 +372,10 @@ pub const Labels = struct {
     subtotal: []const u8 = "Subtotal:",
     tax_prefix: []const u8 = "Tax", // rendered as "Tax (21%):"
     total: []const u8 = "TOTAL:",
+    // Documents taxed at more than one rate (lines with their own tax_rate)
+    vat_column: []const u8 = "VAT", // item-table rate column header
+    tax_on: []const u8 = "on", // per-rate row: "VAT 20% on £1,000.00"
+    tax_total: []const u8 = "", // sum of the per-rate rows; "" draws "Total <tax_prefix>:"
     // Footer sections
     notes: []const u8 = "Notes:",
     payment_terms: []const u8 = "Payment Terms:",
@@ -523,7 +704,7 @@ pub fn formatMoney(buf: []u8, symbol: []const u8, amount: f64, nf: NumberFormat)
     const frac = cents % 100;
 
     var digits_buf: [24]u8 = undefined;
-    const digits = std.fmt.bufPrint(&digits_buf, "{d}", .{units}) catch unreachable;
+    const digits = std.fmt.bufPrint(&digits_buf, "{d}", .{units}) catch return "0.00";
     var i: usize = 0;
     const put = struct {
         fn f(out: []u8, at: *usize, bytes: []const u8) bool {
@@ -594,6 +775,8 @@ const TableCols = struct {
     disc: ?f32,
     total: f32,
     right_aligned: bool,
+    /// Per-line tax rate; shown only on a document taxed at several rates.
+    vat: ?f32 = null,
 };
 
 /// Everything loaded before drawing starts: image resource ids and the
@@ -633,6 +816,9 @@ pub const InvoiceRenderer = struct {
     crypto_qr_pixels: ?[]u8 = null,
     recipient_identicon_pixels: ?[]u8 = null,
     sender_identicon_pixels: ?[]u8 = null,
+
+    /// Rate groups, set by `render` when any line carries its own tax rate.
+    tax: ?TaxBreakdown = null,
 
     // Page state
     current_y: f32 = 0,
@@ -828,6 +1014,44 @@ pub const InvoiceRenderer = struct {
         return false;
     }
 
+    /// Tax shown and more than one rate in play: one tax row per rate in the
+    /// totals, and a rate column in an itemized table.
+    fn mixedRate(self: *const InvoiceRenderer) bool {
+        const t = self.tax orelse return false;
+        return self.data.show_tax and t.len > 1;
+    }
+
+    fn vatColumn(self: *const InvoiceRenderer) bool {
+        return self.mixedRate() and self.data.display_mode == .itemized;
+    }
+
+    /// The rate a single tax row names: the one rate the lines resolve to
+    /// when they carry their own, else the document rate.
+    fn singleTaxRate(self: *const InvoiceRenderer) f64 {
+        if (self.tax) |t| {
+            if (t.len == 1) return t.buf[0].rate();
+        }
+        return self.data.tax_rate;
+    }
+
+    /// A rate fraction as a percentage, to at most two decimals with the
+    /// document's decimal mark: 0.2 -> "20", 0.175 -> "17.5".
+    fn pctText(self: *const InvoiceRenderer, buf: []u8, rate: f64) []const u8 {
+        return self.decimalText(buf, @round(rate * 1e6) / 1e4);
+    }
+
+    /// "20%" for a line's effective rate.
+    fn lineRateText(self: *const InvoiceRenderer, buf: []u8, item: LineItem) []const u8 {
+        var pb: [32]u8 = undefined;
+        return std.fmt.bufPrint(buf, "{s}%", .{self.pctText(&pb, item.tax_rate orelse self.data.tax_rate)}) catch "";
+    }
+
+    /// The "Total VAT" row label: labels.tax_total, else "Total <tax_prefix>:".
+    fn taxTotalLabel(self: *const InvoiceRenderer, buf: []u8) []const u8 {
+        if (self.data.labels.tax_total.len > 0) return self.data.labels.tax_total;
+        return std.fmt.bufPrint(buf, "Total {s}:", .{self.data.labels.tax_prefix}) catch self.data.labels.tax_prefix;
+    }
+
     fn amountPaid(self: *const InvoiceRenderer) ?f64 {
         return self.data.amount_paid;
     }
@@ -926,6 +1150,15 @@ pub const InvoiceRenderer = struct {
         const usable = self.page_width - self.margin_left - self.margin_right;
         const disc = self.anyDiscount();
         const qty = self.data.show_qty_columns;
+        const vat = self.vatColumn();
+        if (!self.isModern() and vat) {
+            // The rate column sits left of the total; the others narrow.
+            const v = ml + 385;
+            if (qty and !disc) return .{ .desc_x = ml + 5, .desc_w = 225, .qty = ml + 240, .price = ml + 300, .disc = null, .vat = v, .total = ml + 450, .right_aligned = false };
+            if (qty) return .{ .desc_x = ml + 5, .desc_w = 185, .qty = ml + 200, .price = ml + 260, .disc = ml + 335, .vat = v, .total = ml + 450, .right_aligned = false };
+            if (disc) return .{ .desc_x = ml + 5, .desc_w = 320, .qty = null, .price = null, .disc = ml + 335, .vat = v, .total = ml + 450, .right_aligned = false };
+            return .{ .desc_x = ml + 5, .desc_w = 370, .qty = null, .price = null, .disc = null, .vat = v, .total = ml + 450, .right_aligned = false };
+        }
         if (!self.isModern()) {
             if (qty and !disc) return .{ .desc_x = ml + 5, .desc_w = 265, .qty = ml + 280, .price = ml + 350, .disc = null, .total = ml + 450, .right_aligned = false };
             if (qty) return .{ .desc_x = ml + 5, .desc_w = 225, .qty = ml + 240, .price = ml + 300, .disc = ml + 385, .total = ml + 450, .right_aligned = false };
@@ -937,6 +1170,10 @@ pub const InvoiceRenderer = struct {
         const r = ml + usable;
         var edge = r - 82; // left of the total column
         var c = TableCols{ .desc_x = ml, .desc_w = 0, .qty = null, .price = null, .disc = null, .total = r, .right_aligned = true };
+        if (vat) {
+            c.vat = edge;
+            edge -= 46;
+        }
         if (disc) {
             c.disc = edge;
             edge -= 46;
@@ -1077,6 +1314,7 @@ pub const InvoiceRenderer = struct {
         if (cols.qty) |x| try content.drawText(self.data.labels.quantity, x, self.current_y, self.font_bold, 10, header_text_color);
         if (cols.price) |x| try content.drawText(self.data.labels.unit_price, x, self.current_y, self.font_bold, 10, header_text_color);
         if (cols.disc) |x| try content.drawText(self.data.labels.discount, x, self.current_y, self.font_bold, 10, header_text_color);
+        if (cols.vat) |x| try content.drawText(self.data.labels.vat_column, x, self.current_y, self.font_bold, 10, header_text_color);
         try content.drawText(total_label, cols.total, self.current_y, self.font_bold, 10, header_text_color);
         if (table_style == .minimal and !self.roundedLayout()) {
             try content.drawLine(self.margin_left, self.current_y - 6, self.margin_left + usable_width, self.current_y - 6, secondary, 0.75);
@@ -1099,13 +1337,14 @@ pub const InvoiceRenderer = struct {
         if (self.data.theme == .letterhead) {
             try content.drawLine(left, y + 12, right, y + 12, primary, 1.0);
         }
-        var buf: [5][64]u8 = undefined;
+        var buf: [6][64]u8 = undefined;
         const total_label = if (self.data.show_qty_columns) self.data.labels.line_total else self.data.labels.amount;
         try content.drawTrackedText(capsLabel(&buf[0], self.data.labels.description), cols.desc_x, y, self.font_bold, size, 0.6, color);
         const heads = [_]struct { x: ?f32, label: []const u8 }{
             .{ .x = cols.qty, .label = self.data.labels.quantity },
             .{ .x = cols.price, .label = self.data.labels.unit_price },
             .{ .x = cols.disc, .label = self.data.labels.discount },
+            .{ .x = cols.vat, .label = self.data.labels.vat_column },
             .{ .x = cols.total, .label = total_label },
         };
         for (heads, 1..) |h, i| {
@@ -1181,6 +1420,11 @@ pub const InvoiceRenderer = struct {
 
     /// Generate the complete invoice PDF
     pub fn render(self: *InvoiceRenderer) ![]const u8 {
+        if (hasLineRates(self.data.items)) {
+            self.tax = try taxBreakdown(self.data.items, self.data.adjustments, self.data.tax_rate);
+            try checkMixedRateTotals(self.data);
+        }
+
         var content = document.ContentStream.init(self.allocator);
         defer content.deinit();
 
@@ -1951,6 +2195,10 @@ pub const InvoiceRenderer = struct {
                         try content.drawText(self.discText(&db, item.discount), x, self.current_y, self.font_regular, 9, document.Color.black);
                     }
                 }
+                if (cols.vat) |x| {
+                    var vb: [40]u8 = undefined;
+                    try content.drawText(self.lineRateText(&vb, item), x, self.current_y, self.font_regular, 9, document.Color.black);
+                }
                 var total_buf: [48]u8 = undefined;
                 const total_str = self.money(&total_buf, item.total);
                 try content.drawText(total_str, cols.total, self.current_y, self.font_regular, 9, document.Color.black);
@@ -2055,6 +2303,10 @@ pub const InvoiceRenderer = struct {
                         try content.drawTextRightAligned(self.discText(&db, item.discount), x, self.current_y, self.font_regular, reg, size, ink);
                     }
                 }
+                if (cols.vat) |x| {
+                    var vb: [40]u8 = undefined;
+                    try content.drawTextRightAligned(self.lineRateText(&vb, item), x, self.current_y, self.font_regular, reg, size, ink);
+                }
             }
             var tb: [48]u8 = undefined;
             try content.drawTextRightAligned(self.money(&tb, row.amount), cols.total, self.current_y, self.font_regular, reg, size, ink);
@@ -2080,7 +2332,9 @@ pub const InvoiceRenderer = struct {
         const primary = document.Color.fromHex(self.data.primary_color);
         const secondary = document.Color.fromHex(self.data.secondary_color);
         const usable_width = self.page_width - self.margin_left - self.margin_right;
-        const col_price = self.margin_left + 350;
+        // Per-rate rows ("VAT 20% on £1,000.00") need a wider label column.
+        const mixed = self.mixedRate();
+        const col_price = self.margin_left + @as(f32, if (mixed) 300 else 350);
         const adjustments = self.data.adjustments;
 
         // Squircle: the rows are done — close the rounded table container.
@@ -2091,6 +2345,7 @@ pub const InvoiceRenderer = struct {
         var extra_rows: f32 = @floatFromInt(adjustments.len);
         if (!self.data.show_tax and adjustments.len > 0) extra_rows += 1;
         if (self.data.amount_paid != null) extra_rows += 3;
+        if (mixed) extra_rows += @floatFromInt(self.tax.?.len);
         if (self.current_y < self.margin_bottom + 160 + extra_rows * 16 + self.payNowHeight()) {
             try self.startNewPage(content, false);
         }
@@ -2119,14 +2374,19 @@ pub const InvoiceRenderer = struct {
 
             try self.drawClassicAdjustments(content, col_price, amt_right, amt_width);
 
-            var tax_label_buf: [64]u8 = undefined;
-            const tax_pct = self.data.tax_rate * 100;
-            const tax_label = std.fmt.bufPrint(&tax_label_buf, "{s} ({d:.0}%):", .{ self.data.labels.tax_prefix, tax_pct }) catch self.data.labels.tax_prefix;
-            try content.drawText(tax_label, col_price, self.current_y, self.font_regular, 10, document.Color.black);
-            var tax_buf: [48]u8 = undefined;
-            const tax_str = self.money(&tax_buf, self.data.tax_amount);
-            try self.drawRightFit(content, tax_str, amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
-            self.current_y -= 16;
+            if (mixed) {
+                var tl: [96]u8 = undefined;
+                self.current_y = try self.drawRateRows(content, col_price, amt_right, self.current_y, 10, 16, document.Color.black, document.Color.black, self.taxTotalLabel(&tl));
+            } else {
+                var tax_label_buf: [96]u8 = undefined;
+                var pb: [32]u8 = undefined;
+                const tax_label = std.fmt.bufPrint(&tax_label_buf, "{s} ({s}%):", .{ self.data.labels.tax_prefix, self.pctText(&pb, self.singleTaxRate()) }) catch self.data.labels.tax_prefix;
+                try content.drawText(tax_label, col_price, self.current_y, self.font_regular, 10, document.Color.black);
+                var tax_buf: [48]u8 = undefined;
+                const tax_str = self.money(&tax_buf, self.data.tax_amount);
+                try self.drawRightFit(content, tax_str, amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
+                self.current_y -= 16;
+            }
 
             // IRPF retention (Spanish freelancer invoices) — a negative row.
             if (self.data.irpf_rate != 0 or self.data.irpf_amount != 0) {
@@ -2213,6 +2473,50 @@ pub const InvoiceRenderer = struct {
         }
     }
 
+    /// The per-rate tax rows, then the tax total, from baseline `y` down;
+    /// returns the baseline after the last row. Each row reads
+    /// "<tax_prefix> 20%   on £1,000.00 ... £200.00": the rate labels share
+    /// one column, the net amounts (muted, a point smaller) the next, and the
+    /// tax is right-aligned at `right`.
+    fn drawRateRows(self: *InvoiceRenderer, content: *document.ContentStream, lx: f32, right: f32, y0: f32, size: f32, step: f32, label_ink: document.Color, ink: document.Color, total_label: []const u8) !f32 {
+        const t = self.tax.?;
+        const groups = t.groups();
+        const reg = self.fontEnumRegular();
+        const muted = document.Color.fromHex("#6B7280");
+        const net_size = size - 1;
+        const prefix = self.data.labels.tax_prefix;
+
+        var label_bufs: [MAX_TAX_RATES][64]u8 = undefined;
+        var labels: [MAX_TAX_RATES][]const u8 = undefined;
+        var widest: f32 = 0;
+        for (groups, 0..) |g, i| {
+            var pb: [32]u8 = undefined;
+            const pct = self.decimalText(&pb, @as(f64, @floatFromInt(g.rate_ppm)) / 1e4);
+            labels[i] = std.fmt.bufPrint(&label_bufs[i], "{s} {s}%", .{ prefix, pct }) catch prefix;
+            widest = @max(widest, reg.measureText(labels[i], size));
+        }
+        const net_x = lx + widest + 6;
+
+        var y = y0;
+        for (groups, 0..) |g, i| {
+            try content.drawText(labels[i], lx, y, self.font_regular, size, label_ink);
+            var mb: [48]u8 = undefined;
+            var nb: [96]u8 = undefined;
+            const net = std.fmt.bufPrint(&nb, "{s} {s}", .{ self.data.labels.tax_on, self.money(&mb, g.net()) }) catch "";
+            try content.drawText(net, net_x, y, self.font_regular, net_size, muted);
+            const net_end = net_x + reg.measureText(net, net_size);
+            var ab: [48]u8 = undefined;
+            try self.drawRightFit(content, self.money(&ab, g.tax()), right, right - net_end - 10, y, self.font_regular, reg, size, ink);
+            y -= step;
+        }
+
+        const label = if (self.isModern()) bareLabel(total_label) else total_label;
+        try content.drawText(label, lx, y, self.font_regular, size, label_ink);
+        var tb: [48]u8 = undefined;
+        try self.drawRightFit(content, self.money(&tb, self.data.tax_amount), right, right - lx - reg.measureText(label, size) - 10, y, self.font_regular, reg, size, ink);
+        return y - step;
+    }
+
     /// "2026-09-03 · Bank transfer" from payment_date / payment_method.
     fn paymentMeta(self: *const InvoiceRenderer, buf: []u8) ?[]const u8 {
         const d = self.data.payment_date;
@@ -2251,6 +2555,7 @@ pub const InvoiceRenderer = struct {
 
         var rows: f32 = @floatFromInt(adjustments.len);
         if (self.data.show_tax) rows += 2;
+        if (self.mixedRate()) rows += @floatFromInt(self.tax.?.len);
         if (self.data.irpf_rate != 0 or self.data.irpf_amount != 0) rows += 1;
         if (self.data.amount_paid != null) rows += 3;
         if (self.current_y - (rows * 17 + 50 + self.payNowHeight()) < self.margin_bottom + 10) try self.startNewPage(content, false);
@@ -2273,11 +2578,16 @@ pub const InvoiceRenderer = struct {
             y -= 17;
         }
         if (self.data.show_tax) {
-            var qb: [32]u8 = undefined;
-            const tax_label = std.fmt.bufPrint(&buf, "{s} ({s}%)", .{ self.data.labels.tax_prefix, self.decimalText(&qb, self.data.tax_rate * 100) }) catch self.data.labels.tax_prefix;
-            try content.drawText(tax_label, lx, y, self.font_regular, 9.5, body);
-            try content.drawTextRightAligned(self.money(&mb, self.data.tax_amount), right, y, self.font_regular, reg, 9.5, ink);
-            y -= 17;
+            if (self.mixedRate()) {
+                var tl: [96]u8 = undefined;
+                y = try self.drawRateRows(content, lx, right, y, 9.5, 17, body, ink, self.taxTotalLabel(&tl));
+            } else {
+                var qb: [32]u8 = undefined;
+                const tax_label = std.fmt.bufPrint(&buf, "{s} ({s}%)", .{ self.data.labels.tax_prefix, self.pctText(&qb, self.singleTaxRate()) }) catch self.data.labels.tax_prefix;
+                try content.drawText(tax_label, lx, y, self.font_regular, 9.5, body);
+                try content.drawTextRightAligned(self.money(&mb, self.data.tax_amount), right, y, self.font_regular, reg, 9.5, ink);
+                y -= 17;
+            }
             if (self.data.irpf_rate != 0 or self.data.irpf_amount != 0) {
                 var ib: [32]u8 = undefined;
                 const irpf_label = std.fmt.bufPrint(&buf, "IRPF ({s}%)", .{self.decimalText(&ib, self.data.irpf_rate * 100)}) catch "IRPF";
@@ -3203,6 +3513,174 @@ test "line totals, document totals and balance" {
     try std.testing.expectEqual(@as(f64, 0), balanceDue(180, 200));
 }
 
+// Expected figures in the per-rate tests are worked by hand in whole pence.
+
+fn expectGroup(g: TaxGroup, rate_ppm: i64, net_cents: i64, tax_cents: i64) !void {
+    try std.testing.expectEqual(rate_ppm, g.rate_ppm);
+    try std.testing.expectEqual(net_cents, g.net_cents);
+    try std.testing.expectEqual(tax_cents, g.tax_cents);
+}
+
+test "per-rate tax rounds each rate's total, not each line" {
+    // Two 3p lines at 20%: rounding per line gives 1p + 1p = 2p of VAT; the
+    // rate group is 6p x 20% = 1.2p -> 1p.
+    const items = [_]LineItem{
+        .{ .description = "a", .quantity = 1, .unit_price = 0.03, .total = 0.03, .tax_rate = 0.2 },
+        .{ .description = "b", .quantity = 1, .unit_price = 0.03, .total = 0.03, .tax_rate = 0.2 },
+        .{ .description = "c", .quantity = 1, .unit_price = 10, .total = 10, .tax_rate = 0 },
+    };
+    const b = try taxBreakdown(&items, &.{}, 0.2);
+    try std.testing.expectEqual(@as(usize, 2), b.len);
+    try expectGroup(b.groups()[0], 0, 1000, 0);
+    try expectGroup(b.groups()[1], 200_000, 6, 1);
+    try std.testing.expectEqual(@as(i64, 1), b.taxCents());
+}
+
+test "per-rate tax: 0% and 20%" {
+    const items = [_]LineItem{
+        .{ .description = "Panels", .quantity = 1, .unit_price = 4160, .total = 4160, .tax_rate = 0 },
+        .{ .description = "Battery", .quantity = 1, .unit_price = 3800, .total = 3800, .tax_rate = 0 },
+        .{ .description = "Charger", .quantity = 1, .unit_price = 1000, .total = 1000, .tax_rate = 0.2 },
+    };
+    const b = try taxBreakdown(&items, &.{}, 0.2);
+    try std.testing.expectEqual(@as(usize, 2), b.len);
+    try expectGroup(b.groups()[0], 0, 796_000, 0);
+    try expectGroup(b.groups()[1], 200_000, 100_000, 20_000);
+
+    const t = try computeTotalsByRate(&items, &.{}, 0.2, true, 0);
+    try std.testing.expectEqual(@as(f64, 8960), t.subtotal);
+    try std.testing.expectEqual(@as(f64, 200), t.tax);
+    try std.testing.expectEqual(@as(f64, 9160), t.total);
+}
+
+test "per-rate tax: 0%, 5% and 20%, ascending, half a penny rounds up" {
+    // 20.70 x 5% = 103.5p -> 104p (binary floating point would make it
+    // 103.4999…p and round down); 123.45 x 20% = 2469p exactly.
+    const items = [_]LineItem{
+        .{ .description = "Charger", .quantity = 1, .unit_price = 123.45, .total = 123.45, .tax_rate = 0.2 },
+        .{ .description = "Panels", .quantity = 1, .unit_price = 1000, .total = 1000, .tax_rate = 0 },
+        .{ .description = "Insulation", .quantity = 1, .unit_price = 20.70, .total = 20.70, .tax_rate = 0.05 },
+    };
+    const b = try taxBreakdown(&items, &.{}, 0.2);
+    try std.testing.expectEqual(@as(usize, 3), b.len);
+    try expectGroup(b.groups()[0], 0, 100_000, 0);
+    try expectGroup(b.groups()[1], 50_000, 2070, 104);
+    try expectGroup(b.groups()[2], 200_000, 12_345, 2469);
+
+    const t = try computeTotalsByRate(&items, &.{}, 0.2, true, 0);
+    try std.testing.expectApproxEqAbs(@as(f64, 1144.15), t.subtotal, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 25.73), t.tax, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 1169.88), t.total, 1e-9);
+}
+
+test "per-rate tax: adjustments are taxed at the document rate" {
+    // 0% line 100.00; a 250.00 line with no rate of its own (document 20%);
+    // Delivery +50.00 and a -20.00 credit join the 20% group:
+    // 250 + 30 = 280.00 -> 56.00.
+    const items = [_]LineItem{
+        .{ .description = "Zero", .quantity = 1, .unit_price = 100, .total = 100, .tax_rate = 0 },
+        .{ .description = "Doc rate", .quantity = 1, .unit_price = 250, .total = 250 },
+    };
+    const adj = [_]Adjustment{ .{ .label = "Delivery", .amount = 50 }, .{ .label = "Credit", .amount = -20 } };
+    const b = try taxBreakdown(&items, &adj, 0.2);
+    try std.testing.expectEqual(@as(usize, 2), b.len);
+    try expectGroup(b.groups()[0], 0, 10_000, 0);
+    try expectGroup(b.groups()[1], 200_000, 28_000, 5600);
+
+    const t = try computeTotalsByRate(&items, &adj, 0.2, true, 0);
+    try std.testing.expectEqual(@as(f64, 350), t.subtotal);
+    try std.testing.expectEqual(@as(f64, 30), t.adjustments);
+    try std.testing.expectEqual(@as(f64, 56), t.tax);
+    try std.testing.expectEqual(@as(f64, 436), t.total);
+
+    // Adjustments with every line at another rate open the document-rate group.
+    const zero = [_]LineItem{.{ .description = "Zero", .quantity = 1, .unit_price = 100, .total = 100, .tax_rate = 0 }};
+    const b2 = try taxBreakdown(&zero, &adj, 0.2);
+    try std.testing.expectEqual(@as(usize, 2), b2.len);
+    try expectGroup(b2.groups()[1], 200_000, 3000, 600);
+}
+
+test "per-rate tax: half a cent rounds away from zero, credits included" {
+    // 25p x 10% = 2.5p: +3p on a charge, -3p on a credit.
+    const items = [_]LineItem{
+        .{ .description = "credit", .quantity = 1, .unit_price = -0.25, .total = -0.25, .tax_rate = 0.1 },
+        .{ .description = "charge", .quantity = 1, .unit_price = 0.25, .total = 0.25, .tax_rate = 0.15 },
+    };
+    const b = try taxBreakdown(&items, &.{}, 0.2);
+    try expectGroup(b.groups()[0], 100_000, -25, -3);
+    // 25p x 15% = 3.75p -> 4p.
+    try expectGroup(b.groups()[1], 150_000, 25, 4);
+    try std.testing.expectEqual(@as(i64, 3), rateTaxCents(25, 100_000));
+    try std.testing.expectEqual(@as(i64, -3), rateTaxCents(-25, 100_000));
+    try std.testing.expectEqual(@as(i64, 2), rateTaxCents(24, 100_000));
+}
+
+test "per-rate tax: limits and refusals" {
+    // Eight distinct rates are accepted; a ninth is refused.
+    var items: [9]LineItem = undefined;
+    for (&items, 0..) |*it, i| it.* = .{ .description = "x", .quantity = 1, .unit_price = 1, .total = 1, .tax_rate = @as(f64, @floatFromInt(i)) / 100.0 };
+    _ = try taxBreakdown(items[0..8], &.{}, 0);
+    try std.testing.expectError(error.TooManyTaxRates, taxBreakdown(&items, &.{}, 0));
+
+    // The document rate is checked only where it applies.
+    const own = [_]LineItem{.{ .description = "a", .quantity = 1, .unit_price = 1, .total = 1, .tax_rate = 0.2 }};
+    _ = try taxBreakdown(&own, &.{}, 21);
+    const inherits = [_]LineItem{ own[0], .{ .description = "b", .quantity = 1, .unit_price = 1, .total = 1 } };
+    try std.testing.expectError(error.InvalidTaxRate, taxBreakdown(&inherits, &.{}, 21));
+
+    const huge = [_]LineItem{.{ .description = "a", .quantity = 1, .unit_price = 1, .total = 1e13, .tax_rate = 0 }};
+    try std.testing.expectError(error.AmountOutOfRange, taxBreakdown(&huge, &.{}, 0.2));
+    const nan = [_]LineItem{.{ .description = "a", .quantity = 1, .unit_price = 1, .total = std.math.nan(f64), .tax_rate = 0 }};
+    try std.testing.expectError(error.AmountOutOfRange, taxBreakdown(&nan, &.{}, 0.2));
+}
+
+test "per-rate totals: tax hidden, IRPF withheld" {
+    const items = [_]LineItem{
+        .{ .description = "a", .quantity = 1, .unit_price = 100, .total = 100, .tax_rate = 0 },
+        .{ .description = "b", .quantity = 1, .unit_price = 100, .total = 100, .tax_rate = 0.2 },
+    };
+    const hidden = try computeTotalsByRate(&items, &.{}, 0.2, false, 15);
+    try std.testing.expectEqual(@as(f64, 0), hidden.tax);
+    try std.testing.expectEqual(@as(f64, 185), hidden.total);
+    const shown = try computeTotalsByRate(&items, &.{}, 0.2, true, 15);
+    try std.testing.expectEqual(@as(f64, 20), shown.tax);
+    try std.testing.expectEqual(@as(f64, 205), shown.total);
+}
+
+test "a mixed-rate document's drawn totals must reconcile" {
+    const items = [_]LineItem{
+        .{ .description = "Panels", .quantity = 1, .unit_price = 7960, .total = 7960, .tax_rate = 0 },
+        .{ .description = "Charger", .quantity = 1, .unit_price = 1000, .total = 1000, .tax_rate = 0.2 },
+    };
+    const ok = InvoiceData{ .items = &items, .tax_rate = 0.2, .subtotal = 8960, .tax_amount = 200, .total = 9160 };
+    try checkMixedRateTotals(ok);
+    var d = ok;
+    d.tax_amount = 200.004;
+    d.total = 9160.004;
+    try checkMixedRateTotals(d);
+    d = ok;
+    d.tax_amount = 210;
+    try std.testing.expectError(error.TaxAmountMismatch, checkMixedRateTotals(d));
+    d = ok;
+    d.subtotal = 9000;
+    try std.testing.expectError(error.SubtotalMismatch, checkMixedRateTotals(d));
+    d = ok;
+    d.total = 9200;
+    try std.testing.expectError(error.TotalMismatch, checkMixedRateTotals(d));
+    // Tax hidden: nothing per rate is drawn, so nothing to reconcile.
+    d = ok;
+    d.tax_amount = 210;
+    d.show_tax = false;
+    try checkMixedRateTotals(d);
+    // One rate: the supplied figures are drawn verbatim, as without line rates.
+    const one = [_]LineItem{.{ .description = "a", .quantity = 1, .unit_price = 100, .total = 100, .tax_rate = 0.2 }};
+    try checkMixedRateTotals(.{ .items = &one, .tax_rate = 0.2, .subtotal = 100, .tax_amount = 99, .total = 1 });
+    // The renderer refuses the mismatch too.
+    d = ok;
+    d.tax_amount = 210;
+    try std.testing.expectError(error.TaxAmountMismatch, generateInvoice(std.testing.allocator, d));
+}
+
 fn renderForTest(data: InvoiceData) ![]u8 {
     return generateInvoice(std.testing.allocator, data);
 }
@@ -3464,7 +3942,7 @@ test "pay-now button: link annotation with the exact URI over the drawn button i
         // The fill is in the content stream at that rect: a plain `re` for the
         // square styles, the rounded path's first point for squircle/glass.
         var rb: [96]u8 = undefined;
-        const square = std.fmt.bufPrint(&rb, "{d:.2} {d:.2} {d:.2} {d:.2} re", .{ drawn.x, drawn.y, drawn.w, drawn.h }) catch unreachable;
+        const square = try std.fmt.bufPrint(&rb, "{d:.2} {d:.2} {d:.2} {d:.2} re", .{ drawn.x, drawn.y, drawn.w, drawn.h });
         const rounded = theme == .squircle or theme == .glass;
         try std.testing.expectEqual(!rounded, contains(pdf, square));
 

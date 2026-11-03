@@ -196,6 +196,7 @@ Per-item extras and the table toggle:
 | `items[].unit` | string | `""` | Unit printed after the quantity in the Qty column: `"2.5 hrs"`, `"12 m²"` |
 | `items[].discount` | number | `0` | Line discount in **percent** (`10` = 10% off). Any non-zero discount adds a `Disc.` column |
 | `items[].total` | number | derived | Omitted → `quantity × unit_price × (1 − discount/100)`, rounded to cents. Supplied → drawn as given |
+| `items[].tax_rate` | number or `null` | document `tax_rate` | The line's own tax rate as a fraction, `0`–`1` (`0` = 0%, `0.05` = 5%, `0.2` = 20%). Omitted or `null` → the document `tax_rate`. Anything else (a string, `20`, `-0.1`) is refused with `InvalidItemTaxRate`. See **Mixed tax rates** below |
 | `show_qty_columns` | bool | `true` | `false` draws Description \| Amount only — flat-rate and fixed-fee documents |
 
 Quantities print with up to two decimals, trailing zeros trimmed (`3`, `2.5`, `0.13`).
@@ -220,7 +221,8 @@ Quantities print with up to two decimals, trailing zeros trimmed (`3`, `2.5`, `0
 Figures you supply are drawn exactly as given — even `0`. Figures you **omit**
 are derived: `subtotal` = sum of the item totals; `tax_amount` = `tax_rate` ×
 (subtotal + adjustments), `0` when `show_tax` is false; `total` = subtotal +
-adjustments + tax − IRPF.
+adjustments + tax − IRPF. When any item carries its own `tax_rate`, `tax_amount`
+is worked per rate instead (see **Mixed tax rates**).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -239,6 +241,63 @@ adjustments + tax − IRPF.
 
 **Line items are capped at 500.** A longer `items` array is refused with
 `TooManyLineItems` before anything is allocated.
+
+### Mixed tax rates (`items[].tax_rate`)
+
+One invoice can mix rates — solar panels and batteries at 0%, an EV charger
+at 20%:
+
+```json
+{
+  "currency_symbol": "£",
+  "tax_rate": 0.2,
+  "labels": { "tax_prefix": "VAT" },
+  "items": [
+    { "description": "Solar panels", "quantity": 1, "unit_price": 4160, "tax_rate": 0 },
+    { "description": "Battery",      "quantity": 1, "unit_price": 3800, "tax_rate": 0 },
+    { "description": "EV charger",   "quantity": 1, "unit_price": 1000, "tax_rate": 0.2 }
+  ]
+}
+```
+
+When **any** item sets `tax_rate`, the totals are worked per rate:
+
+1. Each line's effective rate is its own `tax_rate`, else the document `tax_rate`.
+2. Each line total and each adjustment is rounded to whole cents. The
+   adjustments are taxed at the document `tax_rate` and join that rate's group.
+3. Each rate's tax = (sum of its line totals, plus the adjustments for the
+   document rate) × rate, rounded **half away from zero** to a whole cent. The
+   arithmetic is exact (cents × the rate in millionths), so `20.70` at 5% is
+   `1.035` → `1.04`.
+4. `tax_amount` = the sum of the per-rate taxes; `total` = subtotal +
+   adjustments + `tax_amount` − IRPF.
+
+Absent figures are derived this way; a figure you supply is kept, as on any
+invoice. When the lines and adjustments resolve to **more than one rate** and
+tax is shown, the document draws:
+
+- a `VAT` column in the item table (header `labels.vat_column`) with each
+  line's rate (`0%`, `5%`, `17.5%`);
+- one row per rate in ascending order instead of the single `Tax (x%)` row —
+  `VAT 0% on £7,960.00 … £0.00`, `VAT 20% on £1,000.00 … £200.00` (the
+  prefix is `labels.tax_prefix`, the word before the net is `labels.tax_on`) —
+  then a `Total VAT:` row (`labels.tax_total`, default `Total <tax_prefix>:`).
+
+Such a document is refused rather than drawn inconsistently when a supplied
+figure disagrees with the per-rate breakdown by more than half a cent:
+`TaxAmountMismatch` (`tax_amount` ≠ sum of the per-rate tax),
+`SubtotalMismatch` (`subtotal` ≠ sum of the item totals) or `TotalMismatch`
+(`total` ≠ subtotal + adjustments + tax − IRPF). Omit the figure to have it
+derived. At most 8 distinct rates (`TooManyTaxRates`); a document `tax_rate`
+outside `0`–`1` is refused once a line or adjustment uses it
+(`InvalidTaxRate`). Each refusal returns NULL with the reason in
+`zigpdf_get_error()`, e.g. `JSON parse error: "tax_amount" is not the sum of
+the per-rate tax (omit it to derive it)`.
+
+Every line at one rate draws the single `Tax (x%)` row naming that rate; when
+it is the document rate the PDF is byte-identical to the same payload without
+`items[].tax_rate`. `show_tax: false` still suppresses every tax row and the
+rate column. A `blackbox` document draws the per-rate rows but no column.
 
 ### Optional Sections
 | Field | Type | Description |
@@ -481,6 +540,9 @@ The big title and the number label are not in here: those are the top-level
 |  | `line_total` | `"Total"` |
 | Totals | `subtotal` | `"Subtotal:"` |
 |  | `tax_prefix` | `"Tax"` |
+|  | `vat_column` | `"VAT"` (rate column, mixed-rate documents) |
+|  | `tax_on` | `"on"` (`VAT 20% on £1,000.00`) |
+|  | `tax_total` | `""` → `"Total <tax_prefix>:"` |
 |  | `total` | `"TOTAL:"` |
 | Footer sections | `notes` | `"Notes:"` |
 |  | `payment_terms` | `"Payment Terms:"` |

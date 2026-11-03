@@ -608,7 +608,10 @@ fn reportGenerationError(stderr: *std.Io.Writer, mode: TemplateMode, err: anyerr
             "Error: Too many line items for --{s} template — \"items\" is capped at {d}.\n",
             .{ t, lib.json.MAX_LINE_ITEMS },
         ) catch {},
-        else => stderr.print(
+        else => if (lib.json.describeInvoiceError(err)) |detail| stderr.print(
+            "Error: Schema mismatch for --{s} template: {s}.\n",
+            .{ t, detail },
+        ) catch {} else stderr.print(
             "Error: PDF generation failed for mode --{s}: {s}\n",
             .{ t, @errorName(err) },
         ) catch {},
