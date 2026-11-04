@@ -123,7 +123,12 @@ change time is set by the system, so a tool that restores old modification
 times while unpacking still counts as fresh. Immediately before each move the
 folder is checked again: the same folder (device and inode, not a link), still
 build output by the same rule (manifest or tag still there), still old enough,
-nothing in it on another filesystem. The Trash is NSFileManager's on macOS
+nothing in it on another filesystem, and no running process using it: not as its
+working directory, its executable, an open file or a mapped file
+(`src/inuse.zig`). A folder in use stays and is reported as `in use by <pid>
+<command>`, because a server reads its `node_modules` without writing it, so
+age alone would let it go. Only this user's processes can be read, and if the
+process list cannot be read at all the folder stays. The Trash is NSFileManager's on macOS
 (`src/trash.zig`, through the Objective-C runtime) and the freedesktop Trash
 on Linux (`files/` + `info/*.trashinfo` on the item's own filesystem, never a
 copy across filesystems); Windows reports it as unsupported. Whole project

@@ -512,7 +512,8 @@ fn printCleanHelp() void {
         \\                     (never a root), not protected (build output in a temp
         \\                     area such as /private/tmp is not), not inside .git, read
         \\                     completely, and nothing in them modified or changed
-        \\                     for AGE. Each is checked again just before it moves.
+        \\                     for AGE. Each is checked again just before it moves,
+        \\                     and stays if a running process is using it.
         \\                     Never deletes anything permanently.
         \\  --older AGE        30m, 24h, 3d, 2w (default 24h, at least 10m)
         \\  --main-roots DIR   Where main checkouts live, searched 4 levels deep for

@@ -162,6 +162,7 @@ pub fn build(b: *std.Build) void {
         "src/buildrule.zig",
         "src/trash.zig",
         "src/gitinfo.zig",
+        "src/inuse.zig",
         "src/clean.zig",
         "src/lib.zig",
         // External anchors + end-to-end contract tests (see file header).

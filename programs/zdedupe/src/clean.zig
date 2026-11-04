@@ -34,8 +34,10 @@
 //! version-control store, and have been read completely. Just before a move
 //! each folder is checked again: the same folder (device and inode, not a
 //! link), still build output by the same rule, still old enough, still on one
-//! filesystem. Whole project copies are reported with their verdict and are
-//! never moved by this module.
+//! filesystem, and with no running process using it (inuse.zig): a server reads
+//! its `node_modules` without writing it, so age alone would let it go. Whole
+//! project copies are reported with their verdict and are never moved by this
+//! module.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -51,6 +53,7 @@ const pstat = @import("pstat.zig");
 const session = @import("session.zig");
 const gitinfo = @import("gitinfo.zig");
 const trash_mod = @import("trash.zig");
+const inuse = @import("inuse.zig");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -205,6 +208,8 @@ pub const Report = struct {
 pub const TrashFn = *const fn (arena: Allocator, path: []const u8, is_dir: bool) trash_mod.Outcome;
 /// True when a folder must not be moved; tests substitute their own.
 pub const GuardFn = *const fn (ctx: ?*const anyopaque, path: []const u8) bool;
+/// Which running process is using a folder; tests substitute their own.
+pub const HolderFn = *const fn (arena: Allocator, path: []const u8) inuse.Answer;
 
 pub const Options = struct {
     roots: []const []const u8,
@@ -218,6 +223,7 @@ pub const Options = struct {
     trash_fn: TrashFn = trash_mod.moveToTrash,
     guard_fn: GuardFn = protectedByCore,
     guard_ctx: ?*const anyopaque = null,
+    holder_fn: HolderFn = inuse.holderOf,
 };
 
 /// protect.zig, with the real home folder from the user database and the
@@ -496,6 +502,10 @@ pub fn trashEligible(gpa: Allocator, report: *Report, opts: Options) !void {
             try skipped.append(a, .{ .path = b.path, .bytes = b.bytes, .reason = again.refusal orelse "not eligible" });
             continue;
         }
+        if (try inUse(a, opts, b.path)) |reason| {
+            try skipped.append(a, .{ .path = b.path, .bytes = b.bytes, .reason = reason });
+            continue;
+        }
         switch (opts.trash_fn(a, b.path, true)) {
             .moved => |where| {
                 try moved.append(a, .{ .path = b.path, .bytes = b.bytes, .trashed_as = where });
@@ -752,6 +762,16 @@ fn checkFolder(gpa: Allocator, opts: Options, now: i64, b: *const BuildDir) Chec
     };
     check.eligible = check.refusal == null;
     return check;
+}
+
+/// Why `path` must stay because of a running process, or null when none is
+/// using it. Not being able to tell is a reason to leave it.
+fn inUse(a: Allocator, opts: Options, path: []const u8) !?[]const u8 {
+    return switch (opts.holder_fn(a, path)) {
+        .free => null,
+        .held => |h| try std.fmt.allocPrint(a, "in use by {d} {s}", .{ h.pid, h.command }),
+        .unknown => "could not tell whether a running process is using it",
+    };
 }
 
 /// Why `b` is no longer build output, or null when it still is (by any
@@ -1584,6 +1604,51 @@ test "clean --trash moves only old, unprotected build output under a root, reche
     try testing.expect(try f.scratch.exists("photos/target/shot.jpg"));
     try testing.expect(try f.scratch.exists("tool/notes/todo.txt"));
     try testing.expect(try f.scratch.exists("copy-a/package.json"));
+}
+
+fn holdsCopyAOrCannotTell(a: Allocator, path: []const u8) inuse.Answer {
+    _ = a;
+    if (std.mem.endsWith(u8, path, "copy-a/node_modules")) return .{ .held = .{ .pid = 4242, .command = "vite" } };
+    if (std.mem.endsWith(u8, path, "tool/scratchpad-cache")) return .unknown;
+    return .free;
+}
+
+test "clean --trash leaves a folder a running process is using, and says which" {
+    // --trash and its age check are unsupported on Windows (newestChange).
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var f = try Fixture.init(a, "clean-inuse");
+    defer f.deinit();
+    try buildFixture(&f);
+
+    const opts: Options = .{
+        .roots = &.{f.real},
+        .main_roots = &.{f.path(a, "no-main-roots")},
+        .guard_fn = Fixture.guard,
+        .guard_ctx = &f,
+        .git_exe = "/nonexistent/zdedupe/git",
+        .trash_fn = fakeTrash,
+        .holder_fn = holdsCopyAOrCannotTell,
+        .now = realtimeSeconds() + std.time.s_per_day + 60,
+    };
+    var report = try run(testing.allocator, testing.io, opts, true);
+    defer report.deinit();
+    const t = report.trash.?;
+
+    var skipped: std.StringHashMapUnmanaged([]const u8) = .empty;
+    for (t.skipped) |s| try skipped.put(a, s.path, s.reason);
+    try testing.expectEqualStrings("in use by 4242 vite", skipped.get(f.path(a, "copy-a/node_modules")).?);
+    try testing.expect(std.mem.indexOf(u8, skipped.get(f.path(a, "tool/scratchpad-cache")).?, "could not tell") != null);
+    try testing.expect(try f.scratch.exists("copy-a/node_modules/left-pad/index.js"));
+    try testing.expect(try f.scratch.exists("tool/scratchpad-cache/blob"));
+
+    // A folder nothing is using still goes.
+    var moved: std.StringHashMapUnmanaged(void) = .empty;
+    for (t.moved) |m| try moved.put(a, m.path, {});
+    try testing.expect(moved.contains(f.path(a, "copy-b/node_modules")));
+    try testing.expect(!try f.scratch.exists("copy-b/node_modules"));
 }
 
 test "clean --older: a just-built folder stays, measured by status changes too" {
