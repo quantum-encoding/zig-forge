@@ -544,6 +544,14 @@ pub const Grid = struct {
 /// (`capacity_lines * cols` cells). `push` copies a scrolled-off row into the
 /// next slot with no heap allocation — so the PTY-ingest hot path never calls
 /// the allocator. The buffer is sized once at init / resize.
+///
+/// The ring is reserved, not written: it comes from `rawAlloc`, because
+/// `Allocator.alloc` fills a new block with `undefined` (0xAA in Debug and
+/// ReleaseSafe), and that fill commits every page of the ring — ~19 MB per
+/// pane at 10,000 lines × 120 columns, before the pane has printed a line.
+/// A large block left untouched stays uncommitted until `push` writes into
+/// it, so a pane costs memory in proportion to the history it has. Slots at
+/// or past `len` are never read, and `push` writes a whole slot.
 pub const Scrollback = struct {
     allocator: std.mem.Allocator,
     cells: []Cell,
@@ -553,7 +561,7 @@ pub const Scrollback = struct {
     len: usize, // number of retained lines
 
     pub fn init(allocator: std.mem.Allocator, capacity_lines: usize, cols: u16) !Scrollback {
-        const cells = try allocator.alloc(Cell, capacity_lines * @as(usize, cols));
+        const cells = try reserve(allocator, capacity_lines, cols);
         return .{
             .allocator = allocator,
             .cells = cells,
@@ -565,17 +573,36 @@ pub const Scrollback = struct {
     }
 
     pub fn deinit(self: *Scrollback) void {
-        self.allocator.free(self.cells);
+        release(self.allocator, self.cells);
+    }
+
+    /// `capacity_lines * cols` cells with no contents written.
+    fn reserve(allocator: std.mem.Allocator, capacity_lines: usize, cols: u16) error{OutOfMemory}![]Cell {
+        const n = std.math.mul(usize, capacity_lines, cols) catch return error.OutOfMemory;
+        if (n == 0) return &.{};
+        const bytes = std.math.mul(usize, n, @sizeOf(Cell)) catch return error.OutOfMemory;
+        const ptr = allocator.rawAlloc(bytes, .of(Cell), @returnAddress()) orelse return error.OutOfMemory;
+        const cells: [*]Cell = @ptrCast(@alignCast(ptr));
+        return cells[0..n];
+    }
+
+    /// Frees a `reserve` block without `Allocator.free`'s `undefined` fill,
+    /// which would commit the unused pages just to discard them.
+    fn release(allocator: std.mem.Allocator, cells: []Cell) void {
+        if (cells.len == 0) return;
+        allocator.rawFree(std.mem.sliceAsBytes(cells), .of(Cell), @returnAddress());
     }
 
     /// Copy a row into the ring. Allocation-free; oldest line is evicted when
-    /// full. `row` is the visible-width slice; only up to `cols` cells are kept.
+    /// full. `row` is the visible-width slice; up to `cols` cells are kept and
+    /// a shorter row is padded with blanks, so every cell of the slot is set.
     pub fn push(self: *Scrollback, row: []const Cell) void {
         if (self.capacity_lines == 0) return;
         const slot = (self.head + self.len) % self.capacity_lines;
         const start = slot * @as(usize, self.cols);
         const n = @min(row.len, @as(usize, self.cols));
         @memcpy(self.cells[start .. start + n], row[0..n]);
+        @memset(self.cells[start + n .. start + self.cols], Cell.default);
         if (self.len < self.capacity_lines) {
             self.len += 1;
         } else {
@@ -602,7 +629,7 @@ pub const Scrollback = struct {
     /// scope; a narrower window loses the clipped tails, not the lines.)
     pub fn resizeCols(self: *Scrollback, new_cols: u16) !void {
         if (new_cols == self.cols) return;
-        const new_cells = try self.allocator.alloc(Cell, self.capacity_lines * @as(usize, new_cols));
+        const new_cells = try reserve(self.allocator, self.capacity_lines, new_cols);
         // Compact the ring into the new buffer starting at slot 0.
         var i: usize = 0;
         while (i < self.len) : (i += 1) {
@@ -612,7 +639,7 @@ pub const Scrollback = struct {
             @memcpy(dst[0..n], src[0..n]);
             @memset(dst[n..], Cell.default);
         }
-        self.allocator.free(self.cells);
+        release(self.allocator, self.cells);
         self.cells = new_cells;
         self.cols = new_cols;
         self.head = 0;
@@ -2103,6 +2130,112 @@ test "terminal init and deinit" {
 
     try std.testing.expectEqual(@as(u16, 24), term.grid.rows);
     try std.testing.expectEqual(@as(u16, 80), term.grid.cols);
+}
+
+/// Hands out blocks filled with `marker` and, at free, records whether any
+/// byte past `kept_bytes` had been overwritten — i.e. whether the scrollback
+/// wrote ring memory it never pushed a line into. Forwards to `child`.
+const RingProbe = struct {
+    child: std.mem.Allocator,
+    kept_bytes: usize = 0,
+    freed: usize = 0,
+    written_past_kept: bool = false,
+
+    const marker: u8 = 0x5C;
+
+    fn allocator(self: *RingProbe) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *RingProbe = @ptrCast(@alignCast(ctx));
+        const p = self.child.rawAlloc(len, a, ra) orelse return null;
+        @memset(p[0..len], marker);
+        return p;
+    }
+
+    fn free(ctx: *anyopaque, mem: []u8, a: std.mem.Alignment, ra: usize) void {
+        const self: *RingProbe = @ptrCast(@alignCast(ctx));
+        const from = @min(self.kept_bytes, mem.len);
+        for (mem[from..]) |b| {
+            if (b != marker) {
+                self.written_past_kept = true;
+                break;
+            }
+        }
+        self.freed += 1;
+        self.child.rawFree(mem, a, ra);
+    }
+};
+
+test "scrollback ring is reserved, not written, until lines are pushed" {
+    // Allocator.alloc/free fill with `undefined` (0xAA) in Debug, which is the
+    // mode `zig build test` runs in; that fill is what commits the ring.
+    var probe: RingProbe = .{ .child = std.testing.allocator };
+    var sb = try Scrollback.init(probe.allocator(), 1000, 120);
+    for (std.mem.sliceAsBytes(sb.cells)) |b| try std.testing.expectEqual(RingProbe.marker, b);
+
+    var row: [120]Cell = @splat(Cell.default);
+    row[0].char = 'x';
+    sb.push(&row);
+    sb.push(&row);
+    probe.kept_bytes = 2 * 120 * @sizeOf(Cell);
+    try std.testing.expectEqual(@as(u21, 'x'), sb.line(1)[0].char);
+
+    sb.deinit();
+    try std.testing.expectEqual(@as(usize, 1), probe.freed);
+    try std.testing.expect(!probe.written_past_kept);
+}
+
+test "scrollback resizeCols reserves the new ring and writes only retained lines" {
+    var probe: RingProbe = .{ .child = std.testing.allocator };
+    var sb = try Scrollback.init(probe.allocator(), 1000, 80);
+    var row: [80]Cell = @splat(Cell.default);
+    row[0].char = 'y';
+    sb.push(&row);
+
+    // The old ring held one line; its free must not fill the rest.
+    probe.kept_bytes = 80 * @sizeOf(Cell);
+    try sb.resizeCols(120);
+    try std.testing.expect(!probe.written_past_kept);
+    try std.testing.expectEqual(@as(usize, 1), probe.freed);
+    try std.testing.expectEqual(@as(u21, 'y'), sb.line(0)[0].char);
+
+    probe.kept_bytes = 120 * @sizeOf(Cell);
+    sb.deinit();
+    try std.testing.expectEqual(@as(usize, 2), probe.freed);
+    try std.testing.expect(!probe.written_past_kept);
+}
+
+test "scrollback push pads a row narrower than the ring with blanks" {
+    var sb = try Scrollback.init(std.testing.allocator, 4, 8);
+    defer sb.deinit();
+    var wide: [8]Cell = @splat(Cell.default);
+    for (&wide) |*c| c.char = 'w';
+    // Fill every slot, wrap, then push a 3-cell row over the oldest.
+    for (0..4) |_| sb.push(&wide);
+    var short: [3]Cell = @splat(Cell.default);
+    for (&short) |*c| c.char = 's';
+    sb.push(&short);
+
+    const newest = sb.line(sb.len - 1);
+    for (newest[0..3]) |c| try std.testing.expectEqual(@as(u21, 's'), c.char);
+    for (newest[3..]) |*c| try std.testing.expect(c.eql(&Cell.default));
+}
+
+test "scrollback with no capacity reserves nothing" {
+    var probe: RingProbe = .{ .child = std.testing.allocator };
+    var sb = try Scrollback.init(probe.allocator(), 0, 120);
+    try std.testing.expectEqual(@as(usize, 0), sb.cells.len);
+    sb.push(&[_]Cell{Cell.default});
+    try sb.resizeCols(80);
+    sb.deinit();
+    try std.testing.expectEqual(@as(usize, 0), probe.freed);
 }
 
 test "terminal putChar" {
