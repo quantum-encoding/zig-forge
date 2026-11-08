@@ -1021,6 +1021,25 @@ const char* zdedupe_results_space_largest(zdedupe_results* r, const char* query_
 const char* zdedupe_results_space_suggest(zdedupe_results* r, const char* query_json);
 
 /**
+ * One folder as a plain-text report, for a person to read, paste or save ->
+ * SpaceReport { "text", "file_name" }. Query (SpaceReportQuery):
+ *   { "node"|"path" as above, "type": "media" ... | null (narrows the top
+ *     files), "contents": 50 (<= 500), "folders": 50 (<= 200),
+ *     "files": 100 (<= 200), "units": "decimal" | "binary",
+ *     "utc_offset": seconds east of UTC, "volume_name": string | null }
+ * The text has the folder's totals, the disk, when and what was scanned with
+ * the overview's notes (could not be read, excluded, only in iCloud, hard
+ * links, moved to the Trash since), then By Type (largest first, with each
+ * type's share), Contents (what is directly inside, largest first, and what
+ * the list left out), Largest Folders and Top N Files by full path. It is
+ * rendered from the overview, children and largest answers, so it states what
+ * they state. Sizes are written as the host writes them: "decimal" as Apple's
+ * ByteCountFormatter (.file), "binary" in powers of 1024 with two decimals.
+ * file_name is "disk-space-<folder>-<scan date>.txt", safe on any file system.
+ */
+const char* zdedupe_results_space_report(zdedupe_results* r, const char* query_json);
+
+/**
  * Record this scan in its volume's history, kept as one JSON file per volume
  * in `history_dir` (a folder the host owns; created files are 0600), and
  * describe that history -> SpaceHistory: every recorded scan's totals, oldest

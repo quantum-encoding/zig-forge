@@ -276,6 +276,14 @@ Streams every alive group in store order. Shapes as
 JSON `{report_type, generated_at, summary{...}, groups:[{hash,size,count,savings,files:[{path,mtime}]}]}`;
 HTML a table grouped by first row.
 
+A disk-space store has no groups; its export is one folder as text:
+
+```c
+const char* zdedupe_results_space_report(zdedupe_results* r, const char* query_json /* SpaceReportQuery */);
+```
+Returns `SpaceReport {text, file_name}`; the host copies the text or writes it
+to a file the person picks. See the header for what the text holds.
+
 ## Excludes as presets
 
 ```c

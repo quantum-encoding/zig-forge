@@ -158,6 +158,7 @@ pub fn build(b: *std.Build) void {
         // Disk-space scans end to end, the same way.
         "src/space.zig",
         "src/space_test.zig",
+        "src/space_report.zig",
         // The clean subcommand: build leftovers, git verdicts, the Trash.
         "src/buildrule.zig",
         "src/trash.zig",

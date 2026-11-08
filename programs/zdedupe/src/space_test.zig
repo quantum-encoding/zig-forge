@@ -354,6 +354,88 @@ test "largest files and folders; wrappers left out" {
     try testing.expect(findItem(found, "node_modules") == null);
 }
 
+fn contains(text: []const u8, part: []const u8) bool {
+    return std.mem.indexOf(u8, text, part) != null;
+}
+
+test "report: a folder as text, stating what the overview, children and largest calls answer" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    try fx.scan();
+    const s = try fx.open(true);
+    defer s.close();
+
+    const root = field(try parse(arena, s.spaceChildren("{}")), "node");
+    const root_path = str(root, "path");
+    const report = try parse(arena, s.spaceReport(
+        "{\"files\":3,\"units\":\"decimal\",\"volume_name\":\"Test Disk\",\"utc_offset\":3600}",
+    ));
+    const text = str(report, "text");
+
+    try testing.expect(std.mem.startsWith(u8, text, "Disk Space Report\n\nFolder:   "));
+    try testing.expect(contains(text, try std.fmt.allocPrint(arena, "Folder:   {s}\n", .{root_path})));
+    try testing.expect(contains(text, "Disk:     Test Disk ("));
+    try testing.expect(contains(text, "1 extra hard link counted once.\n"));
+    try testing.expect(std.mem.endsWith(u8, text, "\n"));
+
+    // Contents: what is directly inside, folders marked, as the children call ranks them.
+    const contents = text[std.mem.indexOf(u8, text, "\nContents\n").?..std.mem.indexOf(u8, text, "\nLargest Folders\n").?];
+    var at: usize = 0;
+    const children = field(try parse(arena, s.spaceChildren("{\"limit\":50}")), "groups").array.items[0];
+    for (field(children, "items").array.items) |item| {
+        const name = str(item, "name");
+        const shown = if (std.mem.eql(u8, str(item, "kind"), "dir")) try std.fmt.allocPrint(arena, "  {s}/\n", .{name}) else try std.fmt.allocPrint(arena, "  {s}\n", .{name});
+        at = (std.mem.indexOfPos(u8, contents, at, shown) orelse return error.MissingChild) + shown.len;
+    }
+
+    // Largest folders and top files: full paths, in the largest calls' order.
+    const lists = [_]struct { []const u8, []const u8 }{
+        .{ "{\"kind\":\"folders\",\"limit\":50}", "\nLargest Folders\n" },
+        .{ "{\"kind\":\"files\",\"limit\":3}", "\nTop 3 Files\n" },
+    };
+    for (lists) |list| {
+        const items = field(try parse(arena, s.spaceLargest(list[0])), "items").array.items;
+        try testing.expect(items.len > 0);
+        at = std.mem.indexOf(u8, text, list[1]) orelse return error.MissingSection;
+        for (items) |item| {
+            const line = try std.fmt.allocPrint(arena, "  {s}\n", .{str(item, "path")});
+            at = (std.mem.indexOfPos(u8, text, at, line) orelse return error.MissingItem) + line.len;
+        }
+    }
+    // node_modules is nothing but pkg, so it is not a largest folder of its own.
+    try testing.expect(!contains(text, "node_modules\n"));
+
+    // By type: every type with files, none without.
+    try testing.expect(contains(text, "\n  Media "));
+    try testing.expect(contains(text, "\n  Applications "));
+    try testing.expect(!contains(text, "\n  System "));
+
+    const name = str(report, "file_name");
+    try testing.expect(std.mem.startsWith(u8, name, "disk-space-"));
+    try testing.expect(std.mem.endsWith(u8, name, ".txt"));
+
+    // A subfolder, top files narrowed to one type, sizes as the Svelte app writes them.
+    const docs_path = try std.fmt.allocPrint(arena, "{s}/docs", .{root_path});
+    const docs_query = try std.json.Stringify.valueAlloc(arena, .{ .path = docs_path, .type = "documents", .units = "binary" }, .{});
+    const docs = try parse(arena, s.spaceReport(try arena.dupeSentinel(u8, docs_query, 0)));
+    const docs_text = str(docs, "text");
+    try testing.expect(contains(docs_text, try std.fmt.allocPrint(arena, "Folder:   {s}\n", .{docs_path})));
+    try testing.expect(contains(docs_text, "\nTop 2 Files (Documents)\n"));
+    try testing.expect(contains(docs_text, "\nLargest Folders\n  No folders below this one.\n"));
+    try testing.expect(contains(docs_text, " KB  "));
+    try testing.expect(std.mem.startsWith(u8, str(docs, "file_name"), "disk-space-docs-"));
+
+    // A folder that is not in the results, and a query that is not JSON, fail with a reason.
+    try testing.expect(s.spaceReport("{\"node\":4000000000}") == null);
+    try testing.expect(contains(s.lastError().?, "not in these results"));
+    try testing.expect(s.spaceReport("{") == null);
+    try testing.expect(contains(s.lastError().?, "not valid JSON"));
+}
+
 const FakeTrash = struct {
     bin: [:0]const u8,
     moved: usize = 0,
@@ -500,6 +582,8 @@ test "a duplicate scan's store has no disk-space data, and says so" {
     const s = try fx.open(true);
     defer s.close();
     try testing.expect(s.spaceOverview() == null);
+    try testing.expect(std.mem.indexOf(u8, s.lastError().?, "disk-space") != null);
+    try testing.expect(s.spaceReport("{}") == null);
     try testing.expect(std.mem.indexOf(u8, s.lastError().?, "disk-space") != null);
 }
 

@@ -889,6 +889,34 @@
       }
     },
 
+    "SpaceReportQuery": {
+      "description": "Query for zdedupe_results_space_report: one folder (default: the whole scan) as a plain-text report.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "node": { "type": ["integer", "null"], "minimum": 0, "default": null },
+        "path": { "type": ["string", "null"], "default": null },
+        "type": { "oneOf": [{ "$ref": "#/$defs/SpaceType" }, { "type": "null" }], "default": null, "description": "Narrows the top files to one type." },
+        "contents": { "type": "integer", "minimum": 0, "maximum": 500, "default": 50, "description": "Items directly inside the folder; clamped to 500." },
+        "folders": { "type": "integer", "minimum": 0, "maximum": 200, "default": 50, "description": "Largest folders; clamped to 200." },
+        "files": { "type": "integer", "minimum": 0, "maximum": 200, "default": 100, "description": "Largest files; clamped to 200." },
+        "units": { "type": "string", "enum": ["decimal", "binary"], "default": "binary", "description": "decimal: Apple's ByteCountFormatter (.file); binary: powers of 1024, two decimals." },
+        "utc_offset": { "type": "integer", "default": 0, "description": "Seconds east of UTC, for the scan time." },
+        "volume_name": { "type": ["string", "null"], "default": null, "description": "What the host calls the disk; the mount point stands alone without one." }
+      }
+    },
+
+    "SpaceReport": {
+      "description": "Response of zdedupe_results_space_report.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "file_name"],
+      "properties": {
+        "text": { "type": "string", "description": "The report, UTF-8, lines ending in \\n, the last one too." },
+        "file_name": { "type": "string", "description": "disk-space-<folder>-<scan date>.txt: the folder's name with characters no file system takes replaced by '-'." }
+      }
+    },
+
     "SpaceSkipReason": {
       "description": "Why a disk-space scan left an entry out. denied: no permission. privacy: macOS privacy protection refused it. unreadable: any other failure to open or stat it, or a path too long. partial: the folder itself, whose listing stopped partway (what came before is counted). other_volume: a mount point of another volume. app_library: another app's library package (Photos, Music). credentials: a credential store (Skip credentials and keys). excluded: an excluded path or name.",
       "type": "string",

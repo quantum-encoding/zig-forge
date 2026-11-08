@@ -50,6 +50,7 @@ const removed_mod = @import("removed.zig");
 const keep_mod = @import("keep.zig");
 const protect_mod = @import("protect.zig");
 const space_mod = @import("space.zig");
+const space_report = @import("space_report.zig");
 const buildrule = @import("buildrule.zig");
 const realpath = @import("realpath.zig");
 
@@ -2345,6 +2346,75 @@ pub const Session = struct {
         var json: std.json.Stringify = .{ .writer = &out.writer };
         view.suggest(&json, query) catch |err| return self.spaceFailed(err);
         return self.finishJson(&out);
+    }
+
+    /// One folder as a plain-text report -> SpaceReport { text, file_name }.
+    /// Rendered from the overview, children and largest answers, so it states
+    /// what those state.
+    pub fn spaceReport(self: *Session, query_json: []const u8) ?[:0]const u8 {
+        const arena = self.beginCall();
+        const query = std.json.parseFromSliceLeaky(space_report.Query, arena, query_json, .{
+            .ignore_unknown_fields = true,
+        }) catch {
+            self.fail("report query is not valid JSON", .{});
+            return null;
+        };
+        const view = self.spaceView(arena) orelse return null;
+        const input = self.spaceReportInput(arena, &view, query) catch |err| return self.spaceFailed(err);
+        var text: std.Io.Writer.Allocating = .init(arena);
+        space_report.render(arena, &text.writer, input) catch |err| return self.spaceFailed(err);
+        const file_name = space_report.fileName(arena, input) catch |err| return self.spaceFailed(err);
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        json.write(.{ .text = text.written(), .file_name = file_name }) catch return self.outOfMemory();
+        return self.finishJson(&out);
+    }
+
+    /// The answers a report is rendered from, read back from the calls that
+    /// produce them for a host.
+    fn spaceReportInput(self: *Session, arena: Allocator, view: *const space_mod.View, query: space_report.Query) !space_report.Input {
+        const header = &self.reader.header;
+        const opts: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
+
+        var overview_out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &overview_out.writer };
+        try view.overview(&json, self.roots, millis(header.generated_at), header.scan_time_ns);
+
+        var children_out: std.Io.Writer.Allocating = .init(arena);
+        json = .{ .writer = &children_out.writer };
+        try view.children(&json, .{
+            .node = query.node,
+            .path = query.path,
+            .by = .folder,
+            .limit = @min(query.contents, space_report.max_contents),
+        });
+
+        var folders_out: std.Io.Writer.Allocating = .init(arena);
+        json = .{ .writer = &folders_out.writer };
+        try view.largest(&json, .{
+            .node = query.node,
+            .path = query.path,
+            .kind = .folders,
+            .limit = @min(query.folders, space_report.max_listed),
+        });
+
+        var files_out: std.Io.Writer.Allocating = .init(arena);
+        json = .{ .writer = &files_out.writer };
+        try view.largest(&json, .{
+            .node = query.node,
+            .path = query.path,
+            .kind = .files,
+            .type = query.type,
+            .limit = @min(query.files, space_report.max_listed),
+        });
+
+        return .{
+            .query = query,
+            .overview = try std.json.parseFromSliceLeaky(space_report.Overview, arena, overview_out.written(), opts),
+            .children = try std.json.parseFromSliceLeaky(space_report.Children, arena, children_out.written(), opts),
+            .folders = (try std.json.parseFromSliceLeaky(space_report.Largest, arena, folders_out.written(), opts)).items,
+            .files = (try std.json.parseFromSliceLeaky(space_report.Largest, arena, files_out.written(), opts)).items,
+        };
     }
 
     /// Record this scan in the volume's history under `dir` and describe it.

@@ -734,6 +734,12 @@ pub export fn zdedupe_results_space_suggest(r: ?*ZDedupeResults, query_json: ?[*
     return (s.spaceSuggest(std.mem.span(query)) orelse return null).ptr;
 }
 
+pub export fn zdedupe_results_space_report(r: ?*ZDedupeResults, query_json: ?[*:0]const u8) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const query = query_json orelse return null;
+    return (s.spaceReport(std.mem.span(query)) orelse return null).ptr;
+}
+
 pub export fn zdedupe_results_space_history(r: ?*ZDedupeResults, history_dir: ?[*:0]const u8) ?[*:0]const u8 {
     const s = asSession(r) orelse return null;
     const dir = history_dir orelse return null;
