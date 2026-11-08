@@ -913,7 +913,7 @@
       "required": ["text", "file_name"],
       "properties": {
         "text": { "type": "string", "description": "The report, UTF-8, lines ending in \\n, the last one too." },
-        "file_name": { "type": "string", "description": "disk-space-<folder>-<scan date>.txt: the folder's name with characters no file system takes replaced by '-'." }
+        "file_name": { "type": "string", "description": "disk-space-<folder>-<scan date>.txt: the folder's name with characters no file system takes replaced by '-'; disk-space-<scan date>.txt for a root with no name (/, C:\\) and for the whole of several roots." }
       }
     },
 

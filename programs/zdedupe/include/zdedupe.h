@@ -1035,7 +1035,9 @@ const char* zdedupe_results_space_suggest(zdedupe_results* r, const char* query_
  * rendered from the overview, children and largest answers, so it states what
  * they state. Sizes are written as the host writes them: "decimal" as Apple's
  * ByteCountFormatter (.file), "binary" in powers of 1024 with two decimals.
- * file_name is "disk-space-<folder>-<scan date>.txt", safe on any file system.
+ * file_name is "disk-space-<folder>-<scan date>.txt", safe on any file system;
+ * "disk-space-<scan date>.txt" for a root with no name ("/", "C:\\") and for the
+ * whole of several roots.
  */
 const char* zdedupe_results_space_report(zdedupe_results* r, const char* query_json);
 

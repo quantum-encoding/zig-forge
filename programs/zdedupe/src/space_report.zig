@@ -451,16 +451,17 @@ fn writeList(arena: Allocator, w: *Writer, units: Units, items: []const Node, em
 }
 
 /// A file name for the saved report: "disk-space-<folder>-<scan date>.txt",
-/// with the folder's name made safe for any file system ("disk" for a root
-/// with no name, "scan" for the whole of several roots).
+/// with the folder's name made safe for any file system, or
+/// "disk-space-<scan date>.txt" for a folder with no name of its own ("/",
+/// "C:\\") and for the whole of several roots.
 pub fn fileName(arena: Allocator, in: Input) ![]u8 {
     const node = in.children.node;
-    var name: []const u8 = "scan";
+    var name: []const u8 = "";
     if (!std.mem.eql(u8, node.kind, "all")) {
         const trimmed = std.mem.trimEnd(u8, node.path, "/\\");
         const cut = std.mem.lastIndexOfAny(u8, trimmed, "/\\");
         name = if (cut) |c| trimmed[c + 1 ..] else trimmed;
-        if (name.len == 0 or (name.len == 2 and name[1] == ':')) name = "disk";
+        if (name.len == 2 and name[1] == ':') name = "";
     }
     var safe: std.ArrayListUnmanaged(u8) = .empty;
     for (name) |c| {
@@ -471,12 +472,15 @@ pub fn fileName(arena: Allocator, in: Input) ![]u8 {
     // Never cut a UTF-8 sequence in half, nor start with a dot (a hidden file).
     var end = safe.items.len;
     if (end < name.len) {
-        while (end > 0 and safe.items[end] & 0xC0 == 0x80) end -= 1;
+        while (end > 0 and name[end] & 0xC0 == 0x80) end -= 1;
     }
     var start: usize = 0;
     while (start < end and safe.items[start] == '.') start += 1;
-    const folder = if (start == end) "disk" else safe.items[start..end];
+    const folder = safe.items[start..end];
     const at = clockOf(in.overview.generated_at, in.query.utc_offset);
+    if (folder.len == 0) {
+        return std.fmt.allocPrint(arena, "disk-space-{d:0>4}-{d:0>2}-{d:0>2}.txt", .{ at.year, at.month, at.day });
+    }
     return std.fmt.allocPrint(arena, "disk-space-{s}-{d:0>4}-{d:0>2}-{d:0>2}.txt", .{ folder, at.year, at.month, at.day });
 }
 
@@ -552,4 +556,42 @@ test "the scan time is read in the host's zone" {
     try testing.expectEqual(Clock{ .year = 2026, .month = 11, .day = 7, .hour = 20, .minute = 54 }, clockOf(1_794_081_270_000, 3600));
     try testing.expectEqual(Clock{ .year = 2026, .month = 11, .day = 8, .hour = 0, .minute = 24 }, clockOf(1_794_081_270_000, 16_200));
     try testing.expectEqual(Clock{ .year = 2026, .month = 11, .day = 7, .hour = 14, .minute = 54 }, clockOf(1_794_081_270_000, -18_000));
+}
+
+test "file names: the folder's own name, safe anywhere; none for a root without one" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const xs: [79]u8 = @splat('x');
+    const long = xs ++ "\u{e9}";
+    const cases = [_]struct { []const u8, []const u8, []const u8 }{
+        .{ "dir", "/Users/director/work", "disk-space-work-2026-11-07.txt" },
+        .{ "dir", "/Users/director/work/", "disk-space-work-2026-11-07.txt" },
+        .{ "dir", "/", "disk-space-2026-11-07.txt" },
+        .{ "dir", "C:\\", "disk-space-2026-11-07.txt" },
+        .{ "dir", "C:\\Users\\rich\\Videos", "disk-space-Videos-2026-11-07.txt" },
+        .{ "dir", "/home/x/a:b*c?", "disk-space-a-b-c--2026-11-07.txt" },
+        .{ "dir", "/home/x/.config", "disk-space-config-2026-11-07.txt" },
+        .{ "dir", "/home/x/..", "disk-space-2026-11-07.txt" },
+        // 80 bytes kept, and the two-byte e-acute that starts at byte 79 left out whole.
+        .{ "dir", "/home/x/" ++ long, "disk-space-" ++ xs ++ "-2026-11-07.txt" },
+        .{ "all", "", "disk-space-2026-11-07.txt" },
+    };
+    for (cases) |c| {
+        const in: Input = .{
+            .query = .{},
+            .overview = .{
+                .roots = &.{},
+                .generated_at = 1_794_081_270_000,
+                .volume = .{ .mount = "/", .total = 0, .free = 0, .available = 0 },
+                .files = 0,
+                .dirs = 0,
+                .bytes = 0,
+            },
+            .children = .{ .node = .{ .kind = c[0], .name = "", .path = c[1], .bytes = 0 }, .types = &.{}, .groups = &.{} },
+            .folders = &.{},
+            .files = &.{},
+        };
+        try testing.expectEqualStrings(c[2], try fileName(arena, in));
+    }
 }
