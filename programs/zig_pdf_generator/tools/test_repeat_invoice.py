@@ -146,6 +146,21 @@ class Run(unittest.TestCase):
         self.assertEqual([m["number"] for m in made], ["INV-0019"])
         self.assertEqual((self.out / "INV-0018-Example.pdf").read_bytes(), b"someone else's")
 
+    def test_a_folder_it_may_not_read_is_skipped_not_fatal(self):
+        # macOS refuses a background job its protected folders (Downloads, Documents):
+        # the scan is a safety net, so losing it warns rather than failing the run.
+        locked = self.dir / "locked"
+        locked.mkdir()
+        locked.chmod(0)
+        s = json.loads((self.dir / "schedule.json").read_text())
+        s["also_scan"] = [str(locked)]
+        (self.dir / "schedule.json").write_text(json.dumps(s))
+        try:
+            made = ri.run(self.dir, D(2026, 11, 30), render=self.render)
+        finally:
+            locked.chmod(0o700)
+        self.assertEqual([m["number"] for m in made], ["INV-0018"])
+
     def test_a_dry_run_says_what_it_would_make_and_writes_nothing(self):
         plan = ri.run(self.dir, D(2026, 11, 30), render=self.render, dry_run=True)
         self.assertEqual([m["number"] for m in plan], ["INV-0018"])

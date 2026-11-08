@@ -155,6 +155,22 @@ def _logo(folder: Path, schedule: dict):
     return "data:image/png;base64," + base64.b64encode(data).decode()
 
 
+def _names_in(dirs) -> list:
+    """File names in each folder that exists and may be read. A folder the OS refuses
+    (macOS keeps a background job out of Downloads and Documents) is skipped with a
+    warning: the scan only guards against numbers issued by hand."""
+    names = []
+    for d in dirs:
+        if not d.exists():
+            continue
+        try:
+            names.extend(p.name for p in d.iterdir())
+        except PermissionError as e:
+            print(f"warning: cannot read {d} ({e.strerror}); its invoice numbers are not checked",
+                  file=sys.stderr)
+    return names
+
+
 def _number_of(schedule: dict, number: str) -> int:
     return int(number[len(schedule["number"].get("prefix", "INV-")):])
 
@@ -172,7 +188,7 @@ def run(folder, today: dt.date, render=None, dry_run: bool = False) -> list:
     results = []
     made_numbers = [_number_of(schedule, m["number"]) for m in made]
     for period, when in due:
-        existing = [p.name for d in scan if d.exists() for p in d.iterdir()]
+        existing = _names_in(scan)
         n = next_number(schedule, made_numbers, existing)
         number = format_number(schedule, n)
         target = out_dir / schedule["file_name"].format(number=number, period=period)
