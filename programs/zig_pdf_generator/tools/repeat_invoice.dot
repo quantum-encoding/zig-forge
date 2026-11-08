@@ -1,0 +1,62 @@
+// repeat_invoice.py as a DAG: what runs, what each step reads and writes, and the
+// witness (test in test_repeat_invoice.py) that says each step is right.
+//
+// Node kinds:  note/cylinder/folder = data   box = a deterministic tool step
+//              diamond = a decision          house = a person
+// Render:      dot -Tsvg repeat_invoice.dot -o repeat_invoice.svg
+digraph repeat_invoice {
+  graph [rankdir=LR, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.5, pad=0.3,
+         label="Repeat invoice: JSON in, PDF out, once per period. No model in the loop.",
+         labelloc=t, labeljust=l];
+  node  [fontname="Helvetica", fontsize=10];
+  edge  [fontname="Helvetica", fontsize=9, color="#4a5568"];
+
+  // ── inputs ────────────────────────────────────────────────────────────────
+  subgraph cluster_inputs {
+    label="the repeat folder"; style="rounded,dashed"; color="#a0aec0"; fontsize=10;
+    schedule [shape=note, label="schedule.json\nmonthly on the 30th\nnumbering, due days"];
+    template [shape=note, label="invoice.json\npdf-gen invoice template"];
+    logo     [shape=note, label="logo.png"];
+    ledger   [shape=cylinder, label="made.jsonl\ninvoices made"];
+  }
+  disk [shape=folder, label="~/Invoices, ~/Downloads\nnumbers already on disk"];
+
+  // ── the run ───────────────────────────────────────────────────────────────
+  cron   [shape=box, style="rounded,filled", fillcolor="#edf2f7",
+          label="launchd\n09:00 on the 28th–31st"];
+  due    [shape=diamond, label="due periods?\ndue_periods()"];
+  stop   [shape=plaintext, label="nothing due:\nexit 0, writes nothing"];
+  number [shape=box, label="next number\nnext_number()\nhighest seen + 1"];
+  json   [shape=box, label="generate the invoice JSON\ninvoice_json()\nnumber, dates, reference, logo"];
+  pdfgen [shape=box, style="bold,filled", fillcolor="#e6fffa",
+          label="pdf-gen\nJSON → PDF\n(zig_pdf_generator)"];
+  save   [shape=box, label="save\nlink into ~/Invoices\nnever overwrites"];
+  record [shape=box, label="record\nappend made.jsonl\nwith sha256"];
+  pdf    [shape=note, style=filled, fillcolor="#fefcbf", label="INV-NNNN-Customer.pdf"];
+  send   [shape=house, style=filled, fillcolor="#fed7d7", label="send it\n(a person, one tap)"];
+
+  cron -> due;
+  schedule -> due; ledger -> due;
+  due -> stop   [label="none"];
+  due -> number [label="each due period,\noldest first"];
+  schedule -> number; ledger -> number; disk -> number;
+  number -> json;
+  template -> json; logo -> json;
+  json -> pdfgen [label="invoice.json"];
+  pdfgen -> save [label="PDF bytes"];
+  save -> pdf;
+  save -> record;
+  record -> ledger [style=dashed, label="next run\nsees it"];
+  record -> number [style=dashed, label="next period\nin this run"];
+  pdf -> send;
+
+  // ── witnesses: the tests that say each step is right ─────────────────────
+  node [shape=plaintext, fontsize=8, fontcolor="#2f855a"];
+  w_due    [label="✓ month-end days, nothing before the day,\none per missed period, no remakes, end date, count"];
+  w_number [label="✓ highest seen + 1, a number on disk is never reused"];
+  w_json   [label="✓ number, dates and reference set;\nthe template untouched"];
+  w_pdf    [label="✓ the real pdf-gen renders the\nnumber, dates and total (pdftotext)"];
+  w_save   [label="✓ an existing file is never overwritten;\na failed render burns no number"];
+  edge [style=dotted, color="#9ae6b4", arrowhead=none];
+  w_due -> due; w_number -> number; w_json -> json; w_pdf -> pdfgen; w_save -> save;
+}
