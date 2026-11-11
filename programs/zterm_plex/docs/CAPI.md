@@ -103,6 +103,36 @@ An application's clipboard **read** (`OSC 52 ; Pc ; ?`) is answered with an
 empty payload (`ESC ] 52 ; Pc ; ESC \`) through `zterm_take_responses`, so an
 app waiting on the answer proceeds; the host's clipboard never reaches it.
 
+### View protocol for a viewer elsewhere
+
+A host that draws the pane itself uses the grid calls above. A host that
+carries the pane to a viewer somewhere else (another process, another
+machine) can hand that viewer the same messages `zterm server` sends
+(`docs/VIEW-PROTOCOL.md`), encoded here for the session's active pane:
+
+| Call | Message |
+|---|---|
+| `zterm_view_hello(h, out, max)` | `hello`: protocol version, pane id (the session's id), theme. Send it first. |
+| `zterm_view_frame(h, full, out, max)` | The next `frame`: rows changed since the last one, with cursor, modes and title. Every row the first time, after a resize or an alternate-screen switch, or when `full` is set. |
+| `zterm_view_history(h, from, count, out, max)` | `history`: up to `count` lines (at most 5000) from absolute line `from`. |
+
+- Each call writes one JSON message, without a newline, and returns its
+  length. A buffer too small is left untouched and the call returns **minus**
+  the length needed, having consumed nothing. `0` means nothing to send.
+- `zterm_view_frame` returns `0` when nothing a frame carries has changed,
+  and while a synchronized update (DEC 2026) is open. Call it after
+  `zterm_drain`, at the pace frames should go out; changes between calls go
+  out together.
+- One viewer per session: the handle keeps the viewer's place (sequence
+  number, rows changed since its last frame).
+- `zterm_view_frame` consumes the emulator's per-row dirty flags for the
+  session.
+- The viewer's messages are the host's to act on: `input` with `zterm_send`
+  (`zterm_paste` for a paste, `zterm_mouse` for the mouse), `resize` with
+  `zterm_resize`, `history` with `zterm_view_history`. `bell`, `clipboard`
+  and `exit` are the host's to send from `zterm_take_bell`,
+  `zterm_take_clipboard` and `zterm_take_exit`.
+
 ### Window / pane control
 | Function | Purpose |
 |---|---|

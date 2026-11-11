@@ -29,6 +29,7 @@ const url = @import("url.zig");
 const pty = @import("pty.zig");
 const gfx = @import("graphics.zig");
 const sys = @import("sys.zig");
+const view = @import("view.zig");
 
 const is_windows = builtin.os.tag == .windows;
 
@@ -71,6 +72,24 @@ pub const ZtermSession = struct {
     child_exited: bool = false,
     exit_code: c_int = 0,
     exit_signal: c_int = 0,
+    /// The one viewer `zterm_view_frame` encodes for (see "View protocol").
+    view: ViewState = .{},
+};
+
+/// What `zterm_view_frame` last told its viewer, so the next frame carries
+/// only what changed since.
+const ViewState = struct {
+    seq: u64 = 0,
+    /// Rows changed since the last frame handed out.
+    dirty: std.DynamicBitSetUnmanaged = .{},
+    /// Nothing sent yet, or the grid's size or screen changed: every row.
+    full: bool = true,
+    rows: u16 = 0,
+    cols: u16 = 0,
+    alt_screen: bool = false,
+    /// A digest of the frame's cursor, modes and title, which every frame
+    /// carries: a change in any of them is a frame even with no row dirty.
+    chrome: u64 = 0,
 };
 
 var registry: std.AutoHashMapUnmanaged(u64, *ZtermSession) = .empty;
@@ -491,6 +510,7 @@ pub export fn zterm_destroy(handle: ?*ZtermSession) void {
     _ = registry.remove(h.id);
     registry_mutex.unlock();
     h.sess.deinit();
+    h.view.dirty.deinit(alloc);
     alloc.destroy(h);
 }
 
@@ -818,6 +838,119 @@ pub export fn zterm_take_responses(handle: ?*ZtermSession, out: ?[*]u8, max: usi
         t.resp_len -= n;
     }
     return n;
+}
+
+// =============================================================================
+// View protocol (docs/VIEW-PROTOCOL.md) for an in-process host
+// =============================================================================
+//
+// `zterm server` sends a viewer its pane as JSON messages: `hello`, `frame`,
+// `history`. These calls encode the same messages for the active pane of a
+// session a host drives in-process, so a host can carry them to a viewer
+// somewhere else (another process, another machine) that already draws what
+// the server sends. One viewer per session: the calls keep that viewer's
+// place (sequence number, rows changed since its last frame) in the handle.
+//
+// Each call writes one message, without a newline, and returns its length.
+// A buffer too small is left untouched and the call returns MINUS the length
+// needed, having consumed nothing: call again with a larger one. 0 means
+// there is nothing to send (or the handle is NULL).
+//
+// `zterm_view_frame` is the consumer of the emulator's per-row dirty flags
+// for its session: a host that calls it reads cells for its own drawing with
+// `zterm_read_cells` as before, but must not expect another consumer of
+// those flags to see them.
+
+fn viewChrome(t: *const terminal.Terminal) u64 {
+    var h = std.hash.Wyhash.init(0);
+    h.update(std.mem.asBytes(&t.cursor.row));
+    h.update(std.mem.asBytes(&t.cursor.col));
+    h.update(std.mem.asBytes(&t.cursor_shape));
+    const flags = [_]bool{
+        t.modes.cursor_visible, t.cursor_blink,         t.modes.app_cursor,
+        t.modes.bracketed_paste, t.modes.alt_screen,    t.modes.mouse_sgr,
+        t.modes.focus_events,
+    };
+    h.update(std.mem.asBytes(&flags));
+    h.update(std.mem.asBytes(&t.modes.mouse_tracking));
+    h.update(t.title[0..t.title_len]);
+    return h.final();
+}
+
+/// Hand `bytes` to the caller's buffer under the rule above.
+fn viewOut(bytes: []const u8, out: ?[*]u8, max: usize) c_long {
+    const buf = out orelse return -@as(c_long, @intCast(bytes.len));
+    if (bytes.len > max) return -@as(c_long, @intCast(bytes.len));
+    @memcpy(buf[0..bytes.len], bytes);
+    return @intCast(bytes.len);
+}
+
+/// The `hello` message: protocol version, pane id (the session's id) and the
+/// theme every colour in a frame resolves through. Send it first.
+pub export fn zterm_view_hello(handle: ?*ZtermSession, out: ?[*]u8, max: usize) c_long {
+    const h = handle orelse return 0;
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer };
+    view.writeHello(&s, h.id, &config.active_theme) catch return 0;
+    return viewOut(aw.written(), out, max);
+}
+
+/// The next `frame` message for the active pane: the rows changed since the
+/// frame before (every row the first time, after a resize, after the
+/// alternate screen switches, and when `full` is set), with the cursor,
+/// modes and title. 0 when nothing a frame carries has changed, and while
+/// an application's synchronized update (DEC 2026) is open: call again after
+/// the next `zterm_drain`. Call after `zterm_drain`, at the pace frames
+/// should go out; changes between calls go out together.
+pub export fn zterm_view_frame(handle: ?*ZtermSession, full: bool, out: ?[*]u8, max: usize) c_long {
+    const h = handle orelse return 0;
+    const t = &activePane(h).terminal;
+    const v = &h.view;
+    const grid = t.getCurrentGrid();
+    if (v.dirty.capacity() != grid.rows) {
+        v.dirty.resize(alloc, grid.rows, false) catch return 0;
+        v.full = true;
+    }
+    if (full or v.rows != grid.rows or v.cols != grid.cols or v.alt_screen != t.modes.alt_screen) v.full = true;
+    // Fold the emulator's flags into the viewer's own set and clear them,
+    // whether or not a frame goes out now: a frame held back loses nothing.
+    var any = v.full;
+    var r: u16 = 0;
+    while (r < grid.rows) : (r += 1) {
+        if (t.isDirty(r)) v.dirty.set(r);
+        if (v.dirty.isSet(r)) any = true;
+    }
+    t.clearDirty();
+    const chrome = viewChrome(t);
+    if (!any and chrome == v.chrome) return 0;
+    if (zterm_sync_suppressed(h)) return 0;
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer };
+    view.writeFrame(&s, t, .{ .pane = h.id, .seq = v.seq + 1, .full = v.full, .dirty = &v.dirty }, alloc) catch return 0;
+    const n = viewOut(aw.written(), out, max);
+    if (n <= 0) return n;
+    v.seq += 1;
+    v.dirty.setRangeValue(.{ .start = 0, .end = v.dirty.capacity() }, false);
+    v.full = false;
+    v.rows = grid.rows;
+    v.cols = grid.cols;
+    v.alt_screen = t.modes.alt_screen;
+    v.chrome = chrome;
+    return n;
+}
+
+/// The `history` reply for the active pane: up to `count` lines (at most
+/// 5000) from absolute line `from`, as a viewer asks for scrollback.
+pub export fn zterm_view_history(handle: ?*ZtermSession, from: i64, count: usize, out: ?[*]u8, max: usize) c_long {
+    const h = handle orelse return 0;
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer };
+    view.writeHistory(&s, &activePane(h).terminal, h.id, from, @min(count, 5000), alloc) catch return 0;
+    return viewOut(aw.written(), out, max);
 }
 
 /// The window title (OSC 0/2), UTF-8, not NUL-terminated. Returns the length.
@@ -1788,6 +1921,87 @@ test "zterm_create_argv refuses an empty or relative argv" {
     try std.testing.expect(zterm_create_argv(24, 80, null, 1, &id) == null);
     const holed = [_]?[*:0]const u8{ "/bin/sh", null };
     try std.testing.expect(zterm_create_argv(24, 80, &holed, holed.len, &id) == null);
+}
+
+test "view protocol: hello, a full frame, then only what changed, and nothing when nothing did" {
+    try pty.skipIfUnavailable();
+    var id: u64 = 0;
+    const h = zterm_create(6, 40, testSitter(), &id) orelse return error.CreateFailed;
+    defer zterm_destroy(h);
+    var buf: [64 * 1024]u8 = undefined;
+
+    const hello_len = zterm_view_hello(h, &buf, buf.len);
+    try std.testing.expect(hello_len > 0);
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf[0..@intCast(hello_len)], .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("hello", parsed.value.object.get("t").?.string);
+        try std.testing.expectEqual(@as(i64, @intCast(id)), parsed.value.object.get("pane").?.integer);
+        try std.testing.expectEqual(@as(usize, 256), parsed.value.object.get("theme").?.object.get("palette").?.array.items.len);
+    }
+
+    // Start from a known screen whatever the sitter printed.
+    _ = zterm_drain(h);
+    const clear = "\x1b[2J\x1b[Hfirst line\r\nsecond";
+    zterm_feed(h, clear, clear.len);
+
+    // A buffer too small says how much is needed and consumes nothing.
+    var tiny: [8]u8 = undefined;
+    const need = zterm_view_frame(h, false, &tiny, tiny.len);
+    try std.testing.expect(need < 0);
+    const n1 = zterm_view_frame(h, false, &buf, buf.len);
+    try std.testing.expectEqual(-need, n1);
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf[0..@intCast(n1)], .{});
+        defer parsed.deinit();
+        const o = parsed.value.object;
+        try std.testing.expectEqualStrings("frame", o.get("t").?.string);
+        try std.testing.expectEqual(@as(i64, 1), o.get("seq").?.integer);
+        try std.testing.expect(o.get("full").?.bool);
+        try std.testing.expectEqual(@as(i64, 6), o.get("rows").?.integer);
+        try std.testing.expectEqual(@as(usize, 6), o.get("lines").?.array.items.len);
+        const row0 = o.get("lines").?.array.items[0].object.get("spans").?.array.items[0].object.get("text").?.string;
+        try std.testing.expectEqualStrings("first line", row0);
+        try std.testing.expectEqual(@as(i64, 1), o.get("cursor").?.object.get("y").?.integer);
+    }
+    // Nothing changed: nothing to send.
+    try std.testing.expectEqual(@as(c_long, 0), zterm_view_frame(h, false, &buf, buf.len));
+
+    // One row changes: a frame with that row alone.
+    const more = " half";
+    zterm_feed(h, more, more.len);
+    const n2 = zterm_view_frame(h, false, &buf, buf.len);
+    try std.testing.expect(n2 > 0);
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf[0..@intCast(n2)], .{});
+        defer parsed.deinit();
+        const o = parsed.value.object;
+        try std.testing.expectEqual(@as(i64, 2), o.get("seq").?.integer);
+        try std.testing.expect(!o.get("full").?.bool);
+        const lines = o.get("lines").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), lines.len);
+        try std.testing.expectEqual(@as(i64, 1), lines[0].object.get("y").?.integer);
+        try std.testing.expectEqualStrings("second half", lines[0].object.get("spans").?.array.items[0].object.get("text").?.string);
+    }
+
+    // The cursor alone moving is a frame with no rows; a resize is a full one.
+    const up = "\x1b[H";
+    zterm_feed(h, up, up.len);
+    const n3 = zterm_view_frame(h, false, &buf, buf.len);
+    try std.testing.expect(n3 > 0);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..@intCast(n3)], "\"lines\":[]") != null);
+    _ = zterm_resize(h, 8, 50);
+    const n4 = zterm_view_frame(h, false, &buf, buf.len);
+    try std.testing.expect(n4 > 0);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..@intCast(n4)], "\"full\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..@intCast(n4)], "\"rows\":8") != null);
+
+    // History answers in the protocol's shape; NULL handles answer nothing.
+    const hist = zterm_view_history(h, 0, 10, &buf, buf.len);
+    try std.testing.expect(hist > 0);
+    try std.testing.expect(std.mem.startsWith(u8, buf[0..@intCast(hist)], "{\"t\":\"history\""));
+    try std.testing.expectEqual(@as(c_long, 0), zterm_view_frame(null, true, &buf, buf.len));
+    try std.testing.expectEqual(@as(c_long, 0), zterm_view_hello(null, &buf, buf.len));
 }
 
 test "version string is well formed" {

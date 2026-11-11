@@ -152,6 +152,30 @@ size_t   zterm_take_clipboard(zterm_session *handle, uint8_t *out, size_t max);
  * split across two calls. */
 size_t   zterm_take_responses(zterm_session *handle, uint8_t *out, size_t max);
 size_t   zterm_title(zterm_session *handle, uint8_t *out, size_t max);
+
+/* ---- view protocol (docs/VIEW-PROTOCOL.md) for an in-process host ----
+ * The messages `zterm server` sends a viewer, encoded for the active pane of
+ * this session, so a host can carry them to a viewer elsewhere that already
+ * draws what the server sends. One viewer per session: the handle keeps its
+ * place (sequence number, rows changed since its last frame).
+ *
+ * Each call writes ONE JSON message, no newline, and returns its length. A
+ * buffer too small is left untouched and the call returns MINUS the length
+ * needed, having consumed nothing: call again with a larger one. 0 = nothing
+ * to send (or handle is NULL).
+ *
+ * zterm_view_frame consumes the emulator's per-row dirty flags for the
+ * session. Call it after zterm_drain, at the pace frames should go out. */
+/* `hello`: protocol version, pane id (the session's id), theme. Send first. */
+long     zterm_view_hello(zterm_session *handle, uint8_t *out, size_t max);
+/* The next `frame`: rows changed since the last one (every row the first
+ * time, after a resize or an alternate-screen switch, or when `full`), with
+ * cursor, modes and title. 0 when nothing changed, and while a DEC 2026
+ * synchronized update is open. */
+long     zterm_view_frame(zterm_session *handle, bool full, uint8_t *out, size_t max);
+/* `history`: up to `count` lines (at most 5000) from absolute line `from`. */
+long     zterm_view_history(zterm_session *handle, int64_t from, size_t count, uint8_t *out, size_t max);
+
 int      zterm_mouse(zterm_session *handle, int kind, int button, uint16_t row, uint16_t col, int mods);
 
 /* ---- scrolling ----
