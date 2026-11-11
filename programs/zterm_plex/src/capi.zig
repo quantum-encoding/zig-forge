@@ -318,6 +318,21 @@ pub export fn zterm_create(rows: u16, cols: u16, shell: ?[*:0]const u8, out_id: 
     return createIn(rows, cols, if (shell) |s| std.mem.sliceTo(s, 0) else null, null, false, &.{}, out_id);
 }
 
+/// As `zterm_create`, with the shell started in the directory `cwd` instead
+/// of this process's own (an app's working directory is rarely where a
+/// person expects a shell to open). `cwd` must be an absolute path of at
+/// most `std.fs.max_path_bytes` bytes (anything else: NULL); a NULL `cwd` is
+/// `zterm_create`. The caller checks the directory exists and can be
+/// entered: one that can't makes the shell exit 126 at once, a session whose
+/// pane is dead, not a NULL.
+pub export fn zterm_create_in(rows: u16, cols: u16, shell: ?[*:0]const u8, cwd: ?[*:0]const u8, out_id: ?*u64) ?*ZtermSession {
+    const dir: ?[]const u8 = if (cwd) |c| std.mem.sliceTo(c, 0) else null;
+    if (dir) |d| {
+        if (d.len > std.fs.max_path_bytes or !std.fs.path.isAbsolute(d)) return null;
+    }
+    return createIn(rows, cols, if (shell) |s| std.mem.sliceTo(s, 0) else null, dir, false, &.{}, out_id);
+}
+
 /// Create a session whose first pane runs `argv[0..argc]` as its own process:
 /// no shell is started and nothing is typed. `argv[0]` must be an absolute
 /// path (it is exec'd without a PATH search). Otherwise as `zterm_create`.
@@ -393,8 +408,9 @@ const SpawnEnv = struct {
 };
 
 /// `zterm_create`, with the shell started in `cwd` (null = inherit this
-/// process's). Zig-only — the headless `zterm server` needs a per-pane start
-/// directory; the C ABI is unchanged. The caller validates `cwd`: a directory
+/// process's): what the headless `zterm server` uses for a per-pane start
+/// directory, and what `zterm_create_in` exposes to C. The caller validates
+/// `cwd`: a directory
 /// the child cannot enter makes the shell exit 126 immediately (see
 /// `Pty.spawnIn`), which is a live-but-dead pane rather than a clean error.
 ///
@@ -2002,6 +2018,25 @@ test "view protocol: hello, a full frame, then only what changed, and nothing wh
     try std.testing.expect(std.mem.startsWith(u8, buf[0..@intCast(hist)], "{\"t\":\"history\""));
     try std.testing.expectEqual(@as(c_long, 0), zterm_view_frame(null, true, &buf, buf.len));
     try std.testing.expectEqual(@as(c_long, 0), zterm_view_hello(null, &buf, buf.len));
+}
+
+test "zterm_create_in starts the shell in the directory asked for, and refuses a relative one" {
+    try pty.skipIfUnavailable();
+    if (is_windows) return error.SkipZigTest;
+    try std.testing.expect(zterm_create_in(6, 40, "/bin/sh", "relative/dir", null) == null);
+    const h = zterm_create_in(6, 60, "/bin/sh", "/usr/share", null) orelse return error.CreateFailed;
+    defer zterm_destroy(h);
+    const ask = "pwd\n";
+    _ = zterm_send(h, ask, ask.len);
+    var buf: [32 * 1024]u8 = undefined;
+    var seen = false;
+    var tries: usize = 0;
+    while (!seen and tries < 200) : (tries += 1) {
+        _ = zterm_pump(h, 25);
+        const n = zterm_view_frame(h, true, &buf, buf.len);
+        if (n > 0 and std.mem.indexOf(u8, buf[0..@intCast(n)], "\"text\":\"/usr/share\"") != null) seen = true;
+    }
+    try std.testing.expect(seen);
 }
 
 test "version string is well formed" {

@@ -70,6 +70,11 @@ const char *zterm_version(void);
 
 /* ---- lifecycle ---- */
 zterm_session *zterm_create(uint16_t rows, uint16_t cols, const char *shell, uint64_t *out_id);
+/* As zterm_create, with the shell started in the directory `cwd` (absolute)
+ * instead of this process's own. NULL cwd = zterm_create. Check the directory
+ * exists first: one the shell cannot enter is a session whose pane exits 126,
+ * not a NULL. A relative or over-long cwd is NULL. */
+zterm_session *zterm_create_in(uint16_t rows, uint16_t cols, const char *shell, const char *cwd, uint64_t *out_id);
 /* The first pane runs argv[0..argc] as its own process: no shell, nothing
  * typed. argv[0] must be an absolute path. NULL on any failure. */
 zterm_session *zterm_create_argv(uint16_t rows, uint16_t cols, const char *const *argv, size_t argc, uint64_t *out_id);

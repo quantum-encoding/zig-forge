@@ -58,6 +58,7 @@ UI surface.
 |---|---|
 | `const char *zterm_version(void)` | Library version string. |
 | `zterm_session *zterm_create(uint16_t rows, uint16_t cols, const char *shell, uint64_t *out_id)` | Allocate a `rows`×`cols` terminal and spawn `shell` (NULL → `$SHELL`, else the passwd login shell, else `/bin/zsh` on macOS / `/bin/bash` elsewhere) in its first pane. That shell is the session's: splits and new windows spawn it too. Writes the new id to `out_id` if non-NULL. 0 rows/cols default to 24/80. |
+| `zterm_session *zterm_create_in(uint16_t rows, uint16_t cols, const char *shell, const char *cwd, uint64_t *out_id)` | As `zterm_create`, with the shell started in the absolute directory `cwd` instead of this process's own. NULL `cwd` is `zterm_create`. A relative `cwd` is NULL; check the directory exists first, since one the shell cannot enter gives a session whose pane exits 126 at once. |
 | `zterm_session *zterm_create_argv(uint16_t rows, uint16_t cols, const char *const *argv, size_t argc, uint64_t *out_id)` | As `zterm_create`, but the first pane runs `argv` itself (no shell, nothing typed; `argv[0]` absolute). Splits and new windows of such a session get the default shell. NULL on any failure. |
 | `zterm_session *zterm_attach(uint64_t id)` | Re-acquire a live session by id; NULL if not found. |
 | `void zterm_detach(zterm_session *)` | Release the logical hold; session keeps running. |
