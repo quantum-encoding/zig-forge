@@ -1021,6 +1021,8 @@ fn writeTable(
     drawing_id: *u32,
     revisions: *Revisions,
 ) !void {
+    // Table properties in CT_TblPr order (ECMA-376 Part 1, 17.4.60): tblStyle,
+    // tblW, jc, tblBorders, tblLayout, tblCellMar, tblLook.
     try buf.appendSlice(allocator, "<w:tbl><w:tblPr>\n  <w:tblStyle w:val=\"TableGrid\"/>\n");
 
     if (t.col_widths.len > 0) {
@@ -1035,7 +1037,6 @@ fn writeTable(
 
     try buf.appendSlice(allocator,
         \\  <w:jc w:val="center"/>
-        \\  <w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>
         \\  <w:tblBorders>
         \\
     );
@@ -1053,7 +1054,11 @@ fn writeTable(
         var tmp: [224]u8 = undefined;
         try buf.appendSlice(allocator, try std.fmt.bufPrint(&tmp, "  <w:tblCellMar><w:top w:w=\"{d}\" w:type=\"dxa\"/><w:left w:w=\"{d}\" w:type=\"dxa\"/><w:bottom w:w=\"{d}\" w:type=\"dxa\"/><w:right w:w=\"{d}\" w:type=\"dxa\"/></w:tblCellMar>\n", .{ m.top, m.left, m.bottom, m.right }));
     }
-    try buf.appendSlice(allocator, "</w:tblPr>\n");
+    try buf.appendSlice(allocator,
+        \\  <w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>
+        \\</w:tblPr>
+        \\
+    );
 
     // A table has to declare its grid. ECMA-376 requires tblGrid, and without
     // it a reader has nothing to lay the columns out against: LibreOffice
@@ -1477,7 +1482,7 @@ test "rows repeat or hold together, cells span columns, tracked changes are numb
     var plain_rows = [_]docx.TableRow{.{ .cells = &plain_cells }};
     try writeTable(allocator, &buf, &docx.Table{ .rows = &plain_rows }, &hyperlinks, &images, &drawing_id, &revisions);
     try testing.expect(has(buf.items, "<w:tr><w:tc>"));
-    try testing.expect(has(buf.items, "w:color=\"auto\"/>\n  </w:tblBorders>\n</w:tblPr>"));
+    try testing.expect(has(buf.items, "w:color=\"auto\"/>\n  </w:tblBorders>\n  <w:tblLook "));
 }
 
 test "landscape A4 with narrow margins; the footer's tab stop follows the text width" {
@@ -1486,4 +1491,37 @@ test "landscape A4 with narrow margins; the footer's tab stop follows the text w
     try testing.expectEqual(@as(u32, 15398), parts.textWidth());
     try testing.expectEqual(@as(u32, 9026), (SectionParts{ .a4 = true }).textWidth());
     try testing.expectEqual(@as(u32, 9360), (SectionParts{}).textWidth());
+}
+
+test "table properties are in schema order" {
+    const allocator = testing.allocator;
+    var paras = [_]docx.Paragraph{.{}};
+    var cells = [_]docx.TableCell{.{ .paragraphs = &paras }};
+    var rows = [_]docx.TableRow{.{ .cells = &cells }};
+    const table = docx.Table{
+        .rows = &rows,
+        .col_widths = &[_]u16{1000},
+        .fixed_layout = true,
+        .cell_margins = .{ .top = 1, .left = 2, .bottom = 3, .right = 4 },
+    };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    var hyperlinks = HyperlinkCollector.init(allocator);
+    defer hyperlinks.deinit();
+    var images = ImageCollector.init(allocator);
+    defer images.deinit();
+    var drawing_id: u32 = 1;
+    var revisions = Revisions{ .author = "", .date = "" };
+    try writeTable(allocator, &buf, &table, &hyperlinks, &images, &drawing_id, &revisions);
+
+    // CT_TblPr: each element after the one before it.
+    const order = [_][]const u8{ "<w:tblStyle ", "<w:tblW ", "<w:jc ", "<w:tblBorders>", "<w:tblLayout ", "<w:tblCellMar>", "<w:tblLook ", "</w:tblPr>" };
+    var at: usize = 0;
+    for (order) |tag| {
+        const found = std.mem.indexOfPos(u8, buf.items, at, tag) orelse {
+            std.debug.print("{s} missing or out of order\n", .{tag});
+            return error.TestUnexpectedResult;
+        };
+        at = found + tag.len;
+    }
 }
