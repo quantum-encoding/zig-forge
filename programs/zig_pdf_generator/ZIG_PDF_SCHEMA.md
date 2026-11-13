@@ -554,7 +554,7 @@ static/shared, iOS, Android); WASM export `zigpdf_generate_letter` (both
 
 | Field | Type | Req | Default | Notes |
 |---|---|---|---|---|
-| `body_markdown` | string (Markdown) | Yes | `""` | The letter body. Tables (`\| … \|`), headings, lists, bold/italic render; `[text](url)` links render as **clickable** annotations on whatever page they land. Flows across pages |
+| `body_markdown` | string (Markdown) | Yes | `""` | The letter body. Tables (`\| … \|`), headings, lists, bold/italic render; `[text](url)` links render as **clickable** annotations on whatever page they land. Struck-through, highlighted and coloured text and CriticMarkup redlines render anywhere inline, table cells included (see *Marking text* in `JSON_GUIDE.md`). Flows across pages |
 | `background_image` | string | No | `""` | Full-page background. File path, `data:` URL, or raw base64. Drawn behind every page |
 | `background_opacity` | number | No | `1.0` | `<1` paints it faint (watermark-like, e.g. `0.10`) |
 | `background_fit` | `enum("cover"\|"contain"\|"stretch")` | No | `"cover"` | `cover` fills + crops; `contain` letterboxes; `stretch` distorts to page |

@@ -1315,6 +1315,38 @@ Each signatory object:
 
 Addresses take newline- or `|`-separated lines. Every field is optional; see `ZIG_PDF_SCHEMA.md` (Template: `letter`) for the full table, background images, signature images and password protection.
 
+### Marking text (strike-through, highlight, colour, redline)
+
+Anywhere inline text goes in `body_markdown` (paragraphs, headings, list items, quotes, table cells), and in `zigpdf_generate_markdown`:
+
+| Write | Renders as |
+|---|---|
+| `~~text~~` | struck through |
+| `==text==` | yellow highlight |
+| `[text]{color=red}` | coloured text |
+| `[text]{bg=yellow}` | highlight in a colour of your choice |
+| `[text]{color=#b91c1c bg=#fee2e2 strike underline}` | any mix of `color=`, `bg=`, `strike`, `underline` |
+| `{--text--}` | deletion: red, struck through, on pale red |
+| `{++text++}` | insertion: green on pale green |
+| `{~~old~>new~~}` | substitution: `old` as a deletion, then `new` as an insertion |
+| `{==text==}` | yellow highlight |
+
+The last four are [CriticMarkup](https://criticmarkup.com/). A "now / should be" correction sheet is a table of them:
+
+```json
+{
+  "company_name": "Harbourlight Joinery Ltd",
+  "subject": "Spelling corrections",
+  "body_markdown": "| Where | Now | Should be |\n|---|---|---|\n| Cover | {--Glenlea School--} | {++Glenlee School++} |\n| Page 3 | the {~~assesment~>assessment~~} date | ==check== |"
+}
+```
+
+- Colours are `#rgb`, `#rrggbb`, or a name: `black`, `white`, `grey`, `red`, `green`, `blue`, `orange`, `purple`, `yellow`, `pink`, `lightred`, `lightgreen`, `lightblue`, `lightgrey`.
+- Marks nest with each other and with `**bold**` / `*italic*`, up to 8 deep: `**total {--£900--} {++£960++}**`.
+- `[text]{…}` with anything other than those four attributes is printed as typed. So are `==` and `~~` with a space just inside them (`a == b`).
+- A backslash prints a mark character as itself: `\~~`, `\==`, `\{`, `\[`, `\*`.
+- In a legend letter template, braces are doubled as for any literal brace there: `{{--text--}}`, `[text]{{color=red}}`.
+
 ## Legend Letter Schema
 
 `zigpdf_generate_legend_letter` (C and WASM) / `pdf-gen --legend-letter in.json out.pdf`: the same letter, with the body rendered from a [zig_legend](../zig_legend/README.md) template and a typed legend. Use it for pre-constructed letters whose wording branches on an outcome, such as the debt-recovery pack in `templates/letters/`.

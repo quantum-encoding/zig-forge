@@ -7,6 +7,12 @@
 //! documentation-style subset:
 //!   - Headings H1–H6 (#, ##, ...)
 //!   - Paragraphs with inline **bold**, *italic*, ***bold italic***, `code`, [link](url)
+//!   - Inline marking, nestable with the above and with each other:
+//!       ~~struck through~~            ==highlighted==
+//!       [text]{color=red bg=#fee2e2 strike underline}   (any subset of the four)
+//!     and CriticMarkup for a redline:
+//!       {--deleted--}  {++inserted++}  {~~old~>new~~}  {==highlighted==}
+//!     A backslash before one of ``\ ` * ~ = [ ] { }`` prints that character.
 //!   - Bullet lists (`- ` or `* `)
 //!   - Ordered lists (`1. `)
 //!   - Horizontal rules (`---`)
@@ -93,6 +99,10 @@ pub const Span = struct {
     kind: SpanKind,
     text: []const u8,
     url: []const u8 = "", // link target, unused for other kinds
+    strike: bool = false, // line through the middle of the text
+    underline: bool = false,
+    color: ?document.Color = null, // text colour; null = the block's own
+    bg: ?document.Color = null, // highlight painted behind the text
 };
 
 pub const ListItem = struct {
@@ -444,42 +454,290 @@ fn parseList(
     });
 }
 
-// Inline span parser — handles **bold**, *italic*, ***bold-italic***, `code`, [link](url).
-// Returns a list of spans that together reconstruct the input text with formatting.
+// Colours of the marks that carry no colour of their own.
+const HIGHLIGHT_BG = document.Color{ .r = 0.996, .g = 0.941, .b = 0.541 }; // #fef08a
+const DELETED_INK = document.Color{ .r = 0.725, .g = 0.110, .b = 0.110 }; // #b91c1c
+const DELETED_BG = document.Color{ .r = 0.996, .g = 0.886, .b = 0.886 }; // #fee2e2
+const INSERTED_INK = document.Color{ .r = 0.086, .g = 0.396, .b = 0.204 }; // #166534
+const INSERTED_BG = document.Color{ .r = 0.863, .g = 0.988, .b = 0.906 }; // #dcfce7
+
+/// Marks nest at most this deep; anything deeper is printed as typed, so
+/// hostile input cannot recurse without bound.
+const MAX_INLINE_DEPTH: u8 = 8;
+
+/// The formatting in force at a point in the text: what the enclosing marks
+/// have switched on.
+const InlineStyle = struct {
+    bold: bool = false,
+    italic: bool = false,
+    strike: bool = false,
+    underline: bool = false,
+    color: ?document.Color = null,
+    bg: ?document.Color = null,
+
+    fn span(self: InlineStyle, kind: ?SpanKind, text: []const u8, url: []const u8) Span {
+        const k: SpanKind = kind orelse if (self.bold and self.italic)
+            SpanKind.bold_italic
+        else if (self.bold)
+            SpanKind.bold
+        else if (self.italic)
+            SpanKind.italic
+        else
+            SpanKind.text;
+        return .{
+            .kind = k,
+            .text = text,
+            .url = url,
+            .strike = self.strike,
+            .underline = self.underline,
+            .color = self.color,
+            .bg = self.bg,
+        };
+    }
+
+    fn deleted(self: InlineStyle) InlineStyle {
+        var s = self;
+        s.strike = true;
+        s.color = DELETED_INK;
+        s.bg = DELETED_BG;
+        return s;
+    }
+
+    fn inserted(self: InlineStyle) InlineStyle {
+        var s = self;
+        s.color = INSERTED_INK;
+        s.bg = INSERTED_BG;
+        return s;
+    }
+
+    fn highlighted(self: InlineStyle) InlineStyle {
+        var s = self;
+        s.bg = HIGHLIGHT_BG;
+        return s;
+    }
+};
+
+const NAMED_COLORS = [_]struct { name: []const u8, hex: []const u8 }{
+    .{ .name = "black", .hex = "0f0f0f" },  .{ .name = "white", .hex = "ffffff" },
+    .{ .name = "grey", .hex = "71717a" },   .{ .name = "gray", .hex = "71717a" },
+    .{ .name = "red", .hex = "b91c1c" },    .{ .name = "green", .hex = "166534" },
+    .{ .name = "blue", .hex = "1d4ed8" },   .{ .name = "orange", .hex = "c2410c" },
+    .{ .name = "purple", .hex = "7e22ce" }, .{ .name = "yellow", .hex = "fef08a" },
+    .{ .name = "pink", .hex = "fbcfe8" },   .{ .name = "lightred", .hex = "fee2e2" },
+    .{ .name = "lightgreen", .hex = "dcfce7" }, .{ .name = "lightblue", .hex = "dbeafe" },
+    .{ .name = "lightgrey", .hex = "e4e4e7" }, .{ .name = "lightgray", .hex = "e4e4e7" },
+};
+
+/// `#rgb`, `#rrggbb` or one of NAMED_COLORS (any case); null for anything else.
+pub fn parseColor(s: []const u8) ?document.Color {
+    if (s.len > 0 and s[0] == '#') {
+        const hex = s[1..];
+        var rgb: [3]u8 = undefined;
+        if (hex.len == 6) {
+            for (&rgb, 0..) |*c, i| {
+                const hi = std.fmt.charToDigit(hex[i * 2], 16) catch return null;
+                const lo = std.fmt.charToDigit(hex[i * 2 + 1], 16) catch return null;
+                c.* = hi * 16 + lo;
+            }
+        } else if (hex.len == 3) {
+            for (&rgb, 0..) |*c, i| c.* = (std.fmt.charToDigit(hex[i], 16) catch return null) * 17;
+        } else return null;
+        return .{
+            .r = @as(f32, @floatFromInt(rgb[0])) / 255.0,
+            .g = @as(f32, @floatFromInt(rgb[1])) / 255.0,
+            .b = @as(f32, @floatFromInt(rgb[2])) / 255.0,
+        };
+    }
+    for (NAMED_COLORS) |n| {
+        if (std.ascii.eqlIgnoreCase(n.name, s)) return document.Color.fromHex(n.hex);
+    }
+    return null;
+}
+
+/// The attribute list of `[text]{…}` applied over `base`: space-separated
+/// `color=<colour>`, `bg=<colour>`, `strike`, `underline`. Null when the list
+/// is empty or holds anything else, so `[x]{y}` in ordinary prose is left alone.
+fn parseSpanAttrs(attrs: []const u8, base: InlineStyle) ?InlineStyle {
+    var style = base;
+    var any = false;
+    var it = std.mem.tokenizeAny(u8, attrs, " \t");
+    while (it.next()) |tok| {
+        if (std.mem.eql(u8, tok, "strike")) {
+            style.strike = true;
+        } else if (std.mem.eql(u8, tok, "underline")) {
+            style.underline = true;
+        } else if (std.mem.startsWith(u8, tok, "color=")) {
+            style.color = parseColor(tok["color=".len..]) orelse return null;
+        } else if (std.mem.startsWith(u8, tok, "bg=")) {
+            style.bg = parseColor(tok["bg=".len..]) orelse return null;
+        } else return null;
+        any = true;
+    }
+    return if (any) style else null;
+}
+
+const StyledSpanMatch = struct {
+    text_start: usize,
+    text_end: usize,
+    style: InlineStyle,
+    end: usize,
+};
+
+/// Longest bracketed text `[…]` a link or marked span may hold. Bounds the
+/// work per `[`, so a long run of unclosed brackets costs linear time.
+const MAX_BRACKET_TEXT: usize = 4096;
+
+/// Index of the `]` matching the `[` at `start`, counting nested pairs.
+fn findBracketClose(text: []const u8, start: usize) ?usize {
+    var depth: u32 = 1;
+    var i = start + 1;
+    const limit = @min(text.len, start + 1 + MAX_BRACKET_TEXT);
+    while (i < limit) : (i += 1) {
+        if (text[i] == '[') depth += 1;
+        if (text[i] == ']') {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+    }
+    return null;
+}
+
+/// `[text]{attrs}` starting at `start` (which holds the `[`), or null.
+fn findStyledSpan(text: []const u8, start: usize, base: InlineStyle) ?StyledSpanMatch {
+    const i = findBracketClose(text, start) orelse return null;
+    if (i + 1 >= text.len or text[i + 1] != '{') return null;
+    const close = std.mem.indexOfScalarPos(u8, text, i + 2, '}') orelse return null;
+    const style = parseSpanAttrs(text[i + 2 .. close], base) orelse return null;
+    return .{ .text_start = start + 1, .text_end = i, .style = style, .end = close + 1 };
+}
+
+/// The closing `delim` of a `~~…~~` / `==…==` mark opened just before `from`:
+/// the first one after at least one character and not preceded by a space.
+fn findCloser(text: []const u8, from: usize, delim: []const u8) ?usize {
+    var p = from;
+    while (std.mem.indexOfPos(u8, text, p, delim)) |at| {
+        if (at > from and text[at - 1] != ' ') return at;
+        p = at + 1;
+    }
+    return null;
+}
+
+fn isEscapable(c: u8) bool {
+    return switch (c) {
+        '\\', '`', '*', '~', '=', '[', ']', '{', '}' => true,
+        else => false,
+    };
+}
+
+// Inline span parser. Returns the spans that together reconstruct the input
+// text with its formatting; marks nest (see the file header for the syntax).
 fn parseInlineSpans(allocator: std.mem.Allocator, text: []const u8) ![]const Span {
     var spans: std.ArrayListUnmanaged(Span) = .empty;
+    try parseInlineInto(allocator, &spans, text, .{}, 0);
+    return spans.toOwnedSlice(allocator);
+}
+
+fn parseInlineInto(
+    allocator: std.mem.Allocator,
+    spans: *std.ArrayListUnmanaged(Span),
+    text: []const u8,
+    style: InlineStyle,
+    depth: u8,
+) error{OutOfMemory}!void {
+    if (depth >= MAX_INLINE_DEPTH) {
+        if (text.len > 0) try spans.append(allocator, style.span(null, text, ""));
+        return;
+    }
+
     var i: usize = 0;
     var plain_start: usize = 0;
+    // Once a closing delimiter is known to be absent from the rest of the
+    // text, later openers of that kind are not searched for again.
+    var no_strike_close = false;
+    var no_mark_close = false;
+    var no_critic_close = false;
 
     while (i < text.len) {
         const c = text[i];
 
-        // Inline code
-        if (c == '`') {
-            if (i > plain_start) {
-                try spans.append(allocator, .{ .kind = .text, .text = text[plain_start..i] });
-            }
-            const end = std.mem.indexOfScalarPos(u8, text, i + 1, '`') orelse {
-                i += 1;
-                continue;
-            };
-            try spans.append(allocator, .{ .kind = .code, .text = text[i + 1 .. end] });
-            i = end + 1;
-            plain_start = i;
+        // Backslash escape: the next character is printed, not interpreted.
+        if (c == '\\' and i + 1 < text.len and isEscapable(text[i + 1])) {
+            if (i > plain_start) try spans.append(allocator, style.span(null, text[plain_start..i], ""));
+            plain_start = i + 1;
+            i += 2;
             continue;
         }
 
-        // Link [text](url)
+        // Inline code
+        if (c == '`') {
+            if (std.mem.indexOfScalarPos(u8, text, i + 1, '`')) |end| {
+                if (i > plain_start) try spans.append(allocator, style.span(null, text[plain_start..i], ""));
+                try spans.append(allocator, style.span(.code, text[i + 1 .. end], ""));
+                i = end + 1;
+                plain_start = i;
+                continue;
+            }
+        }
+
+        // CriticMarkup: {--deleted--} {++inserted++} {==highlighted==} {~~old~>new~~}
+        if (c == '{' and !no_critic_close and i + 2 < text.len and text[i + 1] == text[i + 2]) {
+            const m = text[i + 1];
+            if (m == '-' or m == '+' or m == '=' or m == '~') {
+                const closer = [3]u8{ m, m, '}' };
+                if (std.mem.indexOfPos(u8, text, i + 3, &closer)) |close| {
+                    const inner = text[i + 3 .. close];
+                    const arrow = if (m == '~') std.mem.indexOf(u8, inner, "~>") else null;
+                    if (m != '~' or arrow != null) {
+                        if (i > plain_start) try spans.append(allocator, style.span(null, text[plain_start..i], ""));
+                        switch (m) {
+                            '-' => try parseInlineInto(allocator, spans, inner, style.deleted(), depth + 1),
+                            '+' => try parseInlineInto(allocator, spans, inner, style.inserted(), depth + 1),
+                            '=' => try parseInlineInto(allocator, spans, inner, style.highlighted(), depth + 1),
+                            else => {
+                                try parseInlineInto(allocator, spans, inner[0..arrow.?], style.deleted(), depth + 1);
+                                try parseInlineInto(allocator, spans, inner[arrow.? + 2 ..], style.inserted(), depth + 1);
+                            },
+                        }
+                        i = close + 3;
+                        plain_start = i;
+                        continue;
+                    }
+                } else if (std.mem.indexOfScalarPos(u8, text, i + 3, '}') == null) {
+                    no_critic_close = true;
+                }
+            }
+        }
+
+        // ~~struck through~~ and ==highlighted==
+        if ((c == '~' or c == '=') and i + 2 < text.len and text[i + 1] == c and text[i + 2] != ' ') {
+            const gave_up = if (c == '~') &no_strike_close else &no_mark_close;
+            if (!gave_up.*) {
+                const delim = [2]u8{ c, c };
+                if (findCloser(text, i + 2, &delim)) |close| {
+                    if (i > plain_start) try spans.append(allocator, style.span(null, text[plain_start..i], ""));
+                    var inner_style = style;
+                    if (c == '~') inner_style.strike = true else inner_style.bg = HIGHLIGHT_BG;
+                    try parseInlineInto(allocator, spans, text[i + 2 .. close], inner_style, depth + 1);
+                    i = close + 2;
+                    plain_start = i;
+                    continue;
+                }
+                gave_up.* = true;
+            }
+        }
+
+        // Link [text](url), or a marked span [text]{color=… bg=… strike underline}
         if (c == '[') {
             if (findLink(text, i)) |found| {
-                if (i > plain_start) {
-                    try spans.append(allocator, .{ .kind = .text, .text = text[plain_start..i] });
-                }
-                try spans.append(allocator, .{
-                    .kind = .link,
-                    .text = text[found.text_start..found.text_end],
-                    .url = text[found.url_start..found.url_end],
-                });
+                if (i > plain_start) try spans.append(allocator, style.span(null, text[plain_start..i], ""));
+                try spans.append(allocator, style.span(.link, text[found.text_start..found.text_end], text[found.url_start..found.url_end]));
+                i = found.end;
+                plain_start = i;
+                continue;
+            }
+            if (findStyledSpan(text, i, style)) |found| {
+                if (i > plain_start) try spans.append(allocator, style.span(null, text[plain_start..i], ""));
+                try parseInlineInto(allocator, spans, text[found.text_start..found.text_end], found.style, depth + 1);
                 i = found.end;
                 plain_start = i;
                 continue;
@@ -488,46 +746,39 @@ fn parseInlineSpans(allocator: std.mem.Allocator, text: []const u8) ![]const Spa
 
         // Bold / italic / bold-italic — asterisks
         if (c == '*') {
-            // Count asterisks
             var star_count: usize = 0;
             while (i + star_count < text.len and text[i + star_count] == '*' and star_count < 3) star_count += 1;
-            if (star_count >= 1 and star_count <= 3) {
-                // Find matching closing sequence of the same count
-                var search_from = i + star_count;
-                while (search_from < text.len) {
-                    const maybe_close = std.mem.indexOfScalarPos(u8, text, search_from, '*') orelse break;
-                    var close_count: usize = 0;
-                    while (maybe_close + close_count < text.len and text[maybe_close + close_count] == '*' and close_count < 3) close_count += 1;
-                    if (close_count >= star_count) {
-                        // Match
-                        if (i > plain_start) {
-                            try spans.append(allocator, .{ .kind = .text, .text = text[plain_start..i] });
-                        }
-                        const inner = text[i + star_count .. maybe_close];
-                        const kind: SpanKind = if (star_count == 3) .bold_italic else if (star_count == 2) .bold else .italic;
-                        try spans.append(allocator, .{ .kind = kind, .text = inner });
-                        i = maybe_close + star_count;
-                        plain_start = i;
-                        break;
-                    }
-                    search_from = maybe_close + close_count;
-                } else {
-                    // No matching close — treat as literal
-                    i += 1;
-                    continue;
+            // Find a closing run of at least as many asterisks. A longer run
+            // closes with its last ones; the rest belong to marks opened inside.
+            var search_from = i + star_count;
+            var matched = false;
+            while (search_from < text.len) {
+                const maybe_close = std.mem.indexOfScalarPos(u8, text, search_from, '*') orelse break;
+                var close_count: usize = 0;
+                while (maybe_close + close_count < text.len and text[maybe_close + close_count] == '*' and close_count < 3) close_count += 1;
+                if (close_count >= star_count) {
+                    if (i > plain_start) try spans.append(allocator, style.span(null, text[plain_start..i], ""));
+                    var inner_style = style;
+                    if (star_count != 1) inner_style.bold = true;
+                    if (star_count != 2) inner_style.italic = true;
+                    const close_at = maybe_close + close_count - star_count;
+                    try parseInlineInto(allocator, spans, text[i + star_count .. close_at], inner_style, depth + 1);
+                    i = close_at + star_count;
+                    plain_start = i;
+                    matched = true;
+                    break;
                 }
-                continue;
+                search_from = maybe_close + close_count;
             }
+            if (matched) continue;
         }
 
         i += 1;
     }
 
     if (plain_start < text.len) {
-        try spans.append(allocator, .{ .kind = .text, .text = text[plain_start..] });
+        try spans.append(allocator, style.span(null, text[plain_start..], ""));
     }
-
-    return spans.toOwnedSlice(allocator);
 }
 
 const LinkMatch = struct {
@@ -540,17 +791,7 @@ const LinkMatch = struct {
 
 fn findLink(text: []const u8, start: usize) ?LinkMatch {
     // [text](url) — the text_end ] must be followed immediately by (
-    var depth: u32 = 1;
-    var i = start + 1;
-    while (i < text.len) : (i += 1) {
-        if (text[i] == '[') depth += 1;
-        if (text[i] == ']') {
-            depth -= 1;
-            if (depth == 0) break;
-        }
-    }
-    if (i >= text.len or depth != 0) return null;
-    const text_close = i;
+    const text_close = findBracketClose(text, start) orelse return null;
     if (text_close + 1 >= text.len or text[text_close + 1] != '(') return null;
     const url_open = text_close + 2;
     const url_close = std.mem.indexOfScalarPos(u8, text, url_open, ')') orelse return null;
@@ -900,7 +1141,7 @@ const Renderer = struct {
     }
 
     // Lay out spans across multiple lines, wrapping on word boundaries.
-    // size_px = font size in points for all non-code spans. code is drawn at CODE_SIZE.
+    // size_px = font size in points for all non-code spans; code is drawn one point smaller.
     fn drawSpans(
         self: *Renderer,
         content: *document.ContentStream,
@@ -919,6 +1160,10 @@ const Renderer = struct {
             width: f32,
             url: []const u8,
             is_space: bool,
+            strike: bool,
+            underline: bool,
+            color: ?document.Color,
+            bg: ?document.Color,
         };
 
         var words: std.ArrayListUnmanaged(WordDraw) = .empty;
@@ -938,6 +1183,10 @@ const Renderer = struct {
                         .width = space_w,
                         .url = span.url,
                         .is_space = true,
+                        .strike = span.strike,
+                        .underline = span.underline,
+                        .color = span.color,
+                        .bg = span.bg,
                     });
                     i += 1;
                     continue;
@@ -952,6 +1201,10 @@ const Renderer = struct {
                     .width = w,
                     .url = span.url,
                     .is_space = false,
+                    .strike = span.strike,
+                    .underline = span.underline,
+                    .color = span.color,
+                    .bg = span.bg,
                 });
             }
         }
@@ -1021,7 +1274,31 @@ const Renderer = struct {
             }
         }
 
+        // Highlights go down first so the text is painted over them. Adjacent
+        // words sharing a highlight become one rectangle (no seams between them).
+        {
+            var x = x_start;
+            var run: ?document.Color = null;
+            var run_x0: f32 = 0;
+            for (words) |w| {
+                const same = if (run) |r| (if (w.bg) |b| sameColor(r, b) else false) else false;
+                if (!same) {
+                    if (run) |r| try drawHighlight(content, r, run_x0, x, self.current_y, size_px);
+                    run = w.bg;
+                    run_x0 = x;
+                }
+                x += w.width + (if (w.is_space) extra_per_gap else 0);
+            }
+            if (run) |r| try drawHighlight(content, r, run_x0, x, self.current_y, size_px);
+        }
+
         var x = x_start;
+        // A contiguous run of struck-through or underlined words in one colour
+        // gets one line across it, spaces included.
+        var strike_run: ?document.Color = null;
+        var strike_x0: f32 = 0;
+        var under_run: ?document.Color = null;
+        var under_x0: f32 = 0;
         // Track a contiguous run of link words (same URL) so the whole phrase
         // becomes one clickable annotation, even across the spaces within it.
         var link_active = false;
@@ -1032,12 +1309,25 @@ const Renderer = struct {
         for (words) |w| {
             const font_id = self.fontForSpan(w.kind);
             const effective_size = if (w.kind == .code) size_px - 1 else size_px;
-            const effective_color = switch (w.kind) {
+            const effective_color = w.color orelse switch (w.kind) {
                 .link => LINK_COLOR,
                 .code => INK_BLACK,
                 else => color,
             };
             try content.drawText(w.text, x, self.current_y, font_id, effective_size, effective_color);
+
+            const strike_same = if (strike_run) |r| w.strike and sameColor(r, effective_color) else false;
+            if (!strike_same) {
+                if (strike_run) |r| try drawTextRule(content, r, strike_x0, x, self.current_y + size_px * STRIKE_RISE, size_px);
+                strike_run = if (w.strike) effective_color else null;
+                strike_x0 = x;
+            }
+            const under_same = if (under_run) |r| w.underline and sameColor(r, effective_color) else false;
+            if (!under_same) {
+                if (under_run) |r| try drawTextRule(content, r, under_x0, x, self.current_y - size_px * UNDERLINE_DROP, size_px);
+                under_run = if (w.underline) effective_color else null;
+                under_x0 = x;
+            }
 
             const is_link = w.kind == .link and w.url.len > 0;
             if (is_link and link_active and std.mem.eql(u8, link_url, w.url)) {
@@ -1058,8 +1348,32 @@ const Renderer = struct {
             x += w.width + (if (w.is_space) extra_per_gap else 0);
         }
         if (link_active) self.flushLinkRun(link_url, link_x0, link_x1, size_px);
+        if (strike_run) |r| try drawTextRule(content, r, strike_x0, x, self.current_y + size_px * STRIKE_RISE, size_px);
+        if (under_run) |r| try drawTextRule(content, r, under_x0, x, self.current_y - size_px * UNDERLINE_DROP, size_px);
 
         self.current_y -= line_h;
+    }
+
+    // Where the strike and underline rules sit relative to the baseline, and
+    // how far a highlight reaches below and above it, as fractions of the
+    // font size (Helvetica: x-height 0.52, ascender 0.72, descender 0.21).
+    const STRIKE_RISE: f32 = 0.27;
+    const UNDERLINE_DROP: f32 = 0.13;
+    const HIGHLIGHT_BELOW: f32 = 0.25;
+    const HIGHLIGHT_ABOVE: f32 = 0.80;
+
+    fn sameColor(a: document.Color, b: document.Color) bool {
+        return a.r == b.r and a.g == b.g and a.b == b.b;
+    }
+
+    fn drawHighlight(content: *document.ContentStream, bg: document.Color, x0: f32, x1: f32, baseline: f32, size_px: f32) !void {
+        if (x1 <= x0) return;
+        try content.drawRect(x0 - 1, baseline - size_px * HIGHLIGHT_BELOW, x1 - x0 + 2, size_px * (HIGHLIGHT_BELOW + HIGHLIGHT_ABOVE), bg, null);
+    }
+
+    fn drawTextRule(content: *document.ContentStream, ink: document.Color, x0: f32, x1: f32, y: f32, size_px: f32) !void {
+        if (x1 <= x0) return;
+        try content.drawLine(x0, y, x1, y, ink, @max(0.5, size_px * 0.06));
     }
 
     // Record a clickable link annotation for a run drawn on the current line,
@@ -1100,11 +1414,8 @@ const Renderer = struct {
     fn promoteTextToBold(self: *Renderer, spans: []const Span) ![]Span {
         const out = try self.allocator.alloc(Span, spans.len);
         for (spans, 0..) |s, i| {
-            out[i] = .{
-                .kind = if (s.kind == .text) .bold else if (s.kind == .italic) .bold_italic else s.kind,
-                .text = s.text,
-                .url = s.url,
-            };
+            out[i] = s;
+            out[i].kind = if (s.kind == .text) .bold else if (s.kind == .italic) .bold_italic else s.kind;
         }
         return out;
     }
@@ -1599,4 +1910,224 @@ pub fn generateLetter(allocator: std.mem.Allocator, in: LetterInput) ![]u8 {
 
     const pdf_bytes = try renderer.render();
     return try allocator.dupe(u8, pdf_bytes);
+}
+
+// =============================================================================
+// Tests — inline marking
+// =============================================================================
+
+fn testSpans(arena: *std.heap.ArenaAllocator, text: []const u8) ![]const Span {
+    return parseInlineSpans(arena.allocator(), text);
+}
+
+fn expectColor(want: document.Color, got: ?document.Color) !void {
+    const g = got orelse return error.TestExpectedColor;
+    try std.testing.expectApproxEqAbs(want.r, g.r, 0.002);
+    try std.testing.expectApproxEqAbs(want.g, g.g, 0.002);
+    try std.testing.expectApproxEqAbs(want.b, g.b, 0.002);
+}
+
+test "~~strike~~ and ==highlight== mark only what they enclose" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const s = try testSpans(&arena, "keep ~~gone away~~ and ==look here== end");
+    try std.testing.expectEqual(@as(usize, 5), s.len);
+    try std.testing.expectEqualStrings("keep ", s[0].text);
+    try std.testing.expect(!s[0].strike and s[0].bg == null);
+    try std.testing.expectEqualStrings("gone away", s[1].text);
+    try std.testing.expect(s[1].strike and s[1].bg == null);
+    try std.testing.expectEqualStrings(" and ", s[2].text);
+    try std.testing.expect(!s[2].strike and s[2].bg == null);
+    try std.testing.expectEqualStrings("look here", s[3].text);
+    try std.testing.expect(!s[3].strike);
+    try expectColor(HIGHLIGHT_BG, s[3].bg);
+    try std.testing.expectEqualStrings(" end", s[4].text);
+}
+
+test "spaced == and ~~ in prose are not marks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "if a == b and c == d", "about ~~ 5 or ~~ 6", "==", "~~~~", "x ==y", "{--never closed" }) |text| {
+        const s = try testSpans(&arena, text);
+        try std.testing.expectEqual(@as(usize, 1), s.len);
+        try std.testing.expectEqualStrings(text, s[0].text);
+        try std.testing.expect(!s[0].strike and s[0].bg == null and s[0].color == null);
+    }
+}
+
+test "CriticMarkup substitution is a struck red deletion then a green insertion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const s = try testSpans(&arena, "We {~~recieve~>receive~~} it, {--not--}{++now++} {==noted==}.");
+    try std.testing.expectEqual(@as(usize, 9), s.len);
+    try std.testing.expectEqualStrings("recieve", s[1].text);
+    try std.testing.expect(s[1].strike);
+    try expectColor(DELETED_INK, s[1].color);
+    try expectColor(DELETED_BG, s[1].bg);
+    try std.testing.expectEqualStrings("receive", s[2].text);
+    try std.testing.expect(!s[2].strike);
+    try expectColor(INSERTED_INK, s[2].color);
+    try expectColor(INSERTED_BG, s[2].bg);
+    try std.testing.expectEqualStrings(" it, ", s[3].text);
+    try std.testing.expect(s[3].color == null and s[3].bg == null);
+    try std.testing.expectEqualStrings("not", s[4].text);
+    try std.testing.expect(s[4].strike);
+    try std.testing.expectEqualStrings("now", s[5].text);
+    try expectColor(INSERTED_INK, s[5].color);
+    try std.testing.expectEqualStrings("noted", s[7].text);
+    try expectColor(HIGHLIGHT_BG, s[7].bg);
+    try std.testing.expect(s[7].color == null);
+    // A substitution with no `~>` is not one.
+    const lit = try testSpans(&arena, "{~~no arrow~~}");
+    try std.testing.expect(!lit[0].strike and lit[0].color == null);
+}
+
+test "[text]{attrs} sets colour, highlight, strike and underline; unknown attrs leave the text alone" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const s = try testSpans(&arena, "[warn]{color=#ff0000 bg=#0f0 underline strike}");
+    try std.testing.expectEqual(@as(usize, 1), s.len);
+    try std.testing.expectEqualStrings("warn", s[0].text);
+    try expectColor(.{ .r = 1, .g = 0, .b = 0 }, s[0].color);
+    try expectColor(.{ .r = 0, .g = 1, .b = 0 }, s[0].bg);
+    try std.testing.expect(s[0].underline and s[0].strike);
+
+    for ([_][]const u8{ "[x]{nope}", "[x]{color=notacolour}", "[x]{color=#12345}", "[x]{color=#gggggg}", "[x]{}", "[x]{color=red", "[x] {color=red}" }) |text| {
+        const lit = try testSpans(&arena, text);
+        try std.testing.expectEqual(@as(usize, 1), lit.len);
+        try std.testing.expectEqualStrings(text, lit[0].text);
+        try std.testing.expect(lit[0].color == null);
+    }
+    // A link is still a link.
+    const link = try testSpans(&arena, "[site](https://example.com)");
+    try std.testing.expectEqual(SpanKind.link, link[0].kind);
+    try std.testing.expectEqualStrings("https://example.com", link[0].url);
+}
+
+test "marks nest: bold inside a deletion, a deletion inside bold, code keeps the marking" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = try testSpans(&arena, "{--old **very** `x`--}");
+    try std.testing.expectEqual(@as(usize, 4), a.len);
+    try std.testing.expectEqual(SpanKind.text, a[0].kind);
+    try std.testing.expectEqual(SpanKind.bold, a[1].kind);
+    try std.testing.expectEqualStrings("very", a[1].text);
+    try std.testing.expectEqual(SpanKind.code, a[3].kind);
+    for (a) |sp| try std.testing.expect(sp.strike);
+
+    const b = try testSpans(&arena, "**keep ~~drop~~ *lean***");
+    try std.testing.expectEqual(@as(usize, 4), b.len);
+    try std.testing.expectEqual(SpanKind.bold, b[0].kind);
+    try std.testing.expect(!b[0].strike);
+    try std.testing.expectEqual(SpanKind.bold, b[1].kind);
+    try std.testing.expect(b[1].strike);
+    try std.testing.expectEqual(SpanKind.bold_italic, b[3].kind);
+    try std.testing.expectEqualStrings("lean", b[3].text);
+}
+
+test "a backslash prints the mark character; an unclosed backtick prints once" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const s = try testSpans(&arena, "\\~~not struck~~ \\{--kept--}");
+    var joined: std.ArrayListUnmanaged(u8) = .empty;
+    for (s) |sp| {
+        try std.testing.expect(!sp.strike and sp.color == null);
+        try joined.appendSlice(arena.allocator(), sp.text);
+    }
+    try std.testing.expectEqualStrings("~~not struck~~ {--kept--}", joined.items);
+
+    const t = try testSpans(&arena, "cost is 5` per unit");
+    try std.testing.expectEqual(@as(usize, 1), t.len);
+    try std.testing.expectEqualStrings("cost is 5` per unit", t[0].text);
+}
+
+test "marks nested past the limit are printed as typed, and nothing is lost" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const levels = MAX_INLINE_DEPTH + 4;
+    var text: std.ArrayListUnmanaged(u8) = .empty;
+    for (0..levels) |_| try text.append(a, '[');
+    try text.append(a, 'x');
+    for (0..levels) |_| try text.appendSlice(a, "]{underline}");
+    const s = try parseInlineSpans(a, text.items);
+    var joined: std.ArrayListUnmanaged(u8) = .empty;
+    for (s) |sp| {
+        try std.testing.expect(sp.underline);
+        try joined.appendSlice(a, sp.text);
+    }
+    // The outer MAX_INLINE_DEPTH pairs are marks; the 4 inside them are text.
+    try std.testing.expectEqualStrings("[[[[x]{underline}]{underline}]{underline}]{underline}", joined.items);
+}
+
+test "bracketed text longer than MAX_BRACKET_TEXT is not a link or a marked span" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]struct { len: usize, marked: bool }{
+        .{ .len = MAX_BRACKET_TEXT - 1, .marked = true },
+        .{ .len = MAX_BRACKET_TEXT + 1, .marked = false },
+    }) |case| {
+        for ([_][]const u8{ "](https://example.com)", "]{strike}" }) |tail| {
+            var text: std.ArrayListUnmanaged(u8) = .empty;
+            try text.append(a, '[');
+            try text.appendNTimes(a, 'a', case.len);
+            try text.appendSlice(a, tail);
+            const s = try parseInlineSpans(a, text.items);
+            try std.testing.expectEqual(@as(usize, 1), s.len);
+            const is_marked = s[0].kind == .link or s[0].strike;
+            try std.testing.expectEqual(case.marked, is_marked);
+            try std.testing.expectEqual(if (case.marked) case.len else text.items.len, s[0].text.len);
+        }
+    }
+}
+
+test "parseColor accepts #rgb, #rrggbb and names, and nothing else" {
+    try expectColor(.{ .r = 1, .g = 0, .b = 0 }, parseColor("#f00"));
+    try expectColor(.{ .r = 0.2, .g = 0.4, .b = 0.6 }, parseColor("#336699"));
+    try expectColor(.{ .r = 0.725, .g = 0.110, .b = 0.110 }, parseColor("Red"));
+    for ([_][]const u8{ "", "#", "#12", "#1234", "#12345", "#1234567", "#gg0000", "336699", "reddish", "#+1+1+1", "#1_1_1_", "#-1-1-1" }) |bad| {
+        try std.testing.expect(parseColor(bad) == null);
+    }
+}
+
+/// Byte offset of `needle` in `hay`, failing the test when it is absent.
+fn mustFind(hay: []const u8, needle: []const u8) !usize {
+    return std.mem.indexOf(u8, hay, needle) orelse {
+        std.debug.print("missing in PDF: {s}\n", .{needle});
+        return error.TestExpectedInPdf;
+    };
+}
+
+test "a redline paints the highlight under the text and the strike over it" {
+    const pdf = try generateFromMarkdown(std.testing.allocator, "We {~~recieve~>receive~~} it.");
+    defer std.testing.allocator.free(pdf);
+    // Fill and stroke operators carry the colours (content streams are not
+    // compressed in test builds).
+    const del_bg = try mustFind(pdf, "0.996 0.886 0.886 rg");
+    const ins_bg = try mustFind(pdf, "0.863 0.988 0.906 rg");
+    const del_text = try mustFind(pdf, "(recieve) Tj");
+    const ins_text = try mustFind(pdf, "(receive) Tj");
+    const strike = try mustFind(pdf, "0.725 0.110 0.110 RG");
+    try std.testing.expect(del_bg < del_text and ins_bg < ins_text);
+    try std.testing.expect(strike > del_text);
+    // One strike only: the insertion is not struck.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, pdf, " RG\n"));
+    // Text outside the marks has no highlight behind it.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, pdf, " re\n"));
+}
+
+test "a redline inside a table cell renders in every column" {
+    const md =
+        "| Where | Now | Should be |\n|---|---|---|\n" ++
+        "| Page 3 | {--Glenlea--} | {++Glenlee++} |\n" ++
+        "| Page 7 | the {~~assesment~>assessment~~} date | ==check== |\n";
+    const pdf = try generateFromMarkdown(std.testing.allocator, md);
+    defer std.testing.allocator.free(pdf);
+    _ = try mustFind(pdf, "(Glenlea) Tj");
+    _ = try mustFind(pdf, "(Glenlee) Tj");
+    _ = try mustFind(pdf, "(assesment) Tj");
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, pdf, "0.996 0.886 0.886 rg")); // two deletions
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, pdf, "0.863 0.988 0.906 rg")); // two insertions
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, pdf, "0.996 0.941 0.541 rg")); // one highlight
 }
