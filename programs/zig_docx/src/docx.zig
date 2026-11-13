@@ -62,6 +62,8 @@ pub fn parseRgb(s: []const u8) ?Rgb {
     return out;
 }
 
+pub const Revision = enum { inserted, deleted };
+
 pub const Run = struct {
     text: []const u8,
     bold: bool = false,
@@ -82,6 +84,9 @@ pub const Run = struct {
     bg: ?Rgb = null,
     /// Font size in half-points (20 = 10pt); null keeps the style's size.
     half_points: ?u16 = null,
+    /// A Word tracked change: the run was inserted or deleted, by the author
+    /// and on the date in DocxWriterOptions. Null for ordinary text.
+    revision: ?Revision = null,
     hyperlink_url: ?[]const u8 = null,
     image_rel_id: ?[]const u8 = null,
 };
@@ -92,6 +97,10 @@ pub const Paragraph = struct {
     is_list_item: bool = false,
     is_ordered: bool = false, // ordered (1. 2. 3.) vs unordered (- * +)
     numbering_level: u8 = 0,
+    /// Keep on the same page as the next paragraph (a heading row, a title).
+    keep_next: bool = false,
+    /// Space after the paragraph in twentieths of a point; null keeps the style's.
+    spacing_after: ?u16 = null,
 };
 
 pub const TableCell = struct {
@@ -103,12 +112,25 @@ pub const TableCell = struct {
 
 pub const TableRow = struct {
     cells: []TableCell = &[_]TableCell{},
+    /// Repeat this row at the top of every page the table runs onto.
+    header: bool = false,
+    /// Keep the row whole: it moves to the next page rather than splitting.
+    cant_split: bool = false,
 };
 
 pub const Table = struct {
     rows: []TableRow = &[_]TableRow{},
     /// Column widths in twentieths of a point (dxa). Empty = auto-width.
     col_widths: []const u16 = &[_]u16{},
+    /// Border colour as hex ("BBBBBB"); null for Word's automatic colour.
+    border_color: ?[]const u8 = null,
+    /// Columns keep the widths given instead of growing to fit their text.
+    fixed_layout: bool = false,
+    /// Space between a cell's edge and its text, in twentieths of a point;
+    /// null keeps Word's default.
+    cell_margins: ?CellMargins = null,
+
+    pub const CellMargins = struct { top: u16, left: u16, bottom: u16, right: u16 };
 };
 
 pub const Element = union(enum) {

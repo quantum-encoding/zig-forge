@@ -411,6 +411,8 @@ zig-docx old.docx --compare new.docx -o changes.docx [--options sheet.json] [--t
 
 Every key but `groups` is optional and the values above are the defaults (`title` defaults to none). `key` is inline Markdown with the marks above, in the sheet's own colours; leave it out for a default key, set `""` for none. A top-level `items` array is one group without a name row; a group with `"name": ""` has no name row either. Colours take six hex digits with or without `#`, or a colour name. `mode` is `redline` or `tracked`; `orientation` is `landscape` or `portrait`; `date` is `YYYY-MM-DD` (midnight UTC) or an ISO 8601 timestamp and is left off the tracked changes when omitted. Errors name the fault: `InvalidJson`, `ExpectedString`, `InvalidColor`, `InvalidDate`, `InvalidMode`, `InvalidOrientation`.
 
+The sheet is laid out as a document (paragraphs and a table) and written by the same `docx_writer` as Markdown and FRA documents: rows can repeat as a header (`TableRow.header`) or refuse to split (`cant_split`), cells span columns (`col_span`), runs can be tracked changes (`Run.revision`, stamped with `DocxWriterOptions.revision_author` / `revision_date`), and pages can be landscape with their own margins (`landscape`, `margin`).
+
 The diff works on words and the whitespace between them (longest common subsequence), then reads like a proofreader's marks: a kept stretch that is only whitespace, or no longer than the changes either side of it, is folded into one replacement ("by similar standard of" → "with a"), and a change starts at a word rather than a space.
 
 ### PDF → Markdown

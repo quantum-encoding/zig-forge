@@ -46,6 +46,7 @@ pub const LetterheadImage = struct {
 pub const DocumentStyle = enum {
     default, // Calibri, blue headings, left-aligned
     minutes, // Arial, black bold+underline headings, justified text
+    sheet, // Calibri 10pt, en-GB, no space between paragraphs: tables of short entries
 };
 
 pub const DocxWriterOptions = struct {
@@ -63,6 +64,23 @@ pub const DocxWriterOptions = struct {
     page_footer: []const u8 = "",
     /// A4 paper (210 × 297 mm) instead of the application's default size.
     a4: bool = false,
+    /// Turn the page on its side.
+    landscape: bool = false,
+    /// Every page margin, in twentieths of a point (720 = half an inch);
+    /// null keeps the defaults. Header and footer sit half a margin in.
+    margin: ?u16 = null,
+    /// Who made the document's tracked changes (runs with a `revision`).
+    revision_author: []const u8 = "Reviewer",
+    /// When, as an xsd:dateTime; "" leaves the date off.
+    revision_date: []const u8 = "",
+};
+
+/// Numbers each tracked change (ids must be unique in a document) and
+/// carries the author and date every one of them is stamped with.
+const Revisions = struct {
+    author: []const u8,
+    date: []const u8,
+    next_id: u32 = 1,
 };
 
 /// What the section properties point at: the header and footer parts and the
@@ -72,12 +90,27 @@ const SectionParts = struct {
     text_header: bool = false,
     footer: bool = false,
     a4: bool = false,
+    landscape: bool = false,
+    margin: ?u16 = null,
 
     fn header(self: SectionParts) bool {
         return self.image_header or self.text_header;
     }
     fn any(self: SectionParts) bool {
-        return self.header() or self.footer or self.a4;
+        return self.header() or self.footer or self.a4 or self.landscape or self.margin != null;
+    }
+
+    /// Page width and height in twentieths of a point: A4 or US Letter
+    /// (the application's default), turned for landscape.
+    fn pageSize(self: SectionParts) struct { w: u32, h: u32 } {
+        const short: u32 = if (self.a4) 11906 else 12240;
+        const long: u32 = if (self.a4) 16838 else 15840;
+        return if (self.landscape) .{ .w = long, .h = short } else .{ .w = short, .h = long };
+    }
+
+    /// The width text runs across: the page less its left and right margins.
+    fn textWidth(self: SectionParts) u32 {
+        return self.pageSize().w - 2 * @as(u32, self.margin orelse 1440);
     }
 };
 
@@ -224,6 +257,8 @@ pub fn generateDocx(
         .text_header = !has_header and options.page_header.len > 0,
         .footer = options.page_footer.len > 0,
         .a4 = options.a4,
+        .landscape = options.landscape,
+        .margin = options.margin,
     };
     var letterhead_index: ?usize = null;
 
@@ -233,8 +268,9 @@ pub fn generateDocx(
 
     // Drawing object IDs must be unique per document; body images count up.
     var drawing_id_counter: u32 = 1;
+    var revisions = Revisions{ .author = options.revision_author, .date = options.revision_date };
 
-    const document_xml = try genDocumentXml(allocator, doc, &hyperlinks, &images, parts, &drawing_id_counter);
+    const document_xml = try genDocumentXml(allocator, doc, &hyperlinks, &images, parts, &drawing_id_counter, &revisions);
     defer allocator.free(document_xml);
 
     const content_types = try genContentTypes(allocator, has_lists, &images, parts);
@@ -248,6 +284,7 @@ pub fn generateDocx(
     try zip.addFile("word/styles.xml", switch (options.style) {
         .minutes => styles_minutes_xml,
         .default => styles_xml,
+        .sheet => styles_sheet_xml,
     });
 
     const doc_rels = try genDocumentRels(allocator, has_lists, &hyperlinks, &images, parts);
@@ -284,7 +321,7 @@ pub fn generateDocx(
         try zip.addFile("word/header1.xml", header_xml);
     }
     if (parts.footer) {
-        const footer_xml = try genPageFooterXml(allocator, options.page_footer, options.a4);
+        const footer_xml = try genPageFooterXml(allocator, options.page_footer, parts.textWidth());
         defer allocator.free(footer_xml);
         try zip.addFile("word/footer1.xml", footer_xml);
     }
@@ -414,6 +451,24 @@ const styles_minutes_xml =
     \\  <w:style w:type="paragraph" w:styleId="CodeBlock"><w:name w:val="Code Block"/><w:pPr><w:spacing w:before="80" w:after="80"/><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/></w:pPr><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New" w:cs="Courier New"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:style>
     \\  <w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/><w:pPr><w:ind w:left="720"/><w:pBdr><w:left w:val="single" w:sz="12" w:space="8" w:color="CCCCCC"/></w:pBdr></w:pPr><w:rPr><w:i/><w:color w:val="555555"/></w:rPr></w:style>
     \\  <w:style w:type="character" w:styleId="InlineCode"><w:name w:val="Inline Code"/><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New" w:cs="Courier New"/><w:sz w:val="20"/><w:szCs w:val="20"/><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/></w:rPr></w:style>
+    \\</w:styles>
+;
+
+// Sheet style: Calibri 10pt, British English, no space between paragraphs —
+// for documents that are mostly a table of short entries (the redline sheet).
+const styles_sheet_xml =
+    \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    \\<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+    \\  <w:docDefaults>
+    \\    <w:rPrDefault><w:rPr>
+    \\      <w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri"/>
+    \\      <w:sz w:val="20"/><w:szCs w:val="20"/><w:lang w:val="en-GB"/>
+    \\    </w:rPr></w:rPrDefault>
+    \\    <w:pPrDefault><w:pPr>
+    \\      <w:spacing w:after="0" w:line="240" w:lineRule="auto"/>
+    \\    </w:pPr></w:pPrDefault>
+    \\  </w:docDefaults>
+    \\  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>
     \\</w:styles>
 ;
 
@@ -573,6 +628,7 @@ fn genDocumentXml(
     images: *ImageCollector,
     parts: SectionParts,
     drawing_id: *u32,
+    revisions: *Revisions,
 ) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
@@ -590,8 +646,8 @@ fn genDocumentXml(
 
     for (doc.elements) |elem| {
         switch (elem) {
-            .paragraph => |p| try writeParagraph(allocator, &buf, &p, hyperlinks, images, drawing_id),
-            .table => |t| try writeTable(allocator, &buf, &t, hyperlinks, images, drawing_id),
+            .paragraph => |p| try writeParagraph(allocator, &buf, &p, hyperlinks, images, drawing_id, revisions),
+            .table => |t| try writeTable(allocator, &buf, &t, hyperlinks, images, drawing_id, revisions),
         }
     }
 
@@ -608,8 +664,17 @@ fn genDocumentXml(
             try buf.appendSlice(allocator, RID_FOOTER);
             try buf.appendSlice(allocator, "\"/>");
         }
-        if (parts.a4) try buf.appendSlice(allocator, "<w:pgSz w:w=\"11906\" w:h=\"16838\"/>");
-        if (parts.image_header) {
+        if (parts.a4 or parts.landscape) {
+            const size = parts.pageSize();
+            var tmp: [96]u8 = undefined;
+            try buf.appendSlice(allocator, try std.fmt.bufPrint(&tmp, "<w:pgSz w:w=\"{d}\" w:h=\"{d}\"{s}/>", .{
+                size.w, size.h, if (parts.landscape) " w:orient=\"landscape\"" else "",
+            }));
+        }
+        if (parts.margin) |m| {
+            var tmp: [160]u8 = undefined;
+            try buf.appendSlice(allocator, try std.fmt.bufPrint(&tmp, "<w:pgMar w:top=\"{d}\" w:right=\"{d}\" w:bottom=\"{d}\" w:left=\"{d}\" w:header=\"{d}\" w:footer=\"{d}\" w:gutter=\"0\"/>", .{ m, m, m, m, m / 2, m / 2 }));
+        } else if (parts.image_header) {
             try buf.appendSlice(allocator, "<w:pgMar w:top=\"1800\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\"/>");
         } else {
             try buf.appendSlice(allocator, "<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"708\" w:footer=\"708\"/>");
@@ -628,6 +693,7 @@ fn writeParagraph(
     hyperlinks: *HyperlinkCollector,
     images: *ImageCollector,
     drawing_id: *u32,
+    revisions: *Revisions,
 ) !void {
     // A page-break marker is a standalone paragraph whose only content is a
     // hard page break. Emit it and return — no style/run processing needed.
@@ -636,6 +702,8 @@ fn writeParagraph(
         return;
     }
 
+    // Paragraph properties in CT_PPrBase order: pStyle, keepNext, numPr,
+    // pBdr, spacing.
     try buf.appendSlice(allocator, "<w:p><w:pPr>");
 
     switch (p.style) {
@@ -647,16 +715,26 @@ fn writeParagraph(
         .heading6 => try buf.appendSlice(allocator, "<w:pStyle w:val=\"Heading6\"/>"),
         .code_block => try buf.appendSlice(allocator, "<w:pStyle w:val=\"CodeBlock\"/>"),
         .blockquote => try buf.appendSlice(allocator, "<w:pStyle w:val=\"Quote\"/>"),
-        .horizontal_rule => try buf.appendSlice(allocator, "<w:pBdr><w:bottom w:val=\"single\" w:sz=\"6\" w:space=\"1\" w:color=\"999999\"/></w:pBdr>"),
         .list_paragraph => try buf.appendSlice(allocator, "<w:pStyle w:val=\"ListParagraph\"/>"),
         else => {},
     }
+
+    if (p.keep_next) try buf.appendSlice(allocator, "<w:keepNext/>");
 
     if (p.is_list_item) {
         var tmp: [128]u8 = undefined;
         const num_id: u8 = if (p.is_ordered) 2 else 1;
         const s = try std.fmt.bufPrint(&tmp, "<w:numPr><w:ilvl w:val=\"{d}\"/><w:numId w:val=\"{d}\"/></w:numPr>", .{ p.numbering_level, num_id });
         try buf.appendSlice(allocator, s);
+    }
+
+    if (p.style == .horizontal_rule) {
+        try buf.appendSlice(allocator, "<w:pBdr><w:bottom w:val=\"single\" w:sz=\"6\" w:space=\"1\" w:color=\"999999\"/></w:pBdr>");
+    }
+
+    if (p.spacing_after) |after| {
+        var tmp: [48]u8 = undefined;
+        try buf.appendSlice(allocator, try std.fmt.bufPrint(&tmp, "<w:spacing w:after=\"{d}\"/>", .{after}));
     }
 
     try buf.appendSlice(allocator, "</w:pPr>");
@@ -672,6 +750,8 @@ fn writeParagraph(
             try buf.appendSlice(allocator, "</w:hyperlink>");
         } else if (run.image_rel_id) |_| {
             try writeImageRun(allocator, buf, &run, images, drawing_id);
+        } else if (run.revision) |rev| {
+            try writeRevisionRun(allocator, buf, &run, rev, revisions);
         } else {
             try writeRun(allocator, buf, &run);
         }
@@ -686,6 +766,31 @@ fn writeRun(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), run:
 
 fn writeHyperlinkRun(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), run: *const docx.Run) !void {
     try writeRunXml(allocator, buf, run, .hyperlink);
+}
+
+/// A run as a Word tracked change: `w:ins` around an ordinary run, or `w:del`
+/// around one whose text is `w:delText`. Each carries a document-unique id,
+/// the author and, when given, the date.
+fn writeRevisionRun(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), run: *const docx.Run, rev: docx.Revision, revisions: *Revisions) !void {
+    const tag = switch (rev) {
+        .inserted => "w:ins",
+        .deleted => "w:del",
+    };
+    var tmp: [48]u8 = undefined;
+    try buf.appendSlice(allocator, try std.fmt.bufPrint(&tmp, "<{s} w:id=\"{d}\" w:author=\"", .{ tag, revisions.next_id }));
+    revisions.next_id += 1;
+    try appendXmlEscaped(allocator, buf, revisions.author);
+    try buf.append(allocator, '"');
+    if (revisions.date.len > 0) {
+        try buf.appendSlice(allocator, " w:date=\"");
+        try appendXmlEscaped(allocator, buf, revisions.date);
+        try buf.append(allocator, '"');
+    }
+    try buf.append(allocator, '>');
+    try writeRunXml(allocator, buf, run, if (rev == .deleted) .deleted else .text);
+    try buf.appendSlice(allocator, "</");
+    try buf.appendSlice(allocator, tag);
+    try buf.append(allocator, '>');
 }
 
 /// Where a run is written: in ordinary text, as the text of a hyperlink
@@ -914,6 +1019,7 @@ fn writeTable(
     hyperlinks: *HyperlinkCollector,
     images: *ImageCollector,
     drawing_id: *u32,
+    revisions: *Revisions,
 ) !void {
     try buf.appendSlice(allocator, "<w:tbl><w:tblPr>\n  <w:tblStyle w:val=\"TableGrid\"/>\n");
 
@@ -931,16 +1037,23 @@ fn writeTable(
         \\  <w:jc w:val="center"/>
         \\  <w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>
         \\  <w:tblBorders>
-        \\    <w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>
-        \\    <w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>
-        \\    <w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>
-        \\    <w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>
-        \\    <w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>
-        \\    <w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>
-        \\  </w:tblBorders>
-        \\</w:tblPr>
         \\
     );
+    const border_color = t.border_color orelse "auto";
+    for ([_][]const u8{ "top", "left", "bottom", "right", "insideH", "insideV" }) |edge| {
+        try buf.appendSlice(allocator, "    <w:");
+        try buf.appendSlice(allocator, edge);
+        try buf.appendSlice(allocator, " w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"");
+        try appendXmlEscaped(allocator, buf, border_color);
+        try buf.appendSlice(allocator, "\"/>\n");
+    }
+    try buf.appendSlice(allocator, "  </w:tblBorders>\n");
+    if (t.fixed_layout) try buf.appendSlice(allocator, "  <w:tblLayout w:type=\"fixed\"/>\n");
+    if (t.cell_margins) |m| {
+        var tmp: [224]u8 = undefined;
+        try buf.appendSlice(allocator, try std.fmt.bufPrint(&tmp, "  <w:tblCellMar><w:top w:w=\"{d}\" w:type=\"dxa\"/><w:left w:w=\"{d}\" w:type=\"dxa\"/><w:bottom w:w=\"{d}\" w:type=\"dxa\"/><w:right w:w=\"{d}\" w:type=\"dxa\"/></w:tblCellMar>\n", .{ m.top, m.left, m.bottom, m.right }));
+    }
+    try buf.appendSlice(allocator, "</w:tblPr>\n");
 
     // A table has to declare its grid. ECMA-376 requires tblGrid, and without
     // it a reader has nothing to lay the columns out against: LibreOffice
@@ -977,15 +1090,32 @@ fn writeTable(
 
     for (t.rows) |row| {
         try buf.appendSlice(allocator, "<w:tr>");
-        for (row.cells, 0..) |cell, ci| {
+        if (row.header or row.cant_split) {
+            try buf.appendSlice(allocator, "<w:trPr>");
+            if (row.cant_split) try buf.appendSlice(allocator, "<w:cantSplit/>");
+            if (row.header) try buf.appendSlice(allocator, "<w:tblHeader/>");
+            try buf.appendSlice(allocator, "</w:trPr>");
+        }
+        // A cell spanning columns starts at grid column `col` and is as wide
+        // as the columns it covers.
+        var col: usize = 0;
+        for (row.cells) |cell| {
+            const span: usize = @max(cell.col_span, 1);
             try buf.appendSlice(allocator, "<w:tc><w:tcPr>");
-            if (ci < widths.len) {
+            if (col < widths.len) {
+                var w: u32 = 0;
+                for (widths[col..@min(col + span, widths.len)]) |cw| w += cw;
                 var tmp: [64]u8 = undefined;
-                const s = try std.fmt.bufPrint(&tmp, "<w:tcW w:w=\"{d}\" w:type=\"dxa\"/>", .{widths[ci]});
+                const s = try std.fmt.bufPrint(&tmp, "<w:tcW w:w=\"{d}\" w:type=\"dxa\"/>", .{w});
                 try buf.appendSlice(allocator, s);
             } else {
                 try buf.appendSlice(allocator, "<w:tcW w:w=\"0\" w:type=\"auto\"/>");
             }
+            if (span > 1) {
+                var tmp: [40]u8 = undefined;
+                try buf.appendSlice(allocator, try std.fmt.bufPrint(&tmp, "<w:gridSpan w:val=\"{d}\"/>", .{span}));
+            }
+            col += span;
             if (cell.shading) |fill| {
                 try buf.appendSlice(allocator, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"");
                 try appendXmlEscaped(allocator, buf, fill);
@@ -993,8 +1123,10 @@ fn writeTable(
             }
             try buf.appendSlice(allocator, "</w:tcPr>");
             for (cell.paragraphs) |p| {
-                try writeParagraph(allocator, buf, &p, hyperlinks, images, drawing_id);
+                try writeParagraph(allocator, buf, &p, hyperlinks, images, drawing_id, revisions);
             }
+            // A cell must end in a paragraph; Word refuses one that does not.
+            if (cell.paragraphs.len == 0) try buf.appendSlice(allocator, "<w:p/>");
             try buf.appendSlice(allocator, "</w:tc>");
         }
         try buf.appendSlice(allocator, "</w:tr>\n");
@@ -1052,7 +1184,7 @@ fn genTextHeaderXml(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
 
 /// A page footer reading "Page N of M" at the left and `text` at the right,
 /// small and grey. N and M are Word fields, so they are right on every page.
-fn genPageFooterXml(allocator: std.mem.Allocator, text: []const u8, a4: bool) ![]u8 {
+fn genPageFooterXml(allocator: std.mem.Allocator, text: []const u8, text_width: u32) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const rpr = "<w:rPr><w:color w:val=\"808080\"/><w:sz w:val=\"16\"/><w:szCs w:val=\"16\"/></w:rPr>";
@@ -1061,7 +1193,8 @@ fn genPageFooterXml(allocator: std.mem.Allocator, text: []const u8, a4: bool) ![
         \\<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:tabs><w:tab w:val="right" w:pos="
     );
     // The right tab stop sits at the right margin: the text width of the page.
-    try buf.appendSlice(allocator, if (a4) "9026" else "9360");
+    var width_buf: [16]u8 = undefined;
+    try buf.appendSlice(allocator, try std.fmt.bufPrint(&width_buf, "{d}", .{text_width}));
     try buf.appendSlice(allocator, "\"/></w:tabs></w:pPr>");
     const field = struct {
         fn write(a: std.mem.Allocator, b: *std.ArrayListUnmanaged(u8), r: []const u8, instr: []const u8) !void {
@@ -1229,8 +1362,9 @@ test "a markdown table declares a grid so readers can lay it out" {
     var images = ImageCollector.init(allocator);
     defer images.deinit();
     var drawing_id: u32 = 1;
+    var revisions = Revisions{ .author = "", .date = "" };
 
-    try writeTable(allocator, &buf, &table, &hyperlinks, &images, &drawing_id);
+    try writeTable(allocator, &buf, &table, &hyperlinks, &images, &drawing_id, &revisions);
 
     const xml = buf.items;
     try testing.expect(std.mem.indexOf(u8, xml, "<w:tblGrid>") != null);
@@ -1284,4 +1418,72 @@ test "newlines and tabs become breaks and tab stops; a deleted run uses delText"
         "<w:r><w:rPr></w:rPr><w:delText xml:space=\"preserve\">gone &amp; &lt;done&gt;</w:delText></w:r>",
         buf.items,
     );
+}
+
+test "rows repeat or hold together, cells span columns, tracked changes are numbered" {
+    const allocator = testing.allocator;
+    var ins_runs = [_]docx.Run{
+        .{ .text = "kept " },
+        .{ .text = "old", .revision = .deleted },
+        .{ .text = "new", .revision = .inserted },
+    };
+    var head_para = [_]docx.Paragraph{.{ .runs = &[_]docx.Run{}, .keep_next = true, .spacing_after = 0 }};
+    var body_para = [_]docx.Paragraph{.{ .runs = &ins_runs }};
+    var head_cells = [_]docx.TableCell{.{ .paragraphs = &head_para, .col_span = 2, .shading = "222222" }};
+    var body_cells = [_]docx.TableCell{ .{ .paragraphs = &body_para }, .{} };
+    var rows = [_]docx.TableRow{
+        .{ .cells = &head_cells, .header = true, .cant_split = true },
+        .{ .cells = &body_cells, .cant_split = true },
+    };
+    const table = docx.Table{
+        .rows = &rows,
+        .col_widths = &[_]u16{ 1000, 3000 },
+        .border_color = "BBBBBB",
+        .fixed_layout = true,
+        .cell_margins = .{ .top = 50, .left = 90, .bottom = 50, .right = 90 },
+    };
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    var hyperlinks = HyperlinkCollector.init(allocator);
+    defer hyperlinks.deinit();
+    var images = ImageCollector.init(allocator);
+    defer images.deinit();
+    var drawing_id: u32 = 1;
+    var revisions = Revisions{ .author = "Ed & Co", .date = "2026-01-02T00:00:00Z" };
+    try writeTable(allocator, &buf, &table, &hyperlinks, &images, &drawing_id, &revisions);
+    const xml = buf.items;
+
+    const has = struct {
+        fn f(hay: []const u8, needle: []const u8) bool {
+            return std.mem.indexOf(u8, hay, needle) != null;
+        }
+    }.f;
+    try testing.expect(has(xml, "<w:tr><w:trPr><w:cantSplit/><w:tblHeader/></w:trPr>"));
+    try testing.expect(has(xml, "<w:tcW w:w=\"4000\" w:type=\"dxa\"/><w:gridSpan w:val=\"2\"/><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"222222\"/>"));
+    try testing.expect(has(xml, "<w:pPr><w:keepNext/><w:spacing w:after=\"0\"/></w:pPr>"));
+    try testing.expect(has(xml, "<w:top w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"BBBBBB\"/>"));
+    try testing.expect(has(xml, "<w:tblLayout w:type=\"fixed\"/>"));
+    try testing.expect(has(xml, "<w:tblCellMar><w:top w:w=\"50\" w:type=\"dxa\"/>"));
+    try testing.expect(has(xml, "<w:del w:id=\"1\" w:author=\"Ed &amp; Co\" w:date=\"2026-01-02T00:00:00Z\"><w:r><w:rPr></w:rPr><w:delText xml:space=\"preserve\">old</w:delText></w:r></w:del>"));
+    try testing.expect(has(xml, "<w:ins w:id=\"2\" w:author=\"Ed &amp; Co\" w:date=\"2026-01-02T00:00:00Z\"><w:r><w:rPr></w:rPr><w:t xml:space=\"preserve\">new</w:t></w:r></w:ins>"));
+    // A cell with no paragraphs still ends in one.
+    try testing.expect(has(xml, "<w:tcW w:w=\"3000\" w:type=\"dxa\"/></w:tcPr><w:p/></w:tc>"));
+    try testing.expectEqual(@as(u32, 3), revisions.next_id);
+
+    // A table with none of the new properties is written as before.
+    buf.clearRetainingCapacity();
+    var plain_cells = [_]docx.TableCell{.{ .paragraphs = &body_para }};
+    var plain_rows = [_]docx.TableRow{.{ .cells = &plain_cells }};
+    try writeTable(allocator, &buf, &docx.Table{ .rows = &plain_rows }, &hyperlinks, &images, &drawing_id, &revisions);
+    try testing.expect(has(buf.items, "<w:tr><w:tc>"));
+    try testing.expect(has(buf.items, "w:color=\"auto\"/>\n  </w:tblBorders>\n</w:tblPr>"));
+}
+
+test "landscape A4 with narrow margins; the footer's tab stop follows the text width" {
+    const parts = SectionParts{ .a4 = true, .landscape = true, .margin = 720 };
+    try testing.expectEqual(@as(u32, 16838), parts.pageSize().w);
+    try testing.expectEqual(@as(u32, 15398), parts.textWidth());
+    try testing.expectEqual(@as(u32, 9026), (SectionParts{ .a4 = true }).textWidth());
+    try testing.expectEqual(@as(u32, 9360), (SectionParts{}).textWidth());
 }

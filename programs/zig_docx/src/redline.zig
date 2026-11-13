@@ -54,7 +54,6 @@ const writer = @import("docx_writer.zig");
 const md_parser = @import("md_parser.zig");
 const word_diff = @import("word_diff.zig");
 const zip = @import("zip.zig");
-const ZipWriter = @import("zip_writer.zig").ZipWriter;
 
 const Rgb = docx.Rgb;
 const Allocator = std.mem.Allocator;
@@ -287,18 +286,18 @@ fn digits(s: []const u8) bool {
 // ─── Page geometry ─────────────────────────────────────────────────
 
 /// A4 in twentieths of a point, and the margin on every side.
-const A4_SHORT: u32 = 11906;
-const A4_LONG: u32 = 16838;
-const MARGIN: u32 = 720;
+const A4_SHORT: u16 = 11906;
+const A4_LONG: u16 = 16838;
+const MARGIN: u16 = 720;
 
-fn textWidth(o: Orientation) u32 {
+fn textWidth(o: Orientation) u16 {
     return (if (o == .landscape) A4_LONG else A4_SHORT) - 2 * MARGIN;
 }
 
 /// Column widths: Where takes 17% of the text width, the rest is shared.
-fn columnWidths(sheet: *const Sheet, has_notes: bool, out: *[3]u32) []const u32 {
+fn columnWidths(sheet: *const Sheet, has_notes: bool, out: *[3]u16) []const u16 {
     const total = textWidth(sheet.orientation);
-    const where = total * 17 / 100;
+    const where: u16 = @intCast(@as(u32, total) * 17 / 100);
     out[0] = where;
     switch (sheet.mode) {
         .redline => {
@@ -311,7 +310,7 @@ fn columnWidths(sheet: *const Sheet, has_notes: bool, out: *[3]u32) []const u32 
                 out[1] = total - where;
                 return out[0..2];
             }
-            out[1] = (total - where) * 7 / 10;
+            out[1] = @intCast(@as(u32, total - where) * 7 / 10);
             out[2] = total - where - out[1];
             return out[0..3];
         },
@@ -321,131 +320,27 @@ fn columnWidths(sheet: *const Sheet, has_notes: bool, out: *[3]u32) []const u32 
 // ─── Generation ────────────────────────────────────────────────────
 
 /// The sheet as .docx bytes, allocated with `allocator` (the caller frees
-/// them). Working memory is an arena released before returning.
+/// them). The sheet is laid out as a docx.Document and written by
+/// docx_writer, the writer every other document here goes through; working
+/// memory is an arena released before returning.
 pub fn generate(allocator: Allocator, sheet: *const Sheet) ![]u8 {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const document_xml = try documentXml(arena, sheet);
-
-    var core: Buf = .empty;
-    try core.appendSlice(arena,
-        \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        \\<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>
-    );
-    try writer.appendXmlEscaped(arena, &core, sheet.title);
-    try core.appendSlice(arena, "</dc:title><dc:creator>");
-    try writer.appendXmlEscaped(arena, &core, sheet.author);
-    try core.appendSlice(arena, "</dc:creator></cp:coreProperties>");
-
-    var z = ZipWriter.init(allocator);
-    defer z.deinit();
-    try z.addFile("[Content_Types].xml", content_types_xml);
-    try z.addFile("_rels/.rels", package_rels_xml);
-    try z.addFile("word/document.xml", document_xml);
-    try z.addFile("word/_rels/document.xml.rels", document_rels_xml);
-    try z.addFile("word/styles.xml", styles_xml);
-    try z.addFile("docProps/core.xml", core.items);
-    return z.finish();
+    const doc = try buildDocument(arena, sheet);
+    const bytes = try writer.generateDocx(arena, &doc, .{
+        .title = sheet.title,
+        .author = sheet.author,
+        .style = .sheet,
+        .a4 = true,
+        .landscape = sheet.orientation == .landscape,
+        .margin = MARGIN,
+        .revision_author = sheet.author,
+        .revision_date = sheet.date,
+    });
+    return allocator.dupe(u8, bytes);
 }
-
-const content_types_xml =
-    \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-    \\<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>
-;
-
-const package_rels_xml =
-    \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-    \\<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>
-;
-
-const document_rels_xml =
-    \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-    \\<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>
-;
-
-const styles_xml =
-    \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-    \\<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri"/><w:sz w:val="20"/><w:szCs w:val="20"/><w:lang w:val="en-GB"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style></w:styles>
-;
-
-/// Writes the body: tracks the revision ids tracked changes need.
-const Body = struct {
-    arena: Allocator,
-    sheet: *const Sheet,
-    buf: Buf = .empty,
-    revision: u32 = 0,
-
-    fn add(self: *Body, s: []const u8) !void {
-        try self.buf.appendSlice(self.arena, s);
-    }
-
-    fn print(self: *Body, comptime fmt: []const u8, args: anytype) !void {
-        try self.buf.print(self.arena, fmt, args);
-    }
-
-    fn run(self: *Body, r: docx.Run) !void {
-        try writer.writeRunXml(self.arena, &self.buf, &r, .text);
-    }
-
-    /// Write `runs`, each stretch of neighbours that look the same as one run.
-    fn runsJoined(self: *Body, runs: []const docx.Run) !void {
-        var i: usize = 0;
-        while (i < runs.len) {
-            var j = i + 1;
-            while (j < runs.len and md_parser.sameLook(runs[i], runs[j])) j += 1;
-            var joined = runs[i];
-            if (j - i > 1) {
-                var text: Buf = .empty;
-                for (runs[i..j]) |r| try text.appendSlice(self.arena, r.text);
-                joined.text = text.items;
-            }
-            try self.run(joined);
-            i = j;
-        }
-    }
-
-    fn paraOpen(self: *Body, keep_next: bool, after: u32) !void {
-        try self.add("<w:p><w:pPr>");
-        if (keep_next) try self.add("<w:keepNext/>");
-        try self.print("<w:spacing w:after=\"{d}\"/></w:pPr>", .{after});
-    }
-
-    fn cellOpen(self: *Body, width: u32, span: usize, fill: ?Rgb) !void {
-        try self.print("<w:tc><w:tcPr><w:tcW w:w=\"{d}\" w:type=\"dxa\"/>", .{width});
-        if (span > 1) try self.print("<w:gridSpan w:val=\"{d}\"/>", .{span});
-        if (fill) |f| try self.print("<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{s}\"/>", .{&f});
-        try self.add("</w:tcPr>");
-    }
-
-    /// A cell holding one paragraph of one run.
-    fn textCell(self: *Body, width: u32, span: usize, fill: ?Rgb, r: docx.Run, keep_next: bool) !void {
-        try self.cellOpen(width, span, fill);
-        try self.paraOpen(keep_next, 0);
-        try self.run(r);
-        try self.add("</w:p></w:tc>");
-    }
-
-    fn noteParagraph(self: *Body, note: []const u8) !void {
-        try self.paraOpen(false, 0);
-        try self.run(.{ .text = note, .italic = true, .fg = self.sheet.colors.note, .half_points = 17 });
-        try self.add("</w:p>");
-    }
-
-    /// A tracked change's attributes: id, author and (when given) date.
-    fn revisionAttrs(self: *Body) !void {
-        self.revision += 1;
-        try self.print(" w:id=\"{d}\" w:author=\"", .{self.revision});
-        try writer.appendXmlEscaped(self.arena, &self.buf, self.sheet.author);
-        try self.add("\"");
-        if (self.sheet.date.len > 0) {
-            try self.add(" w:date=\"");
-            try writer.appendXmlEscaped(self.arena, &self.buf, self.sheet.date);
-            try self.add("\"");
-        }
-    }
-};
 
 fn hasNonSpace(s: []const u8) bool {
     for (s) |c| {
@@ -454,19 +349,49 @@ fn hasNonSpace(s: []const u8) bool {
     return false;
 }
 
-fn documentXml(arena: Allocator, sheet: *const Sheet) ![]const u8 {
-    var b = Body{ .arena = arena, .sheet = sheet };
-    const marks = sheet.colors.marks();
+/// Builds the sheet's elements; everything lives in the arena.
+const Builder = struct {
+    arena: Allocator,
 
-    try b.add(
-        \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        \\<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
-    );
+    fn paragraph(self: Builder, runs: []const docx.Run, opts: struct { keep_next: bool = false, after: ?u16 = null }) !docx.Paragraph {
+        return .{
+            .runs = try self.arena.dupe(docx.Run, runs),
+            .keep_next = opts.keep_next,
+            .spacing_after = opts.after,
+        };
+    }
+
+    /// `runs` with each stretch of neighbours that look the same joined into one.
+    fn joined(self: Builder, runs: []const docx.Run) ![]docx.Run {
+        var out: std.ArrayListUnmanaged(docx.Run) = .empty;
+        var i: usize = 0;
+        while (i < runs.len) {
+            var j = i + 1;
+            while (j < runs.len and runs[j].revision == runs[i].revision and md_parser.sameLook(runs[i], runs[j])) j += 1;
+            var run = runs[i];
+            if (j - i > 1) {
+                var text: Buf = .empty;
+                for (runs[i..j]) |r| try text.appendSlice(self.arena, r.text);
+                run.text = text.items;
+            }
+            try out.append(self.arena, run);
+            i = j;
+        }
+        return out.toOwnedSlice(self.arena);
+    }
+
+    fn cell(self: Builder, paragraphs: []const docx.Paragraph, fill: ?[]const u8, span: u16) !docx.TableCell {
+        return .{ .paragraphs = try self.arena.dupe(docx.Paragraph, paragraphs), .shading = fill, .col_span = span };
+    }
+};
+
+fn buildDocument(arena: Allocator, sheet: *const Sheet) !docx.Document {
+    const b = Builder{ .arena = arena };
+    const marks = sheet.colors.marks();
+    var elements: std.ArrayListUnmanaged(docx.Element) = .empty;
 
     if (sheet.title.len > 0) {
-        try b.paraOpen(false, 120);
-        try b.run(.{ .text = sheet.title, .bold = true, .half_points = 30 });
-        try b.add("</w:p>");
+        try elements.append(arena, .{ .paragraph = try b.paragraph(&.{.{ .text = sheet.title, .bold = true, .half_points = 30 }}, .{ .after = 120 }) });
     }
 
     const key = sheet.key orelse switch (sheet.mode) {
@@ -474,16 +399,13 @@ fn documentXml(arena: Allocator, sheet: *const Sheet) ![]const u8 {
         .tracked => default_tracked_key,
     };
     if (key.len > 0) {
-        try b.paraOpen(false, 160);
         const runs = try md_parser.parseInlineMarked(arena, key, marks);
-        for (runs) |r| {
-            if (r.text.len == 0) continue;
-            var plain = r;
-            plain.hyperlink_url = null;
-            plain.image_rel_id = null;
-            try b.run(plain);
+        // The sheet has no relationships for links or pictures: their text stays.
+        for (runs) |*r| {
+            r.hyperlink_url = null;
+            r.image_rel_id = null;
         }
-        try b.add("</w:p>");
+        try elements.append(arena, .{ .paragraph = .{ .runs = runs, .spacing_after = 160 } });
     }
 
     var has_notes = false;
@@ -492,19 +414,11 @@ fn documentXml(arena: Allocator, sheet: *const Sheet) ![]const u8 {
             if (it.note.len > 0) has_notes = true;
         }
     }
-    var widths_buf: [3]u32 = undefined;
+    var widths_buf: [3]u16 = undefined;
     const widths = columnWidths(sheet, has_notes, &widths_buf);
-    var total: u32 = 0;
-    for (widths) |w| total += w;
+    const columns: u16 = @intCast(widths.len);
 
-    // Table properties in CT_TblPr order: tblW, tblBorders, tblLayout, tblCellMar.
-    try b.print("<w:tbl><w:tblPr><w:tblW w:w=\"{d}\" w:type=\"dxa\"/><w:tblBorders>", .{total});
-    for ([_][]const u8{ "top", "left", "bottom", "right", "insideH", "insideV" }) |edge| {
-        try b.print("<w:{s} w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"{s}\"/>", .{ edge, &sheet.colors.border });
-    }
-    try b.add("</w:tblBorders><w:tblLayout w:type=\"fixed\"/><w:tblCellMar><w:top w:w=\"50\" w:type=\"dxa\"/><w:left w:w=\"90\" w:type=\"dxa\"/><w:bottom w:w=\"50\" w:type=\"dxa\"/><w:right w:w=\"90\" w:type=\"dxa\"/></w:tblCellMar></w:tblPr><w:tblGrid>");
-    for (widths) |w| try b.print("<w:gridCol w:w=\"{d}\"/>", .{w});
-    try b.add("</w:tblGrid>");
+    var rows: std.ArrayListUnmanaged(docx.TableRow) = .empty;
 
     // Header row, repeated at the top of every page.
     const labels = sheet.labels;
@@ -512,110 +426,90 @@ fn documentXml(arena: Allocator, sheet: *const Sheet) ![]const u8 {
         .redline => .{ labels.where, labels.before, labels.after },
         .tracked => .{ labels.where, labels.change, labels.note },
     };
-    try b.add("<w:tr><w:trPr><w:cantSplit/><w:tblHeader/></w:trPr>");
-    for (widths, 0..) |w, col| {
-        try b.textCell(w, 1, sheet.colors.header_fill, .{ .text = header_texts[col], .bold = true }, false);
+    var header_cells: [3]docx.TableCell = undefined;
+    for (header_cells[0..widths.len], header_texts[0..widths.len]) |*c, text| {
+        c.* = try b.cell(&.{try b.paragraph(&.{.{ .text = text, .bold = true }}, .{})}, &sheet.colors.header_fill, 1);
     }
-    try b.add("</w:tr>");
+    try rows.append(arena, .{ .cells = try arena.dupe(docx.TableCell, header_cells[0..widths.len]), .header = true, .cant_split = true });
 
+    var runs: std.ArrayListUnmanaged(docx.Run) = .empty;
     for (sheet.groups) |group| {
         if (group.name.len > 0) {
             // keepNext holds the name row on the page of the first item under it.
-            try b.add("<w:tr><w:trPr><w:cantSplit/></w:trPr>");
-            try b.textCell(total, widths.len, sheet.colors.group_fill, .{
-                .text = group.name,
-                .bold = true,
-                .fg = sheet.colors.group_text,
-            }, true);
-            try b.add("</w:tr>");
+            const name_para = try b.paragraph(&.{.{ .text = group.name, .bold = true, .fg = sheet.colors.group_text }}, .{ .keep_next = true });
+            try rows.append(arena, .{
+                .cells = try arena.dupe(docx.TableCell, &.{try b.cell(&.{name_para}, &sheet.colors.group_fill, columns)}),
+                .cant_split = true,
+            });
         }
         for (group.items) |item| {
-            try b.add("<w:tr><w:trPr><w:cantSplit/></w:trPr>");
-            try b.textCell(widths[0], 1, null, .{ .text = item.where, .bold = true }, false);
             const segs = try word_diff.diffWords(arena, item.before, item.after);
+            const where = try b.cell(&.{try b.paragraph(&.{.{ .text = item.where, .bold = true }}, .{})}, null, 1);
+            const note: ?docx.Paragraph = if (item.note.len > 0)
+                try b.paragraph(&.{.{ .text = item.note, .italic = true, .fg = sheet.colors.note, .half_points = 17 }}, .{})
+            else
+                null;
+
+            var cells: std.ArrayListUnmanaged(docx.TableCell) = .empty;
+            try cells.append(arena, where);
             switch (sheet.mode) {
                 .redline => {
                     // Now: kept words plain, removed words in the removed look.
-                    var runs: std.ArrayListUnmanaged(docx.Run) = .empty;
-                    try b.cellOpen(widths[1], 1, null);
-                    try b.paraOpen(false, 0);
+                    runs.clearRetainingCapacity();
                     for (segs) |s| {
                         if (s.before.len == 0) continue;
-                        const removed = s.kind == .changed and hasNonSpace(s.before);
                         const base = docx.Run{ .text = s.before };
-                        try runs.append(arena, if (removed) marks.removedLook(base) else base);
+                        try runs.append(arena, if (s.kind == .changed and hasNonSpace(s.before)) marks.removedLook(base) else base);
                     }
-                    try b.runsJoined(runs.items);
-                    try b.add("</w:p></w:tc>");
+                    try cells.append(arena, try b.cell(&.{.{ .runs = try b.joined(runs.items) }}, null, 1));
 
                     // Should be: kept words plain, added words in the added look, then the note.
                     runs.clearRetainingCapacity();
-                    try b.cellOpen(widths[2], 1, null);
-                    try b.paraOpen(false, 0);
                     for (segs) |s| {
                         if (s.after.len == 0) continue;
-                        const added = s.kind == .changed and hasNonSpace(s.after);
                         const base = docx.Run{ .text = s.after };
-                        try runs.append(arena, if (added) marks.addedLook(base) else base);
+                        try runs.append(arena, if (s.kind == .changed and hasNonSpace(s.after)) marks.addedLook(base) else base);
                     }
-                    try b.runsJoined(runs.items);
-                    try b.add("</w:p>");
-                    if (item.note.len > 0) try b.noteParagraph(item.note);
-                    try b.add("</w:tc>");
+                    const after_para = docx.Paragraph{ .runs = try b.joined(runs.items) };
+                    try cells.append(arena, if (note) |n| try b.cell(&.{ after_para, n }, null, 1) else try b.cell(&.{after_para}, null, 1));
                 },
                 .tracked => {
                     // Change: the old text with each change as a tracked
                     // deletion and insertion; accepting all gives the new text.
-                    try b.cellOpen(widths[1], 1, null);
-                    try b.paraOpen(false, 0);
+                    runs.clearRetainingCapacity();
                     for (segs) |s| {
                         if (s.kind == .same) {
-                            try b.run(.{ .text = s.before });
+                            try runs.append(arena, .{ .text = s.before });
                             continue;
                         }
-                        if (s.before.len > 0) {
-                            try b.add("<w:del");
-                            try b.revisionAttrs();
-                            try b.add(">");
-                            try writer.writeRunXml(arena, &b.buf, &docx.Run{ .text = s.before }, .deleted);
-                            try b.add("</w:del>");
-                        }
-                        if (s.after.len > 0) {
-                            try b.add("<w:ins");
-                            try b.revisionAttrs();
-                            try b.add(">");
-                            try b.run(.{ .text = s.after });
-                            try b.add("</w:ins>");
-                        }
+                        if (s.before.len > 0) try runs.append(arena, .{ .text = s.before, .revision = .deleted });
+                        if (s.after.len > 0) try runs.append(arena, .{ .text = s.after, .revision = .inserted });
                     }
-                    try b.add("</w:p></w:tc>");
+                    try cells.append(arena, try b.cell(&.{.{ .runs = try b.joined(runs.items) }}, null, 1));
                     if (widths.len == 3) {
-                        try b.cellOpen(widths[2], 1, null);
-                        if (item.note.len > 0) {
-                            try b.noteParagraph(item.note);
-                        } else {
-                            try b.paraOpen(false, 0);
-                            try b.add("</w:p>");
-                        }
-                        try b.add("</w:tc>");
+                        try cells.append(arena, if (note) |n| try b.cell(&.{n}, null, 1) else try b.cell(&.{.{}}, null, 1));
                     }
                 },
             }
-            try b.add("</w:tr>");
+            try rows.append(arena, .{ .cells = try cells.toOwnedSlice(arena), .cant_split = true });
         }
     }
-    try b.add("</w:tbl>");
 
-    // Word keeps a paragraph after a closing table; so does this.
-    try b.paraOpen(false, 0);
-    try b.add("</w:p>");
+    try elements.append(arena, .{ .table = .{
+        .rows = try rows.toOwnedSlice(arena),
+        .col_widths = try arena.dupe(u16, widths),
+        .border_color = &sheet.colors.border,
+        .fixed_layout = true,
+        .cell_margins = .{ .top = 50, .left = 90, .bottom = 50, .right = 90 },
+    } });
+    // Word keeps a paragraph after a closing table; so does the sheet.
+    try elements.append(arena, .{ .paragraph = .{} });
 
-    switch (sheet.orientation) {
-        .landscape => try b.print("<w:sectPr><w:pgSz w:w=\"{d}\" w:h=\"{d}\" w:orient=\"landscape\"/>", .{ A4_LONG, A4_SHORT }),
-        .portrait => try b.print("<w:sectPr><w:pgSz w:w=\"{d}\" w:h=\"{d}\"/>", .{ A4_SHORT, A4_LONG }),
-    }
-    try b.print("<w:pgMar w:top=\"{d}\" w:right=\"{d}\" w:bottom=\"{d}\" w:left=\"{d}\" w:header=\"360\" w:footer=\"360\" w:gutter=\"0\"/></w:sectPr></w:body></w:document>", .{ MARGIN, MARGIN, MARGIN, MARGIN });
-    return b.buf.items;
+    return .{
+        .elements = try elements.toOwnedSlice(arena),
+        .media = &.{},
+        .allocator = arena,
+    };
 }
 
 // ─── Comparing two documents ───────────────────────────────────────
@@ -765,6 +659,11 @@ fn contains(hay: []const u8, needle: []const u8) bool {
 
 fn countOf(hay: []const u8, needle: []const u8) usize {
     return std.mem.count(u8, hay, needle);
+}
+
+/// word/document.xml of the sheet, generated in full.
+fn documentXml(arena: Allocator, sheet: *const Sheet) ![]const u8 {
+    return documentOf(arena, try generate(arena, sheet));
 }
 
 /// word/document.xml of a generated .docx.
