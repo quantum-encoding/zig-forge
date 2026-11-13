@@ -66,6 +66,8 @@ pub const Paragraph = struct {
 pub const TableCell = struct {
     paragraphs: []Paragraph = &[_]Paragraph{},
     col_span: u16 = 1,
+    /// Cell background as a hex colour ("FFFF00"), or null for none.
+    shading: ?[]const u8 = null,
 };
 
 pub const TableRow = struct {

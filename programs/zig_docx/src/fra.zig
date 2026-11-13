@@ -72,6 +72,10 @@ pub const FraData = struct {
     remote_workers: []const u8 = "",
     other_occupants: []const u8 = "0",
 
+    /// Who uses the premises and how, printed above the occupancy table
+    /// ("Unoccupied at present; to be a licensed short-term let…"). Empty = none.
+    occupancy_notes: []const u8 = "",
+
     // Previous incidents
     previous_fires: []const u8 = "None",
     previous_false_alarms: []const u8 = "",
@@ -101,8 +105,12 @@ pub const ChecklistSection = struct {
     items: []const ChecklistItem = &[_]ChecklistItem{},
     additional_info: []const u8 = "",
     /// Image filenames keyed by section code (e.g. "1c-001.jpg", "7a-008.jpg").
-    /// Images are inserted after the checklist table as a photo evidence block.
+    /// Images are inserted after the section's Additional Information as a
+    /// photo evidence block.
     images: []const []const u8 = &[_][]const u8{},
+    /// A caption for each image, by position. A missing or empty caption
+    /// falls back to "Photo evidence N" (data URL) or the filename.
+    image_captions: []const []const u8 = &[_][]const u8{},
 };
 
 pub const ChecklistItem = struct {
@@ -190,15 +198,15 @@ pub fn generateFra(allocator: std.mem.Allocator, data: *const FraData) ![]u8 {
     try addHeading(allocator, &elements, "Previous Fires and False Alarms", .heading1);
     try addPreviousIncidentsTable(allocator, &elements, data);
 
-    // ── Checklist Sections (dynamic) ──
+    // ── Checklist Sections (dynamic), numbered 1, 2, 3… with lettered questions ──
     var last_category: []const u8 = "";
-    for (data.sections) |section| {
+    for (data.sections, 1..) |section, number| {
         // Print category heading if changed
         if (!std.mem.eql(u8, section.category, last_category)) {
             try addHeading(allocator, &elements, section.category, .heading1);
             last_category = section.category;
         }
-        try addChecklistSection(allocator, &elements, &section, data.image_dir, &media_list, &img_index);
+        try addChecklistSection(allocator, &elements, &section, number, data.image_dir, &media_list, &img_index);
     }
 
     // ── Scoring Matrix ──
@@ -233,10 +241,20 @@ pub fn generateFra(allocator: std.mem.Allocator, data: *const FraData) ![]u8 {
     // Document model (previously it was never freed).
     defer doc.deinit();
 
+    // Every page names the premises at the top and is numbered at the foot.
+    const page_header = if (data.client_postcode.len > 0)
+        try std.fmt.allocPrint(allocator, "Fire Risk Assessment \u{2013} {s}, {s}", .{ data.client_name, data.client_postcode })
+    else
+        try std.fmt.allocPrint(allocator, "Fire Risk Assessment \u{2013} {s}", .{data.client_name});
+    defer allocator.free(page_header);
+
     const opts = docx_writer.DocxWriterOptions{
         .title = "Fire Risk Assessment",
         .author = data.assessor_name,
         .date = data.assessment_date,
+        .page_header = page_header,
+        .page_footer = data.assessor_company,
+        .a4 = true,
     };
 
     return docx_writer.generateDocx(allocator, &doc, opts);
@@ -307,10 +325,10 @@ fn addCoverPage(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(
 
 fn addIntroductionBoilerplate(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element)) !void {
     try addParagraph(allocator, elements,
-        "The purpose of this report is to present the findings of the assessment in relation to the risk to life and property from a fire breaking out within the premises and to make recommendations to the duty holder of the premises in order to comply with Fire legislation.",
+        "The purpose of this report is to present the findings of the assessment in relation to the risk to life and property from a fire breaking out within the premises and to make recommendations to the duty holder of the premises in order to comply with fire legislation.",
     );
     try addParagraph(allocator, elements,
-        "The report does not address the risk of business continuity from fire; however, issues raised may if not addressed have the following implications:",
+        "The report does not address the risk to business continuity from fire; however, issues raised may, if not addressed, have the following implications:",
     );
 
     const implications = [_][]const u8{
@@ -325,7 +343,7 @@ fn addIntroductionBoilerplate(allocator: std.mem.Allocator, elements: *std.Array
     }
 
     try addItalicParagraph(allocator, elements,
-        "Please note that this report and any recommendations made within are based on the use and conditions observed and the information supplied to the assessor at the time. It is not intended to be exhaustive or conclusive, covering every hazard or potential risk, or to guarantee compliance with any statute regulation. It is offered to assist you in your continued management of potential risks",
+        "Please note that this report and any recommendations made within are based on the use and conditions observed and the information supplied to the assessor at the time. It is not intended to be exhaustive or conclusive, covering every hazard or potential risk, or to guarantee compliance with any statute or regulation. It is offered to assist you in your continued management of potential risks.",
     );
 }
 
@@ -334,16 +352,16 @@ fn addDeclarationBoilerplate(allocator: std.mem.Allocator, elements: *std.ArrayL
         "The contents of this document are based upon information that was obtained by visual examination of the premises, examination of available documentation, verbal information provided and non-formal discussion/questioning of staff. It should be noted that the visual examination of the premises was of a non-destructive nature. In addition, the fire alarm, fire detection system, air conditioning, fire dampers and emergency lighting received a visual inspection only.",
     );
     try addParagraph(allocator, elements,
-        "Comments relating to security measures relating to arson/willful fire raising are only in the context of this fire risk assessment, e.g. CCTV coverage. If further advice on security is required then a security specialist should be consulted.",
+        "Comments relating to security measures relating to arson/wilful fire-raising are only in the context of this fire risk assessment, e.g. CCTV coverage. If further advice on security is required then a security specialist should be consulted.",
     );
     try addParagraph(allocator, elements,
-        "No guarantee can be given that during any subsequent visit by Enforcing Authority Officers with statutory powers that non-compliances may be found resulting in enforcement procedures being instigated. Responsibility for any loss arising from such a discovery will not be accepted by the Fire Risk Assessor or associated companies.",
+        "No guarantee can be given that, during any subsequent visit by enforcing authority officers with statutory powers, non-compliances will not be found resulting in enforcement procedures being instigated. Responsibility for any loss arising from such a discovery will not be accepted by the Fire Risk Assessor or associated companies.",
     );
     try addParagraph(allocator, elements,
         "Failure to maintain the levels of fire protection provided, or the standards of routine fire precautions and safe working practices, may invalidate the Fire Risk Assessment.",
     );
     try addParagraph(allocator, elements,
-        "Whilst every care is taken to interpret the Acts, Regulations, Guidance and Approved Codes of Practices, these can only be authoritatively interpreted by Court of Law.",
+        "Whilst every care is taken to interpret the Acts, Regulations, Guidance and Approved Codes of Practice, these can only be authoritatively interpreted by a court of law.",
     );
 }
 
@@ -393,7 +411,7 @@ fn addMethodologyBoilerplate(allocator: std.mem.Allocator, elements: *std.ArrayL
         "The method used to undertake the risk assessment follows Publicly Available Specifications and is based on the framework as described within PAS 79:",
     );
     const steps = [_][]const u8{
-        "Assessment of the building, processes within the building and the person present or likely to be present within the building",
+        "Assessment of the building, processes within the building and the persons present or likely to be present within the building",
         "Identification of fire hazards and means of elimination or control of these hazards",
         "An assessment of likelihood of a fire",
         "Determine the fire prevention methods in place",
@@ -418,13 +436,13 @@ fn addSignaturesTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnma
     defer allocator.free(name_str);
 
     const rows_data = [_][2][]const u8{
-        .{ "Assessors Name (Print)", name_str },
-        .{ "Assessors Signature", "" },
+        .{ "Assessor's Name (Print)", name_str },
+        .{ "Assessor's Signature", "" },
         .{ "Date of Assessment", data.assessment_date },
         .{ "Review Date", data.review_date },
         .{ "", "" },
         .{ "Person(s) providing information during assessment", data.info_provider },
-        .{ "Competent person appointed under Regulation 17 of the Fire Scotland Regulations 2006 by the duty holder to implement fire safety measures", data.competent_person },
+        .{ "Competent person appointed under Regulation 17 of the Fire Safety (Scotland) Regulations 2006 by the duty holder to implement fire safety measures", data.competent_person },
         .{ "Signature of competent person", "" },
         .{ "Date", "" },
     };
@@ -467,7 +485,15 @@ fn addFireAlarmTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnman
 }
 
 fn addOccupancyTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), data: *const FraData) !void {
-    const rows_data = [_][2][]const u8{
+    if (data.occupancy_notes.len > 0) {
+        try addBoldParagraph(allocator, elements, "General:");
+        try addParagraph(allocator, elements, data.occupancy_notes);
+        try addBoldParagraph(allocator, elements, "Occupants most susceptible to risk from fire");
+    }
+    // Only the kinds of occupant the assessor filled in: a short-term let has
+    // sleeping occupants but no employees, a shop the reverse.
+    const all = [_][2][]const u8{
+        .{ "", "Maximum numbers within the premises at any one time" },
         .{ "Employees", data.max_employees },
         .{ "Visitors", data.max_visitors },
         .{ "Sleeping Occupants", data.sleeping_occupants },
@@ -476,14 +502,27 @@ fn addOccupancyTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnman
         .{ "Persons in remote areas", data.remote_workers },
         .{ "Others", data.other_occupants },
     };
-    try addKeyValueTable(allocator, elements, &rows_data);
+    var kept: [all.len][2][]const u8 = undefined;
+    var n: usize = 0;
+    for (all) |row| {
+        if (std.mem.trim(u8, row[1], " \t\r\n").len == 0) continue;
+        kept[n] = row;
+        n += 1;
+    }
+    if (n > 1) try addKeyValueTable(allocator, elements, kept[0..n]);
 }
 
 fn addPreviousIncidentsTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), data: *const FraData) !void {
-    const combined = try std.fmt.allocPrint(allocator, "{s} / {s}", .{ data.previous_fires, data.previous_false_alarms });
+    // One value when only one is given ("None"), both with a slash when both are.
+    const fires = std.mem.trim(u8, data.previous_fires, " \t\r\n");
+    const alarms = std.mem.trim(u8, data.previous_false_alarms, " \t\r\n");
+    const combined = if (fires.len > 0 and alarms.len > 0)
+        try std.fmt.allocPrint(allocator, "{s} / {s}", .{ fires, alarms })
+    else
+        try allocator.dupe(u8, if (fires.len > 0) fires else alarms);
     defer allocator.free(combined);
     const rows_data = [_][2][]const u8{
-        .{ "Fires / False Alarms", combined },
+        .{ "Fires or False Alarms", combined },
     };
     try addKeyValueTable(allocator, elements, &rows_data);
 }
@@ -499,9 +538,11 @@ const COL_3_ANSWER: u16 = 1233; // 3-column checklist: Yes/No
 const COL_3_ACTION: u16 = 1372; // 3-column checklist: Action Plan
 const COL_1_FULL: u16 = 8296; // Full-width single column
 
-fn addChecklistSection(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), section: *const ChecklistSection, image_dir: []const u8, media_list: *std.ArrayListUnmanaged(docx.MediaFile), img_index: *u32) !void {
-    // Section title as heading
-    try addHeading(allocator, elements, section.title, .heading2);
+fn addChecklistSection(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), section: *const ChecklistSection, number: usize, image_dir: []const u8, media_list: *std.ArrayListUnmanaged(docx.MediaFile), img_index: *u32) !void {
+    // "1. Electrical & Lightning": the number the notes ("1c- …") and the
+    // action plan ("See section 1c") refer to.
+    const numbered_title = try std.fmt.allocPrint(allocator, "{d}. {s}", .{ number, section.title });
+    defer allocator.free(numbered_title);
 
     if (section.items.len > 0) {
         // Build checklist table: header + items
@@ -510,17 +551,21 @@ fn addChecklistSection(allocator: std.mem.Allocator, elements: *std.ArrayListUnm
 
         // Header row
         const hdr_cells = try allocator.alloc(docx.TableCell, 3);
-        hdr_cells[0] = try makeBoldCell(allocator, section.title);
+        hdr_cells[0] = try makeBoldCell(allocator, numbered_title);
         hdr_cells[1] = try makeBoldCell(allocator, "Yes / No");
         hdr_cells[2] = try makeBoldCell(allocator, "Action Plan No.");
         try rows.append(allocator, .{ .cells = hdr_cells });
 
-        // Data rows
-        for (section.items) |item| {
+        // Data rows: "a) question"; a finding (No) is in red.
+        for (section.items, 0..) |item, i| {
+            const color: ?[]const u8 = if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, item.answer, " "), "no")) RED else null;
+            var letter_buf: [12]u8 = undefined;
+            const lettered = try std.fmt.allocPrint(allocator, "{s}) {s}", .{ itemLetter(&letter_buf, i), item.question });
+            defer allocator.free(lettered);
             const item_cells = try allocator.alloc(docx.TableCell, 3);
-            item_cells[0] = try makeCell(allocator, item.question);
-            item_cells[1] = try makeCell(allocator, item.answer);
-            item_cells[2] = try makeCell(allocator, item.action_ref);
+            item_cells[0] = try makeColoredCell(allocator, lettered, color);
+            item_cells[1] = try makeColoredCell(allocator, item.answer, color);
+            item_cells[2] = try makeColoredCell(allocator, item.action_ref, color);
             try rows.append(allocator, .{ .cells = item_cells });
         }
 
@@ -529,13 +574,35 @@ fn addChecklistSection(allocator: std.mem.Allocator, elements: *std.ArrayListUnm
             .rows = try rows.toOwnedSlice(allocator),
             .col_widths = col3_widths,
         } });
+    } else {
+        try addHeading(allocator, elements, numbered_title, .heading2);
+    }
+
+    // Additional information box: the notes the photos below illustrate.
+    if (section.additional_info.len > 0) {
+        var info_rows: std.ArrayListUnmanaged(docx.TableRow) = .empty;
+        defer info_rows.deinit(allocator);
+
+        const hdr = try allocator.alloc(docx.TableCell, 1);
+        hdr[0] = try makeBoldCell(allocator, "Additional Information");
+        try info_rows.append(allocator, .{ .cells = hdr });
+
+        const body_cell = try allocator.alloc(docx.TableCell, 1);
+        body_cell[0] = try makeCell(allocator, section.additional_info);
+        try info_rows.append(allocator, .{ .cells = body_cell });
+
+        const col1_widths = try allocator.dupe(u16, &[_]u16{COL_1_FULL});
+        try elements.append(allocator, .{ .table = .{
+            .rows = try info_rows.toOwnedSlice(allocator),
+            .col_widths = col1_widths,
+        } });
     }
 
     // Photo evidence — insert images for this section. Each entry is one of:
     //   • a base64 image data URL ("data:image/png;base64,…") decoded inline —
     //     the only form the freestanding web build can use (it has no fs); or
     //   • a filename resolved against image_dir and read from disk (native/CLI).
-    for (section.images) |img_entry| {
+    for (section.images, 0..) |img_entry, img_pos| {
         var ext: []const u8 = "jpg";
         var img_data: []u8 = undefined;
         var is_data_url = false;
@@ -574,9 +641,12 @@ fn addChecklistSection(allocator: std.mem.Allocator, elements: *std.ArrayListUnm
             continue;
         };
 
-        // Create an image paragraph with the media reference. A data URL has no
-        // meaningful name, so caption it generically.
-        const caption_text = if (is_data_url)
+        // Create an image paragraph with the media reference, captioned with the
+        // assessor's caption, or generically (a data URL has no meaningful name).
+        const given = if (img_pos < section.image_captions.len) std.mem.trim(u8, section.image_captions[img_pos], " \t\r\n") else "";
+        const caption_text = if (given.len > 0)
+            (allocator.dupe(u8, given) catch continue)
+        else if (is_data_url)
             (std.fmt.allocPrint(allocator, "Photo evidence {d}", .{img_index.*}) catch continue)
         else
             (std.fmt.allocPrint(allocator, "Photo: {s}", .{img_entry}) catch continue);
@@ -586,27 +656,18 @@ fn addChecklistSection(allocator: std.mem.Allocator, elements: *std.ArrayListUnm
             .image_rel_id = allocator.dupe(u8, media_name) catch null,
         };
         try elements.append(allocator, .{ .paragraph = .{ .style = .normal, .runs = img_run } });
+        // The assessor's caption is printed under the photo as well as being its alt text.
+        if (given.len > 0) try addItalicParagraph(allocator, elements, given);
     }
+}
 
-    // Additional information box
-    if (section.additional_info.len > 0) {
-        var info_rows: std.ArrayListUnmanaged(docx.TableRow) = .empty;
-        defer info_rows.deinit(allocator);
+const RED = "FF0000";
+const LETTERS = "abcdefghijklmnopqrstuvwxyz";
 
-        const hdr = try allocator.alloc(docx.TableCell, 1);
-        hdr[0] = try makeBoldCell(allocator, "Additional Information");
-        try info_rows.append(allocator, .{ .cells = hdr });
-
-        const body_cell = try allocator.alloc(docx.TableCell, 1);
-        body_cell[0] = try makeCell(allocator, section.additional_info);
-        try info_rows.append(allocator, .{ .cells = body_cell });
-
-        const col1_widths = try allocator.dupe(u16, &[_]u16{COL_1_FULL});
-        try elements.append(allocator, .{ .table = .{
-            .rows = try info_rows.toOwnedSlice(allocator),
-            .col_widths = col1_widths,
-        } });
-    }
+/// "a", "b", … for a section's questions; past the 26th, its number ("27").
+fn itemLetter(buf: *[12]u8, i: usize) []const u8 {
+    if (i < LETTERS.len) return LETTERS[i .. i + 1];
+    return std.fmt.bufPrint(buf, "{d}", .{i + 1}) catch "?";
 }
 
 // ─── Scoring Matrix ────────────────────────────────────────────────
@@ -632,9 +693,10 @@ fn addScoringMatrix(allocator: std.mem.Allocator, elements: *std.ArrayListUnmana
     for (matrix) |row_data| {
         const cells = try allocator.alloc(docx.TableCell, 4);
         cells[0] = try makeBoldCell(allocator, row_data[0]);
-        cells[1] = try makeCell(allocator, row_data[1]);
-        cells[2] = try makeCell(allocator, row_data[2]);
-        cells[3] = try makeCell(allocator, row_data[3]);
+        for (1..4) |c| {
+            cells[c] = try makeCell(allocator, row_data[c]);
+            cells[c].shading = riskFill(row_data[c]);
+        }
         try rows.append(allocator, .{ .cells = cells });
     }
 
@@ -662,7 +724,7 @@ fn addScoringMatrix(allocator: std.mem.Allocator, elements: *std.ArrayListUnmana
 
 fn addRiskRating(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), data: *const FraData) !void {
     try addParagraph(allocator, elements,
-        "Taking into account the fire prevention measures observed at the time of this risk assessment, it is considered, that the hazard from fire (likelihood of ignition) within the building is:",
+        "Taking into account the fire prevention measures observed at the time of this risk assessment, it is considered that the hazard from fire (likelihood of ignition) within the building is:",
     );
     try addBoldParagraph(allocator, elements, data.risk_likelihood);
 
@@ -678,7 +740,7 @@ fn addRiskRating(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged
         "A suitable risk-based control plan should involve effort and urgency that is proportional to risk.",
     );
     try addParagraph(allocator, elements,
-        "It is considered that the recommendations contained with the Action Plan should be implemented in order to reduce the likelihood of fire and subsequent consequences to reduce the Risk Level to Tolerable or trivial.",
+        "It is considered that the recommendations contained within the Action Plan should be implemented in order to reduce the likelihood of fire and subsequent consequences to reduce the Risk Level to Tolerable or Trivial.",
     );
 
     // Risk level table
@@ -697,6 +759,8 @@ fn addRiskRating(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged
         const cells = try allocator.alloc(docx.TableCell, 2);
         cells[0] = try makeBoldCell(allocator, level[0]);
         cells[1] = try makeCell(allocator, level[1]);
+        cells[0].shading = riskFill(level[0]);
+        cells[1].shading = riskFill(level[0]);
         try rows.append(allocator, .{ .cells = cells });
     }
 
@@ -705,6 +769,17 @@ fn addRiskRating(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged
         .rows = try rows.toOwnedSlice(allocator),
         .col_widths = risk_col_widths,
     } });
+}
+
+/// The colour of a risk level in the matrix and the risk level table:
+/// green Trivial, yellow Tolerable, orange Moderate, red Substantial and
+/// Intolerable.
+fn riskFill(label: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, label, "Trivial")) return "00B050";
+    if (std.mem.startsWith(u8, label, "Tolerable")) return "FFFF00";
+    if (std.mem.startsWith(u8, label, "Moderate")) return "FF9900";
+    if (std.mem.startsWith(u8, label, "Substantial") or std.mem.startsWith(u8, label, "Intolerable")) return "FF0000";
+    return null;
 }
 
 // ─── Action Plan ───────────────────────────────────────────────────
@@ -722,8 +797,8 @@ fn addActionPlanLegend(allocator: std.mem.Allocator, elements: *std.ArrayListUnm
 
     for (legend) |l| {
         const cells = try allocator.alloc(docx.TableCell, 2);
-        cells[0] = try makeBoldCell(allocator, l[0]);
-        cells[1] = try makeCell(allocator, l[1]);
+        cells[0] = try makeColoredCell(allocator, l[0], priorityColor(l[0]));
+        cells[1] = try makeColoredCell(allocator, l[1], priorityColor(l[0]));
         try rows.append(allocator, .{ .cells = cells });
     }
 
@@ -732,6 +807,14 @@ fn addActionPlanLegend(allocator: std.mem.Allocator, elements: *std.ArrayListUnm
         .rows = try rows.toOwnedSlice(allocator),
         .col_widths = legend_widths,
     } });
+}
+
+/// High red, Low blue, Advice green; Medium in the body colour.
+fn priorityColor(priority: []const u8) ?[]const u8 {
+    if (std.ascii.eqlIgnoreCase(priority, "High")) return RED;
+    if (std.ascii.eqlIgnoreCase(priority, "Low")) return "0070C0";
+    if (std.ascii.eqlIgnoreCase(priority, "Advice")) return "00B050";
+    return null;
 }
 
 fn addActionPlanTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), data: *const FraData) !void {
@@ -749,17 +832,20 @@ fn addActionPlanTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnma
     try rows.append(allocator, .{ .cells = hdr });
 
     for (data.actions) |action| {
+        // A High priority action is in red, as its legend line is.
+        const color: ?[]const u8 = if (std.ascii.eqlIgnoreCase(action.priority, "High")) RED else null;
         const cells = try allocator.alloc(docx.TableCell, 6);
-        cells[0] = try makeCell(allocator, action.number);
-        cells[1] = try makeCell(allocator, action.priority);
-        cells[2] = try makeCell(allocator, action.recommendation);
+        cells[0] = try makeColoredCell(allocator, action.number, color);
+        cells[1] = try makeColoredCell(allocator, action.priority, color);
+        cells[2] = try makeColoredCell(allocator, action.recommendation, color);
         cells[3] = try makeCell(allocator, action.comments);
         cells[4] = try makeCell(allocator, action.date);
         cells[5] = try makeCell(allocator, action.sign);
         try rows.append(allocator, .{ .cells = cells });
     }
 
-    const action_widths = try allocator.dupe(u16, &[_]u16{ 600, 900, 3800, 1500, 700, 796 });
+    // Priority wide enough for "Priority" and "Medium" on one line.
+    const action_widths = try allocator.dupe(u16, &[_]u16{ 650, 1100, 3550, 1500, 700, 796 });
     try elements.append(allocator, .{ .table = .{
         .rows = try rows.toOwnedSlice(allocator),
         .col_widths = action_widths,
@@ -879,15 +965,23 @@ fn addHeading(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(do
     try elements.append(allocator, .{ .paragraph = .{ .style = style, .runs = runs } });
 }
 
+/// One paragraph per line of `text`: a line break in Word text is not a new
+/// line, so "Act\nRegulations" would otherwise print as "Act Regulations".
 fn addParagraph(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), text: []const u8) !void {
-    const runs = try parseMarkedText(allocator, text);
-    try elements.append(allocator, .{ .paragraph = .{ .style = .normal, .runs = runs } });
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const runs = try parseMarkedText(allocator, std.mem.trimEnd(u8, raw, "\r"));
+        try elements.append(allocator, .{ .paragraph = .{ .style = .normal, .runs = runs } });
+    }
 }
 
 fn addBoldParagraph(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), text: []const u8) !void {
-    const runs = try allocator.alloc(docx.Run, 1);
-    runs[0] = .{ .text = try allocator.dupe(u8, text), .bold = true };
-    try elements.append(allocator, .{ .paragraph = .{ .style = .normal, .runs = runs } });
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const runs = try allocator.alloc(docx.Run, 1);
+        runs[0] = .{ .text = try allocator.dupe(u8, std.mem.trimEnd(u8, raw, "\r")), .bold = true };
+        try elements.append(allocator, .{ .paragraph = .{ .style = .normal, .runs = runs } });
+    }
 }
 
 fn addItalicParagraph(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), text: []const u8) !void {
@@ -906,10 +1000,25 @@ fn addListItem(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(d
     } });
 }
 
+/// A cell with one paragraph per line of `text` (markers apply per line).
 fn makeCell(allocator: std.mem.Allocator, text: []const u8) !docx.TableCell {
-    const runs = try parseMarkedText(allocator, text);
-    const paras = try allocator.alloc(docx.Paragraph, 1);
-    paras[0] = .{ .style = .normal, .runs = runs };
+    return makeColoredCell(allocator, text, null);
+}
+
+/// As makeCell, with every run in `color` ("FF0000") when one is given.
+fn makeColoredCell(allocator: std.mem.Allocator, text: []const u8, color: ?[]const u8) !docx.TableCell {
+    const paras = try allocator.alloc(docx.Paragraph, std.mem.count(u8, text, "\n") + 1);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var i: usize = 0;
+    while (lines.next()) |raw| : (i += 1) {
+        const runs = try parseMarkedText(allocator, std.mem.trimEnd(u8, raw, "\r"));
+        if (color) |c| {
+            for (runs) |*r| {
+                if (r.color == null) r.color = c;
+            }
+        }
+        paras[i] = .{ .style = .normal, .runs = runs };
+    }
     return .{ .paragraphs = paras };
 }
 
@@ -1105,6 +1214,7 @@ pub fn parseFraJson(allocator: std.mem.Allocator, json_str: []const u8) !FraData
     if (getStr(obj, "young_persons")) |v| data.young_persons = try allocator.dupe(u8, v);
     if (getStr(obj, "remote_workers")) |v| data.remote_workers = try allocator.dupe(u8, v);
     if (getStr(obj, "other_occupants")) |v| data.other_occupants = try allocator.dupe(u8, v);
+    if (getStr(obj, "occupancy_notes")) |v| data.occupancy_notes = try allocator.dupe(u8, v);
     if (getStr(obj, "previous_fires")) |v| data.previous_fires = try allocator.dupe(u8, v);
     if (getStr(obj, "previous_false_alarms")) |v| data.previous_false_alarms = try allocator.dupe(u8, v);
     if (getStr(obj, "risk_likelihood")) |v| data.risk_likelihood = try allocator.dupe(u8, v);
@@ -1153,6 +1263,15 @@ pub fn parseFraJson(allocator: std.mem.Allocator, json_str: []const u8) !FraData
                             }
                         }
                         section.images = try imgs.toOwnedSlice(allocator);
+                    }
+                }
+                if (sobj.get("image_captions")) |caps_val| {
+                    if (caps_val == .array) {
+                        var caps: std.ArrayListUnmanaged([]const u8) = .empty;
+                        for (caps_val.array.items) |cap_val| {
+                            try caps.append(allocator, try allocator.dupe(u8, if (cap_val == .string) cap_val.string else ""));
+                        }
+                        section.image_captions = try caps.toOwnedSlice(allocator);
                     }
                 }
 
@@ -1240,4 +1359,70 @@ test "generateFra embeds a base64 section image" {
     try std.testing.expect(docx_bytes.len > 1000);
     try std.testing.expect(docx_bytes[0] == 'P' and docx_bytes[1] == 'K');
     try std.testing.expect(std.mem.indexOf(u8, docx_bytes, "media/image1.png") != null);
+}
+
+test "itemLetter letters a section's questions and numbers past the 26th" {
+    var buf: [12]u8 = undefined;
+    try std.testing.expectEqualStrings("a", itemLetter(&buf, 0));
+    try std.testing.expectEqualStrings("z", itemLetter(&buf, 25));
+    try std.testing.expectEqualStrings("27", itemLetter(&buf, 26));
+}
+
+test "riskFill colours each risk level as the matrix shows it" {
+    try std.testing.expectEqualStrings("00B050", riskFill("Trivial Risk").?);
+    try std.testing.expectEqualStrings("FFFF00", riskFill("Tolerable").?);
+    try std.testing.expectEqualStrings("FF9900", riskFill("Moderate Risk").?);
+    try std.testing.expectEqualStrings("FF0000", riskFill("Intolerable Risk").?);
+    try std.testing.expect(riskFill("LOW") == null);
+}
+
+test "makeColoredCell puts each line in its own paragraph, in the colour given" {
+    const allocator = std.testing.allocator;
+    const cell = try makeColoredCell(allocator, "Fit a self-closer\r\nSee section 11c", RED);
+    defer {
+        for (cell.paragraphs) |p| {
+            for (p.runs) |r| allocator.free(r.text);
+            allocator.free(p.runs);
+        }
+        allocator.free(cell.paragraphs);
+    }
+    try std.testing.expectEqual(@as(usize, 2), cell.paragraphs.len);
+    try std.testing.expectEqualStrings("Fit a self-closer", cell.paragraphs[0].runs[0].text);
+    try std.testing.expectEqualStrings("See section 11c", cell.paragraphs[1].runs[0].text);
+    try std.testing.expectEqualStrings(RED, cell.paragraphs[1].runs[0].color.?);
+}
+
+test "generateFra renders a short-term let with notes, captions, findings and actions without leaking" {
+    const allocator = std.testing.allocator;
+    const items = [_]ChecklistItem{
+        .{ .question = "Has the fixed installation been inspected and tested within the last 5 years", .answer = "No", .action_ref = "1" },
+        .{ .question = "Is the installation free from temporary wiring", .answer = "Yes" },
+    };
+    const png_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAFElEQVR42mNk+M9Qz0BkYBxVSF+FAP+FAQWZ7nUgAAAAAElFTkSuQmCC";
+    const images = [_][]const u8{png_url};
+    const captions = [_][]const u8{"1a Consumer unit label"};
+    const sections = [_]ChecklistSection{.{
+        .category = "Sources of Ignition",
+        .title = "Electrical & Lightning",
+        .items = &items,
+        .additional_info = "1a- No record of recent mains electrical testing.\nLightning protection not required.",
+        .images = &images,
+        .image_captions = &captions,
+    }};
+    const actions = [_]ActionItem{.{ .number = "1", .priority = "High", .recommendation = "EICR to be carried out\nSee section 1a" }};
+    const data = FraData{
+        .assessor_company = "Example Assessors Ltd",
+        .client_name = "Test Flat (fake)",
+        .client_postcode = "G1 1ZZ",
+        .occupancy_notes = "Unoccupied at present.\nTo be a licensed short-term let.",
+        .sleeping_occupants = "4",
+        .previous_false_alarms = "",
+        .sections = &sections,
+        .actions = &actions,
+    };
+    const docx_bytes = try generateFra(allocator, &data);
+    defer allocator.free(docx_bytes);
+    try std.testing.expect(docx_bytes[0] == 'P' and docx_bytes[1] == 'K');
+    try std.testing.expect(std.mem.indexOf(u8, docx_bytes, "word/footer1.xml") != null);
+    try std.testing.expect(std.mem.indexOf(u8, docx_bytes, "word/header1.xml") != null);
 }

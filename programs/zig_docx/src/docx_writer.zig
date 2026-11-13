@@ -18,6 +18,7 @@ const ZipWriter = @import("zip_writer.zig").ZipWriter;
 const RID_STYLES = "rId1";
 const RID_NUMBERING = "rId2";
 const RID_HEADER = "rId5";
+const RID_FOOTER = "rId6";
 const RID_HEADER_IMAGE = "rIdHdr1";
 const RID_HYPERLINK_BASE: usize = 10;
 const RID_IMAGE_BASE: usize = 100;
@@ -54,6 +55,30 @@ pub const DocxWriterOptions = struct {
     date: []const u8 = "",
     letterhead: ?LetterheadImage = null,
     style: DocumentStyle = .default,
+    /// A line of text at the top right of every page. Ignored when there is a
+    /// letterhead, which owns the page header.
+    page_header: []const u8 = "",
+    /// Text at the right of a footer that reads "Page N of M" on every page.
+    /// Empty = no footer.
+    page_footer: []const u8 = "",
+    /// A4 paper (210 × 297 mm) instead of the application's default size.
+    a4: bool = false,
+};
+
+/// What the section properties point at: the header and footer parts and the
+/// page size.
+const SectionParts = struct {
+    image_header: bool = false,
+    text_header: bool = false,
+    footer: bool = false,
+    a4: bool = false,
+
+    fn header(self: SectionParts) bool {
+        return self.image_header or self.text_header;
+    }
+    fn any(self: SectionParts) bool {
+        return self.header() or self.footer or self.a4;
+    }
 };
 
 /// Tracks hyperlink URLs and assigns relationship IDs during document generation.
@@ -194,6 +219,12 @@ pub fn generateDocx(
     // letterhead's entry index at add time — the previous "last entry" pattern
     // was a sequencing invariant waiting to break.
     const has_header = options.letterhead != null;
+    const parts = SectionParts{
+        .image_header = has_header,
+        .text_header = !has_header and options.page_header.len > 0,
+        .footer = options.page_footer.len > 0,
+        .a4 = options.a4,
+    };
     var letterhead_index: ?usize = null;
 
     if (options.letterhead) |lh| {
@@ -203,10 +234,10 @@ pub fn generateDocx(
     // Drawing object IDs must be unique per document; body images count up.
     var drawing_id_counter: u32 = 1;
 
-    const document_xml = try genDocumentXml(allocator, doc, &hyperlinks, &images, has_header, &drawing_id_counter);
+    const document_xml = try genDocumentXml(allocator, doc, &hyperlinks, &images, parts, &drawing_id_counter);
     defer allocator.free(document_xml);
 
-    const content_types = try genContentTypes(allocator, has_lists, &images, has_header);
+    const content_types = try genContentTypes(allocator, has_lists, &images, parts);
     defer allocator.free(content_types);
     try zip.addFile("[Content_Types].xml", content_types);
 
@@ -219,7 +250,7 @@ pub fn generateDocx(
         .default => styles_xml,
     });
 
-    const doc_rels = try genDocumentRels(allocator, has_lists, &hyperlinks, &images, has_header);
+    const doc_rels = try genDocumentRels(allocator, has_lists, &hyperlinks, &images, parts);
     defer allocator.free(doc_rels);
     try zip.addFile("word/_rels/document.xml.rels", doc_rels);
 
@@ -245,6 +276,17 @@ pub fn generateDocx(
         const header_rels = try genHeaderRels(allocator, media_target);
         defer allocator.free(header_rels);
         try zip.addFile("word/_rels/header1.xml.rels", header_rels);
+    }
+
+    if (parts.text_header) {
+        const header_xml = try genTextHeaderXml(allocator, options.page_header);
+        defer allocator.free(header_xml);
+        try zip.addFile("word/header1.xml", header_xml);
+    }
+    if (parts.footer) {
+        const footer_xml = try genPageFooterXml(allocator, options.page_footer, options.a4);
+        defer allocator.free(footer_xml);
+        try zip.addFile("word/footer1.xml", footer_xml);
     }
 
     if (options.title.len > 0 or options.author.len > 0) {
@@ -395,7 +437,7 @@ const numbering_xml =
 
 // ── Dynamic XML generators ──────────────────────────────────────
 
-fn genContentTypes(allocator: std.mem.Allocator, has_numbering: bool, images: *const ImageCollector, has_header: bool) ![]u8 {
+fn genContentTypes(allocator: std.mem.Allocator, has_numbering: bool, images: *const ImageCollector, parts: SectionParts) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
 
@@ -438,9 +480,15 @@ fn genContentTypes(allocator: std.mem.Allocator, has_numbering: bool, images: *c
         try buf.appendSlice(allocator, "\"/>\n");
     }
 
-    if (has_header) {
+    if (parts.header()) {
         try buf.appendSlice(allocator,
             \\  <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+            \\
+        );
+    }
+    if (parts.footer) {
+        try buf.appendSlice(allocator,
+            \\  <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>
             \\
         );
     }
@@ -462,7 +510,7 @@ fn imageContentType(ext: []const u8) []const u8 {
     return "application/octet-stream";
 }
 
-fn genDocumentRels(allocator: std.mem.Allocator, has_numbering: bool, hyperlinks: *const HyperlinkCollector, images: *const ImageCollector, has_header: bool) ![]u8 {
+fn genDocumentRels(allocator: std.mem.Allocator, has_numbering: bool, hyperlinks: *const HyperlinkCollector, images: *const ImageCollector, parts: SectionParts) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
 
@@ -504,10 +552,15 @@ fn genDocumentRels(allocator: std.mem.Allocator, has_numbering: bool, hyperlinks
         try buf.appendSlice(allocator, "\"/>\n");
     }
 
-    if (has_header) {
+    if (parts.header()) {
         try buf.appendSlice(allocator, "  <Relationship Id=\"");
         try buf.appendSlice(allocator, RID_HEADER);
         try buf.appendSlice(allocator, "\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/header\" Target=\"header1.xml\"/>\n");
+    }
+    if (parts.footer) {
+        try buf.appendSlice(allocator, "  <Relationship Id=\"");
+        try buf.appendSlice(allocator, RID_FOOTER);
+        try buf.appendSlice(allocator, "\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer\" Target=\"footer1.xml\"/>\n");
     }
     try buf.appendSlice(allocator, "</Relationships>");
     return allocator.dupe(u8, buf.items);
@@ -518,7 +571,7 @@ fn genDocumentXml(
     doc: *const docx.Document,
     hyperlinks: *HyperlinkCollector,
     images: *ImageCollector,
-    has_header: bool,
+    parts: SectionParts,
     drawing_id: *u32,
 ) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -542,11 +595,25 @@ fn genDocumentXml(
         }
     }
 
-    if (has_header) {
-        try buf.appendSlice(allocator, "<w:sectPr><w:headerReference w:type=\"default\" r:id=\"");
-        try buf.appendSlice(allocator, RID_HEADER);
-        try buf.appendSlice(allocator, "\"/>");
-        try buf.appendSlice(allocator, "<w:pgMar w:top=\"1800\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\"/>");
+    if (parts.any()) {
+        // Schema order: header and footer references, then page size, then margins.
+        try buf.appendSlice(allocator, "<w:sectPr>");
+        if (parts.header()) {
+            try buf.appendSlice(allocator, "<w:headerReference w:type=\"default\" r:id=\"");
+            try buf.appendSlice(allocator, RID_HEADER);
+            try buf.appendSlice(allocator, "\"/>");
+        }
+        if (parts.footer) {
+            try buf.appendSlice(allocator, "<w:footerReference w:type=\"default\" r:id=\"");
+            try buf.appendSlice(allocator, RID_FOOTER);
+            try buf.appendSlice(allocator, "\"/>");
+        }
+        if (parts.a4) try buf.appendSlice(allocator, "<w:pgSz w:w=\"11906\" w:h=\"16838\"/>");
+        if (parts.image_header) {
+            try buf.appendSlice(allocator, "<w:pgMar w:top=\"1800\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\"/>");
+        } else {
+            try buf.appendSlice(allocator, "<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"708\" w:footer=\"708\"/>");
+        }
         try buf.appendSlice(allocator, "</w:sectPr>");
     }
 
@@ -865,6 +932,11 @@ fn writeTable(
             } else {
                 try buf.appendSlice(allocator, "<w:tcW w:w=\"0\" w:type=\"auto\"/>");
             }
+            if (cell.shading) |fill| {
+                try buf.appendSlice(allocator, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"");
+                try appendXmlEscaped(allocator, buf, fill);
+                try buf.appendSlice(allocator, "\"/>");
+            }
             try buf.appendSlice(allocator, "</w:tcPr>");
             for (cell.paragraphs) |p| {
                 try writeParagraph(allocator, buf, &p, hyperlinks, images, drawing_id);
@@ -910,6 +982,59 @@ fn genCoreProps(allocator: std.mem.Allocator, options: DocxWriterOptions) ![]u8 
 }
 
 // ── Header XML (letterhead) ─────────────────────────────────────
+
+/// A page header holding one line of small grey text at the right.
+fn genTextHeaderXml(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.appendSlice(allocator,
+        \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        \\<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:rPr><w:color w:val="808080"/><w:sz w:val="16"/><w:szCs w:val="16"/></w:rPr><w:t xml:space="preserve">
+    );
+    try appendXmlEscaped(allocator, &buf, text);
+    try buf.appendSlice(allocator, "</w:t></w:r></w:p></w:hdr>");
+    return allocator.dupe(u8, buf.items);
+}
+
+/// A page footer reading "Page N of M" at the left and `text` at the right,
+/// small and grey. N and M are Word fields, so they are right on every page.
+fn genPageFooterXml(allocator: std.mem.Allocator, text: []const u8, a4: bool) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const rpr = "<w:rPr><w:color w:val=\"808080\"/><w:sz w:val=\"16\"/><w:szCs w:val=\"16\"/></w:rPr>";
+    try buf.appendSlice(allocator,
+        \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        \\<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:tabs><w:tab w:val="right" w:pos="
+    );
+    // The right tab stop sits at the right margin: the text width of the page.
+    try buf.appendSlice(allocator, if (a4) "9026" else "9360");
+    try buf.appendSlice(allocator, "\"/></w:tabs></w:pPr>");
+    const field = struct {
+        fn write(a: std.mem.Allocator, b: *std.ArrayListUnmanaged(u8), r: []const u8, instr: []const u8) !void {
+            try b.appendSlice(a, "<w:r>");
+            try b.appendSlice(a, r);
+            try b.appendSlice(a, "<w:fldChar w:fldCharType=\"begin\"/></w:r><w:r>");
+            try b.appendSlice(a, r);
+            try b.appendSlice(a, "<w:instrText xml:space=\"preserve\"> ");
+            try b.appendSlice(a, instr);
+            try b.appendSlice(a, " </w:instrText></w:r><w:r>");
+            try b.appendSlice(a, r);
+            try b.appendSlice(a, "<w:fldChar w:fldCharType=\"separate\"/></w:r><w:r>");
+            try b.appendSlice(a, r);
+            try b.appendSlice(a, "<w:t>1</w:t></w:r><w:r>");
+            try b.appendSlice(a, r);
+            try b.appendSlice(a, "<w:fldChar w:fldCharType=\"end\"/></w:r>");
+        }
+    };
+    try buf.appendSlice(allocator, "<w:r>" ++ rpr ++ "<w:t xml:space=\"preserve\">Page </w:t></w:r>");
+    try field.write(allocator, &buf, rpr, "PAGE");
+    try buf.appendSlice(allocator, "<w:r>" ++ rpr ++ "<w:t xml:space=\"preserve\"> of </w:t></w:r>");
+    try field.write(allocator, &buf, rpr, "NUMPAGES");
+    try buf.appendSlice(allocator, "<w:r>" ++ rpr ++ "<w:tab/><w:t xml:space=\"preserve\">");
+    try appendXmlEscaped(allocator, &buf, text);
+    try buf.appendSlice(allocator, "</w:t></w:r></w:p></w:ftr>");
+    return allocator.dupe(u8, buf.items);
+}
 
 fn genHeaderXml(allocator: std.mem.Allocator, img_rid: []const u8, width_px: u32, height_px: u32) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
