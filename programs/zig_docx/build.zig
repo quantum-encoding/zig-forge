@@ -193,8 +193,16 @@ pub fn build(b: *std.Build) void {
     web_wasm.rdynamic = true;
     web_wasm.export_memory = true;
 
-    const web_wasm_step = b.step("wasm-web", "Build freestanding WASM module for the browser (FRA)");
-    web_wasm_step.dependOn(&b.addInstallArtifact(web_wasm, .{}).step);
+    const web_wasm_install = b.addInstallArtifact(web_wasm, .{});
+    const web_wasm_step = b.step("wasm-web", "Build freestanding WASM module for the browser (FRA, redline, Markdown)");
+    web_wasm_step.dependOn(&web_wasm_install.step);
+
+    // The freestanding module under Node, instantiated with an empty import
+    // object as a Worker does: tests/wasm_web.test.mjs, given the module's path.
+    const wasm_test = b.addSystemCommand(&.{ "node", "tests/wasm_web.test.mjs" });
+    wasm_test.addFileArg(web_wasm.getEmittedBin());
+    const wasm_test_step = b.step("wasm-test", "Run the freestanding WASM module's tests under Node (needs node)");
+    wasm_test_step.dependOn(&wasm_test.step);
 
     // ============================================================
     // iOS ARM64 (aarch64-ios, static library)

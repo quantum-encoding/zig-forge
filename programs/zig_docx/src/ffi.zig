@@ -224,6 +224,8 @@ comptime {
     @export(&zig_docx_to_markdown, .{ .name = "zig_docx_to_markdown" });
     @export(&zig_docx_to_markdown_with_images, .{ .name = "zig_docx_to_markdown_with_images" });
     @export(&zig_docx_fra_from_json, .{ .name = "zig_docx_fra_from_json" });
+    @export(&zig_docx_redline_from_json, .{ .name = "zig_docx_redline_from_json" });
+    @export(&zig_docx_redline_compare, .{ .name = "zig_docx_redline_compare" });
     @export(&zig_docx_info, .{ .name = "zig_docx_info" });
     @export(&zig_docx_alloc, .{ .name = "zig_docx_alloc" });
     @export(&zig_docx_free, .{ .name = "zig_docx_free" });
@@ -489,6 +491,58 @@ fn zig_docx_fra_from_json(
         .len = docx_bytes.len,
         .error_msg = null,
     };
+}
+
+/// A redline sheet (.docx) from JSON: groups of `{where, before, after,
+/// note}` items, word-diffed and shown as before → after, or as Word tracked
+/// changes with `"mode": "tracked"`. The schema is in src/redline.zig.
+fn zig_docx_redline_from_json(
+    json_ptr: [*]const u8,
+    json_len: usize,
+) callconv(.c) ZigDocxResult {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const sheet = docx.redline.parseJson(arena_state.allocator(), json_ptr[0..json_len]) catch |err| {
+        return makeErrorNamed("Redline JSON", err);
+    };
+    const bytes = docx.redline.generate(allocator, &sheet) catch |err| {
+        return makeErrorNamed("Redline generation", err);
+    };
+    return .{ .data = bytes.ptr, .len = bytes.len, .error_msg = null };
+}
+
+/// A redline sheet of what changed from one .docx to another: their
+/// paragraphs lined up, each one that changed an item under its heading.
+/// `opts` is optional JSON with the sheet's title, key, mode, author, date,
+/// orientation, labels and colours (null/0 for the defaults).
+fn zig_docx_redline_compare(
+    before_ptr: [*]const u8,
+    before_len: usize,
+    after_ptr: [*]const u8,
+    after_len: usize,
+    opts_ptr: ?[*]const u8,
+    opts_len: usize,
+) callconv(.c) ZigDocxResult {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const options = docx.redline.parseOptionsJson(arena, sliceFromPtr(opts_ptr, opts_len)) catch |err| {
+        return makeErrorNamed("Redline options JSON", err);
+    };
+    const sheet = docx.redline.compareDocx(arena, before_ptr[0..before_len], after_ptr[0..after_len], options) catch |err| {
+        return makeErrorNamed("Comparing the documents", err);
+    };
+    const bytes = docx.redline.generate(allocator, &sheet) catch |err| {
+        return makeErrorNamed("Redline generation", err);
+    };
+    return .{ .data = bytes.ptr, .len = bytes.len, .error_msg = null };
+}
+
+/// An error result reading "<what>: <error name>".
+fn makeErrorNamed(what: []const u8, err: anyerror) ZigDocxResult {
+    var buf: [160]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}: {s}", .{ what, @errorName(err) }) catch what;
+    return makeError(msg);
 }
 
 /// Convert a DOCX file (in memory) to markdown text.
@@ -758,7 +812,7 @@ fn zig_docx_free_info(info: *ZigDocxInfo) callconv(.c) void {
 
 /// Returns the library version as a null-terminated string.
 fn zig_docx_version() callconv(.c) [*:0]const u8 {
-    return "1.1.0";
+    return "1.2.0";
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────
@@ -834,4 +888,38 @@ test "a markdown reference is matched by whole path as well as filename" {
     try testing.expectEqual(@as(?usize, 0), findHostImage(&images, "./images/a.png"));
     try testing.expectEqual(@as(?usize, 1), findHostImage(&images, "./shots/b.png"));
     try testing.expectEqual(@as(?usize, null), findHostImage(&images, "c.png"));
+}
+
+test "a redline sheet comes back from JSON, and bad JSON names its fault" {
+    const json =
+        \\{"title": "Check", "items": [{"where": "A", "before": "one two", "after": "one three"}]}
+    ;
+    const ok = zig_docx_redline_from_json(json.ptr, json.len);
+    try testing.expect(ok.error_msg == null);
+    defer zig_docx_free(ok.data, ok.len);
+    try testing.expect(std.mem.startsWith(u8, ok.data.?[0..ok.len], "PK\x03\x04"));
+
+    const bad = "{\"colors\": {\"removed\": \"nope\"}}";
+    const err = zig_docx_redline_from_json(bad.ptr, bad.len);
+    try testing.expect(err.data == null);
+    defer zig_docx_free_string(@constCast(err.error_msg));
+    try testing.expectEqualStrings("Redline JSON: InvalidColor", std.mem.span(err.error_msg.?));
+}
+
+test "two documents compare into a redline sheet" {
+    const md_a = "# H\n\nThe old words here.\n";
+    const md_b = "# H\n\nThe new words here.\n";
+    const a = zig_docx_md_to_docx(md_a.ptr, md_a.len, null);
+    defer zig_docx_free(a.data, a.len);
+    const b = zig_docx_md_to_docx(md_b.ptr, md_b.len, null);
+    defer zig_docx_free(b.data, b.len);
+    const opts = "{\"mode\": \"tracked\", \"author\": \"Ed\"}";
+    const r = zig_docx_redline_compare(a.data.?, a.len, b.data.?, b.len, opts.ptr, opts.len);
+    try testing.expect(r.error_msg == null);
+    defer zig_docx_free(r.data, r.len);
+    try testing.expect(r.len > 0);
+
+    const none = zig_docx_redline_compare(a.data.?, a.len, b.data.?, b.len, null, 0);
+    try testing.expect(none.error_msg == null);
+    zig_docx_free(none.data, none.len);
 }

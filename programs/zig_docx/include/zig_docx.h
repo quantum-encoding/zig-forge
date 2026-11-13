@@ -242,9 +242,38 @@ ZigDocxResult zig_docx_xlsx_sheet_names(const uint8_t *xlsx_ptr,
 ZigDocxResult zig_docx_fra_from_json(const uint8_t *json_ptr,
                                       size_t json_len);
 
+// ─── Redline sheets ───────────────────────────────────────────────
+
+/// A proofreading sheet (.docx) from JSON: groups of {where, before, after,
+/// note} items. Each before/after pair is word-diffed: removed words are red,
+/// struck through, on light red; added words green and bold on light green.
+/// With "mode": "tracked" the changes are Word tracked changes (w:del/w:ins
+/// with "author" and "date") the reader can accept or reject. A4 landscape,
+/// repeated header row, rows that do not split. Schema in src/redline.zig.
+///
+/// @param json_ptr  Pointer to UTF-8 JSON text.
+/// @param json_len  Length of JSON text in bytes.
+/// @return          ZigDocxResult with DOCX bytes, or error_msg such as
+///                  "Redline JSON: InvalidColor".
+ZigDocxResult zig_docx_redline_from_json(const uint8_t *json_ptr,
+                                         size_t json_len);
+
+/// The same sheet listing what changed from one .docx to another: their
+/// paragraphs lined up by text, each changed paragraph an item grouped under
+/// its heading.
+///
+/// @param opts_ptr  Optional JSON with the sheet's title, key, mode, author,
+///                  date, orientation, labels and colors (NULL/0: defaults).
+ZigDocxResult zig_docx_redline_compare(const uint8_t *before_ptr,
+                                       size_t before_len,
+                                       const uint8_t *after_ptr,
+                                       size_t after_len,
+                                       const uint8_t *opts_ptr,
+                                       size_t opts_len);
+
 // ─── Utility ──────────────────────────────────────────────────────
 
-/// Returns the library version string (e.g. "1.1.0").
+/// Returns the library version string (e.g. "1.2.0").
 /// The returned string is static — do NOT free it.
 const char *zig_docx_version(void);
 

@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 /**
- * TypeScript types for the zig_docx web module (Fire Risk Assessment).
+ * TypeScript types for the zig_docx web module (Fire Risk Assessment,
+ * redline sheets, Markdown ↔ DOCX).
  * Mirrors `FraData` in src/fra.zig — every field is optional; the Zig
  * generator supplies sensible defaults and PAS 79 boilerplate for anything
  * omitted. Serialise with JSON.stringify and pass to
@@ -17,7 +18,60 @@
 export interface ZigDocxModule {
   /** JSON (FraData) → Fire Risk Assessment .docx bytes. */
   generateFireRiskAssessment: (jsonString: string) => Uint8Array;
+  /** Redline proofreading sheet → .docx bytes. Throws with the reason ("zig_docx: Redline JSON: InvalidColor"). */
+  generateRedline: (sheet: RedlineSheet) => Uint8Array;
+  /** The redline sheet of what changed from one .docx to another. */
+  compareDocx: (before: Uint8Array, after: Uint8Array, options?: RedlineOptions) => Uint8Array;
+  /** Markdown (with ~~strike~~, ==highlight==, [text]{color= bg=}, CriticMarkup) → .docx bytes. */
+  markdownToDocx: (markdown: string) => Uint8Array;
+  /** .docx → Markdown; struck runs come back as ~~text~~, highlighted as ==text==. */
+  docxToMarkdown: (docx: Uint8Array) => string;
   getVersion: () => string;
+}
+
+/** Six hex digits ("A00000" or "#A00000"), #rgb, or a colour name ("red", "lightgreen"). */
+export type RedlineColor = string;
+
+/** One fix: `before` and `after` are plain text; the sheet word-diffs them. */
+export interface RedlineItem {
+  where?: string;
+  before?: string;
+  after?: string;
+  /** Grey italic note under the new text (its own column in tracked mode). */
+  note?: string | null;
+}
+
+export interface RedlineGroup {
+  /** Shown in a dark row above the items; "" for no row. */
+  name?: string;
+  items?: RedlineItem[];
+}
+
+/** Everything about a sheet but its fixes; the options for compareDocx. */
+export interface RedlineOptions {
+  title?: string;
+  /** Inline Markdown under the title; omit for the default key, "" for none. */
+  key?: string | null;
+  /** "redline" (colours, default) or "tracked" (Word tracked changes). */
+  mode?: 'redline' | 'tracked';
+  /** Tracked changes: who made them. Default "Reviewer". */
+  author?: string;
+  /** Tracked changes: "YYYY-MM-DD" or an ISO 8601 timestamp. Omitted = no date. */
+  date?: string;
+  orientation?: 'landscape' | 'portrait';
+  labels?: { where?: string; before?: string; after?: string; change?: string; note?: string };
+  colors?: {
+    removed?: RedlineColor; removed_fill?: RedlineColor;
+    added?: RedlineColor; added_fill?: RedlineColor;
+    note?: RedlineColor; group_fill?: RedlineColor; group_text?: RedlineColor;
+    header_fill?: RedlineColor; border?: RedlineColor;
+  };
+}
+
+export interface RedlineSheet extends RedlineOptions {
+  groups?: RedlineGroup[];
+  /** One group with no name row. */
+  items?: RedlineItem[];
 }
 
 /** One question/answer row within a checklist section. */

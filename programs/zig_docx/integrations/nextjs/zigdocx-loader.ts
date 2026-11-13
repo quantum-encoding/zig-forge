@@ -3,7 +3,8 @@
 
 /**
  * Browser / edge loader for zig_docx_web.wasm — the freestanding
- * (wasm32-freestanding, no WASI, no libc) Fire Risk Assessment generator.
+ * (wasm32-freestanding, no WASI, no libc) build: Fire Risk Assessments,
+ * redline proofreading sheets, and Markdown ↔ DOCX.
  *
  * The module imports NOTHING from the host, so it instantiates with an
  * empty import object — no WASI shim, no polyfills. This mirrors the
@@ -22,7 +23,7 @@
  *   // return as application/vnd.openxmlformats-officedocument.wordprocessingml.document
  */
 
-import type { FraData, ZigDocxModule } from './types';
+import type { FraData, RedlineOptions, RedlineSheet, ZigDocxModule } from './types';
 
 interface WasmExports {
   memory: WebAssembly.Memory;
@@ -30,6 +31,15 @@ interface WasmExports {
   wasm_free: (ptr: number, size: number) => void;
   zigdocx_free: (ptr: number, size: number) => void;
   zigdocx_generate_fra: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
+  zigdocx_generate_redline: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
+  zigdocx_redline_compare: (
+    beforePtr: number, beforeLen: number,
+    afterPtr: number, afterLen: number,
+    optsPtr: number, optsLen: number,
+    outLenPtr: number,
+  ) => number;
+  zigdocx_md_to_docx: (mdPtr: number, mdLen: number, outLenPtr: number) => number;
+  zigdocx_docx_to_md: (docxPtr: number, docxLen: number, outLenPtr: number) => number;
   zigdocx_get_error: () => number;
   zigdocx_version: () => number;
 }
@@ -54,10 +64,68 @@ function writeString(
   return { ptr, len: encoded.length };
 }
 
+type Generator = 'zigdocx_generate_redline' | 'zigdocx_redline_compare' | 'zigdocx_md_to_docx' | 'zigdocx_docx_to_md';
+
+/**
+ * Call a generator: each input is copied into module memory and passed as
+ * (ptr, len), the out-length slot goes last, and the output is copied out.
+ * Every buffer is freed exactly once, on success or failure.
+ */
+function callGenerator(exports: WasmExports, name: Generator, inputs: Uint8Array[]): Uint8Array {
+  const memory = exports.memory;
+  const held: Array<[number, number]> = [];
+  let outLenPtr = 0;
+  let resultPtr = 0;
+  let outLen = 0;
+  try {
+    for (const bytes of inputs) {
+      if (bytes.length === 0) {
+        held.push([0, 0]);
+        continue;
+      }
+      const ptr = exports.wasm_alloc(bytes.length);
+      if (ptr === 0) throw new Error('zig_docx: failed to allocate WASM memory for input');
+      held.push([ptr, bytes.length]);
+      new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
+    }
+    outLenPtr = exports.wasm_alloc(4);
+    if (outLenPtr === 0) throw new Error('zig_docx: failed to allocate output-length slot');
+    const fn = exports[name] as (...args: number[]) => number;
+    resultPtr = fn(...held.flat(), outLenPtr);
+    if (resultPtr === 0) {
+      throw new Error(`zig_docx: ${readCString(memory, exports.zigdocx_get_error()) || 'unknown error'}`);
+    }
+    outLen = new DataView(memory.buffer).getUint32(outLenPtr, true);
+    return new Uint8Array(memory.buffer, resultPtr, outLen).slice();
+  } finally {
+    for (const [ptr, len] of held) if (ptr) exports.wasm_free(ptr, len);
+    if (outLenPtr) exports.wasm_free(outLenPtr, 4);
+    if (resultPtr) exports.zigdocx_free(resultPtr, outLen);
+  }
+}
+
 function createModule(exports: WasmExports): ZigDocxModule {
   const memory = exports.memory;
+  const utf8 = (s: string) => new TextEncoder().encode(s);
 
   return {
+    generateRedline(sheet: RedlineSheet): Uint8Array {
+      return callGenerator(exports, 'zigdocx_generate_redline', [utf8(JSON.stringify(sheet))]);
+    },
+
+    compareDocx(before: Uint8Array, after: Uint8Array, options?: RedlineOptions): Uint8Array {
+      const opts = options ? utf8(JSON.stringify(options)) : new Uint8Array(0);
+      return callGenerator(exports, 'zigdocx_redline_compare', [before, after, opts]);
+    },
+
+    markdownToDocx(markdown: string): Uint8Array {
+      return callGenerator(exports, 'zigdocx_md_to_docx', [utf8(markdown)]);
+    },
+
+    docxToMarkdown(docx: Uint8Array): string {
+      return new TextDecoder().decode(callGenerator(exports, 'zigdocx_docx_to_md', [docx]));
+    },
+
     /**
      * Generate a Fire Risk Assessment .docx from a JSON string matching the
      * FRA schema (see FraData). Returns the DOCX as bytes — a complete Open

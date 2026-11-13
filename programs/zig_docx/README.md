@@ -1,6 +1,6 @@
 # zig-docx
 
-**Universal document converter, generator, and chunker** written in pure Zig. Converts in both directions between DOCX, Markdown, PDF, XLSX, and Anthropic Claude JSON exports, generates DOCX files from Markdown or structured JSON (Fire Risk Assessments), and ships a section-aware chunker that produces hash-linked markdown ready for RAG pipelines.
+**Universal document converter, generator, and chunker** written in pure Zig. Converts in both directions between DOCX, Markdown, PDF, XLSX, and Anthropic Claude JSON exports, generates DOCX files from Markdown or structured JSON (Fire Risk Assessments, redline proofreading sheets), and ships a section-aware chunker that produces hash-linked markdown ready for RAG pipelines.
 
 Four artifacts from one source tree:
 
@@ -9,12 +9,14 @@ Four artifacts from one source tree:
 | `zig-out/bin/zig-docx` | 3.6 MB | CLI binary, single static executable |
 | `zig-out/lib/libzig_docx.a` | 5.8 MB | C-callable static library (Swift, Rust, Go, Python via cffi) |
 | `zig-out/bin/zig_docx.wasm` | 3.1 MB | WASI reactor module for Node, edge runtimes (`zig build wasm`) |
-| `zig-out/bin/zig_docx_web.wasm` | ~160 KB | Freestanding browser module — Fire Risk Assessment only, zero host imports, instantiate with `{}` (no WASI shim). `zig build wasm-web`. See `integrations/nextjs/`. |
+| `zig-out/bin/zig_docx_web.wasm` | ~260 KB | Freestanding browser / Worker module — FRA, redline sheets, Markdown ↔ DOCX; zero host imports, instantiate with `{}` (no WASI shim). `zig build wasm-web`. See [Freestanding module](#freestanding-module-zig_docx_webwasm). |
 
 No runtime dependencies for DOCX, MDX, XLSX, JSON, and chunking flows. PDF extraction shells out to `pdftotext` or `mutool`.
 
 > The freestanding `zig_docx_web.wasm` is the build the website embeds: call
-> `zigdocx_generate_fra(jsonPtr, jsonLen, outLenPtr)` (JSON → FRA `.docx` bytes).
+> `zigdocx_generate_fra(jsonPtr, jsonLen, outLenPtr)` (JSON → FRA `.docx` bytes),
+> `zigdocx_generate_redline` (redline sheet JSON → `.docx`), and the others
+> listed under [Freestanding module](#freestanding-module-zig_docx_webwasm).
 > Section photo evidence is passed as base64 data URLs
 > (`"data:image/png;base64,…"`) since the module has no filesystem.
 
@@ -31,6 +33,8 @@ No runtime dependencies for DOCX, MDX, XLSX, JSON, and chunking flows. PDF extra
 | **JSON (Anthropic)** | Per-conversation markdown files | Claude `conversations.json` export |
 | **JSON (Claude Code)** | Per-session markdown files | Claude Code transcript JSONL |
 | **JSON (FRA schema)** | DOCX | Fire Risk Assessment generator with bordered tables and metadata |
+| **JSON (redline sheet)** | DOCX | Proofreading sheet: each fix word-diffed, removed words red and struck, added words green; or real Word tracked changes |
+| **Two DOCX** | DOCX | The redline sheet of what changed between them, paragraph by paragraph |
 | **MD / TXT / MDX** | Chunked markdown | Section-aware chunker with hash-linked navigation |
 
 Every markdown output can optionally be **chunked** into RAG-ready files.
@@ -97,7 +101,7 @@ zig build wasm
 ls zig-out/bin/zig_docx.wasm
 ```
 
-The module exports the same C FFI as the native lib — `zig_docx_md_to_docx`, `zig_docx_md_to_docx_with_images`, `zig_docx_to_markdown`, `zig_docx_to_markdown_with_images`, `zig_docx_info`, `zig_docx_fra_from_json`, `zig_docx_alloc`, plus matching `_free` calls and `zig_docx_version`. Imports are vanilla `wasi_snapshot_preview1` syscalls — load with Node's `node:wasi`, wasmtime, wasmer, jco, or any WASI-compatible host.
+The module exports the same C FFI as the native lib — `zig_docx_md_to_docx`, `zig_docx_md_to_docx_with_images`, `zig_docx_to_markdown`, `zig_docx_to_markdown_with_images`, `zig_docx_info`, `zig_docx_fra_from_json`, `zig_docx_redline_from_json`, `zig_docx_redline_compare`, `zig_docx_alloc`, plus matching `_free` calls and `zig_docx_version`. Imports are vanilla `wasi_snapshot_preview1` syscalls — load with Node's `node:wasi`, wasmtime, wasmer, jco, or any WASI-compatible host.
 
 `pdf` and `claude_code` modules are gated out of the WASM build (subprocess and dirent.d_name aren't available under WASI). Everything else — XML, ZIP, DrawingML, FRA, MDX — works unchanged.
 
@@ -143,6 +147,37 @@ e.zig_docx_free(retPtr, 16);
 ```
 
 The same pattern works for `zig_docx_to_markdown` (input = DOCX bytes, output = MDX bytes) and `zig_docx_fra_from_json`. `zig_docx_info` returns a `ZigDocxInfo` struct (24 bytes); free it with `zig_docx_free_info(ptr)`.
+
+#### Freestanding module (zig_docx_web.wasm)
+
+`zig build wasm-web` builds a wasm32-freestanding module with no imports at all: `new WebAssembly.Instance(module, {})`. Every generator takes its inputs as (pointer, length) pairs in module memory and an out-length pointer last, and returns a pointer to the output bytes, or 0 with the reason from `zigdocx_get_error()` (a NUL-terminated string).
+
+| Export | Inputs | Output |
+|---|---|---|
+| `zigdocx_generate_fra(json, len, outLen)` | FRA JSON | .docx |
+| `zigdocx_generate_redline(json, len, outLen)` | redline sheet JSON | .docx |
+| `zigdocx_redline_compare(before, beforeLen, after, afterLen, opts, optsLen, outLen)` | two .docx, optional options JSON (0, 0 for none) | .docx |
+| `zigdocx_md_to_docx(md, len, outLen)` | Markdown, inline marks included | .docx |
+| `zigdocx_docx_to_md(docx, len, outLen)` | .docx | Markdown |
+
+Memory: `wasm_alloc(n)` reserves an input buffer; free every buffer you allocated and every output with `wasm_free(ptr, len)` (`zigdocx_free` is the same call), passing the length it was allocated or returned with. Each call's working memory is an arena released before it returns, so there is no reset between calls; after the first few calls the module's memory stays the same size.
+
+```js
+const { exports: ex } = new WebAssembly.Instance(module, {});
+const json = new TextEncoder().encode(JSON.stringify(sheet));
+const inPtr = ex.wasm_alloc(json.length);
+new Uint8Array(ex.memory.buffer, inPtr, json.length).set(json);
+const outLenPtr = ex.wasm_alloc(4);
+const ptr = ex.zigdocx_generate_redline(inPtr, json.length, outLenPtr);
+ex.wasm_free(inPtr, json.length);
+if (ptr === 0) throw new Error(readCString(ex.zigdocx_get_error()));
+const len = new DataView(ex.memory.buffer).getUint32(outLenPtr, true);
+const docx = new Uint8Array(ex.memory.buffer, ptr, len).slice();
+ex.zigdocx_free(ptr, len);
+ex.wasm_free(outLenPtr, 4);
+```
+
+`zig build wasm-test` runs `tests/wasm_web.test.mjs` under Node against the built module.
 
 #### Surfacing embedded images (DOCX with photos)
 
@@ -216,6 +251,11 @@ zig-docx <folder/>              Batch mode (DOCX only)
 | `--claude-code` | JSON: extract Claude Code transcript JSONL |
 | `--to-docx` | Markdown: convert MD → DOCX (uses frontmatter for metadata) |
 | `--fra` | JSON: generate Fire Risk Assessment DOCX from FRA schema |
+| `--redline` | JSON: generate a redline proofreading sheet (see [Redline sheet](#redline-sheet)) |
+| `--compare <after.docx>` | DOCX: redline sheet of what changed from the input to `<after.docx>` |
+| `--tracked` | Redline: Word tracked changes (accept / reject) instead of colours |
+| `--options <sheet.json>` | `--compare`: title, key, labels and colours for the sheet |
+| `--marks` | DOCX → MD: also keep colours as `[text]{color= bg=}` and redline runs as CriticMarkup (Markdown, not valid MDX) |
 
 ### Output options
 
@@ -275,11 +315,32 @@ zig-docx quote.md --to-docx -o quote.docx
 zig-docx meeting-notes.md --to-docx --style minutes -o minutes.docx
 ```
 
-The writer supports headings, ordered/unordered lists with nested levels, hyperlinks, inline images, tables with column widths, blockquotes, code blocks, and inline code. Letterhead images are sized automatically (max 6 inches wide, aspect-ratio preserved).
+The writer supports headings, ordered/unordered lists with nested levels, hyperlinks, inline images, tables with column widths, blockquotes, code blocks (line breaks kept), and inline code. Letterhead images are sized automatically (max 6 inches wide, aspect-ratio preserved).
+
+#### Inline marks
+
+The same inline syntax as zig_pdf_generator's Markdown, so one text marks up the same way in a PDF and a .docx:
+
+| Markdown | In Word |
+|---|---|
+| `~~struck through~~` | strike-through |
+| `==highlighted==` | yellow highlighter |
+| `[text]{color=red bg=#fee2e2 strike underline}` | any subset: text colour, shading, strike, underline. Colours are `#rgb`, `#rrggbb` or a name: black, white, grey/gray, red, green, blue, orange, purple, yellow, pink, lightred, lightgreen, lightblue, lightgrey/lightgray |
+| `{--removed--}` | red `A00000`, struck, on light red `FDDADA` |
+| `{++added++}` | green `006400`, bold, on light green `D7F5D7` |
+| `{~~old~>new~~}` | the two above, side by side |
+| `{==highlighted==}` | yellow highlighter |
+
+Marks nest with each other and with `**bold**` / `*italic*` (up to 8 deep). `~~` and `==` need a non-space just inside them, so `a == b` stays as typed; so does `[x]{…}` unless every attribute is one of the four above. A backslash before one of ``\ ` * ~ = [ ] { }`` keeps the character as typed.
+
+```markdown
+Fire doors: {~~No 5~>No 7~~}. The cupboard is kept free ~~free~~ from storage.
+[Check this number]{color=red bg=lightred} before it is sent.
+```
 
 ### DOCX → MDX
 
-Converts a Word document to MDX with auto-extracted title from the first `# Heading`, blank lines between paragraphs, and properly rendered lists.
+Converts a Word document to MDX with auto-extracted title from the first `# Heading`, blank lines between paragraphs, and properly rendered lists. Struck-through runs come back as `~~text~~` and highlighted runs as `==text==`; spaces at either end of a run are written outside its marks. With `--marks` (`MdxOptions.marks`), runs in the redline look come back as `{--…--}` / `{++…++}` and any other colour, shading or underline as `[text]{color=#… bg=#… underline}`, so Markdown → DOCX → Markdown keeps them. That output is Markdown for zig_docx and zig_pdf_generator, not valid MDX: `{` opens a JSX expression.
 
 ```bash
 # Basic
@@ -312,6 +373,45 @@ zig-docx fra.json --fra -o fire-risk-assessment.docx
 ```
 
 The output is a fully bordered, paginated DOCX with consistent styling — the same generator is exposed as `zig_docx_fra_from_json` in the FFI for embedding in form-driven web apps.
+
+### Redline sheet
+
+A proofreading sheet that shows each fix as before → after. The caller passes plain text; the sheet word-diffs it. In the default `redline` mode the page is A4 landscape with three columns, **Where / Now / Should be**: removed words red, struck through, on light red; added words green and bold on light green; a note in grey italics under the new text. Fixes come in groups, each under a dark row; the header row repeats on every page and no row splits across a page. With `"mode": "tracked"` the middle column is the text with real Word tracked changes (`w:del` / `w:ins` with author and date) that the reader accepts or rejects in Word, and notes get a column of their own.
+
+```bash
+zig-docx fixes.json --redline -o proofread.docx
+zig-docx fixes.json --redline --tracked --author "A. Reviewer" --date 2026-11-13 -o tracked.docx
+
+# The same sheet from two versions of a document: paragraphs are lined up by
+# text and each changed paragraph is an item, grouped under its heading.
+zig-docx old.docx --compare new.docx -o changes.docx [--options sheet.json] [--tracked]
+```
+
+```json
+{
+  "title": "Proofread: 12 Example Road (Flats 1 to 3)",
+  "key": "{--Red, struck through--} is in the report now. {++Green++} is the suggested change.",
+  "mode": "redline",
+  "author": "Reviewer",
+  "date": "2026-11-13",
+  "orientation": "landscape",
+  "labels": { "where": "Where", "before": "Now", "after": "Should be", "change": "Change", "note": "Note" },
+  "colors": { "removed": "A00000", "removed_fill": "FDDADA", "added": "006400", "added_fill": "D7F5D7",
+              "note": "555555", "group_fill": "222222", "group_text": "FFFFFF",
+              "header_fill": "EDEDED", "border": "BBBBBB" },
+  "groups": [
+    { "name": "Flat 3", "items": [
+      { "where": "Fire doors question", "before": "No  5", "after": "No  7",
+        "note": "The fire door action is number 7 in this report." },
+      { "where": "Action 3", "before": "kept free free from storage", "after": "kept free from storage" }
+    ]}
+  ]
+}
+```
+
+Every key but `groups` is optional and the values above are the defaults (`title` defaults to none). `key` is inline Markdown with the marks above, in the sheet's own colours; leave it out for a default key, set `""` for none. A top-level `items` array is one group without a name row; a group with `"name": ""` has no name row either. Colours take six hex digits with or without `#`, or a colour name. `mode` is `redline` or `tracked`; `orientation` is `landscape` or `portrait`; `date` is `YYYY-MM-DD` (midnight UTC) or an ISO 8601 timestamp and is left off the tracked changes when omitted. Errors name the fault: `InvalidJson`, `ExpectedString`, `InvalidColor`, `InvalidDate`, `InvalidMode`, `InvalidOrientation`.
+
+The diff works on words and the whitespace between them (longest common subsequence), then reads like a proofreader's marks: a kept stretch that is only whitespace, or no longer than the changes either side of it, is folded into one replacement ("by similar standard of" → "with a"), and a change starts at a word rather than a space.
 
 ### PDF → Markdown
 
@@ -488,6 +588,8 @@ The same conversion functions exposed to the CLI are exported as a stable C ABI 
 | `zig_docx_to_markdown(docx_ptr, docx_len)` | `ZigDocxResult` | DOCX → MDX bytes (drops embedded images) |
 | `zig_docx_to_markdown_with_images(docx_ptr, docx_len)` | `ZigDocxMarkdownResult` | DOCX → MDX bytes **plus** the embedded images keyed by the filenames the markdown references |
 | `zig_docx_fra_from_json(json_ptr, json_len)` | `ZigDocxResult` | FRA JSON → DOCX bytes |
+| `zig_docx_redline_from_json(json_ptr, json_len)` | `ZigDocxResult` | Redline sheet JSON → DOCX bytes; `error_msg` names the fault (`"Redline JSON: InvalidColor"`) |
+| `zig_docx_redline_compare(before_ptr, before_len, after_ptr, after_len, opts_ptr, opts_len)` | `ZigDocxResult` | Two DOCX → redline sheet DOCX; `opts` is the sheet JSON without groups, or null/0 |
 | `zig_docx_info(docx_ptr, docx_len)` | `ZigDocxInfo` | Title, author, word/paragraph/image counts |
 | `zig_docx_alloc(len)` | `?[*]u8` | Allocate inside library memory (WASM embedders) |
 | `zig_docx_free(ptr, len)` | `void` | Release a buffer or result `data` |
@@ -533,6 +635,8 @@ src/
 ├── md_parser.zig    — Markdown → Document model
 ├── mdx.zig          — Document model → MDX with frontmatter
 ├── fra.zig          — Fire Risk Assessment generator (JSON → DOCX)
+├── redline.zig      — Redline proofreading sheet (JSON or two DOCX → DOCX)
+├── word_diff.zig    — Word-level diff (LCS) tidied for a reader
 │
 ├── xml.zig          — Minimal XML parser
 ├── zip.zig          — ZIP archive reader (DEFLATE)
@@ -561,6 +665,11 @@ The ZIP reader refuses malformed and hostile archives rather than parsing them o
 - **Generated output** — checked against PKWARE APPNOTE.TXT §4.3 record signatures/layout and ECMA-376 Part 2 (OPC) mandatory part names, with every entry's CRC verified (the same check `zipfile.testzip()` performs).
 - **Hostile input** — markdown containing `<script>`, `&`, quotes and `]]>` must appear escaped in `word/document.xml` and read back verbatim.
 - **Negative vectors** — tampered CRC, ZIP64 sentinels, an overrunning central directory, and duplicate entry names each produce their specific error.
+
+Beyond `zig build test`:
+
+- **`zig build wasm-test`** — the freestanding module under Node, instantiated with `{}`: generates a redline sheet, a tracked-changes sheet, Markdown with marks (and back), a two-document comparison, checks error messages, and that repeated calls do not grow memory.
+- **`tests/redline_golden.sh`** — builds the CLI, makes the reference sheet from `src/testdata/redline_sheet.json` and its tracked twin, then checks the ZIP (`unzip -t`), every XML part (`xmllint`), the text macOS's `textutil` reads, and, when LibreOffice is installed, that it reads every `w:del` / `w:ins` as a tracked change by the named author.
 
 The `chunker.zig` module is standalone and can be imported as a library:
 

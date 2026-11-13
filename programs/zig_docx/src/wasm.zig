@@ -11,7 +11,23 @@
 //! zig_pdf_generator's wasm.zig: a `wasm_alloc` bump for input, a single
 //! pointer return plus an out-length, and an error string accessor.
 //!
-//! Scope: the Fire Risk Assessment generator (JSON in → DOCX bytes out).
+//! Exports, each (input pointer, input length, …, out-length pointer) →
+//! pointer to the output bytes, or 0 on failure with the reason from
+//! zigdocx_get_error():
+//!
+//!   zigdocx_generate_fra(json, len, outLen)        FRA JSON → .docx
+//!   zigdocx_generate_redline(json, len, outLen)    redline sheet JSON → .docx
+//!   zigdocx_redline_compare(before, beforeLen, after, afterLen,
+//!                           opts, optsLen, outLen)  two .docx → redline .docx
+//!   zigdocx_md_to_docx(md, len, outLen)            Markdown → .docx
+//!   zigdocx_docx_to_md(docx, len, outLen)          .docx → Markdown
+//!
+//! Memory: wasm_alloc(n) reserves input space; every pointer this module
+//! returns or hands out is released with wasm_free(ptr, len) (zigdocx_free
+//! is the same call), passing the length it was allocated or returned with.
+//! Each call's working memory is an arena freed before it returns, so there
+//! is nothing to reset between calls.
+//!
 //! Photo-evidence images that reference files on disk are skipped here —
 //! there is no filesystem (see can_read_image_files in fra.zig).
 //!
@@ -84,7 +100,7 @@ export fn zigdocx_get_error() [*:0]const u8 {
 
 /// Module version string.
 export fn zigdocx_version() [*:0]const u8 {
-    return "1.0.0-wasm";
+    return "1.1.0-wasm";
 }
 
 // ─── Fire Risk Assessment ──────────────────────────────────────────
@@ -134,10 +150,96 @@ export fn zigdocx_generate_fra(json_ptr: [*]const u8, json_len: usize, output_le
     return out.ptr;
 }
 
+// ─── Redline sheets ────────────────────────────────────────────────
+
+/// Copy `bytes` into module memory for the caller, setting `output_len`.
+fn handOut(bytes: []const u8, output_len: *usize) ?[*]u8 {
+    const out = wasm_allocator.alloc(u8, bytes.len) catch {
+        setLastError("Out of memory copying the output");
+        return null;
+    };
+    @memcpy(out, bytes);
+    output_len.* = out.len;
+    return out.ptr;
+}
+
+fn setLastErrorNamed(what: []const u8, err: anyerror) void {
+    var buf: [160]u8 = undefined;
+    setLastError(std.fmt.bufPrint(&buf, "{s}: {s}", .{ what, @errorName(err) }) catch what);
+}
+
+/// A redline sheet (.docx) from JSON: groups of `{where, before, after,
+/// note}` items, word-diffed and shown as before → after, or as Word tracked
+/// changes with `"mode": "tracked"`. Schema in src/redline.zig. Same
+/// ownership contract as zigdocx_generate_fra.
+export fn zigdocx_generate_redline(json_ptr: [*]const u8, json_len: usize, output_len: *usize) ?[*]u8 {
+    output_len.* = 0;
+    const json_slice = json_ptr[0..json_len];
+    if (!std.unicode.utf8ValidateSlice(json_slice)) {
+        setLastError("Invalid UTF-8 input");
+        return null;
+    }
+
+    var arena = std.heap.ArenaAllocator.init(wasm_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const sheet = docx.redline.parseJson(a, json_slice) catch |err| {
+        setLastErrorNamed("Redline JSON", err);
+        return null;
+    };
+    const bytes = docx.redline.generate(a, &sheet) catch |err| {
+        setLastErrorNamed("Redline generation", err);
+        return null;
+    };
+    return handOut(bytes, output_len);
+}
+
+/// A redline sheet of what changed between two .docx files: paragraphs lined
+/// up, each one that changed an item under its heading. `opts` is optional
+/// JSON (title, key, mode, author, date, orientation, labels, colors); pass
+/// 0 and 0 for the defaults. Same ownership contract as zigdocx_generate_fra.
+export fn zigdocx_redline_compare(
+    before_ptr: [*]const u8,
+    before_len: usize,
+    after_ptr: [*]const u8,
+    after_len: usize,
+    opts_ptr: ?[*]const u8,
+    opts_len: usize,
+    output_len: *usize,
+) ?[*]u8 {
+    output_len.* = 0;
+    const opts: []const u8 = if (opts_ptr) |p| p[0..opts_len] else "";
+    if (!std.unicode.utf8ValidateSlice(opts)) {
+        setLastError("Invalid UTF-8 options");
+        return null;
+    }
+
+    var arena = std.heap.ArenaAllocator.init(wasm_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const options = docx.redline.parseOptionsJson(a, opts) catch |err| {
+        setLastErrorNamed("Redline options JSON", err);
+        return null;
+    };
+    const sheet = docx.redline.compareDocx(a, before_ptr[0..before_len], after_ptr[0..after_len], options) catch |err| {
+        setLastErrorNamed("Comparing the documents", err);
+        return null;
+    };
+    const bytes = docx.redline.generate(a, &sheet) catch |err| {
+        setLastErrorNamed("Redline generation", err);
+        return null;
+    };
+    return handOut(bytes, output_len);
+}
+
 // ─── Markdown → DOCX ───────────────────────────────────────────────
 
 /// Render a structured DOCX from Markdown (with optional YAML frontmatter for
-/// title/author/date). Same ownership contract as zigdocx_generate_fra.
+/// title/author/date), inline marks included: ~~strike~~, ==highlight==,
+/// [text]{color= bg= strike underline} and CriticMarkup. Same ownership
+/// contract as zigdocx_generate_fra.
 /// Disk-backed images / letterhead in the frontmatter are skipped (no fs).
 export fn zigdocx_md_to_docx(md_ptr: [*]const u8, md_len: usize, output_len: *usize) ?[*]u8 {
     output_len.* = 0;

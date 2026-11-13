@@ -82,6 +82,12 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // ── Redline sheet: JSON, or two .docx compared (before generic .json detection) ──
+    if (parsed.redline_mode or parsed.compare_path != null) {
+        runRedline(allocator, parsed);
+        return;
+    }
+
     // ── JSON → FRA DOCX conversion (must come before generic .json detection) ──
     if (parsed.fra_mode) {
         const json_text = readFileContents(allocator, parsed.file_path) orelse return;
@@ -472,6 +478,7 @@ pub fn main(init: std.process.Init) !void {
         .author = parsed.author orelse "",
         .date = parsed.date orelse "",
         .slug = parsed.slug orelse "",
+        .marks = parsed.marks,
     }) catch |err| {
         std.debug.print("Error generating MDX: {}\n", .{err});
         return;
@@ -886,6 +893,11 @@ const Args = struct {
     claude_code_mode: bool = false,
     to_docx: bool = false, // MD → DOCX conversion
     fra_mode: bool = false, // JSON → FRA DOCX conversion
+    redline_mode: bool = false, // --redline: sheet JSON → DOCX
+    compare_path: ?[]const u8 = null, // --compare <after.docx>: the input is the before
+    options_path: ?[]const u8 = null, // --options <sheet.json> for --compare
+    tracked: bool = false, // --tracked: Word tracked changes instead of colours
+    marks: bool = false, // --marks: DOCX → Markdown keeps colours as spans and CriticMarkup
     // Security: by default, image/letterhead paths are sandboxed to the
     // markdown file's directory (absolute paths and `..` traversal rejected,
     // symlink escapes caught via realpath). Opt out only for trusted local use.
@@ -954,6 +966,19 @@ fn parseArgs(args: []const []const u8) ?Args {
             result.to_docx = true;
         } else if (std.mem.eql(u8, arg, "--fra")) {
             result.fra_mode = true;
+        } else if (std.mem.eql(u8, arg, "--redline")) {
+            result.redline_mode = true;
+        } else if (std.mem.eql(u8, arg, "--tracked")) {
+            result.tracked = true;
+        } else if (std.mem.eql(u8, arg, "--marks")) {
+            result.marks = true;
+        } else if (std.mem.eql(u8, arg, "--compare") or std.mem.eql(u8, arg, "--options")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: {s} requires a file path\n", .{arg});
+                return null;
+            }
+            if (std.mem.eql(u8, arg, "--compare")) result.compare_path = args[i] else result.options_path = args[i];
         } else if (std.mem.eql(u8, arg, "--allow-absolute-images")) {
             result.allow_absolute_images = true;
         } else if (std.mem.eql(u8, arg, "--style")) {
@@ -1046,6 +1071,61 @@ fn parseArgs(args: []const []const u8) ?Args {
     return result;
 }
 
+/// --redline / --compare: write a redline sheet .docx.
+fn runRedline(allocator: std.mem.Allocator, parsed: Args) void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const redline = docx.redline;
+
+    var sheet: redline.Sheet = .{};
+    if (parsed.compare_path) |after_path| {
+        const before = readFileContents(arena, parsed.file_path) orelse return;
+        const after = readFileContents(arena, after_path) orelse return;
+        var options: redline.Sheet = .{};
+        if (parsed.options_path) |op| {
+            const json = readFileContents(arena, op) orelse return;
+            options = redline.parseOptionsJson(arena, json) catch |err| {
+                std.debug.print("Error in {s}: {s}\n", .{ op, @errorName(err) });
+                return;
+            };
+        }
+        sheet = redline.compareDocx(arena, before, after, options) catch |err| {
+            std.debug.print("Error comparing {s} with {s}: {s}\n", .{ parsed.file_path, after_path, @errorName(err) });
+            return;
+        };
+    } else {
+        const json = readFileContents(arena, parsed.file_path) orelse return;
+        sheet = redline.parseJson(arena, json) catch |err| {
+            std.debug.print("Error in {s}: {s}\n", .{ parsed.file_path, @errorName(err) });
+            return;
+        };
+    }
+    if (parsed.tracked) sheet.mode = .tracked;
+    if (parsed.title) |t| sheet.title = t;
+    if (parsed.author) |a| sheet.author = a;
+    if (parsed.date) |d| sheet.date = redline.normalizeDate(arena, d) catch {
+        std.debug.print("Error: --date must be YYYY-MM-DD or an ISO 8601 timestamp\n", .{});
+        return;
+    };
+
+    const bytes = redline.generate(arena, &sheet) catch |err| {
+        std.debug.print("Error generating the redline: {s}\n", .{@errorName(err)});
+        return;
+    };
+
+    const out_path = parsed.output_path orelse blk: {
+        const path = parsed.file_path;
+        const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse path.len;
+        const suffix = if (parsed.compare_path != null) "-redline.docx" else ".docx";
+        break :blk std.fmt.allocPrint(arena, "{s}{s}", .{ path[0..dot], suffix }) catch return;
+    };
+    var items: usize = 0;
+    for (sheet.groups) |g| items += g.items.len;
+    writeToFile(allocator, out_path, bytes);
+    std.debug.print("Generated redline: {s} ({d} items, {d} bytes)\n", .{ out_path, items, bytes.len });
+}
+
 fn isDirectory(path: []const u8) bool {
     // Zig 0.16: use std.Io.Dir.cwd().statFile via a thread-local Io handle
     var io_t = std.Io.Threaded.init_single_threaded;
@@ -1121,6 +1201,7 @@ fn processSingleFile(allocator: std.mem.Allocator, input_path: []const u8, outpu
         .author = parsed.author orelse "",
         .date = parsed.date orelse "",
         .slug = parsed.slug orelse "",
+        .marks = parsed.marks,
     }) catch return false;
     defer result.deinit();
 
@@ -1161,6 +1242,13 @@ fn printHelp() void {
         \\  --claude-code         JSON: extract Claude Code transcript JSONL
         \\  --to-docx             Markdown → DOCX (uses frontmatter for metadata)
         \\  --fra                 JSON → DOCX (Fire Risk Assessment generator)
+        \\  --redline             Redline sheet JSON → DOCX (fixes shown before → after)
+        \\  --compare <after.docx>  The input .docx against <after.docx> → redline DOCX
+        \\
+        \\Redline options:
+        \\  --tracked                    Word tracked changes (accept/reject) instead of colours
+        \\  --options <sheet.json>       Title, key, labels, colours for --compare
+        \\  --title / --author / --date  Override the sheet's title, change author, change date
         \\
         \\Output options:
         \\  -o, --output <path>          Write output to file or folder
@@ -1170,6 +1258,8 @@ fn printHelp() void {
         \\  --author "..."               MDX/DOCX frontmatter author
         \\  --date "..."                 MDX/DOCX frontmatter date
         \\  --slug "..."                 MDX frontmatter slug
+        \\  --marks                      DOCX → MD: keep colours as [text]{color= bg=} and
+        \\                               redline runs as {--…--}/{++…++} (Markdown, not MDX)
         \\  --only-project <path>        Claude Code mode: filter to one project dir
         \\
         \\Chunker tuning:
@@ -1198,6 +1288,10 @@ fn printHelp() void {
         \\
         \\  # Fire Risk Assessment JSON → DOCX
         \\  zig-docx fra.json --fra -o fire-risk-assessment.docx
+        \\
+        \\  # Proofreading sheet: removed words red and struck, added words green
+        \\  zig-docx fixes.json --redline -o proofread.docx
+        \\  zig-docx old.docx --compare new.docx --tracked -o changes.docx
         \\
         \\Library: same conversions are exported as a C/WASM FFI in src/ffi.zig.
         \\         Build: zig build (CLI + .a)  |  zig build dylib  |  zig build wasm
