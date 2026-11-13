@@ -36,6 +36,8 @@ pub const docx_writer = @import("docx_writer.zig");
 pub const zip_writer = @import("zip_writer.zig");
 pub const ffi = @import("ffi.zig");
 pub const fra = @import("fra.zig");
+pub const word_diff = @import("word_diff.zig");
+pub const redline = @import("redline.zig");
 
 // Re-export key types
 pub const StyleType = styles.StyleType;
@@ -44,13 +46,42 @@ pub const StyleType = styles.StyleType;
 // Document Model
 // =============================================================================
 
+/// A colour as six upper-case hex digits, "RRGGBB". A value, so a run that
+/// carries one owns nothing extra.
+pub const Rgb = [6]u8;
+
+/// `s` as an Rgb when it is six hex digits, with or without a leading `#`.
+pub fn parseRgb(s: []const u8) ?Rgb {
+    const hex = if (s.len > 0 and s[0] == '#') s[1..] else s;
+    if (hex.len != 6) return null;
+    var out: Rgb = undefined;
+    for (hex, 0..) |c, i| {
+        if (!std.ascii.isHex(c)) return null;
+        out[i] = std.ascii.toUpper(c);
+    }
+    return out;
+}
+
 pub const Run = struct {
     text: []const u8,
     bold: bool = false,
     italic: bool = false,
     underline: bool = false,
+    /// A line through the text (`~~text~~`, `w:strike`).
+    strike: bool = false,
+    /// Word's highlighter, in yellow (`==text==`, `w:highlight`).
+    highlight: bool = false,
     is_code: bool = false, // inline `code` — rendered as monospace
-    color: ?[]const u8 = null, // hex color e.g. "FF0000" for red
+    /// Text colour as a borrowed hex string ("FF0000"), for generators whose
+    /// colours are constants. Nothing frees it.
+    color: ?[]const u8 = null,
+    /// Text colour read from input (a Markdown mark, a .docx run). Wins over
+    /// `color` when both are set.
+    fg: ?Rgb = null,
+    /// Background shading behind the text (`w:shd` fill).
+    bg: ?Rgb = null,
+    /// Font size in half-points (20 = 10pt); null keeps the style's size.
+    half_points: ?u16 = null,
     hyperlink_url: ?[]const u8 = null,
     image_rel_id: ?[]const u8 = null,
 };
@@ -234,6 +265,10 @@ const ParserState = struct {
     current_bold: bool = false,
     current_italic: bool = false,
     current_underline: bool = false,
+    current_strike: bool = false,
+    current_highlight: bool = false,
+    current_fg: ?Rgb = null,
+    current_bg: ?Rgb = null,
     current_hyperlink_url: ?[]const u8 = null,
     current_image_rel: ?[]const u8 = null,
 
@@ -280,16 +315,28 @@ const ParserState = struct {
             .bold = self.current_bold,
             .italic = self.current_italic,
             .underline = self.current_underline,
+            .strike = self.current_strike,
+            .highlight = self.current_highlight,
+            .fg = self.current_fg,
+            .bg = self.current_bg,
             .hyperlink_url = hyper_url,
             .image_rel_id = img_rel,
         });
 
         self.current_text.items.len = 0;
+        self.resetRunProps();
+        // Don't clear hyperlink_url here — it persists across runs within a hyperlink
+        self.current_image_rel = null;
+    }
+
+    fn resetRunProps(self: *ParserState) void {
         self.current_bold = false;
         self.current_italic = false;
         self.current_underline = false;
-        // Don't clear hyperlink_url here — it persists across runs within a hyperlink
-        self.current_image_rel = null;
+        self.current_strike = false;
+        self.current_highlight = false;
+        self.current_fg = null;
+        self.current_bg = null;
     }
 
     fn finishParagraph(self: *ParserState) !void {
@@ -384,20 +431,26 @@ const ParserState = struct {
             }
         } else if (std.mem.eql(u8, name, "r")) {
             self.in_run = true;
-            self.current_bold = false;
-            self.current_italic = false;
-            self.current_underline = false;
+            self.resetRunProps();
         } else if (self.in_run and std.mem.eql(u8, name, "rPr")) {
             self.in_run_props = true;
         } else if (self.in_run_props and std.mem.eql(u8, name, "b")) {
-            const val = xml.getAttr(es.attrs, "val") orelse "1";
-            self.current_bold = !std.mem.eql(u8, val, "0");
+            self.current_bold = onOffValue(xml.getAttr(es.attrs, "val"));
         } else if (self.in_run_props and std.mem.eql(u8, name, "i")) {
-            const val = xml.getAttr(es.attrs, "val") orelse "1";
-            self.current_italic = !std.mem.eql(u8, val, "0");
+            self.current_italic = onOffValue(xml.getAttr(es.attrs, "val"));
         } else if (self.in_run_props and std.mem.eql(u8, name, "u")) {
             const val = xml.getAttr(es.attrs, "val") orelse "single";
             self.current_underline = !std.mem.eql(u8, val, "none");
+        } else if (self.in_run_props and (std.mem.eql(u8, name, "strike") or std.mem.eql(u8, name, "dstrike"))) {
+            self.current_strike = onOffValue(xml.getAttr(es.attrs, "val"));
+        } else if (self.in_run_props and std.mem.eql(u8, name, "highlight")) {
+            const val = xml.getAttr(es.attrs, "val") orelse "none";
+            self.current_highlight = !std.mem.eql(u8, val, "none");
+        } else if (self.in_run_props and std.mem.eql(u8, name, "color")) {
+            // "auto" and theme-only colours parse to null: the reader's default.
+            self.current_fg = parseRgb(xml.getAttr(es.attrs, "val") orelse "");
+        } else if (self.in_run_props and std.mem.eql(u8, name, "shd")) {
+            self.current_bg = parseRgb(xml.getAttr(es.attrs, "fill") orelse "");
         } else if (std.mem.eql(u8, name, "drawing") or std.mem.eql(u8, name, "pict")) {
             self.in_drawing = true;
         } else if (self.in_drawing and std.mem.eql(u8, name, "blip")) {
@@ -456,6 +509,12 @@ const ParserState = struct {
         }
     }
 };
+
+/// An ST_OnOff attribute: absent means on; "0", "false" and "off" mean off.
+fn onOffValue(val: ?[]const u8) bool {
+    const v = val orelse return true;
+    return !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false") or std.mem.eql(u8, v, "off"));
+}
 
 // Make classifyStyleId accessible from styles module
 pub const classifyStyleId = styles.classifyStyleId;
@@ -644,6 +703,9 @@ test {
     // The C ABI is the surface every embedder compiles against — its tests
     // belong in the same run as everything else.
     _ = ffi;
+    _ = md_parser;
+    _ = word_diff;
+    _ = redline;
     // Tier-1 external anchors (LibreOffice-authored fixture, CPython-verified
     // CRCs/text, PKWARE APPNOTE + ECMA-376 structural constants).
     _ = @import("tier1_anchors.zig");
@@ -1009,4 +1071,40 @@ test "space-only runs are kept; deleted text and field codes are not run text" {
     defer joined.deinit(allocator);
     for (doc.elements[0].paragraph.runs) |r| try joined.appendSlice(allocator, r.text);
     try std.testing.expectEqualStrings("Dear Ms\tMorgan", joined.items);
+}
+
+test "strike, highlight, colour and shading are read from a run" {
+    const allocator = std.testing.allocator;
+    const doc_xml =
+        \\<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>
+        \\<w:r><w:rPr><w:strike/><w:color w:val="a00000"/><w:shd w:val="clear" w:color="auto" w:fill="FDDADA"/></w:rPr><w:t>gone</w:t></w:r>
+        \\<w:r><w:rPr><w:highlight w:val="yellow"/><w:color w:val="auto"/></w:rPr><w:t>look</w:t></w:r>
+        \\<w:r><w:rPr><w:b w:val="false"/><w:strike w:val="0"/><w:dstrike/><w:highlight w:val="none"/></w:rPr><w:t>twice</w:t></w:r>
+        \\<w:r><w:t>plain</w:t></w:r>
+        \\</w:p></w:body></w:document>
+    ;
+    var state = ParserState.init(allocator, &.{}, &.{});
+    defer {
+        for (state.elements.items) |el| switch (el) {
+            .paragraph => |p| Document.freeParagraph(allocator, &p),
+            .table => {},
+        };
+        state.elements.deinit(allocator);
+        state.current_runs.deinit(allocator);
+        state.current_text.deinit(allocator);
+    }
+    var parser = xml.XmlParser.init(doc_xml);
+    while (parser.next()) |ev| switch (ev) {
+        .element_start => |es| try state.handleElementStart(es),
+        .element_end => |name| try state.handleElementEnd(name),
+        .text => |t| try state.handleText(t),
+    };
+    const runs = state.elements.items[0].paragraph.runs;
+    try std.testing.expectEqual(@as(usize, 4), runs.len);
+    try std.testing.expect(runs[0].strike);
+    try std.testing.expectEqualStrings("A00000", &runs[0].fg.?);
+    try std.testing.expectEqualStrings("FDDADA", &runs[0].bg.?);
+    try std.testing.expect(runs[1].highlight and runs[1].fg == null and !runs[1].strike);
+    try std.testing.expect(!runs[2].bold and runs[2].strike and !runs[2].highlight);
+    try std.testing.expect(!runs[3].strike and !runs[3].highlight and runs[3].fg == null and runs[3].bg == null);
 }

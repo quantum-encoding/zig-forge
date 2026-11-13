@@ -681,29 +681,83 @@ fn writeParagraph(
 }
 
 fn writeRun(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), run: *const docx.Run) !void {
-    try buf.appendSlice(allocator, "<w:r><w:rPr>");
-    if (run.bold) try buf.appendSlice(allocator, "<w:b/>");
-    if (run.italic) try buf.appendSlice(allocator, "<w:i/>");
-    if (run.underline) try buf.appendSlice(allocator, "<w:u w:val=\"single\"/>");
-    if (run.is_code) try buf.appendSlice(allocator, "<w:rStyle w:val=\"InlineCode\"/>");
-    if (run.color) |c| {
-        try buf.appendSlice(allocator, "<w:color w:val=\"");
-        try buf.appendSlice(allocator, c);
-        try buf.appendSlice(allocator, "\"/>");
-    }
-    try buf.appendSlice(allocator, "</w:rPr><w:t xml:space=\"preserve\">");
-    try appendXmlEscaped(allocator, buf, run.text);
-    try buf.appendSlice(allocator, "</w:t></w:r>");
+    try writeRunXml(allocator, buf, run, .text);
 }
 
 fn writeHyperlinkRun(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), run: *const docx.Run) !void {
-    try buf.appendSlice(allocator, "<w:r><w:rPr>");
-    try buf.appendSlice(allocator, "<w:color w:val=\"0563C1\"/><w:u w:val=\"single\"/>");
+    try writeRunXml(allocator, buf, run, .hyperlink);
+}
+
+/// Where a run is written: in ordinary text, as the text of a hyperlink
+/// (blue and underlined unless the run has its own colour), or inside a
+/// tracked deletion (`w:del`), whose text Word requires as `w:delText`.
+pub const RunContext = enum { text, hyperlink, deleted };
+
+/// `<w:rPr>` for `run`, its elements in the sequence CT_RPr requires
+/// (ECMA-376 Part 1, 17.3.2.28): rStyle, b, i, strike, color, sz, szCs,
+/// highlight, u, shd. Word refuses a document whose run properties are out
+/// of that order.
+pub fn writeRunProps(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), run: *const docx.Run, context: RunContext) !void {
+    try buf.appendSlice(allocator, "<w:rPr>");
+    if (run.is_code) try buf.appendSlice(allocator, "<w:rStyle w:val=\"InlineCode\"/>");
     if (run.bold) try buf.appendSlice(allocator, "<w:b/>");
     if (run.italic) try buf.appendSlice(allocator, "<w:i/>");
-    try buf.appendSlice(allocator, "</w:rPr><w:t xml:space=\"preserve\">");
-    try appendXmlEscaped(allocator, buf, run.text);
-    try buf.appendSlice(allocator, "</w:t></w:r>");
+    if (run.strike) try buf.appendSlice(allocator, "<w:strike/>");
+    if (run.fg) |c| {
+        try buf.appendSlice(allocator, "<w:color w:val=\"");
+        try buf.appendSlice(allocator, &c);
+        try buf.appendSlice(allocator, "\"/>");
+    } else if (run.color) |c| {
+        try buf.appendSlice(allocator, "<w:color w:val=\"");
+        try appendXmlEscaped(allocator, buf, c);
+        try buf.appendSlice(allocator, "\"/>");
+    } else if (context == .hyperlink) {
+        try buf.appendSlice(allocator, "<w:color w:val=\"0563C1\"/>");
+    }
+    if (run.half_points) |hp| {
+        var tmp: [64]u8 = undefined;
+        try buf.appendSlice(allocator, try std.fmt.bufPrint(&tmp, "<w:sz w:val=\"{d}\"/><w:szCs w:val=\"{d}\"/>", .{ hp, hp }));
+    }
+    if (run.highlight) try buf.appendSlice(allocator, "<w:highlight w:val=\"yellow\"/>");
+    if (run.underline or context == .hyperlink) try buf.appendSlice(allocator, "<w:u w:val=\"single\"/>");
+    if (run.bg) |c| {
+        try buf.appendSlice(allocator, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"");
+        try buf.appendSlice(allocator, &c);
+        try buf.appendSlice(allocator, "\"/>");
+    }
+    try buf.appendSlice(allocator, "</w:rPr>");
+}
+
+/// `<w:r>` holding `run`'s properties and text. Word does not read a newline
+/// or a tab inside `w:t`, so a newline is written as `w:br` and a tab as
+/// `w:tab`; a carriage return is dropped.
+pub fn writeRunXml(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), run: *const docx.Run, context: RunContext) !void {
+    try buf.appendSlice(allocator, "<w:r>");
+    try writeRunProps(allocator, buf, run, context);
+    const open = if (context == .deleted) "<w:delText xml:space=\"preserve\">" else "<w:t xml:space=\"preserve\">";
+    const close = if (context == .deleted) "</w:delText>" else "</w:t>";
+    const text = run.text;
+    var start: usize = 0;
+    for (text, 0..) |c, i| {
+        if (c != '\n' and c != '\t' and c != '\r') continue;
+        if (i > start) {
+            try buf.appendSlice(allocator, open);
+            try appendXmlEscaped(allocator, buf, text[start..i]);
+            try buf.appendSlice(allocator, close);
+        }
+        switch (c) {
+            '\n' => try buf.appendSlice(allocator, "<w:br/>"),
+            '\t' => try buf.appendSlice(allocator, "<w:tab/>"),
+            else => {},
+        }
+        start = i + 1;
+    }
+    if (start < text.len or text.len == 0) {
+        try buf.appendSlice(allocator, open);
+        try appendXmlEscaped(allocator, buf, text[start..]);
+        try buf.appendSlice(allocator, close);
+    }
+    try buf.appendSlice(allocator, "</w:r>");
 }
 
 /// EMU per inch (914400) and per pixel at 96 DPI (9525) for drawing geometry.
@@ -1103,7 +1157,7 @@ fn genHeaderRels(allocator: std.mem.Allocator, media_target: []const u8) ![]u8 {
 
 // ── XML escaping ────────────────────────────────────────────────
 
-fn appendXmlEscaped(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), text: []const u8) !void {
+pub fn appendXmlEscaped(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), text: []const u8) !void {
     for (text) |c| {
         switch (c) {
             '&' => try buf.appendSlice(allocator, "&amp;"),
@@ -1183,4 +1237,51 @@ test "a markdown table declares a grid so readers can lay it out" {
     // Two equal columns that between them fill the text width.
     try testing.expect(std.mem.indexOf(u8, xml, "<w:gridCol w:w=\"4680\"/>") != null);
     try testing.expect(std.mem.indexOf(u8, xml, "<w:tcW w:w=\"4680\" w:type=\"dxa\"/>") != null);
+}
+
+test "run properties are written in schema order" {
+    const allocator = testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const run = docx.Run{
+        .text = "x",
+        .bold = true,
+        .italic = true,
+        .underline = true,
+        .strike = true,
+        .highlight = true,
+        .is_code = true,
+        .fg = "A00000".*,
+        .bg = "FDDADA".*,
+        .half_points = 17,
+    };
+    try writeRunProps(allocator, &buf, &run, .text);
+    try testing.expectEqualStrings(
+        "<w:rPr><w:rStyle w:val=\"InlineCode\"/><w:b/><w:i/><w:strike/><w:color w:val=\"A00000\"/>" ++
+            "<w:sz w:val=\"17\"/><w:szCs w:val=\"17\"/><w:highlight w:val=\"yellow\"/><w:u w:val=\"single\"/>" ++
+            "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"FDDADA\"/></w:rPr>",
+        buf.items,
+    );
+
+    // A hyperlink is blue and underlined unless the run says otherwise.
+    buf.clearRetainingCapacity();
+    try writeRunProps(allocator, &buf, &docx.Run{ .text = "l" }, .hyperlink);
+    try testing.expectEqualStrings("<w:rPr><w:color w:val=\"0563C1\"/><w:u w:val=\"single\"/></w:rPr>", buf.items);
+}
+
+test "newlines and tabs become breaks and tab stops; a deleted run uses delText" {
+    const allocator = testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    try writeRunXml(allocator, &buf, &docx.Run{ .text = "a\r\nb\tc\n" }, .text);
+    try testing.expectEqualStrings(
+        "<w:r><w:rPr></w:rPr><w:t xml:space=\"preserve\">a</w:t><w:br/><w:t xml:space=\"preserve\">b</w:t><w:tab/><w:t xml:space=\"preserve\">c</w:t><w:br/></w:r>",
+        buf.items,
+    );
+    buf.clearRetainingCapacity();
+    try writeRunXml(allocator, &buf, &docx.Run{ .text = "gone & <done>" }, .deleted);
+    try testing.expectEqualStrings(
+        "<w:r><w:rPr></w:rPr><w:delText xml:space=\"preserve\">gone &amp; &lt;done&gt;</w:delText></w:r>",
+        buf.items,
+    );
 }

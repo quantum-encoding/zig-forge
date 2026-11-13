@@ -1,0 +1,39 @@
+{
+  "title": "Proofread: 12 Example Road, Sampletown, ZZ1 1ZZ (Flats 1, 2 and 3), FRA 01.01.26",
+  "key": "{--Red, struck through--} is in the report now. {++Green++} is the suggested change. Mistakes in each flat's answers and action plan come first, then the wording shared by all three reports.",
+  "author": "Proofreader",
+  "date": "2026-01-01",
+  "groups": [
+    { "name": "Check first", "items": [
+      { "where": "Header (all three)", "before": "Tel.0100 0000001", "after": "Tel. 0100 000 0002",
+        "note": "The website gives 0100 000 0002. Please confirm which number is right." }
+    ]},
+    { "name": "Flat 3", "items": [
+      { "where": "Fire doors question: Action Plan No.", "before": "No  5", "after": "No  7",
+        "note": "The fire door action is number 7 in this report." },
+      { "where": "Section 11c / Action 7",
+        "before": "Appropriate self closing device to be fitted to the flat entrance door to ensure that it closes fully onto its rebate from all angles of swing.",
+        "after": "Appropriate self-closing device to be fitted to the flat entrance door to ensure that it closes fully onto its rebate from all angles of swing, and the hole in the entrance door to be repaired to its original fire-resisting standard.",
+        "note": "11c notes a hole in the entrance door, but no action covered it." },
+      { "where": "Action 3",
+        "before": "Electrical switchgear cupboard to be kept free free from storage of combustible materials",
+        "after": "Electrical switchgear cupboard to be kept free from storage of combustible materials" }
+    ]},
+    { "name": "Flat 2", "items": [
+      { "where": "Signage notes",
+        "before": "14b- Fire Policy, Procedures and Fire Action Notices to be placed on Notice board in hallway",
+        "after": "15b- Fire Policy, Procedures and Fire Action Notices to be placed on the notice board in the hallway" },
+      { "where": "Action 5",
+        "before": "Missing kitchen door to be replaced by similar standard of robust, close-fitting door fitted throughout the remainder of the flat.",
+        "after": "Missing kitchen door to be replaced with a robust, close-fitting door of the same standard as those fitted throughout the rest of the flat." }
+    ]},
+    { "name": "Flat 1", "items": [
+      { "where": "Means of escape: staircases question", "before": "Yes  5", "after": "No  5",
+        "note": "Action 5 says storage must be cleared from the common stair, so the answer is No." },
+      { "where": "Lighting notes",
+        "before": "4c-d No record of testing or maintenance of emergency lighting in common stairway",
+        "after": "14c-d No record of testing or maintenance of emergency lighting in the common stairway" },
+      { "where": "Fire alarm notes", "before": "Smoke alarm in hall.", "after": "Smoke alarm in hall. Heat alarm in kitchen." }
+    ]}
+  ]
+}

@@ -9,6 +9,10 @@
 //!   **bold**, *italic*, ***bold italic***
 //!   `inline code`
 //!   [link text](url)
+//!   ~~struck through~~, ==highlighted==
+//!   [text]{color=red bg=#fee2e2 strike underline}
+//!   CriticMarkup: {--deleted--} {++inserted++} {~~old~>new~~} {==highlighted==}
+//!   (inline marks nest; see parseInlineFormatting)
 //!   - / * / + unordered lists (with nesting via indentation)
 //!   1. ordered lists
 //!   ```lang  fenced code blocks  ```
@@ -396,173 +400,390 @@ fn flushTable(
 }
 
 // ── Inline formatting parser ────────────────────────────────────
+//
+// The inline syntax is the one zig_pdf_generator's Markdown reads, so the
+// same text marks up the same way in a PDF and in a .docx.
 
-/// Parse inline markdown formatting into a sequence of Runs.
-/// Handles: **bold**, *italic*, ***bold italic***, `code`, [link](url)
-pub fn parseInlineFormatting(allocator: std.mem.Allocator, text: []const u8) ![]docx.Run {
-    var runs: std.ArrayListUnmanaged(docx.Run) = .empty;
-    errdefer {
-        for (runs.items) |r| if (r.text.len > 0) allocator.free(r.text);
-        runs.deinit(allocator);
+/// Marks nest at most this deep; anything deeper is kept as typed, so
+/// hostile input cannot recurse without bound.
+const MAX_INLINE_DEPTH: u8 = 8;
+
+/// Longest bracketed text `[…]` a link or marked span may hold. Bounds the
+/// work per `[`, so a long run of unclosed brackets costs linear time.
+const MAX_BRACKET_TEXT: usize = 4096;
+
+/// How CriticMarkup deletions and insertions look: `{--…--}`, `{++…++}` and
+/// the two halves of `{~~old~>new~~}`. The defaults are the redline sheet's:
+/// removed words red, struck through, on light red; added words green and
+/// bold on light green.
+pub const MarkColors = struct {
+    removed: docx.Rgb = "A00000".*,
+    removed_fill: docx.Rgb = "FDDADA".*,
+    added: docx.Rgb = "006400".*,
+    added_fill: docx.Rgb = "D7F5D7".*,
+
+    pub fn removedLook(self: MarkColors, base: docx.Run) docx.Run {
+        var r = base;
+        r.strike = true;
+        r.fg = self.removed;
+        r.bg = self.removed_fill;
+        return r;
     }
 
-    var i: usize = 0;
-    var plain_start: usize = 0;
+    pub fn addedLook(self: MarkColors, base: docx.Run) docx.Run {
+        var r = base;
+        r.bold = true;
+        r.fg = self.added;
+        r.bg = self.added_fill;
+        return r;
+    }
+};
 
-    while (i < text.len) {
-        // ── Inline code ──
-        if (text[i] == '`' and !isDoubleBacktick(text, i)) {
-            if (i > plain_start) try appendRun(allocator, &runs, text[plain_start..i], false, false, false);
-            const end = std.mem.indexOfScalarPos(u8, text, i + 1, '`') orelse {
-                plain_start = i;
-                i += 1;
-                continue;
-            };
-            const code_text = try allocator.dupe(u8, text[i + 1 .. end]);
-            try runs.append(allocator, .{
-                .text = code_text,
-                .bold = false,
-                .italic = false,
-                .is_code = true,
-            });
-            i = end + 1;
-            plain_start = i;
+/// Colour names a `[text]{color=… bg=…}` span accepts, with the hex each
+/// stands for (the same table as zig_pdf_generator's).
+const NAMED_COLORS = [_]struct { name: []const u8, hex: *const [6]u8 }{
+    .{ .name = "black", .hex = "0F0F0F" },      .{ .name = "white", .hex = "FFFFFF" },
+    .{ .name = "grey", .hex = "71717A" },       .{ .name = "gray", .hex = "71717A" },
+    .{ .name = "red", .hex = "B91C1C" },        .{ .name = "green", .hex = "166534" },
+    .{ .name = "blue", .hex = "1D4ED8" },       .{ .name = "orange", .hex = "C2410C" },
+    .{ .name = "purple", .hex = "7E22CE" },     .{ .name = "yellow", .hex = "FEF08A" },
+    .{ .name = "pink", .hex = "FBCFE8" },       .{ .name = "lightred", .hex = "FEE2E2" },
+    .{ .name = "lightgreen", .hex = "DCFCE7" }, .{ .name = "lightblue", .hex = "DBEAFE" },
+    .{ .name = "lightgrey", .hex = "E4E4E7" },  .{ .name = "lightgray", .hex = "E4E4E7" },
+};
+
+/// `#rgb`, `#rrggbb` or one of NAMED_COLORS (any case); null for anything else.
+pub fn parseColor(s: []const u8) ?docx.Rgb {
+    if (s.len > 0 and s[0] == '#') {
+        const hex = s[1..];
+        if (hex.len == 6) return docx.parseRgb(hex);
+        if (hex.len != 3) return null;
+        var out: docx.Rgb = undefined;
+        for (hex, 0..) |c, i| {
+            if (!std.ascii.isHex(c)) return null;
+            out[i * 2] = std.ascii.toUpper(c);
+            out[i * 2 + 1] = std.ascii.toUpper(c);
+        }
+        return out;
+    }
+    for (NAMED_COLORS) |n| {
+        if (std.ascii.eqlIgnoreCase(n.name, s)) return n.hex.*;
+    }
+    return null;
+}
+
+/// The attribute list of `[text]{…}` applied over `base`: space-separated
+/// `color=<colour>`, `bg=<colour>`, `strike`, `underline`. Null when the list
+/// is empty or holds anything else, so `[x]{y}` in ordinary prose is left alone.
+fn parseSpanAttrs(attrs: []const u8, base: docx.Run) ?docx.Run {
+    var style = base;
+    var any = false;
+    var it = std.mem.tokenizeAny(u8, attrs, " \t");
+    while (it.next()) |tok| {
+        if (std.mem.eql(u8, tok, "strike")) {
+            style.strike = true;
+        } else if (std.mem.eql(u8, tok, "underline")) {
+            style.underline = true;
+        } else if (std.mem.startsWith(u8, tok, "color=")) {
+            style.fg = parseColor(tok["color=".len..]) orelse return null;
+        } else if (std.mem.startsWith(u8, tok, "bg=")) {
+            style.bg = parseColor(tok["bg=".len..]) orelse return null;
+        } else return null;
+        any = true;
+    }
+    return if (any) style else null;
+}
+
+/// Index of the `]` matching the `[` at `start`, counting nested pairs.
+fn findBracketClose(text: []const u8, start: usize) ?usize {
+    var depth: u32 = 1;
+    var i = start + 1;
+    const limit = @min(text.len, start + 1 + MAX_BRACKET_TEXT);
+    while (i < limit) : (i += 1) {
+        if (text[i] == '\\') {
+            i += 1;
             continue;
         }
-
-        // ── Bold + italic (***) ──
-        if (i + 2 < text.len and text[i] == '*' and text[i + 1] == '*' and text[i + 2] == '*') {
-            if (i > plain_start) try appendRun(allocator, &runs, text[plain_start..i], false, false, false);
-            const close = findClosing(text, i + 3, "***") orelse {
-                plain_start = i;
-                i += 3;
-                continue;
-            };
-            const inner = try allocator.dupe(u8, text[i + 3 .. close]);
-            try runs.append(allocator, .{ .text = inner, .bold = true, .italic = true });
-            i = close + 3;
-            plain_start = i;
-            continue;
+        if (text[i] == '[') depth += 1;
+        if (text[i] == ']') {
+            depth -= 1;
+            if (depth == 0) return i;
         }
+    }
+    return null;
+}
 
-        // ── Bold (**) ──
-        if (i + 1 < text.len and text[i] == '*' and text[i + 1] == '*') {
-            if (i > plain_start) try appendRun(allocator, &runs, text[plain_start..i], false, false, false);
-            const close = findClosing(text, i + 2, "**") orelse {
-                plain_start = i;
+/// The closing `delim` of a `~~…~~` / `==…==` mark opened just before `from`:
+/// the first one after at least one character and not preceded by a space.
+fn findCloser(text: []const u8, from: usize, delim: []const u8) ?usize {
+    var p = from;
+    while (std.mem.indexOfPos(u8, text, p, delim)) |at| {
+        if (at > from and text[at - 1] != ' ') return at;
+        p = at + 1;
+    }
+    return null;
+}
+
+fn isEscapable(c: u8) bool {
+    return switch (c) {
+        '\\', '`', '*', '~', '=', '[', ']', '{', '}' => true,
+        else => false,
+    };
+}
+
+/// Parse inline markdown into Runs, with CriticMarkup in the default colours.
+///
+///   **bold**  *italic*  ***bold italic***  `code`  [link](url)  ![alt](path)
+///   ~~struck through~~   ==highlighted==
+///   [text]{color=red bg=#fee2e2 strike underline}   (any subset of the four)
+///   {--deleted--}  {++inserted++}  {~~old~>new~~}  {==highlighted==}
+///
+/// Marks nest with each other and with bold and italic. A backslash before
+/// one of ``\ ` * ~ = [ ] { }`` keeps that character as typed.
+pub fn parseInlineFormatting(allocator: std.mem.Allocator, text: []const u8) ![]docx.Run {
+    return parseInlineMarked(allocator, text, .{});
+}
+
+/// parseInlineFormatting with CriticMarkup drawn in `marks`.
+pub fn parseInlineMarked(allocator: std.mem.Allocator, text: []const u8, marks: MarkColors) ![]docx.Run {
+    var p = InlineParser{ .allocator = allocator, .marks = marks };
+    errdefer p.deinit();
+    try p.parseInto(text, .{ .text = "" }, 0);
+
+    // A paragraph with no runs at all is invisible; keep one empty run.
+    if (p.runs.items.len == 0) try p.runs.append(allocator, .{ .text = "" });
+    return p.runs.toOwnedSlice(allocator);
+}
+
+const InlineParser = struct {
+    allocator: std.mem.Allocator,
+    marks: MarkColors,
+    runs: std.ArrayListUnmanaged(docx.Run) = .empty,
+
+    fn deinit(self: *InlineParser) void {
+        for (self.runs.items) |r| {
+            if (r.text.len > 0) self.allocator.free(r.text);
+            if (r.hyperlink_url) |u| self.allocator.free(u);
+            if (r.image_rel_id) |u| self.allocator.free(u);
+        }
+        self.runs.deinit(self.allocator);
+    }
+
+    /// Append `text` in `style`, joined onto the previous run when the two
+    /// look the same (an escape splits text that reads as one run).
+    fn plain(self: *InlineParser, style: docx.Run, text: []const u8) !void {
+        if (text.len == 0) return;
+        if (self.runs.items.len > 0) {
+            const last = &self.runs.items[self.runs.items.len - 1];
+            if (last.text.len > 0 and sameLook(last.*, style) and joinable(last.*) and joinable(style)) {
+                const joined = try std.mem.concat(self.allocator, u8, &.{ last.text, text });
+                self.allocator.free(last.text);
+                last.text = joined;
+                return;
+            }
+        }
+        var run = style;
+        run.text = try self.allocator.dupe(u8, text);
+        try self.runs.append(self.allocator, run);
+    }
+
+    fn parseInto(self: *InlineParser, text: []const u8, style: docx.Run, depth: u8) error{OutOfMemory}!void {
+        if (depth >= MAX_INLINE_DEPTH) return self.plain(style, text);
+
+        var i: usize = 0;
+        var plain_start: usize = 0;
+        // Once a closing delimiter is known to be absent from the rest of the
+        // text, later openers of that kind are not searched for again.
+        var no_strike_close = false;
+        var no_mark_close = false;
+        var no_critic_close = false;
+
+        while (i < text.len) {
+            const c = text[i];
+
+            // Backslash escape: the next character is kept, not interpreted.
+            if (c == '\\' and i + 1 < text.len and isEscapable(text[i + 1])) {
+                try self.plain(style, text[plain_start..i]);
+                plain_start = i + 1;
                 i += 2;
                 continue;
-            };
-            const inner = try allocator.dupe(u8, text[i + 2 .. close]);
-            try runs.append(allocator, .{ .text = inner, .bold = true });
-            i = close + 2;
-            plain_start = i;
-            continue;
-        }
-
-        // ── Italic (*) ──
-        if (text[i] == '*' and (i + 1 < text.len and text[i + 1] != '*')) {
-            if (i > plain_start) try appendRun(allocator, &runs, text[plain_start..i], false, false, false);
-            const close = std.mem.indexOfScalarPos(u8, text, i + 1, '*') orelse {
-                plain_start = i;
-                i += 1;
-                continue;
-            };
-            const inner = try allocator.dupe(u8, text[i + 1 .. close]);
-            try runs.append(allocator, .{ .text = inner, .italic = true });
-            i = close + 1;
-            plain_start = i;
-            continue;
-        }
-
-        // ── Image ![alt](path) ──
-        if (text[i] == '!' and i + 1 < text.len and text[i + 1] == '[') {
-            const close_bracket = std.mem.indexOfScalarPos(u8, text, i + 2, ']') orelse {
-                i += 1;
-                continue;
-            };
-            if (close_bracket + 1 < text.len and text[close_bracket + 1] == '(') {
-                const close_paren = std.mem.indexOfScalarPos(u8, text, close_bracket + 2, ')') orelse {
-                    i += 1;
-                    continue;
-                };
-                if (i > plain_start) try appendRun(allocator, &runs, text[plain_start..i], false, false, false);
-                const alt_text = try allocator.dupe(u8, text[i + 2 .. close_bracket]);
-                const img_path = try allocator.dupe(u8, text[close_bracket + 2 .. close_paren]);
-                try runs.append(allocator, .{
-                    .text = alt_text,
-                    .image_rel_id = img_path, // temporarily stores path; main.zig resolves to rel ID
-                });
-                i = close_paren + 1;
-                plain_start = i;
-                continue;
             }
-        }
 
-        // ── Link [text](url) ──
-        if (text[i] == '[') {
-            const close_bracket = std.mem.indexOfScalarPos(u8, text, i + 1, ']') orelse {
-                i += 1;
-                continue;
-            };
-            if (close_bracket + 1 < text.len and text[close_bracket + 1] == '(') {
-                const close_paren = std.mem.indexOfScalarPos(u8, text, close_bracket + 2, ')') orelse {
-                    i += 1;
+            // Inline code
+            if (c == '`') {
+                if (std.mem.indexOfScalarPos(u8, text, i + 1, '`')) |end| {
+                    try self.plain(style, text[plain_start..i]);
+                    var code = style;
+                    code.is_code = true;
+                    code.text = try self.allocator.dupe(u8, text[i + 1 .. end]);
+                    try self.runs.append(self.allocator, code);
+                    i = end + 1;
+                    plain_start = i;
                     continue;
-                };
-                if (i > plain_start) try appendRun(allocator, &runs, text[plain_start..i], false, false, false);
-                const link_text = try allocator.dupe(u8, text[i + 1 .. close_bracket]);
-                // H3 (writer side) — scheme allowlist. An unsafe destination
-                // (javascript:, data:, file:, …) must not become a live
-                // TargetMode="External" relationship in the DOCX; keep the
-                // visible text, drop the hyperlink.
-                const url_src = text[close_bracket + 2 .. close_paren];
-                try runs.append(allocator, .{
-                    .text = link_text,
-                    .hyperlink_url = if (isSafeLinkUrl(url_src))
-                        try allocator.dupe(u8, url_src)
-                    else
-                        null,
-                });
-                i = close_paren + 1;
-                plain_start = i;
-                continue;
+                }
             }
+
+            // CriticMarkup: {--deleted--} {++inserted++} {==highlighted==} {~~old~>new~~}
+            if (c == '{' and !no_critic_close and i + 2 < text.len and text[i + 1] == text[i + 2]) {
+                const m = text[i + 1];
+                if (m == '-' or m == '+' or m == '=' or m == '~') {
+                    const closer = [3]u8{ m, m, '}' };
+                    if (std.mem.indexOfPos(u8, text, i + 3, &closer)) |close| {
+                        const inner = text[i + 3 .. close];
+                        const arrow = if (m == '~') std.mem.indexOf(u8, inner, "~>") else null;
+                        if (m != '~' or arrow != null) {
+                            try self.plain(style, text[plain_start..i]);
+                            switch (m) {
+                                '-' => try self.parseInto(inner, self.marks.removedLook(style), depth + 1),
+                                '+' => try self.parseInto(inner, self.marks.addedLook(style), depth + 1),
+                                '=' => {
+                                    var h = style;
+                                    h.highlight = true;
+                                    try self.parseInto(inner, h, depth + 1);
+                                },
+                                else => {
+                                    try self.parseInto(inner[0..arrow.?], self.marks.removedLook(style), depth + 1);
+                                    try self.parseInto(inner[arrow.? + 2 ..], self.marks.addedLook(style), depth + 1);
+                                },
+                            }
+                            i = close + 3;
+                            plain_start = i;
+                            continue;
+                        }
+                    } else if (std.mem.indexOfScalarPos(u8, text, i + 3, '}') == null) {
+                        no_critic_close = true;
+                    }
+                }
+            }
+
+            // ~~struck through~~ and ==highlighted==
+            if ((c == '~' or c == '=') and i + 2 < text.len and text[i + 1] == c and text[i + 2] != ' ') {
+                const gave_up = if (c == '~') &no_strike_close else &no_mark_close;
+                if (!gave_up.*) {
+                    const delim = [2]u8{ c, c };
+                    if (findCloser(text, i + 2, &delim)) |close| {
+                        try self.plain(style, text[plain_start..i]);
+                        var inner = style;
+                        if (c == '~') inner.strike = true else inner.highlight = true;
+                        try self.parseInto(text[i + 2 .. close], inner, depth + 1);
+                        i = close + 2;
+                        plain_start = i;
+                        continue;
+                    }
+                    gave_up.* = true;
+                }
+            }
+
+            // Image ![alt](path): the run carries the path until the image is resolved.
+            if (c == '!' and i + 1 < text.len and text[i + 1] == '[') {
+                if (findBracketClose(text, i + 1)) |close_bracket| {
+                    if (close_bracket + 1 < text.len and text[close_bracket + 1] == '(') {
+                        if (std.mem.indexOfScalarPos(u8, text, close_bracket + 2, ')')) |close_paren| {
+                            try self.plain(style, text[plain_start..i]);
+                            const alt_text = try self.allocator.dupe(u8, text[i + 2 .. close_bracket]);
+                            errdefer self.allocator.free(alt_text);
+                            const img_path = try self.allocator.dupe(u8, text[close_bracket + 2 .. close_paren]);
+                            errdefer self.allocator.free(img_path);
+                            try self.runs.append(self.allocator, .{ .text = alt_text, .image_rel_id = img_path });
+                            i = close_paren + 1;
+                            plain_start = i;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // Link [text](url), or a marked span [text]{color=… bg=… strike underline}
+            if (c == '[') {
+                if (findBracketClose(text, i)) |close_bracket| {
+                    const next: u8 = if (close_bracket + 1 < text.len) text[close_bracket + 1] else 0;
+                    if (next == '(') {
+                        if (std.mem.indexOfScalarPos(u8, text, close_bracket + 2, ')')) |close_paren| {
+                            try self.plain(style, text[plain_start..i]);
+                            // H3 (writer side) — scheme allowlist. An unsafe
+                            // destination (javascript:, data:, file:, …) must
+                            // not become a live TargetMode="External"
+                            // relationship in the DOCX; keep the visible text,
+                            // drop the hyperlink.
+                            const url_src = text[close_bracket + 2 .. close_paren];
+                            const link_text = try self.allocator.dupe(u8, text[i + 1 .. close_bracket]);
+                            errdefer self.allocator.free(link_text);
+                            const url = if (isSafeLinkUrl(url_src)) try self.allocator.dupe(u8, url_src) else null;
+                            errdefer if (url) |u| self.allocator.free(u);
+                            var link = style;
+                            link.text = link_text;
+                            link.hyperlink_url = url;
+                            try self.runs.append(self.allocator, link);
+                            i = close_paren + 1;
+                            plain_start = i;
+                            continue;
+                        }
+                    } else if (next == '{') {
+                        if (std.mem.indexOfScalarPos(u8, text, close_bracket + 2, '}')) |close_brace| {
+                            if (parseSpanAttrs(text[close_bracket + 2 .. close_brace], style)) |span_style| {
+                                try self.plain(style, text[plain_start..i]);
+                                try self.parseInto(text[i + 1 .. close_bracket], span_style, depth + 1);
+                                i = close_brace + 1;
+                                plain_start = i;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Bold / italic / bold-italic — asterisks
+            if (c == '*') {
+                var star_count: usize = 0;
+                while (i + star_count < text.len and text[i + star_count] == '*' and star_count < 3) star_count += 1;
+                // Find a closing run of at least as many asterisks. A longer run
+                // closes with its last ones; the rest belong to marks opened inside.
+                var search_from = i + star_count;
+                var matched = false;
+                while (search_from < text.len) {
+                    const maybe_close = std.mem.indexOfScalarPos(u8, text, search_from, '*') orelse break;
+                    var close_count: usize = 0;
+                    while (maybe_close + close_count < text.len and text[maybe_close + close_count] == '*' and close_count < 3) close_count += 1;
+                    if (close_count >= star_count and maybe_close > i + star_count) {
+                        try self.plain(style, text[plain_start..i]);
+                        var inner = style;
+                        if (star_count != 1) inner.bold = true;
+                        if (star_count != 2) inner.italic = true;
+                        const close_at = maybe_close + close_count - star_count;
+                        try self.parseInto(text[i + star_count .. close_at], inner, depth + 1);
+                        i = close_at + star_count;
+                        plain_start = i;
+                        matched = true;
+                        break;
+                    }
+                    search_from = maybe_close + close_count;
+                }
+                if (matched) continue;
+            }
+
+            i += 1;
         }
 
-        i += 1;
+        try self.plain(style, text[plain_start..]);
     }
+};
 
-    // Remaining plain text
-    if (plain_start < text.len) {
-        try appendRun(allocator, &runs, text[plain_start..], false, false, false);
-    }
-
-    // If no runs at all, add an empty one so the paragraph isn't invisible
-    if (runs.items.len == 0) {
-        try appendRun(allocator, &runs, "", false, false, false);
-    }
-
-    return runs.toOwnedSlice(allocator);
+/// True when two runs are drawn the same way.
+pub fn sameLook(a: docx.Run, b: docx.Run) bool {
+    return a.bold == b.bold and a.italic == b.italic and a.underline == b.underline and
+        a.strike == b.strike and a.highlight == b.highlight and a.is_code == b.is_code and
+        optRgbEql(a.fg, b.fg) and optRgbEql(a.bg, b.bg);
 }
 
-fn appendRun(allocator: std.mem.Allocator, runs: *std.ArrayListUnmanaged(docx.Run), text: []const u8, bold: bool, italic: bool, is_code: bool) !void {
-    try runs.append(allocator, .{
-        .text = try allocator.dupe(u8, text),
-        .bold = bold,
-        .italic = italic,
-        .is_code = is_code,
-    });
+fn optRgbEql(a: ?docx.Rgb, b: ?docx.Rgb) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return std.mem.eql(u8, &a.?, &b.?);
 }
 
-fn findClosing(text: []const u8, start: usize, needle: []const u8) ?usize {
-    const offset = std.mem.indexOf(u8, text[start..], needle) orelse return null;
-    return start + offset; // absolute index into text
-}
-
-fn isDoubleBacktick(text: []const u8, pos: usize) bool {
-    // Check for `` (code fence in inline) — we only handle single backtick
-    return pos + 1 < text.len and text[pos + 1] == '`';
+/// A run plain text may be joined onto: not code, a link or an image.
+fn joinable(r: docx.Run) bool {
+    return !r.is_code and r.hyperlink_url == null and r.image_rel_id == null;
 }
 
 // ── YAML frontmatter parser ─────────────────────────────────────
@@ -622,4 +843,138 @@ fn freeElement(allocator: std.mem.Allocator, elem: *docx.Element) void {
             allocator.free(t.rows);
         },
     }
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+fn freeRuns(runs: []docx.Run) void {
+    for (runs) |r| {
+        if (r.text.len > 0) testing.allocator.free(r.text);
+        if (r.hyperlink_url) |u| testing.allocator.free(u);
+        if (r.image_rel_id) |u| testing.allocator.free(u);
+    }
+    testing.allocator.free(runs);
+}
+
+fn rgb(s: []const u8) docx.Rgb {
+    return docx.parseRgb(s).?;
+}
+
+test "strike-through and highlight marks" {
+    const runs = try parseInlineFormatting(testing.allocator, "a ~~gone~~ and ==look== b");
+    defer freeRuns(runs);
+    try testing.expectEqual(@as(usize, 5), runs.len);
+    try testing.expectEqualStrings("gone", runs[1].text);
+    try testing.expect(runs[1].strike and !runs[1].highlight);
+    try testing.expectEqualStrings(" and ", runs[2].text);
+    try testing.expect(!runs[2].strike);
+    try testing.expectEqualStrings("look", runs[3].text);
+    try testing.expect(runs[3].highlight and !runs[3].strike);
+}
+
+test "marks nest with each other and with bold" {
+    const runs = try parseInlineFormatting(testing.allocator, "==x **bold ~~both~~** y==");
+    defer freeRuns(runs);
+    try testing.expectEqual(@as(usize, 4), runs.len);
+    for (runs) |r| try testing.expect(r.highlight);
+    try testing.expectEqualStrings("bold ", runs[1].text);
+    try testing.expect(runs[1].bold and !runs[1].strike);
+    try testing.expectEqualStrings("both", runs[2].text);
+    try testing.expect(runs[2].bold and runs[2].strike);
+}
+
+test "a span sets colour, shading, strike and underline" {
+    const runs = try parseInlineFormatting(testing.allocator, "[warn **now**]{color=red bg=#fee strike underline}!");
+    defer freeRuns(runs);
+    try testing.expectEqual(@as(usize, 3), runs.len);
+    for (runs[0..2]) |r| {
+        try testing.expectEqualStrings("B91C1C", &r.fg.?);
+        try testing.expectEqualStrings("FFEEEE", &r.bg.?);
+        try testing.expect(r.strike and r.underline);
+    }
+    try testing.expect(runs[1].bold);
+    try testing.expectEqualStrings("!", runs[2].text);
+    try testing.expect(runs[2].fg == null);
+}
+
+test "text that only looks like a mark is left as typed" {
+    const cases = [_][]const u8{
+        "if a == b and c == d",
+        "[note]{see below}",
+        "[x]{color=#12345}",
+        "~~ spaced~~",
+        "{--never closed",
+        "2 * 3",
+    };
+    for (cases) |case| {
+        const runs = try parseInlineFormatting(testing.allocator, case);
+        defer freeRuns(runs);
+        try testing.expectEqual(@as(usize, 1), runs.len);
+        try testing.expectEqualStrings(case, runs[0].text);
+        try testing.expect(!runs[0].strike and !runs[0].highlight and runs[0].fg == null and !runs[0].italic);
+    }
+}
+
+test "CriticMarkup draws removed and added words in the redline look" {
+    const runs = try parseInlineFormatting(testing.allocator, "{--old--}{++new++} {~~was~>is~~} {==see==}");
+    defer freeRuns(runs);
+    try testing.expectEqual(@as(usize, 7), runs.len);
+    const removed = [_]usize{ 0, 3 };
+    const added = [_]usize{ 1, 4 };
+    for (removed) |i| {
+        try testing.expect(runs[i].strike and !runs[i].bold);
+        try testing.expectEqualStrings("A00000", &runs[i].fg.?);
+        try testing.expectEqualStrings("FDDADA", &runs[i].bg.?);
+    }
+    for (added) |i| {
+        try testing.expect(runs[i].bold and !runs[i].strike);
+        try testing.expectEqualStrings("006400", &runs[i].fg.?);
+        try testing.expectEqualStrings("D7F5D7", &runs[i].bg.?);
+    }
+    try testing.expectEqualStrings("was", runs[3].text);
+    try testing.expectEqualStrings("is", runs[4].text);
+    try testing.expect(runs[6].highlight);
+
+    // The colours come from the caller when it has its own.
+    const own = try parseInlineMarked(testing.allocator, "{--x--}", .{ .removed = rgb("123456") });
+    defer freeRuns(own);
+    try testing.expectEqualStrings("123456", &own[0].fg.?);
+}
+
+test "a backslash keeps a mark character as typed" {
+    const runs = try parseInlineFormatting(testing.allocator, "\\~~not struck\\~~ and \\*plain\\* \\\\");
+    defer freeRuns(runs);
+    try testing.expectEqual(@as(usize, 1), runs.len);
+    try testing.expectEqualStrings("~~not struck~~ and *plain* \\", runs[0].text);
+}
+
+test "links, images and code keep working beside the marks" {
+    const runs = try parseInlineFormatting(testing.allocator, "~~see [site](https://example.com) and `x`~~ ![pic](a.png) [bad](javascript:void)");
+    defer freeRuns(runs);
+    try testing.expectEqualStrings("site", runs[1].text);
+    try testing.expectEqualStrings("https://example.com", runs[1].hyperlink_url.?);
+    try testing.expect(runs[1].strike);
+    try testing.expectEqualStrings("x", runs[3].text);
+    try testing.expect(runs[3].is_code and runs[3].strike);
+    try testing.expectEqualStrings("a.png", runs[5].image_rel_id.?);
+    try testing.expectEqualStrings("bad", runs[7].text);
+    try testing.expect(runs[7].hyperlink_url == null);
+}
+
+test "deep nesting stops at the depth limit instead of recursing" {
+    var buf: [400]u8 = undefined;
+    var n: usize = 0;
+    for (0..40) |_| {
+        @memcpy(buf[n .. n + 3], "==a");
+        n += 3;
+    }
+    for (0..40) |_| {
+        @memcpy(buf[n .. n + 2], "==");
+        n += 2;
+    }
+    const runs = try parseInlineFormatting(testing.allocator, buf[0..n]);
+    defer freeRuns(runs);
+    try testing.expect(runs.len > 0);
 }

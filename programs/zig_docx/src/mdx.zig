@@ -6,6 +6,7 @@
 const std = @import("std");
 const docx = @import("docx.zig");
 const rels = @import("rels.zig");
+const MarkColors = @import("md_parser.zig").MarkColors;
 
 pub const MdxOptions = struct {
     title: []const u8 = "",
@@ -14,6 +15,13 @@ pub const MdxOptions = struct {
     date: []const u8 = "",
     slug: []const u8 = "",
     image_mode: ImageMode = .file_reference,
+    /// Also write text colour, shading and underline as `[text]{color=… bg=…
+    /// underline}` spans, and runs in the redline look as CriticMarkup
+    /// (`{--removed--}`, `{++added++}`), so Markdown → DOCX gives them back.
+    /// Off by default: `{` opens a JSX expression in MDX, so the result is
+    /// Markdown for zig_docx and zig_pdf_generator, not valid MDX.
+    /// Strike-through (`~~`) and highlight (`==`) are written either way.
+    marks: bool = false,
 
     pub const ImageMode = enum {
         file_reference, // ./images/1-image1.png (extract separately)
@@ -107,14 +115,14 @@ pub fn generateMdx(allocator: std.mem.Allocator, doc: *const docx.Document, opti
                 }
                 prev_was_empty = false;
 
-                try writeParagraph(allocator, w, &p, doc, &image_counter, &image_refs, options.image_mode);
+                try writeParagraph(allocator, w, &p, doc, &image_counter, &image_refs, options);
                 // Blank line after every paragraph — required by Markdown for separate <p> tags
                 try w.print("\n\n", .{});
             },
             .table => |t| {
                 prev_was_empty = false;
                 try w.print("\n", .{});
-                try writeTable(w, &t);
+                try writeTable(allocator, w, &t, options.marks);
                 try w.print("\n", .{});
             },
         }
@@ -134,8 +142,9 @@ fn writeParagraph(
     doc: *const docx.Document,
     image_counter: *u16,
     image_refs: *std.ArrayListUnmanaged(ImageRef),
-    image_mode: MdxOptions.ImageMode,
+    options: MdxOptions,
 ) !void {
+    const image_mode = options.image_mode;
     // Heading prefix
     const prefix: []const u8 = switch (p.style) {
         .heading1, .title => "# ",
@@ -177,7 +186,7 @@ fn writeParagraph(
         return;
     }
 
-    // Write runs, merging adjacent runs with same formatting to avoid ****
+    // Write runs, adjacent runs that look the same as one marked group.
     var i: usize = 0;
     while (i < p.runs.len) {
         const run = p.runs[i];
@@ -186,77 +195,194 @@ fn writeParagraph(
             i += 1;
             continue;
         }
-
         if (run.text.len == 0) {
             i += 1;
             continue;
         }
-
-        // H3: only emit a markdown link when the target passes the scheme
-        // allowlist (blocks javascript:/data:/vbscript:/file: and control-char
-        // obfuscation). An unsafe target degrades to plain text — never a live
-        // link. The URL is percent-escaped on emission so a `)` can't break out
-        // of the `](…)` destination and inject MDX/JSX downstream.
-        const link_url: ?[]const u8 = if (run.hyperlink_url) |u|
-            (if (isSafeLinkUrl(u)) u else null)
-        else
-            null;
-        const has_link = link_url != null;
-
-        // Merge consecutive runs with identical formatting (bold/italic)
-        // This prevents **text1****text2** → **text1 text2**
-        var merged_end = i + 1;
-        while (merged_end < p.runs.len) {
-            const next = p.runs[merged_end];
-            if (next.text.len == 0) {
-                merged_end += 1;
-                continue;
-            }
-            if (next.bold != run.bold or next.italic != run.italic or
-                next.hyperlink_url != null or next.image_rel_id != null) break;
-            merged_end += 1;
-        }
-
-        if (has_link) try w.print("[", .{});
-
-        // Open formatting
-        if (run.bold and run.italic) {
-            try w.print("***", .{});
-        } else if (run.bold) {
-            try w.print("**", .{});
-        } else if (run.italic) {
-            try w.print("*", .{});
-        }
-
-        // Write merged text. Runs carry their own spaces: Word splits text
-        // across runs mid-word (spelling marks, revision ids), so joining
-        // them verbatim is the only faithful reading.
-        var j = i;
-        while (j < merged_end) : (j += 1) {
-            const r = p.runs[j];
-            if (r.text.len == 0) continue;
-            if (r.image_rel_id != null) continue;
-
-            try w.print("{s}", .{r.text});
-        }
-
-        // Close formatting
-        if (run.bold and run.italic) {
-            try w.print("***", .{});
-        } else if (run.bold) {
-            try w.print("**", .{});
-        } else if (run.italic) {
-            try w.print("*", .{});
-        }
-
-        if (has_link) {
-            try w.print("](", .{});
-            try writeEscapedLinkUrl(w, link_url.?);
-            try w.print(")", .{});
-        }
-
-        i = merged_end;
+        const end = groupEnd(p.runs, i, options.marks);
+        try writeGroup(allocator, w, p.runs[i..end], options.marks);
+        i = end;
     }
+}
+
+/// The Markdown marks a run needs. Bold, italic, strike-through (`~~`) and
+/// highlight (`==`) always; with `marks`, a run in the redline look as
+/// CriticMarkup and any other colour, shading or underline as a
+/// `[text]{…}` span. A hyperlink's own blue and underline are the link's,
+/// not marks.
+const Look = struct {
+    bold: bool = false,
+    italic: bool = false,
+    strike: bool = false,
+    highlight: bool = false,
+    underline: bool = false,
+    fg: ?docx.Rgb = null,
+    bg: ?docx.Rgb = null,
+    critic: Critic = .none,
+
+    const Critic = enum { none, removed, added };
+
+    fn of(run: docx.Run, marks: bool) Look {
+        var l = Look{
+            .bold = run.bold,
+            .italic = run.italic,
+            .strike = run.strike,
+            .highlight = run.highlight,
+        };
+        if (!marks or run.hyperlink_url != null) return l;
+        l.underline = run.underline;
+        l.fg = run.fg;
+        l.bg = run.bg;
+        const mc = MarkColors{};
+        if (run.strike and rgbIs(run.fg, mc.removed) and rgbIs(run.bg, mc.removed_fill)) {
+            l.critic = .removed;
+            l.strike = false;
+            l.fg = null;
+            l.bg = null;
+        } else if (run.bold and rgbIs(run.fg, mc.added) and rgbIs(run.bg, mc.added_fill)) {
+            l.critic = .added;
+            l.bold = false;
+            l.fg = null;
+            l.bg = null;
+        }
+        return l;
+    }
+
+    fn eql(a: Look, b: Look) bool {
+        return a.bold == b.bold and a.italic == b.italic and a.strike == b.strike and
+            a.highlight == b.highlight and a.underline == b.underline and a.critic == b.critic and
+            optRgbEql(a.fg, b.fg) and optRgbEql(a.bg, b.bg);
+    }
+
+    fn span(self: Look) bool {
+        return self.fg != null or self.bg != null or self.underline;
+    }
+
+    fn plain(self: Look) bool {
+        return !self.bold and !self.italic and !self.strike and !self.highlight and
+            !self.span() and self.critic == .none;
+    }
+
+    fn emphasis(self: Look) []const u8 {
+        if (self.bold and self.italic) return "***";
+        if (self.bold) return "**";
+        if (self.italic) return "*";
+        return "";
+    }
+
+    fn open(self: Look, w: anytype) !void {
+        switch (self.critic) {
+            .removed => try w.writeAll("{--"),
+            .added => try w.writeAll("{++"),
+            .none => {},
+        }
+        if (self.span()) try w.writeAll("[");
+        if (self.highlight) try w.writeAll("==");
+        if (self.strike) try w.writeAll("~~");
+        try w.writeAll(self.emphasis());
+    }
+
+    fn close(self: Look, w: anytype) !void {
+        try w.writeAll(self.emphasis());
+        if (self.strike) try w.writeAll("~~");
+        if (self.highlight) try w.writeAll("==");
+        if (self.span()) {
+            try w.writeAll("]{");
+            var sep: []const u8 = "";
+            if (self.fg) |c| {
+                try w.print("color=#{s}", .{&c});
+                sep = " ";
+            }
+            if (self.bg) |c| {
+                try w.print("{s}bg=#{s}", .{ sep, &c });
+                sep = " ";
+            }
+            if (self.underline) try w.print("{s}underline", .{sep});
+            try w.writeAll("}");
+        }
+        switch (self.critic) {
+            .removed => try w.writeAll("--}"),
+            .added => try w.writeAll("++}"),
+            .none => {},
+        }
+    }
+};
+
+fn rgbIs(c: ?docx.Rgb, want: docx.Rgb) bool {
+    return if (c) |v| std.mem.eql(u8, &v, &want) else false;
+}
+
+fn optRgbEql(a: ?docx.Rgb, b: ?docx.Rgb) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return std.mem.eql(u8, &a.?, &b.?);
+}
+
+fn sameLink(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return std.mem.eql(u8, a.?, b.?);
+}
+
+/// One past the last run that joins the group starting at `start`: runs that
+/// look the same and belong to the same hyperlink (or to none). Word splits
+/// text into runs mid-word (spelling marks, revision ids), so a group is
+/// written as one marked stretch rather than `**a****b**`.
+fn groupEnd(runs: []const docx.Run, start: usize, marks: bool) usize {
+    const first = runs[start];
+    const look = Look.of(first, marks);
+    var j = start + 1;
+    while (j < runs.len) : (j += 1) {
+        const next = runs[j];
+        if (next.image_rel_id != null) break;
+        if (next.text.len == 0) continue;
+        if (!sameLink(first.hyperlink_url, next.hyperlink_url)) break;
+        if (!Look.eql(look, Look.of(next, marks))) break;
+    }
+    return j;
+}
+
+/// Write a group of runs that look the same as one marked stretch. Spaces at
+/// either end go outside the marks: `~~ word~~` does not read as
+/// strike-through, `~~word~~ ` does.
+fn writeGroup(allocator: std.mem.Allocator, w: anytype, group: []const docx.Run, marks: bool) !void {
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    for (group) |r| {
+        if (r.image_rel_id == null) try text.appendSlice(allocator, r.text);
+    }
+    const all = text.items;
+
+    // H3: only emit a markdown link when the target passes the scheme
+    // allowlist (blocks javascript:/data:/vbscript:/file: and control-char
+    // obfuscation). An unsafe target degrades to plain text — never a live
+    // link. The URL is percent-escaped on emission so a `)` can't break out
+    // of the `](…)` destination and inject MDX/JSX downstream.
+    const link_url: ?[]const u8 = if (group[0].hyperlink_url) |u|
+        (if (isSafeLinkUrl(u)) u else null)
+    else
+        null;
+    const look = Look.of(group[0], marks);
+
+    const ws = " \t\r\n";
+    const core_start = std.mem.indexOfNone(u8, all, ws) orelse all.len;
+    const core_end = if (std.mem.lastIndexOfNone(u8, all, ws)) |e| e + 1 else core_start;
+    if (core_start >= core_end or (look.plain() and link_url == null)) {
+        try w.writeAll(all);
+        return;
+    }
+
+    try w.writeAll(all[0..core_start]);
+    if (link_url != null) try w.writeAll("[");
+    try look.open(w);
+    try w.writeAll(all[core_start..core_end]);
+    try look.close(w);
+    if (link_url) |u| {
+        try w.writeAll("](");
+        try writeEscapedLinkUrl(w, u);
+        try w.writeAll(")");
+    }
+    try w.writeAll(all[core_end..]);
 }
 
 /// H3 — hyperlink scheme allowlist. Returns true only for URLs safe to emit as
@@ -329,78 +455,16 @@ fn writeInlineBulletList(
     image_refs: *std.ArrayListUnmanaged(ImageRef),
     image_mode: MdxOptions.ImageMode,
 ) !void {
-    // First, collect all text from runs into a single buffer with formatting
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-
-    var ri: usize = 0;
-    while (ri < p.runs.len) {
-        const run = p.runs[ri];
-        if (run.image_rel_id) |rel_id| {
-            try writeImage(allocator, w, rel_id, doc, image_counter, image_refs, image_mode);
-            ri += 1;
-            continue;
-        }
-        if (run.text.len == 0) { ri += 1; continue; }
-
-        // Merge consecutive runs with same formatting
-        var merge_end = ri + 1;
-        while (merge_end < p.runs.len) {
-            const nr = p.runs[merge_end];
-            if (nr.text.len == 0) { merge_end += 1; continue; }
-            if (nr.bold != run.bold or nr.italic != run.italic or
-                nr.hyperlink_url != null or nr.image_rel_id != null) break;
-            merge_end += 1;
-        }
-
-        // Open formatting
-        if (run.bold and run.italic) {
-            try buf.appendSlice(allocator, "***");
-        } else if (run.bold) {
-            try buf.appendSlice(allocator, "**");
-        } else if (run.italic) {
-            try buf.appendSlice(allocator, "*");
-        }
-
-        // Write merged runs verbatim
-        var rj = ri;
-        while (rj < merge_end) : (rj += 1) {
-            const r = p.runs[rj];
-            if (r.text.len == 0 or r.image_rel_id != null) continue;
-            try buf.appendSlice(allocator, r.text);
-        }
-
-        // Close formatting
-        if (run.bold and run.italic) {
-            try buf.appendSlice(allocator, "***");
-        } else if (run.bold) {
-            try buf.appendSlice(allocator, "**");
-        } else if (run.italic) {
-            try buf.appendSlice(allocator, "*");
-        }
-
-        ri = merge_end;
-    }
-
-    // Strip all markdown formatting markers from the collected text.
-    // We'll re-apply bold to the entire list item text instead of inline.
-    // This avoids broken ** markers when bold spans across bullet boundaries.
+    // The items are written as plain text: a mark opened in one item could
+    // otherwise close in the next. Images are written where they stand.
     var plain: std.ArrayList(u8) = .empty;
     defer plain.deinit(allocator);
-    {
-        var i: usize = 0;
-        while (i < buf.items.len) {
-            if (i + 2 < buf.items.len and std.mem.eql(u8, buf.items[i .. i + 3], "***")) {
-                i += 3; // Skip ***
-            } else if (i + 1 < buf.items.len and std.mem.eql(u8, buf.items[i .. i + 2], "**")) {
-                i += 2; // Skip **
-            } else if (buf.items[i] == '*') {
-                i += 1; // Skip *
-            } else {
-                try plain.append(allocator, buf.items[i]);
-                i += 1;
-            }
+    for (p.runs) |run| {
+        if (run.image_rel_id) |rel_id| {
+            try writeImage(allocator, w, rel_id, doc, image_counter, image_refs, image_mode);
+            continue;
         }
+        try plain.appendSlice(allocator, run.text);
     }
 
     // Split on • (UTF-8: E2 80 A2) and emit each segment as a list item
@@ -424,7 +488,7 @@ fn writeInlineBulletList(
     }
 }
 
-fn writeTable(w: anytype, table: *const docx.Table) !void {
+fn writeTable(allocator: std.mem.Allocator, w: anytype, table: *const docx.Table, marks: bool) !void {
     if (table.rows.len == 0) return;
 
     // Write header row (first row)
@@ -432,7 +496,7 @@ fn writeTable(w: anytype, table: *const docx.Table) !void {
     try w.print("|", .{});
     for (header.cells) |cell| {
         try w.print(" ", .{});
-        try writeCellText(w, &cell);
+        try writeCellText(allocator, w, &cell, marks);
         try w.print(" |", .{});
     }
     try w.print("\n", .{});
@@ -449,14 +513,14 @@ fn writeTable(w: anytype, table: *const docx.Table) !void {
         try w.print("|", .{});
         for (row.cells) |cell| {
             try w.print(" ", .{});
-            try writeCellText(w, &cell);
+            try writeCellText(allocator, w, &cell, marks);
             try w.print(" |", .{});
         }
         try w.print("\n", .{});
     }
 }
 
-fn writeCellText(w: anytype, cell: *const docx.TableCell) !void {
+fn writeCellText(allocator: std.mem.Allocator, w: anytype, cell: *const docx.TableCell, marks: bool) !void {
     var first_para = true;
     for (cell.paragraphs) |para| {
         if (!first_para) {
@@ -464,49 +528,16 @@ fn writeCellText(w: anytype, cell: *const docx.TableCell) !void {
         }
         first_para = false;
 
-        // Merge adjacent runs with same formatting
         var ri: usize = 0;
         while (ri < para.runs.len) {
             const run = para.runs[ri];
-            if (run.text.len == 0) { ri += 1; continue; }
-
-            // Merge consecutive runs with same formatting
-            var merge_end = ri + 1;
-            while (merge_end < para.runs.len) {
-                const nr = para.runs[merge_end];
-                if (nr.text.len == 0) { merge_end += 1; continue; }
-                if (nr.bold != run.bold or nr.italic != run.italic or
-                    nr.hyperlink_url != null or nr.image_rel_id != null) break;
-                merge_end += 1;
+            if (run.text.len == 0 or run.image_rel_id != null) {
+                ri += 1;
+                continue;
             }
-
-            // Open formatting
-            if (run.bold and run.italic) {
-                try w.print("***", .{});
-            } else if (run.bold) {
-                try w.print("**", .{});
-            } else if (run.italic) {
-                try w.print("*", .{});
-            }
-
-            // Write merged runs
-            var rj = ri;
-            while (rj < merge_end) : (rj += 1) {
-                const r = para.runs[rj];
-                if (r.text.len == 0 or r.image_rel_id != null) continue;
-                try w.print("{s}", .{r.text});
-            }
-
-            // Close formatting
-            if (run.bold and run.italic) {
-                try w.print("***", .{});
-            } else if (run.bold) {
-                try w.print("**", .{});
-            } else if (run.italic) {
-                try w.print("*", .{});
-            }
-
-            ri = merge_end;
+            const end = groupEnd(para.runs, ri, marks);
+            try writeGroup(allocator, w, para.runs[ri..end], marks);
+            ri = end;
         }
     }
 }
@@ -637,4 +668,85 @@ test "H3: writeEscapedLinkUrl percent-encodes parens/spaces so links can't break
     const out = try aw.toOwnedSlice();
     defer allocator.free(out);
     try std.testing.expectEqualStrings("https://x.com/a%28b%29c%20d", out);
+}
+
+// ─── Round trips through .docx ────────────────────────────────────
+
+/// Markdown → .docx → parsed document → MDX body (frontmatter dropped).
+fn roundTrip(arena: std.mem.Allocator, md: []const u8, marks: bool) ![]const u8 {
+    var parsed = try docx.md_parser.parseMarkdown(arena, md);
+    _ = &parsed;
+    const bytes = try docx.docx_writer.generateDocx(arena, &parsed.document, .{});
+    var archive = try docx.zip.ZipArchive.openFromMemory(arena, bytes);
+    const doc = try docx.parseDocument(arena, &archive);
+    const result = try generateMdx(arena, &doc, .{ .marks = marks });
+    const body = result.mdx[std.mem.indexOf(u8, result.mdx, "---\n\n").? + 5 ..];
+    return std.mem.trim(u8, body, "\n");
+}
+
+test "struck and highlighted text comes back as ~~ and ==" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Word stores formatting per run, so nested marks come back run by run:
+    // the same look, written flat.
+    try std.testing.expectEqualStrings(
+        "Keep ~~this~~ and ==that== **bold** ~~**both**~~.",
+        try roundTrip(arena, "Keep ~~this~~ and ==that== **bold ~~both~~**.", false),
+    );
+    // Without marks, a redline run keeps its strike, an added run its bold.
+    try std.testing.expectEqualStrings(
+        "~~old~~**new** [plain]",
+        try roundTrip(arena, "{--old--}{++new++} [[plain]]{color=red}", false),
+    );
+}
+
+test "with marks, colours and CriticMarkup come back as typed" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const md = "{--old--} {++new++} [warn]{color=#B91C1C bg=#FEE2E2 underline} ==mark==";
+    try std.testing.expectEqualStrings(md, try roundTrip(arena, md, true));
+    // A table cell takes the same marks.
+    const table = "| a | b |\n|---|---|\n| ~~x~~ | {++y++} |";
+    const out = try roundTrip(arena, table, true);
+    try std.testing.expect(std.mem.indexOf(u8, out, "| ~~x~~ | {++y++} |") != null);
+}
+
+test "spaces at the edge of a run go outside its marks" {
+    const runs = [_]docx.Run{
+        .{ .text = "kept " },
+        .{ .text = "free ", .strike = true },
+        .{ .text = "from " },
+        .{ .text = " bold ", .bold = true },
+        .{ .text = "end" },
+    };
+    const elements = [_]docx.Element{.{ .paragraph = .{ .runs = @constCast(&runs) } }};
+    const doc = docx.Document{
+        .elements = @constCast(&elements),
+        .media = @constCast(&[_]docx.MediaFile{}),
+        .allocator = std.testing.allocator,
+    };
+    var result = try generateMdx(std.testing.allocator, &doc, .{ .title = "t" });
+    defer result.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.mdx, "kept ~~free~~ from  **bold** end") != null);
+}
+
+test "text after a link is not pulled into the link" {
+    const runs = [_]docx.Run{
+        .{ .text = "see ", .hyperlink_url = null },
+        .{ .text = "the site", .hyperlink_url = "https://example.com" },
+        .{ .text = " for more" },
+    };
+    const elements = [_]docx.Element{.{ .paragraph = .{ .runs = @constCast(&runs) } }};
+    const doc = docx.Document{
+        .elements = @constCast(&elements),
+        .media = @constCast(&[_]docx.MediaFile{}),
+        .allocator = std.testing.allocator,
+    };
+    var result = try generateMdx(std.testing.allocator, &doc, .{ .title = "t" });
+    defer result.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.mdx, "see [the site](https://example.com) for more") != null);
 }
