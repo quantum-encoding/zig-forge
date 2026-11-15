@@ -876,16 +876,16 @@ const DEFAULT_IMAGE_CX: u64 = 5486400; // 6 inches
 const DEFAULT_IMAGE_CY: u64 = 3657600; // 4 inches
 const DEFAULT_HEADER_CY: u64 = 914400; // 1 inch
 
-/// Convert detected pixel dimensions to EMU, capping width at 6 inches and
-/// preserving aspect ratio. Inputs are clamped at detectImageDimensions so
+/// Convert detected pixel dimensions to EMU, capping width at `max_cx` (at
+/// most 6 inches) and preserving aspect ratio. Inputs are clamped at detectImageDimensions so
 /// the intermediate `cy * max / cx` cannot overflow u64.
-fn pixelsToEmu(width_px: u32, height_px: u32, default_cx: u64, default_cy: u64) struct { cx: u64, cy: u64 } {
+fn pixelsToEmu(width_px: u32, height_px: u32, default_cx: u64, default_cy: u64, max_cx: u64) struct { cx: u64, cy: u64 } {
     if (width_px == 0 or height_px == 0) {
         return .{ .cx = default_cx, .cy = default_cy };
     }
     var cx: u64 = @as(u64, width_px) * EMU_PER_PIXEL;
     var cy: u64 = @as(u64, height_px) * EMU_PER_PIXEL;
-    if (cx > MAX_IMAGE_WIDTH_EMU) {
+    if (cx > max_cx) {
         // Multiply BEFORE dividing. Dividing first computed cy/cx in integer
         // arithmetic, which is 0 for every image wider than it is tall — so a
         // landscape screenshot came out with cy="0" and Word drew nothing.
@@ -894,8 +894,8 @@ fn pixelsToEmu(width_px: u32, height_px: u32, default_cx: u64, default_cy: u64) 
         // so cy is at most 20000 * 9525 ≈ 1.9e8 and the product with
         // MAX_IMAGE_WIDTH_EMU ≈ 5.5e6 is ≈ 1.0e15, four orders of magnitude
         // inside u64.
-        cy = cy * MAX_IMAGE_WIDTH_EMU / cx;
-        cx = MAX_IMAGE_WIDTH_EMU;
+        cy = cy * max_cx / cx;
+        cx = max_cx;
     }
     return .{ .cx = cx, .cy = cy };
 }
@@ -921,7 +921,7 @@ fn writeImageRun(
         return;
     };
 
-    const emu = pixelsToEmu(entry.width, entry.height, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY);
+    const emu = pixelsToEmu(entry.width, entry.height, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY, @min(run.image_max_width_emu orelse MAX_IMAGE_WIDTH_EMU, MAX_IMAGE_WIDTH_EMU));
     const cx: u64 = emu.cx;
     const cy: u64 = emu.cy;
 
@@ -1232,7 +1232,7 @@ fn genHeaderXml(allocator: std.mem.Allocator, img_rid: []const u8, width_px: u32
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
 
-    const emu = pixelsToEmu(width_px, height_px, DEFAULT_IMAGE_CX, DEFAULT_HEADER_CY);
+    const emu = pixelsToEmu(width_px, height_px, DEFAULT_IMAGE_CX, DEFAULT_HEADER_CY, MAX_IMAGE_WIDTH_EMU);
     const cx = emu.cx;
     const cy = emu.cy;
 
@@ -1318,7 +1318,7 @@ const testing = std.testing;
 test "a landscape image keeps its aspect ratio when scaled to the page" {
     // 1920x1032 — an ordinary screen recording frame, and wider than the six
     // inches a page can give it.
-    const emu = pixelsToEmu(1920, 1032, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY);
+    const emu = pixelsToEmu(1920, 1032, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY, MAX_IMAGE_WIDTH_EMU);
     try testing.expectEqual(MAX_IMAGE_WIDTH_EMU, emu.cx);
     try testing.expect(emu.cy > 0); // dividing before multiplying gave 0 here
 
@@ -1332,18 +1332,18 @@ test "a landscape image keeps its aspect ratio when scaled to the page" {
 }
 
 test "an image that already fits is left alone, and a zero-sized one falls back" {
-    const small = pixelsToEmu(300, 200, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY);
+    const small = pixelsToEmu(300, 200, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY, MAX_IMAGE_WIDTH_EMU);
     try testing.expectEqual(@as(u64, 300 * EMU_PER_PIXEL), small.cx);
     try testing.expectEqual(@as(u64, 200 * EMU_PER_PIXEL), small.cy);
 
-    const unknown = pixelsToEmu(0, 0, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY);
+    const unknown = pixelsToEmu(0, 0, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY, MAX_IMAGE_WIDTH_EMU);
     try testing.expectEqual(DEFAULT_IMAGE_CX, unknown.cx);
     try testing.expectEqual(DEFAULT_IMAGE_CY, unknown.cy);
 }
 
 test "a portrait image is scaled by height as well" {
     // Taller than wide and over the limit: the width caps, the height follows.
-    const emu = pixelsToEmu(1200, 2400, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY);
+    const emu = pixelsToEmu(1200, 2400, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY, MAX_IMAGE_WIDTH_EMU);
     try testing.expectEqual(MAX_IMAGE_WIDTH_EMU, emu.cx);
     try testing.expectEqual(MAX_IMAGE_WIDTH_EMU * 2, emu.cy);
 }

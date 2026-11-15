@@ -89,6 +89,10 @@ pub const Run = struct {
     revision: ?Revision = null,
     hyperlink_url: ?[]const u8 = null,
     image_rel_id: ?[]const u8 = null,
+    /// The widest an image run may be drawn, in EMU (914400 to the inch);
+    /// null for the page default (6 inches). A signature or a row of photos
+    /// side by side sets it smaller.
+    image_max_width_emu: ?u64 = null,
 };
 
 pub const Paragraph = struct {

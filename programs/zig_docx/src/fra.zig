@@ -32,6 +32,10 @@ pub const FraData = struct {
     /// Letterhead logo — base64 image data URL ("data:image/png;base64,…").
     /// Rendered at the top of the cover page. Empty = no logo.
     logo: []const u8 = "",
+    /// Photos of the premises for the cover, base64 image data URLs, drawn side by side under its address.
+    cover_photos: []const []const u8 = &[_][]const u8{},
+    /// The assessor's signature, a base64 image data URL, stamped in the Assessor's Signature box; "" for none.
+    assessor_signature: []const u8 = "",
 
     // Client / premises
     client_name: []const u8 = "",
@@ -176,7 +180,7 @@ pub fn generateFra(allocator: std.mem.Allocator, data: *const FraData) ![]u8 {
 
     // ── Signatures ──
     try addHeading(allocator, &elements, "SIGNATURES", .heading1);
-    try addSignaturesTable(allocator, &elements, data);
+    try addSignaturesTable(allocator, &elements, data, &media_list, &img_index);
 
     // ── General Information ──
     try addHeading(allocator, &elements, "General Information", .heading1);
@@ -309,6 +313,20 @@ fn addCoverPage(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(
     if (data.client_postcode.len > 0)
         try addParagraph(allocator, elements, data.client_postcode);
 
+    // Photos of the premises, side by side under the address (up to four).
+    const shown = @min(data.cover_photos.len, 4);
+    if (shown > 0) {
+        const gap: u64 = 182880; // 0.2 inch
+        const each: u64 = (COVER_ROW_EMU - gap * (shown - 1)) / shown;
+        var runs: std.ArrayListUnmanaged(docx.Run) = .empty;
+        for (data.cover_photos[0..shown]) |url| {
+            const name = embedImage(allocator, media_list, img_index, url) orelse continue;
+            if (runs.items.len > 0) try runs.append(allocator, .{ .text = try allocator.dupe(u8, "   ") });
+            try runs.append(allocator, .{ .text = try allocator.dupe(u8, "Photo of the premises"), .image_rel_id = name, .image_max_width_emu = each });
+        }
+        if (runs.items.len > 0) try elements.append(allocator, .{ .paragraph = .{ .style = .normal, .runs = try runs.toOwnedSlice(allocator) } });
+    }
+
     // Legislation reference
     const leg = if (std.mem.eql(u8, data.jurisdiction, "england"))
         "Regulatory Reform (Fire Safety) Order 2005"
@@ -436,7 +454,7 @@ fn addMethodologyBoilerplate(allocator: std.mem.Allocator, elements: *std.ArrayL
 
 // ─── Data Tables ───────────────────────────────────────────────────
 
-fn addSignaturesTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), data: *const FraData) !void {
+fn addSignaturesTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), data: *const FraData, media_list: *std.ArrayListUnmanaged(docx.MediaFile), img_index: *u32) !void {
     // The assessor's name, credentials and company, each on its own line.
     var name_lines: std.ArrayListUnmanaged(u8) = .empty;
     defer name_lines.deinit(allocator);
@@ -460,7 +478,45 @@ fn addSignaturesTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnma
         .{ "Signature of competent person", "" },
         .{ "Date", "" },
     };
-    try addKeyValueTable(allocator, elements, &rows_data);
+    // The assessor's signature, when there is one, stamped in its box.
+    const signature = embedImage(allocator, media_list, img_index, data.assessor_signature);
+    var rows: std.ArrayListUnmanaged(docx.TableRow) = .empty;
+    defer rows.deinit(allocator);
+    for (rows_data) |row_data| {
+        const cells = try allocator.alloc(docx.TableCell, 2);
+        cells[0] = try makeBoldCell(allocator, row_data[0]);
+        if (signature != null and std.mem.eql(u8, row_data[0], "Assessor's Signature")) {
+            const runs = try allocator.alloc(docx.Run, 1);
+            runs[0] = .{ .text = try allocator.dupe(u8, "Assessor's signature"), .image_rel_id = signature, .image_max_width_emu = SIGNATURE_EMU };
+            const paras = try allocator.alloc(docx.Paragraph, 1);
+            paras[0] = .{ .style = .normal, .runs = runs };
+            cells[1] = .{ .paragraphs = paras };
+        } else cells[1] = try makeCell(allocator, row_data[1]);
+        try rows.append(allocator, .{ .cells = cells });
+    }
+    const widths = try allocator.dupe(u16, &[_]u16{ COL_2_LABEL, COL_2_VALUE });
+    try elements.append(allocator, .{ .table = .{ .rows = try rows.toOwnedSlice(allocator), .col_widths = widths } });
+}
+
+/// The width a signature is stamped at (1.8 inches), and the width the cover's photos share (5.9 inches).
+const SIGNATURE_EMU: u64 = 1645920;
+const COVER_ROW_EMU: u64 = 5394960;
+
+/// Adds a base64 image data URL to the document's media and returns the name a
+/// run refers to it by; null when `url` is not a supported image data URL.
+fn embedImage(allocator: std.mem.Allocator, media_list: *std.ArrayListUnmanaged(docx.MediaFile), img_index: *u32, url: []const u8) ?[]const u8 {
+    const decoded = decodeImageDataUrl(allocator, url) orelse return null;
+    img_index.* += 1;
+    const name = std.fmt.allocPrint(allocator, "image{d}.{s}", .{ img_index.*, decoded.ext }) catch {
+        allocator.free(decoded.data);
+        return null;
+    };
+    media_list.append(allocator, .{ .name = name, .data = decoded.data }) catch {
+        allocator.free(name);
+        allocator.free(decoded.data);
+        return null;
+    };
+    return allocator.dupe(u8, name) catch null;
 }
 
 fn addGeneralInfoTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), data: *const FraData) !void {
@@ -1216,6 +1272,14 @@ pub fn parseFraJson(allocator: std.mem.Allocator, json_str: []const u8) !FraData
     if (getStr(obj, "assessor_name")) |v| data.assessor_name = try allocator.dupe(u8, v);
     if (getStr(obj, "assessor_qualifications")) |v| data.assessor_qualifications = try allocator.dupe(u8, v);
     if (getStr(obj, "logo")) |v| data.logo = try allocator.dupe(u8, v);
+    if (getStr(obj, "assessor_signature")) |v| data.assessor_signature = try allocator.dupe(u8, v);
+    if (obj.get("cover_photos")) |cv| {
+        if (cv == .array) {
+            var list: std.ArrayListUnmanaged([]const u8) = .empty;
+            for (cv.array.items) |v| if (v == .string) try list.append(allocator, try allocator.dupe(u8, v.string));
+            data.cover_photos = try list.toOwnedSlice(allocator);
+        }
+    }
     if (getStr(obj, "client_name")) |v| data.client_name = try allocator.dupe(u8, v);
     if (getStr(obj, "client_address")) |v| data.client_address = try allocator.dupe(u8, v);
     if (getStr(obj, "client_postcode")) |v| data.client_postcode = try allocator.dupe(u8, v);
@@ -1450,6 +1514,15 @@ test "generateFra renders a short-term let with notes, captions, findings and ac
     const docx_bytes = try generateFra(allocator, &data);
     defer allocator.free(docx_bytes);
     try std.testing.expect(docx_bytes[0] == 'P' and docx_bytes[1] == 'K');
+
+    // A signature and two cover photos are embedded as well as the section photo.
+    const cover = [_][]const u8{ png_url, png_url };
+    var signed = data;
+    signed.cover_photos = &cover;
+    signed.assessor_signature = png_url;
+    const signed_bytes = try generateFra(allocator, &signed);
+    defer allocator.free(signed_bytes);
+    try std.testing.expectEqual(std.mem.count(u8, docx_bytes, "word/media/image") + 2 * 3, std.mem.count(u8, signed_bytes, "word/media/image"));
     try std.testing.expect(std.mem.indexOf(u8, docx_bytes, "word/footer1.xml") != null);
     try std.testing.expect(std.mem.indexOf(u8, docx_bytes, "word/header1.xml") != null);
 }
