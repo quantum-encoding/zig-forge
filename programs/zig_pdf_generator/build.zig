@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // The Beacon solar report's 12 brand images. The committed defaults in
+    // The Beacon solar report's 14 brand images. The committed defaults in
     // src/beacon_assets/ are 1x1 placeholders; a client build passes
     // -Dbeacon-assets=<dir> naming a directory OUTSIDE this public repository
     // that holds the real files under the same names.
@@ -482,9 +482,10 @@ pub fn build(b: *std.Build) void {
 }
 
 const beacon_asset_files = [_][]const u8{
-    "cover_house.jpg",      "quote_photo.jpg",   "medal.png",     "reviews.jpg",
-    "logo.png",             "accreditation.png", "canadian1.jpg", "canadian2.jpg",
-    "sunsynk_inverter.jpg", "signature.png",     "sunpath.png",   "battery.jpg",
+    "cover_house.jpg",            "quote_photo.jpg",    "medal.png",     "reviews.jpg",
+    "logo.png",                   "accreditation.png",  "canadian1.jpg", "canadian2.jpg",
+    "sunsynk_inverter.jpg",       "signature.png",      "sunpath.png",   "battery.jpg",
+    "sunsynk_acure_inverter.jpg", "solax_inverter.jpg",
 };
 
 /// Copies the asset files into a generated directory beside a generated

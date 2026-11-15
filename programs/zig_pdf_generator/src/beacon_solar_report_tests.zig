@@ -90,3 +90,15 @@ test "the VAT rate follows the quote date" {
     try testing.expectEqualStrings("5%", report.vatRate("2027-04-01"));
     try testing.expectEqualStrings("5%", report.vatRate("2028-01-15"));
 }
+
+test "each named inverter data sheet is shown, and an unknown one is offered on request" {
+    const a = testing.allocator;
+    for ([_][]const u8{ "sunsynk_ecco", "sunsynk_acure", "solax_boost" }) |name| {
+        const text = try renderedText(a, .{ .inverter_datasheet = name });
+        defer a.free(text);
+        try testing.expect(std.mem.indexOf(u8, text, "The data sheet below shows") != null);
+    }
+    const text = try renderedText(a, .{ .inverter_datasheet = "another" });
+    defer a.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "available from us on request") != null);
+}

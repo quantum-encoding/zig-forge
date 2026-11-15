@@ -136,6 +136,8 @@ const AssetsRaw = struct {
     canadian1: []const u8 = beacon_assets.canadian1,
     canadian2: []const u8 = beacon_assets.canadian2,
     sunsynk_inverter: []const u8 = beacon_assets.sunsynk_inverter,
+    sunsynk_acure_inverter: []const u8 = beacon_assets.sunsynk_acure_inverter,
+    solax_inverter: []const u8 = beacon_assets.solax_inverter,
     signature: []const u8 = beacon_assets.signature,
     sunpath: []const u8 = beacon_assets.sunpath,
     battery: []const u8 = beacon_assets.battery,
@@ -151,6 +153,8 @@ const Assets = struct {
     canadian1: []const u8,
     canadian2: []const u8,
     sunsynk_inverter: []const u8,
+    sunsynk_acure_inverter: []const u8,
+    solax_inverter: []const u8,
     signature: []const u8,
     sunpath: []const u8,
     battery: []const u8,
@@ -178,6 +182,8 @@ fn buildAssets(a: std.mem.Allocator) !Assets {
         .canadian1 = try dataUrl(a, "jpeg", r.canadian1),
         .canadian2 = try dataUrl(a, "jpeg", r.canadian2),
         .sunsynk_inverter = try dataUrl(a, "jpeg", r.sunsynk_inverter),
+        .sunsynk_acure_inverter = try dataUrl(a, "jpeg", r.sunsynk_acure_inverter),
+        .solax_inverter = try dataUrl(a, "jpeg", r.solax_inverter),
         .signature = try dataUrl(a, "png", r.signature),
         .sunpath = try dataUrl(a, "png", r.sunpath),
         .battery = try dataUrl(a, "jpeg", r.battery),
@@ -218,8 +224,11 @@ pub const CrgQuote = struct {
     },
     inverter: []const u8 = "Example 3.6kW Hybrid Inverter",
     inverter_raw: []const u8 = "example 3.6kW single-phase hybrid inverter",
-    /// Whether the embedded inverter data sheet image is for this inverter.
+    /// Whether one of the embedded inverter data sheet images is for this inverter.
     show_inverter_datasheet: bool = true,
+    /// Which embedded data sheet is shown: "sunsynk_ecco", "sunsynk_acure" or
+    /// "solax_boost". Any other value shows none, as if the flag were false.
+    inverter_datasheet: []const u8 = "sunsynk_ecco",
     iboost: bool = false,
     birdguard: bool = false,
     annual_usage_kwh: []const u8 = "7450",
@@ -806,7 +815,17 @@ fn p06(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
 fn p07(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     var b = B{ .a = a };
     try b.heading("INVERTER", .{ .size = 17, .gap_after = 8 });
-    const datasheet = if (q.show_inverter_datasheet)
+    const sheet: ?[]const u8 = if (!q.show_inverter_datasheet)
+        null
+    else if (std.mem.eql(u8, q.inverter_datasheet, "sunsynk_ecco"))
+        A.sunsynk_inverter
+    else if (std.mem.eql(u8, q.inverter_datasheet, "sunsynk_acure"))
+        A.sunsynk_acure_inverter
+    else if (std.mem.eql(u8, q.inverter_datasheet, "solax_boost"))
+        A.solax_inverter
+    else
+        null;
+    const datasheet = if (sheet != null)
         "The data sheet below shows the capabilities and limitations of your inverter."
     else
         "The data sheet for your inverter, showing its capabilities and limitations, is available from us on request.";
@@ -814,14 +833,14 @@ fn p07(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
         "have an inverter that does not support battery storage and at some point in " ++
         "the future you require battery storage, you will need to upgrade your " ++
         "inverter.", .{ q.inverter_raw, datasheet }), .{ .size = 10.5, .gap_after = 16 });
-    if (!q.show_inverter_datasheet) return b.page();
+    const sheet_image = sheet orelse return b.page();
     var iw: f64 = 430;
     var ih = iw * (1600.0 / 1131.0);
     if (b.y + ih > PH - 30) {
         ih = PH - 30 - b.y;
         iw = ih * (1131.0 / 1600.0);
     }
-    try b.image(A.sunsynk_inverter, (PW - iw) / 2, b.y, iw, ih);
+    try b.image(sheet_image, (PW - iw) / 2, b.y, iw, ih);
     return b.page();
 }
 
