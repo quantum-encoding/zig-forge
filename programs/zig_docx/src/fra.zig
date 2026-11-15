@@ -199,13 +199,9 @@ pub fn generateFra(allocator: std.mem.Allocator, data: *const FraData) ![]u8 {
     try addPreviousIncidentsTable(allocator, &elements, data);
 
     // ── Checklist Sections (dynamic), numbered 1, 2, 3… with lettered questions ──
-    var last_category: []const u8 = "";
     for (data.sections, 1..) |section, number| {
-        // Print category heading if changed
-        if (!std.mem.eql(u8, section.category, last_category)) {
-            try addHeading(allocator, &elements, section.category, .heading1);
-            last_category = section.category;
-        }
+        // The category heading above every section, as in the assessor's own reports.
+        if (section.category.len > 0) try addHeading(allocator, &elements, section.category, .heading1);
         try addChecklistSection(allocator, &elements, &section, number, data.image_dir, &media_list, &img_index);
     }
 
@@ -317,7 +313,7 @@ fn addCoverPage(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(
     const leg = if (std.mem.eql(u8, data.jurisdiction, "england"))
         "Regulatory Reform (Fire Safety) Order 2005"
     else
-        "Fire (Scotland) Act 2005\nFire Safety (Scotland) Regulations 2006";
+        "Fire (Scotland) Act 2005\nThe Fire Safety (Scotland) Regulations 2006";
     try addParagraph(allocator, elements, leg);
 }
 
@@ -343,7 +339,7 @@ fn addIntroductionBoilerplate(allocator: std.mem.Allocator, elements: *std.Array
     }
 
     try addItalicParagraph(allocator, elements,
-        "Please note that this report and any recommendations made within are based on the use and conditions observed and the information supplied to the assessor at the time. It is not intended to be exhaustive or conclusive, covering every hazard or potential risk, or to guarantee compliance with any statute or regulation. It is offered to assist you in your continued management of potential risks.",
+        "Please note that this report and any recommendations made within are based on the conditions observed and the information supplied to the assessor at the time. It is not intended to be exhaustive or conclusive, covering every hazard or potential risk, or to guarantee compliance with any statute or regulation. It is offered to assist you in your continued management of potential risks.",
     );
 }
 
@@ -355,7 +351,7 @@ fn addDeclarationBoilerplate(allocator: std.mem.Allocator, elements: *std.ArrayL
         "Comments relating to security measures relating to arson/wilful fire-raising are only in the context of this fire risk assessment, e.g. CCTV coverage. If further advice on security is required then a security specialist should be consulted.",
     );
     try addParagraph(allocator, elements,
-        "No guarantee can be given that, during any subsequent visit by enforcing authority officers with statutory powers, non-compliances will not be found resulting in enforcement procedures being instigated. Responsibility for any loss arising from such a discovery will not be accepted by the Fire Risk Assessor or associated companies.",
+        "No guarantee can be given that, during any subsequent visit by Enforcing Authority Officers with statutory powers, non-compliances will not be found resulting in enforcement procedures being instigated. Responsibility for any loss arising from such a discovery will not be accepted by the Fire Risk Assessor or associated companies.",
     );
     try addParagraph(allocator, elements,
         "Failure to maintain the levels of fire protection provided, or the standards of routine fire precautions and safe working practices, may invalidate the Fire Risk Assessment.",
@@ -377,12 +373,19 @@ fn addImportantInfoBoilerplate(allocator: std.mem.Allocator, elements: *std.Arra
         try addParagraph(allocator, elements, "Scotland:");
         try addListItem(allocator, elements, "Fire (Scotland) Act 2005, Sections 53 and 54", false);
         try addListItem(allocator, elements, "Fire Safety (Scotland) Regulations 2006", false);
+        try addParagraph(allocator, elements, "England & Wales");
+        try addListItem(allocator, elements, "Regulatory Reform (Fire Safety) Order 2005", false);
     }
 
     try addParagraph(allocator, elements,
         "It is important that the contents of the fire risk assessment are understood by the person with duties under the relevant fire legislation, i.e. the duty holder. The fire risk assessment includes an Action Plan, which sets out the measures considered necessary to satisfy the requirements of the above legislation and to protect relevant persons from fire. (Relevant persons are primarily anyone who is, or may be, lawfully within the premises; who is, or may be, in the immediate vicinity of the premises; and whose safety would be at risk in the event of fire in the premises).",
     );
 
+    if (!std.mem.eql(u8, data.jurisdiction, "england")) {
+        try addParagraph(allocator, elements,
+            "The Fire (Scotland) Act 2005 and the Fire Safety (Scotland) Regulations 2006 require that you give effect to arrangements for the effective planning, organisation, control, monitoring and review of the fire safety measures.",
+        );
+    }
     try addParagraph(allocator, elements, "You must record the above arrangements if:");
     const conditions = [_][]const u8{
         "You employ five or more employees in your undertaking (regardless of where they are employed);",
@@ -391,6 +394,11 @@ fn addImportantInfoBoilerplate(allocator: std.mem.Allocator, elements: *std.Arra
     };
     for (conditions) |c| {
         try addListItem(allocator, elements, c, false);
+    }
+    if (!std.mem.eql(u8, data.jurisdiction, "england")) {
+        try addParagraph(allocator, elements,
+            "This fire risk assessment has considered dangerous substances that are used or stored in your premises, only to the extent necessary to determine the adequacy of the fire safety measures as defined within the Fire (Scotland) Act 2005 and the Fire Safety (Scotland) Regulations 2006 and to advise you accordingly. If dangerous substances are used or stored in your premises, you should ensure that a risk assessment of the relevant work activities has been carried out to enable you to comply with the Dangerous Substances and Explosive Atmospheres Regulations 2002. This fire risk assessment does not consider special, technical or organisational measures that are required to be taken or observed in connection with the use or storage of any dangerous substance.",
+        );
     }
 }
 
@@ -429,10 +437,16 @@ fn addMethodologyBoilerplate(allocator: std.mem.Allocator, elements: *std.ArrayL
 // ─── Data Tables ───────────────────────────────────────────────────
 
 fn addSignaturesTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), data: *const FraData) !void {
-    const name_str = if (data.assessor_qualifications.len > 0)
-        try std.fmt.allocPrint(allocator, "{s}, {s}", .{ data.assessor_name, data.assessor_qualifications })
-    else
-        try allocator.dupe(u8, data.assessor_name);
+    // The assessor's name, credentials and company, each on its own line.
+    var name_lines: std.ArrayListUnmanaged(u8) = .empty;
+    defer name_lines.deinit(allocator);
+    for ([_][]const u8{ data.assessor_name, data.assessor_qualifications, data.assessor_company }) |part| {
+        const t = std.mem.trim(u8, part, " \t\r\n");
+        if (t.len == 0) continue;
+        if (name_lines.items.len > 0) try name_lines.append(allocator, '\n');
+        try name_lines.appendSlice(allocator, t);
+    }
+    const name_str = try name_lines.toOwnedSlice(allocator);
     defer allocator.free(name_str);
 
     const rows_data = [_][2][]const u8{
@@ -493,7 +507,7 @@ fn addOccupancyTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnman
     // Only the kinds of occupant the assessor filled in: a short-term let has
     // sleeping occupants but no employees, a shop the reverse.
     const all = [_][2][]const u8{
-        .{ "", "Maximum numbers within the premises at any one time" },
+        .{ "", "Maximum Numbers within premises at any one time" },
         .{ "Employees", data.max_employees },
         .{ "Visitors", data.max_visitors },
         .{ "Sleeping Occupants", data.sleeping_occupants },
@@ -513,10 +527,10 @@ fn addOccupancyTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnman
 }
 
 fn addPreviousIncidentsTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), data: *const FraData) !void {
-    // One value when only one is given ("None"), both with a slash when both are.
+    // One value when only one is given, or both say the same ("None"); both with a slash otherwise.
     const fires = std.mem.trim(u8, data.previous_fires, " \t\r\n");
     const alarms = std.mem.trim(u8, data.previous_false_alarms, " \t\r\n");
-    const combined = if (fires.len > 0 and alarms.len > 0)
+    const combined = if (fires.len > 0 and alarms.len > 0 and !std.ascii.eqlIgnoreCase(fires, alarms))
         try std.fmt.allocPrint(allocator, "{s} / {s}", .{ fires, alarms })
     else
         try allocator.dupe(u8, if (fires.len > 0) fires else alarms);
@@ -750,10 +764,15 @@ fn addRiskRating(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged
     const levels = [_][2][]const u8{
         .{ "Trivial", "No action is required and no detailed records need be kept." },
         .{ "Tolerable", "No major additional controls required. However, there may be a need for consideration of improvements that involve minor or limited cost." },
-        .{ "Moderate", "It is essential that efforts be made to reduce the risk. Risk reduction measures should be implemented within a defined time period." },
+        .{ "Moderate", "It is essential that efforts be made to reduce the risk. Risk reduction measures should be implemented within a defined time period.\nWhere moderate risk is associated with consequences that constitute extreme harm, further assessment may be required to establish more precisely the likelihood of harm as a basis for determining the priority for improved control measures." },
         .{ "Substantial", "Considerable resources may have to be allocated to reduce the risk. If the building is unoccupied, it should not be occupied until the risk has been reduced. If the building is occupied, urgent action should be taken." },
         .{ "Intolerable", "Building (or relevant area) should not be occupied until the risk is reduced." },
     };
+
+    const level_head = try allocator.alloc(docx.TableCell, 2);
+    level_head[0] = try makeBoldCell(allocator, "Risk Level");
+    level_head[1] = try makeBoldCell(allocator, "Actions and Timescales");
+    try rows.append(allocator, .{ .cells = level_head });
 
     for (levels) |level| {
         const cells = try allocator.alloc(docx.TableCell, 2);
@@ -821,7 +840,15 @@ fn addActionPlanTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnma
     var rows: std.ArrayListUnmanaged(docx.TableRow) = .empty;
     defer rows.deinit(allocator);
 
-    // Header row
+    // "To be completed by person acting upon stated recommendation" over the
+    // Comments, Date and Sign columns, then the header row.
+    const over = try allocator.alloc(docx.TableCell, 2);
+    over[0] = try makeCell(allocator, "");
+    over[0].col_span = 3;
+    over[1] = try makeBoldCell(allocator, "To be completed by person acting upon stated recommendation");
+    over[1].col_span = 3;
+    try rows.append(allocator, .{ .cells = over });
+
     const hdr = try allocator.alloc(docx.TableCell, 6);
     hdr[0] = try makeBoldCell(allocator, "No.");
     hdr[1] = try makeBoldCell(allocator, "Priority");
