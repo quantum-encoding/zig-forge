@@ -2708,69 +2708,237 @@ fn mirrorModes(out: *std.ArrayList(u8), alloc: std.mem.Allocator, have: *HostMod
     };
 }
 
-/// Draw one frame. Rows are cleared and redrawn whole; every span is placed
+/// One row, cleared and redrawn whole at host row `y`: every span is placed
 /// at its own column, so a host whose width tables disagree with zterm's
-/// cannot shift the rest of a row. Wrapped in a host synchronized update.
-fn drawFrame(alloc: std.mem.Allocator, frame: std.json.Value, have: *HostModes, title_buf: *std.ArrayList(u8), theme: *const ViewTheme) !void {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(alloc);
-    try out.appendSlice(alloc, "\x1b[?2026h\x1b[?25l");
-    if (jsonBool(frame, "full") orelse false) {
-        // Erase paints with the current background: clear to the theme's.
-        try themeReset(&out, alloc, theme);
-        try out.appendSlice(alloc, "\x1b[H\x1b[2J");
+/// cannot shift the rest of the row. `line` is a frame's or a history
+/// reply's line object; only its `spans` are read.
+fn renderRow(out: *std.ArrayList(u8), alloc: std.mem.Allocator, y: i64, line: std.json.Value, theme: *const ViewTheme) !void {
+    try cup(out, alloc, y, 0);
+    try themeReset(out, alloc, theme);
+    try out.appendSlice(alloc, "\x1b[2K");
+    const spans = line.object.get("spans") orelse return;
+    if (spans != .array) return;
+    for (spans.array.items) |span| {
+        if (span != .object) continue;
+        const x = jsonInt(span, "x") orelse 0;
+        try hostSgr(out, alloc, span, theme);
+        const text = jsonStr(span, "text") orelse "";
+        if ((jsonInt(span, "w") orelse 1) == 2) {
+            // A run of double-width characters: place each one at its
+            // own pair of columns, so a host whose width tables disagree
+            // with zterm's cannot drift within the run.
+            var it = (std.unicode.Utf8View.init(text) catch continue).iterator();
+            var k: i64 = 0;
+            while (it.nextCodepointSlice()) |ch| : (k += 1) {
+                try cup(out, alloc, y, x + 2 * k);
+                try out.appendSlice(alloc, ch);
+            }
+        } else {
+            try cup(out, alloc, y, x);
+            try out.appendSlice(alloc, text);
+        }
     }
-    if (frame.object.get("lines")) |lines| if (lines == .array) for (lines.array.items) |line| {
-        if (line != .object) continue;
-        const y = jsonInt(line, "y") orelse continue;
-        try cup(&out, alloc, y, 0);
-        try themeReset(&out, alloc, theme);
-        try out.appendSlice(alloc, "\x1b[2K");
-        const spans = line.object.get("spans") orelse continue;
-        if (spans != .array) continue;
-        for (spans.array.items) |span| {
-            if (span != .object) continue;
-            const x = jsonInt(span, "x") orelse 0;
-            try hostSgr(&out, alloc, span, theme);
-            const text = jsonStr(span, "text") orelse "";
-            if ((jsonInt(span, "w") orelse 1) == 2) {
-                // A run of double-width characters: place each one at its
-                // own pair of columns, so a host whose width tables disagree
-                // with zterm's cannot drift within the run.
-                var it = (std.unicode.Utf8View.init(text) catch continue).iterator();
-                var k: i64 = 0;
-                while (it.nextCodepointSlice()) |ch| : (k += 1) {
-                    try cup(&out, alloc, y, x + 2 * k);
-                    try out.appendSlice(alloc, ch);
-                }
+    try out.appendSlice(alloc, "\x1b[0m");
+}
+
+/// A `history` request the attach client owes the server.
+const HistoryAsk = struct { from: i64, count: i64 };
+
+/// The pane as an attach draws it on the host terminal.
+///
+/// By default the pane is drawn on the host's NORMAL screen and its
+/// scrollback is fed into the host's own: every line that scrolls off the
+/// top of the pane is fetched from the server (`history`) and pushed off the
+/// top of the host screen, where the host keeps it. So the host terminal —
+/// any terminal, with no knowledge of zterm — scrolls back through the pane
+/// and selects and copies from it with its own wheel and its own mouse.
+///
+/// Pushing a line into the host's scrollback is the one thing every terminal
+/// agrees on: write it on a top row, put the cursor on the last row, and
+/// send a line feed. The screen moves up one and the top row is kept. The
+/// rows that moved are then redrawn from `rows`, the copy of the pane's
+/// screen kept here for exactly that.
+///
+/// While the pane's application is on its alternate screen (an editor, a
+/// pager) the host is put on its own, so nothing the application draws
+/// there reaches the scrollback, which is what a terminal does itself.
+///
+/// `legacy` (`zterm attach --alt-screen`) is the older behaviour: the whole
+/// attach lives on the host's alternate screen and its scrollback is left
+/// alone.
+const HostView = struct {
+    alloc: std.mem.Allocator,
+    legacy: bool = false,
+    /// The host terminal's height.
+    host_rows: usize,
+    /// The pane's rows as last drawn, each rendered at its own row. A row
+    /// with no bytes is blank.
+    rows: std.ArrayList(std.ArrayList(u8)) = .empty,
+    /// The last frame's cursor placement, shape and visibility.
+    cursor: std.ArrayList(u8) = .empty,
+    /// The host is on its alternate screen because the pane's application is.
+    in_alt: bool = false,
+    /// History has been asked for up to this absolute line (exclusive). Null
+    /// until the first frame of the pane's primary screen.
+    asked_to: ?i64 = null,
+
+    /// Lines of the pane's existing scrollback an attach brings with it.
+    const preload: i64 = 2000;
+    /// The most one `history` request may ask for (the server's own clamp).
+    const max_request: i64 = 5000;
+
+    fn deinit(self: *HostView) void {
+        for (self.rows.items) |*r| r.deinit(self.alloc);
+        self.rows.deinit(self.alloc);
+        self.cursor.deinit(self.alloc);
+    }
+
+    /// Take the host screen for the pane. On the normal screen, what the
+    /// host was showing is moved up into its scrollback first, so the attach
+    /// overwrites nothing the operator could not scroll back to.
+    fn begin(self: *HostView, out: *std.ArrayList(u8)) !void {
+        if (self.legacy) return out.appendSlice(self.alloc, "\x1b[?1049h\x1b[H\x1b[2J");
+        try out.appendSlice(self.alloc, "\x1b[0m");
+        try cup(out, self.alloc, @intCast(self.host_rows -| 1), 0);
+        try out.appendNTimes(self.alloc, '\n', self.host_rows);
+        try out.appendSlice(self.alloc, "\x1b[H");
+    }
+
+    /// Hand the host terminal back: modes as they were found, and off the
+    /// alternate screen if the attach was on it. On the normal screen the
+    /// pane's last picture stays, with the cursor on a fresh line under it.
+    fn end(self: *HostView, out: *std.ArrayList(u8)) !void {
+        try out.appendSlice(self.alloc, "\x1b[?1l\x1b[?2004l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[0m\x1b[0 q\x1b[?25h");
+        if (self.legacy or self.in_alt) try out.appendSlice(self.alloc, "\x1b[?1049l");
+        if (!self.legacy) {
+            try cup(out, self.alloc, @intCast(self.host_rows -| 1), 0);
+            try out.appendSlice(self.alloc, "\r\n");
+        }
+    }
+
+    fn clearRows(self: *HostView) void {
+        for (self.rows.items) |*r| r.clearRetainingCapacity();
+    }
+
+    /// Every row of the screen, from the copy kept here.
+    fn repaint(self: *HostView, out: *std.ArrayList(u8), theme: *const ViewTheme) !void {
+        const n = @max(self.host_rows, self.rows.items.len);
+        for (0..n) |y| {
+            if (y < self.rows.items.len and self.rows.items[y].items.len > 0) {
+                try out.appendSlice(self.alloc, self.rows.items[y].items);
             } else {
-                try cup(&out, alloc, y, x);
-                try out.appendSlice(alloc, text);
+                try cup(out, self.alloc, @intCast(y), 0);
+                try themeReset(out, self.alloc, theme);
+                try out.appendSlice(self.alloc, "\x1b[2K");
             }
         }
-        try out.appendSlice(alloc, "\x1b[0m");
-    };
-    if (frame.object.get("modes")) |m| if (m == .object) try mirrorModes(&out, alloc, have, m);
-    if (jsonStr(frame, "title")) |t| if (!std.mem.eql(u8, t, title_buf.items)) {
-        title_buf.clearRetainingCapacity();
-        try title_buf.appendSlice(alloc, t);
-        // A title is text; drop what would end the OSC early.
-        try out.appendSlice(alloc, "\x1b]2;");
-        for (t) |ch| if (ch >= 0x20 and ch != 0x7f) try out.append(alloc, ch);
-        try out.append(alloc, 0x07);
-    };
-    if (frame.object.get("cursor")) |cur| if (cur == .object) {
-        try cup(&out, alloc, jsonInt(cur, "y") orelse 0, jsonInt(cur, "x") orelse 0);
-        const shape = jsonStr(cur, "shape") orelse "block";
-        const blink = jsonBool(cur, "blink") orelse true;
-        const ps: u8 = if (std.mem.eql(u8, shape, "underline")) 3 else if (std.mem.eql(u8, shape, "bar")) 5 else 1;
-        var b: [16]u8 = undefined;
-        try out.appendSlice(alloc, std.fmt.bufPrint(&b, "\x1b[{d} q", .{if (blink) ps else ps + 1}) catch "");
-        if (jsonBool(cur, "visible") orelse true) try out.appendSlice(alloc, "\x1b[?25h");
-    };
-    try out.appendSlice(alloc, "\x1b[?2026l");
-    outWrite(out.items);
-}
+    }
+
+    /// Draw one frame, wrapped in a host synchronized update. Returns the
+    /// history the server must now be asked for: the lines that left the top
+    /// of the pane since the last frame.
+    fn frame(self: *HostView, out: *std.ArrayList(u8), msg: std.json.Value, have: *HostModes, title_buf: *std.ArrayList(u8), theme: *const ViewTheme) !?HistoryAsk {
+        const alloc = self.alloc;
+        const modes = msg.object.get("modes");
+        const alt = if (modes) |m| (m == .object and (jsonBool(m, "alt_screen") orelse false)) else false;
+        try out.appendSlice(alloc, "\x1b[?2026h\x1b[?25l");
+        if (!self.legacy and alt != self.in_alt) {
+            try out.appendSlice(alloc, if (alt) "\x1b[?1049h" else "\x1b[?1049l");
+            self.in_alt = alt;
+        }
+        if (jsonInt(msg, "rows")) |r| {
+            const want: usize = @intCast(std.math.clamp(r, 0, 4096));
+            while (self.rows.items.len < want) try self.rows.append(alloc, .empty);
+            while (self.rows.items.len > want) {
+                var gone = self.rows.pop().?;
+                gone.deinit(alloc);
+            }
+        }
+        if (jsonBool(msg, "full") orelse false) {
+            self.clearRows();
+            if (self.legacy) {
+                // Erase paints with the current background: clear to the theme's.
+                try themeReset(out, alloc, theme);
+                try out.appendSlice(alloc, "\x1b[H\x1b[2J");
+            } else {
+                // Row by row: a whole-screen erase is, in some terminals, a
+                // push of the screen into scrollback.
+                try self.repaint(out, theme);
+            }
+        }
+        if (msg.object.get("lines")) |lines| if (lines == .array) for (lines.array.items) |line| {
+            if (line != .object) continue;
+            const y = jsonInt(line, "y") orelse continue;
+            if (y < 0 or y >= self.rows.items.len) continue;
+            const row = &self.rows.items[@intCast(y)];
+            row.clearRetainingCapacity();
+            try renderRow(row, alloc, y, line, theme);
+            try out.appendSlice(alloc, row.items);
+        };
+        if (modes) |m| if (m == .object) try mirrorModes(out, alloc, have, m);
+        if (jsonStr(msg, "title")) |t| if (!std.mem.eql(u8, t, title_buf.items)) {
+            title_buf.clearRetainingCapacity();
+            try title_buf.appendSlice(alloc, t);
+            // A title is text; drop what would end the OSC early.
+            try out.appendSlice(alloc, "\x1b]2;");
+            for (t) |ch| if (ch >= 0x20 and ch != 0x7f) try out.append(alloc, ch);
+            try out.append(alloc, 0x07);
+        };
+        if (msg.object.get("cursor")) |cur| if (cur == .object) {
+            self.cursor.clearRetainingCapacity();
+            try cup(&self.cursor, alloc, jsonInt(cur, "y") orelse 0, jsonInt(cur, "x") orelse 0);
+            const shape = jsonStr(cur, "shape") orelse "block";
+            const blink = jsonBool(cur, "blink") orelse true;
+            const ps: u8 = if (std.mem.eql(u8, shape, "underline")) 3 else if (std.mem.eql(u8, shape, "bar")) 5 else 1;
+            var b: [16]u8 = undefined;
+            try self.cursor.appendSlice(alloc, std.fmt.bufPrint(&b, "\x1b[{d} q", .{if (blink) ps else ps + 1}) catch "");
+            if (jsonBool(cur, "visible") orelse true) try self.cursor.appendSlice(alloc, "\x1b[?25h");
+            try out.appendSlice(alloc, self.cursor.items);
+        };
+        try out.appendSlice(alloc, "\x1b[?2026l");
+
+        if (self.legacy or alt) return null;
+        const live_top = jsonInt(msg, "live_top") orelse return null;
+        const oldest = jsonInt(msg, "oldest") orelse live_top;
+        const asked = self.asked_to orelse @max(oldest, live_top - preload);
+        self.asked_to = live_top;
+        // Fewer lines above the screen than before: the scrollback was
+        // cleared. There is nothing new to bring.
+        if (live_top <= asked) return null;
+        const from = @max(asked, @max(oldest, live_top - max_request));
+        if (from >= live_top) return null;
+        return .{ .from = from, .count = live_top - from };
+    }
+
+    /// Put the lines of a `history` reply into the host's scrollback, oldest
+    /// first, then redraw the screen they were pushed through.
+    fn history(self: *HostView, out: *std.ArrayList(u8), msg: std.json.Value, theme: *const ViewTheme) !void {
+        if (self.legacy or self.host_rows == 0) return;
+        const lines = msg.object.get("lines") orelse return;
+        if (lines != .array or lines.array.items.len == 0) return;
+        const alloc = self.alloc;
+        try out.appendSlice(alloc, "\x1b[?2026h\x1b[?25l");
+        // The scrollback is the normal screen's. An application that has
+        // since gone to its alternate screen is stepped out of for the push.
+        if (self.in_alt) try out.appendSlice(alloc, "\x1b[?1049l");
+        var i: usize = 0;
+        const items = lines.array.items;
+        while (i < items.len) {
+            const n = @min(self.host_rows, items.len - i);
+            for (0..n) |j| {
+                if (items[i + j] == .object) try renderRow(out, alloc, @intCast(j), items[i + j], theme);
+            }
+            try themeReset(out, alloc, theme);
+            try cup(out, alloc, @intCast(self.host_rows - 1), 0);
+            try out.appendNTimes(alloc, '\n', n);
+            i += n;
+        }
+        if (self.in_alt) try out.appendSlice(alloc, "\x1b[?1049h");
+        try self.repaint(out, theme);
+        try out.appendSlice(alloc, self.cursor.items);
+        try out.appendSlice(alloc, "\x1b[?2026l");
+    }
+};
 
 fn sendView(fd: sys.fd_t, alloc: std.mem.Allocator, value: anytype) void {
     const j = std.json.Stringify.valueAlloc(alloc, value, .{}) catch return;
@@ -2788,7 +2956,18 @@ fn sendKeys(fd: sys.fd_t, alloc: std.mem.Allocator, bytes: []const u8) void {
 }
 
 fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
-    const id_str = if (args.len > 0) args[0] else "1";
+    // `--alt-screen` keeps the attach on the host's alternate screen and
+    // out of its scrollback (see `HostView`).
+    var legacy = false;
+    var id_arg: ?[]const u8 = null;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--alt-screen")) {
+            legacy = true;
+        } else if (id_arg == null) {
+            id_arg = a;
+        }
+    }
+    const id_str = id_arg orelse "1";
     // A number is a pane id; anything else is a designation (`spawn` name).
     const pane_id: ?u64 = std.fmt.parseInt(u64, id_str, 10) catch null;
     if (pane_id == null and !validName(id_str)) {
@@ -2813,7 +2992,12 @@ fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
     if (!sys.is_windows) _ = signal(@intFromEnum(c.SIG.WINCH), onWinch);
     // Windows: the console cannot join a socket poll set; a thread forwards it.
     const stdin_fd: sys.fd_t = if (sys.is_windows) try winpty.stdinSocket() else STDIN;
-    outWrite("\x1b[?1049h\x1b[H\x1b[2J");
+    var hv: HostView = .{ .alloc = alloc, .legacy = legacy, .host_rows = ws.ws_row };
+    defer hv.deinit();
+    var draw: std.ArrayList(u8) = .empty;
+    defer draw.deinit(alloc);
+    try hv.begin(&draw);
+    outWrite(draw.items);
 
     var have: HostModes = .{};
     var theme = ViewTheme.fromConfig(&config.Theme{});
@@ -2832,6 +3016,7 @@ fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
             if (pty.getTerminalSize(STDIN)) |now| {
                 if (now.ws_row != ws.ws_row or now.ws_col != ws.ws_col) {
                     ws = now;
+                    hv.host_rows = ws.ws_row;
                     sendView(fd, alloc, .{ .resize = .{ .rows = ws.ws_row, .cols = ws.ws_col } });
                 }
             } else |_| {}
@@ -2868,7 +3053,14 @@ fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
                 } else if (std.mem.eql(u8, t, "palette")) {
                     if (m.object.get("theme")) |th| theme.apply(th);
                 } else if (std.mem.eql(u8, t, "frame")) {
-                    try drawFrame(alloc, m, &have, &title, &theme);
+                    draw.clearRetainingCapacity();
+                    const ask = try hv.frame(&draw, m, &have, &title, &theme);
+                    outWrite(draw.items);
+                    if (ask) |h| sendView(fd, alloc, .{ .history = .{ .from = h.from, .count = h.count } });
+                } else if (std.mem.eql(u8, t, "history")) {
+                    draw.clearRetainingCapacity();
+                    try hv.history(&draw, m, &theme);
+                    outWrite(draw.items);
                 } else if (std.mem.eql(u8, t, "bell")) {
                     outWrite("\x07");
                 } else if (std.mem.eql(u8, t, "clipboard")) {
@@ -2922,7 +3114,9 @@ fn runAttach(alloc: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // Leave the host terminal as we found it.
-    outWrite("\x1b[?1l\x1b[?2004l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[0m\x1b[0 q\x1b[?25h\x1b[?1049l");
+    draw.clearRetainingCapacity();
+    try hv.end(&draw);
+    outWrite(draw.items);
     raw.exit();
     // Windows: the messages are UTF-8, and `exit` put back the console's own
     // code page (437 and friends render them as mojibake) — UTF-8 while they
@@ -2952,7 +3146,11 @@ fn usage() void {
         \\usage: zterm [new [-s NAME]]      the multiplexer, in this terminal
         \\       zterm server [--no-runner] [--runner-socket PATH] [--frame-ms N]
         \\                                 headless pane pool (a service; baton's runner)
-        \\       zterm attach <pane>        this terminal onto a server pane
+        \\       zterm attach [--alt-screen] <pane>
+        \\                                 this terminal onto a server pane; the pane's
+        \\                                 scrollback becomes this terminal's own, so it
+        \\                                 scrolls and copies here (--alt-screen: draw on
+        \\                                 the alternate screen and leave scrollback alone)
         \\       zterm cli <list|spawn|send <id> <text>|enter <id>|capture <id>|kill <id>>
         \\       zterm cli send <id> -- <text…>   (JSON path: binary-safe, submits with Enter)
         \\       zterm cli '<json request>'
@@ -3378,4 +3576,215 @@ test "spawn env: anything outside the bounds is refused whole" {
     // The key-length bound is inclusive at 64.
     try std.testing.expect(validEnvKey(&@as([SPAWN_ENV_MAX_KEY]u8, @splat('A'))));
     try std.testing.expect(!validEnvKey(&@as([SPAWN_ENV_MAX_KEY + 1]u8, @splat('A'))));
+}
+
+// ── attach: the pane's scrollback in the host's ─────────────────────────────
+//
+// Both ends are real: a pane driven through the parser, the frames and
+// history replies the server would send for it (`view.writeFrame`,
+// `view.writeHistory`), and a second terminal standing in for the host that
+// the attach's bytes are fed to. What the host ends up holding is compared
+// with what the pane holds.
+
+const AttachRig = struct {
+    pane: *session.Session,
+    host: *session.Session,
+    hv: HostView,
+    have: HostModes = .{},
+    title: std.ArrayList(u8) = .empty,
+    theme: ViewTheme,
+    out: std.ArrayList(u8) = .empty,
+
+    fn init(rows: u16, cols: u16, legacy: bool) !AttachRig {
+        const rect = session.Rect{ .x = 0, .y = 0, .width = cols, .height = rows };
+        var rig: AttachRig = .{
+            .pane = try session.Session.init(std.testing.allocator, "pane", rect, 200),
+            .host = try session.Session.init(std.testing.allocator, "host", rect, 200),
+            .hv = .{ .alloc = std.testing.allocator, .legacy = legacy, .host_rows = rows },
+            .theme = ViewTheme.fromConfig(&config.Theme{}),
+        };
+        try rig.hv.begin(&rig.out);
+        rig.flush();
+        return rig;
+    }
+
+    fn deinit(self: *AttachRig) void {
+        self.hv.deinit();
+        self.title.deinit(std.testing.allocator);
+        self.out.deinit(std.testing.allocator);
+        self.pane.deinit();
+        self.host.deinit();
+    }
+
+    fn term(s: *session.Session) *@TypeOf(s.getActiveWindow().getActivePane().terminal) {
+        return &s.getActiveWindow().getActivePane().terminal;
+    }
+
+    /// Bytes the application in the pane writes.
+    fn app(self: *AttachRig, bytes: []const u8) void {
+        self.pane.getActiveWindow().getActivePane().processOutput(bytes);
+    }
+
+    fn flush(self: *AttachRig) void {
+        self.host.getActiveWindow().getActivePane().processOutput(self.out.items);
+        self.out.clearRetainingCapacity();
+    }
+
+    /// One round as the attach loop runs it: the server's frame for the pane
+    /// as it stands, drawn on the host, and the history it asks for fetched
+    /// and drawn too. Returns what was asked for.
+    fn sync(self: *AttachRig) !?HistoryAsk {
+        const a = std.testing.allocator;
+        var aw: std.Io.Writer.Allocating = .init(a);
+        defer aw.deinit();
+        var s: std.json.Stringify = .{ .writer = &aw.writer };
+        try view.writeFrame(&s, term(self.pane), .{ .pane = 1, .seq = 1, .full = true, .dirty = null }, a);
+        const frame = try std.json.parseFromSlice(std.json.Value, a, aw.written(), .{});
+        defer frame.deinit();
+        const ask = try self.hv.frame(&self.out, frame.value, &self.have, &self.title, &self.theme);
+        self.flush();
+        if (ask) |h| {
+            var hw: std.Io.Writer.Allocating = .init(a);
+            defer hw.deinit();
+            var hs: std.json.Stringify = .{ .writer = &hw.writer };
+            try view.writeHistory(&hs, term(self.pane), 1, h.from, @intCast(h.count), a);
+            const reply = try std.json.parseFromSlice(std.json.Value, a, hw.written(), .{});
+            defer reply.deinit();
+            try self.hv.history(&self.out, reply.value, &self.theme);
+            self.flush();
+        }
+        return ask;
+    }
+
+    fn text(cells: anytype, buf: []u8) []const u8 {
+        var len: usize = 0;
+        for (cells) |cell| {
+            if (cell.char == 0) continue;
+            buf[len] = if (cell.char < 0x80) @intCast(cell.char) else '?';
+            len += 1;
+        }
+        while (len > 0 and buf[len - 1] == ' ') len -= 1;
+        return buf[0..len];
+    }
+
+    /// The host's screen and the pane's, row for row.
+    fn expectSameScreen(self: *AttachRig) !void {
+        const p = term(self.pane).getCurrentGrid();
+        const h = term(self.host).getCurrentGrid();
+        var pb: [256]u8 = undefined;
+        var hb: [256]u8 = undefined;
+        var row: u16 = 0;
+        while (row < p.rows) : (row += 1) {
+            try std.testing.expectEqualStrings(text(p.rowSlice(row), &pb), text(h.rowSlice(row), &hb));
+        }
+        try std.testing.expectEqual(term(self.pane).cursor.row, term(self.host).cursor.row);
+        try std.testing.expectEqual(term(self.pane).cursor.col, term(self.host).cursor.col);
+    }
+
+    /// The newest `n` lines of the host's scrollback are the newest `n` of the pane's.
+    fn expectSameScrollbackTail(self: *AttachRig, n: usize) !void {
+        const p = &term(self.pane).scrollback;
+        const h = &term(self.host).scrollback;
+        try std.testing.expect(p.len >= n);
+        try std.testing.expect(h.len >= n);
+        var pb: [256]u8 = undefined;
+        var hb: [256]u8 = undefined;
+        for (0..n) |i| {
+            try std.testing.expectEqualStrings(
+                text(p.line(p.len - n + i), &pb),
+                text(h.line(h.len - n + i), &hb),
+            );
+        }
+    }
+};
+
+test "attach: a line that scrolls off the pane lands in the host's scrollback" {
+    var rig = try AttachRig.init(4, 20, false);
+    defer rig.deinit();
+    const before = AttachRig.term(rig.host).scrollback.len;
+
+    rig.app("one\r\ntwo\r\nthree");
+    try std.testing.expectEqual(@as(?HistoryAsk, null), try rig.sync());
+    try rig.expectSameScreen();
+    try std.testing.expectEqual(before, AttachRig.term(rig.host).scrollback.len);
+
+    rig.app("\r\nfour\r\nfive\r\nsix");
+    const ask = (try rig.sync()).?;
+    try std.testing.expectEqual(@as(i64, 0), ask.from);
+    try std.testing.expectEqual(@as(i64, 2), ask.count);
+    try rig.expectSameScreen();
+    try rig.expectSameScrollbackTail(2);
+    try std.testing.expectEqual(before + 2, AttachRig.term(rig.host).scrollback.len);
+
+    // Nothing new scrolled: nothing is asked for and nothing is pushed twice.
+    rig.app("!");
+    try std.testing.expectEqual(@as(?HistoryAsk, null), try rig.sync());
+    try rig.expectSameScreen();
+    try std.testing.expectEqual(before + 2, AttachRig.term(rig.host).scrollback.len);
+}
+
+test "attach: the pane's existing scrollback comes with it, more than a screenful at once" {
+    var rig = try AttachRig.init(4, 20, false);
+    defer rig.deinit();
+    var buf: [32]u8 = undefined;
+    var i: usize = 1;
+    while (i <= 15) : (i += 1) {
+        rig.app(std.fmt.bufPrint(&buf, "line {d}\r\n", .{i}) catch unreachable);
+    }
+    const held = AttachRig.term(rig.pane).scrollback.len;
+    try std.testing.expect(held > 4);
+
+    const ask = (try rig.sync()).?;
+    try std.testing.expectEqual(@as(i64, @intCast(held)), ask.count);
+    try rig.expectSameScreen();
+    try rig.expectSameScrollbackTail(held);
+}
+
+test "attach: the application's alternate screen stays out of the host's scrollback" {
+    var rig = try AttachRig.init(4, 20, false);
+    defer rig.deinit();
+    rig.app("shell\r\n");
+    _ = try rig.sync();
+    const before = AttachRig.term(rig.host).scrollback.len;
+
+    rig.app("\x1b[?1049h\x1b[Hed 1\r\ned 2\r\ned 3\r\ned 4\r\ned 5\r\ned 6");
+    try std.testing.expectEqual(@as(?HistoryAsk, null), try rig.sync());
+    try std.testing.expect(AttachRig.term(rig.host).modes.alt_screen);
+    try rig.expectSameScreen();
+
+    rig.app("\x1b[?1049l");
+    _ = try rig.sync();
+    try std.testing.expect(!AttachRig.term(rig.host).modes.alt_screen);
+    try rig.expectSameScreen();
+    try std.testing.expectEqual(before, AttachRig.term(rig.host).scrollback.len);
+}
+
+test "attach --alt-screen: the host's scrollback is left alone" {
+    var rig = try AttachRig.init(4, 20, true);
+    defer rig.deinit();
+    try std.testing.expect(AttachRig.term(rig.host).modes.alt_screen);
+    var buf: [32]u8 = undefined;
+    var i: usize = 1;
+    while (i <= 9) : (i += 1) {
+        rig.app(std.fmt.bufPrint(&buf, "line {d}\r\n", .{i}) catch unreachable);
+    }
+    try std.testing.expectEqual(@as(?HistoryAsk, null), try rig.sync());
+    try rig.expectSameScreen();
+    try std.testing.expectEqual(@as(usize, 0), AttachRig.term(rig.host).scrollback.len);
+}
+
+test "attach: leaving puts the cursor on a fresh line under the pane's last picture" {
+    var rig = try AttachRig.init(4, 20, false);
+    defer rig.deinit();
+    rig.app("a\r\nb\r\nc\r\nd");
+    _ = try rig.sync();
+    try rig.hv.end(&rig.out);
+    rig.flush();
+    const host = AttachRig.term(rig.host);
+    try std.testing.expect(!host.modes.alt_screen);
+    try std.testing.expectEqual(@as(u16, 3), host.cursor.row);
+    try std.testing.expectEqual(@as(u16, 0), host.cursor.col);
+    // The last picture scrolled up one to make the line: its top row is kept.
+    var b: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("a", AttachRig.text(host.scrollback.line(host.scrollback.len - 1), &b));
 }
