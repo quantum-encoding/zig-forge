@@ -231,6 +231,7 @@ rates**).
 | `amount_paid` | number | none | Adds `Amount Paid:` and `Balance Due:` (total − paid, never negative) rows after the TOTAL |
 | `payment_date` / `payment_method` | string | `""` | Printed under the Amount Paid row (`12 Sep 2026 · Card`) |
 | `paid_stamp` | bool | auto | The PAID IN FULL mark. Auto: shown on a receipt whose balance is 0 |
+| `payment_summary` | object | none | A display-only block of labelled amounts under the totals (see **Payment summary** below). Never changes the subtotal, tax, total or balance |
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -242,6 +243,55 @@ rates**).
 
 **Line items are capped at 500.** A longer `items` array is refused with
 `TooManyLineItems` before anything is allocated.
+
+### Payment summary (`payment_summary`)
+
+For a job paid in stages: the contract, what was invoiced and paid before,
+this invoice and the balance after it, set out under the totals.
+
+```json
+"payment_summary": {
+  "title": "Stage payment 2 of 3: Second payment",
+  "rows": [
+    { "label": "Contract total", "amount": 9000.00 },
+    { "label": "Invoiced before", "amount": 3600.00 },
+    { "label": "Paid before", "amount": 3600.00 },
+    { "label": "This invoice: Second payment (30%)", "amount": 2700.00, "bold": true },
+    { "label": "Balance after this invoice", "amount": 2700.00 }
+  ]
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `title` | string or `null` | none | Bold heading above the rows. Wraps across the block; past 2 lines it is cut with `...` |
+| `rows` | array, 1 to 12 | required | One row each, in order. 13 or more is refused with `TooManyPaymentSummaryRows` |
+| `rows[].label` | string | required | Drawn in the totals' label column. Wraps short of its own amount; past 3 lines it is cut with `...` |
+| `rows[].amount` | number | required | Drawn right-aligned in the totals' money column with `currency_symbol` and `number_format`. Must be smaller in size than `1e13` |
+| `rows[].bold` | bool or `null` | `false` | Sets the row's label and amount in bold |
+
+The block is drawn after the totals (after any Amount Paid / Balance Due rows
+and the pay-now button), before the bank details and the notes, in every
+`style`. `squircle` frames it and `glass` sets it on a panel, both as wide as
+the TOTAL chip; `classic`, `minimal` and `letterhead` rule a line over it. It
+is never split: when it does not fit above the bottom margin it opens the next
+page, and bank details that would sit beside the totals sit beside it there.
+
+In `classic`, `squircle` and `glass` the label column is narrow (about 105pt
+beside a `£9,000.00` amount, 160pt for the title), so a label such as `This
+invoice: Second payment (30%)` takes two lines there; `minimal` and
+`letterhead` fit it on one. A mixed-rate document widens that column by 50pt.
+
+Anything else wrong in the block (not an object, `rows` missing, empty or not
+an array, a row that is not an object, a `label` that is not a string, an
+`amount` that is not a number or not below `1e13` in size, a `title` or `bold`
+of the wrong type) is refused with `InvalidPaymentSummary`. Both refusals
+happen before anything is drawn; through FFI/WASM the generator returns NULL
+and `zigpdf_get_error()` reads `JSON parse error: too many
+"payment_summary.rows" (max 12)` or `JSON parse error: "payment_summary":
+"title"?: string, "rows": 1-12 x {"label": string, "amount": number,
+"bold"?: bool}`. `"payment_summary": null` or no key at all draws nothing, and
+the PDF is byte-identical to one without the key.
 
 ### Mixed tax rates (`items[].tax_rate`)
 

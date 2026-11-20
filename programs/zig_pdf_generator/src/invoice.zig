@@ -46,6 +46,32 @@ pub const Adjustment = struct {
     amount: f64 = 0,
 };
 
+/// One row of a payment summary: a label, an amount, and whether the row is
+/// set in bold.
+pub const SummaryRow = struct {
+    label: []const u8 = "",
+    amount: f64 = 0,
+    bold: bool = false,
+};
+
+/// A display-only block of labelled amounts drawn under the totals, e.g. a
+/// job paid in stages: contract total, invoiced and paid before, this
+/// invoice, the balance after it. It never feeds the subtotal, tax, total or
+/// balance figures.
+pub const PaymentSummary = struct {
+    /// Heading above the rows; empty draws none.
+    title: []const u8 = "",
+    rows: []const SummaryRow = &[_]SummaryRow{},
+};
+
+/// Most rows a payment summary may carry; more is refused
+/// (`error.TooManyPaymentSummaryRows`).
+pub const MAX_SUMMARY_ROWS: usize = 12;
+/// Lines a summary row label wraps to before it is cut with "...".
+pub const SUMMARY_LABEL_LINES: usize = 3;
+/// Lines the summary title wraps to before it is cut with "...".
+pub const SUMMARY_TITLE_LINES: usize = 2;
+
 /// Structured bank-transfer details, drawn as a text block. Independent of
 /// the image-only `qr_mode = bank_details` QR caption.
 pub const BankDetails = struct {
@@ -600,6 +626,10 @@ pub const InvoiceData = struct {
     // PAID IN FULL mark. Null: drawn on a receipt whose balance is 0.
     paid_stamp: ?bool = null,
 
+    // Display-only block of labelled amounts under the totals (stage
+    // payments). Null draws nothing.
+    payment_summary: ?PaymentSummary = null,
+
     // Bank-transfer text block (drawn when non-empty and show_bank_details).
     bank_details: BankDetails = .{},
     show_bank_details: bool = true,
@@ -748,6 +778,51 @@ fn wrapParagraphs(allocator: std.mem.Allocator, text: []const u8, font: document
         try lines.appendSlice(allocator, w.lines);
     }
     return .{ .lines = try lines.toOwnedSlice(allocator), .allocator = allocator };
+}
+
+/// Wrapped text held to a line budget: `lines()` is at most the budget long.
+pub const CappedLines = struct {
+    wrapped: document.WrappedText,
+    len: usize,
+
+    pub fn lines(self: *const CappedLines) []const []const u8 {
+        return self.wrapped.lines[0..self.len];
+    }
+
+    pub fn deinit(self: *CappedLines) void {
+        self.wrapped.deinit();
+    }
+};
+
+/// `text` wrapped to `max_width` (honouring "\n") in at most `max_lines`
+/// lines. When it needs more, the last kept line is cut so that it and a
+/// trailing "..." fit `max_width`; that line is written to `tail`, which must
+/// outlive the result.
+pub fn wrapCapped(allocator: std.mem.Allocator, text: []const u8, font: document.Font, size: f32, max_width: f32, max_lines: usize, tail: []u8) !CappedLines {
+    var w = try wrapParagraphs(allocator, text, font, size, max_width);
+    if (w.lines.len <= max_lines) return .{ .wrapped = w, .len = w.lines.len };
+    if (max_lines == 0) return .{ .wrapped = w, .len = 0 };
+    w.lines[max_lines - 1] = ellipsize(tail, w.lines[max_lines - 1], font, size, max_width);
+    return .{ .wrapped = w, .len = max_lines };
+}
+
+/// `text` cut on a UTF-8 boundary, trailing spaces dropped, with "..."
+/// appended, the whole no wider than `max_width` and no longer than `buf`
+/// (which must hold at least the three dots).
+fn ellipsize(buf: []u8, text: []const u8, font: document.Font, size: f32, max_width: f32) []const u8 {
+    const dots = "...";
+    const budget = max_width - font.measureText(dots, size);
+    var n = @min(text.len, buf.len - dots.len);
+    while (true) {
+        while (n > 0 and n < text.len and (text[n] & 0xC0) == 0x80) n -= 1;
+        const cut = std.mem.trimEnd(u8, text[0..n], " ");
+        if (n == 0 or font.measureText(cut, size) <= budget) {
+            @memcpy(buf[0..cut.len], cut);
+            @memcpy(buf[cut.len..][0..dots.len], dots);
+            return buf[0 .. cut.len + dots.len];
+        }
+        n -= 1;
+    }
 }
 
 /// A drawn label reduced to small-caps form: trailing colon/space removed and
@@ -1449,6 +1524,7 @@ pub const InvoiceRenderer = struct {
 
         try self.drawItems(&content);
         try self.drawTotals(&content);
+        try self.drawPaymentSummary(&content);
         try self.drawClosingBlocks(&content, assets);
 
         if (self.isModern()) {
@@ -2329,15 +2405,20 @@ pub const InvoiceRenderer = struct {
     // Totals
     // -------------------------------------------------------------------------
 
+    /// Classic/squircle/glass: x of the totals' label column. Per-rate rows
+    /// ("VAT 20% on £1,000.00") need a wider one.
+    fn classicTotalsLabelX(self: *const InvoiceRenderer) f32 {
+        return self.margin_left + @as(f32, if (self.mixedRate()) 300 else 350);
+    }
+
     fn drawTotals(self: *InvoiceRenderer, content: *document.ContentStream) !void {
         if (self.isModern()) return self.drawModernTotals(content);
 
         const primary = document.Color.fromHex(self.data.primary_color);
         const secondary = document.Color.fromHex(self.data.secondary_color);
         const usable_width = self.page_width - self.margin_left - self.margin_right;
-        // Per-rate rows ("VAT 20% on £1,000.00") need a wider label column.
         const mixed = self.mixedRate();
-        const col_price = self.margin_left + @as(f32, if (mixed) 300 else 350);
+        const col_price = self.classicTotalsLabelX();
         const adjustments = self.data.adjustments;
 
         // Squircle: the rows are done — close the rounded table container.
@@ -2643,6 +2724,118 @@ pub const InvoiceRenderer = struct {
 
         if (self.showPaidStamp()) try self.drawPaidStamp(content, self.margin_left, total_y + 4);
         self.current_y = y;
+    }
+
+    /// The payment summary (display only) under the totals: an optional bold
+    /// title, then one row per entry with the label in the totals' label
+    /// column and the amount right-aligned in their money column. A label
+    /// wraps short of its own amount (at most SUMMARY_LABEL_LINES, the last
+    /// cut with "..."), the title across the block (SUMMARY_TITLE_LINES).
+    /// Squircle frames the block and glass sets it on a panel, both as wide as
+    /// the TOTAL chip; classic, minimal and letterhead rule a line over it.
+    /// The block is kept whole: when it does not fit above the bottom margin
+    /// it opens the next page, and bank details placed beside the totals sit
+    /// beside it there instead.
+    fn drawPaymentSummary(self: *InvoiceRenderer, content: *document.ContentStream) !void {
+        const ps = self.data.payment_summary orelse return;
+        if (ps.rows.len > MAX_SUMMARY_ROWS) return error.TooManyPaymentSummaryRows;
+        if (ps.rows.len == 0) return;
+
+        const modern = self.isModern();
+        const reg = self.fontEnumRegular();
+        const bold = self.fontEnumBold();
+        const primary = document.Color.fromHex(self.data.primary_color);
+        const right = self.page_width - self.margin_right;
+        const label_x = if (modern) right - 230 else self.classicTotalsLabelX();
+        const amt_right = if (modern) right else right - 6;
+        const col_w = amt_right - label_x;
+        const gap: f32 = 10;
+        const size: f32 = 9.5;
+        const title_size: f32 = if (modern) 9.5 else 10;
+        const title_step: f32 = 12.5;
+        const after_title: f32 = 16;
+        const line_step: f32 = 11.5;
+        const row_step: f32 = if (modern) 16 else 15;
+        const pad_top: f32 = 15; // top edge to the first baseline
+        const pad_bottom: f32 = 8; // last baseline to the bottom edge
+
+        // Every line is laid out before anything is drawn, so the block's
+        // height is known for the page-fit check.
+        var title_tail: [256]u8 = undefined;
+        var title = try wrapCapped(self.allocator, ps.title, bold, title_size, col_w, SUMMARY_TITLE_LINES, &title_tail);
+        defer title.deinit();
+
+        var amount_bufs: [MAX_SUMMARY_ROWS][48]u8 = undefined;
+        var amounts: [MAX_SUMMARY_ROWS][]const u8 = undefined;
+        var amount_max_w: [MAX_SUMMARY_ROWS]f32 = undefined;
+        var tails: [MAX_SUMMARY_ROWS][256]u8 = undefined;
+        var labels: [MAX_SUMMARY_ROWS]CappedLines = undefined;
+        var n_labels: usize = 0;
+        defer for (labels[0..n_labels]) |*l| l.deinit();
+
+        var span: f32 = 0; // first baseline to last baseline
+        if (title.len > 0) span += @as(f32, @floatFromInt(title.len - 1)) * title_step + after_title;
+        for (ps.rows, 0..) |row, i| {
+            const font = if (row.bold) bold else reg;
+            amounts[i] = self.money(&amount_bufs[i], row.amount);
+            // The label takes what its amount leaves, never under half the
+            // column; an amount wider than the rest is shrunk to fit.
+            const aw = font.measureText(amounts[i], size);
+            const room = col_w - aw - gap;
+            const label_w = @max(col_w * 0.5, room);
+            amount_max_w[i] = if (room >= col_w * 0.5) aw else col_w - label_w - gap;
+            labels[i] = try wrapCapped(self.allocator, row.label, font, size, label_w, SUMMARY_LABEL_LINES, &tails[i]);
+            n_labels += 1;
+            if (i > 0) span += row_step;
+            span += @as(f32, @floatFromInt(@max(labels[i].len, 1) - 1)) * line_step;
+        }
+
+        // Classic themes leave current_y on the last totals baseline, the
+        // typographic themes one row below it.
+        var top = if (modern) self.current_y + 4 else self.current_y - 18;
+        if (top - pad_top - span - pad_bottom < self.margin_bottom + 10) {
+            try self.startNewPage(content, false);
+            top = if (modern) self.current_y + 4 else self.current_y;
+            self.totals_top = top - pad_top;
+        }
+        const first = top - pad_top;
+        const last = first - span;
+        const bottom = last - pad_bottom;
+
+        const box_x = if (modern) label_x else label_x - 10;
+        switch (self.data.theme) {
+            .glass => {
+                const border = mixColor(document.Color.white, primary, 0.14);
+                const sheen_end = mixColor(document.Color.white, primary, 0.22);
+                try self.drawGlassPanel(self.bg.?, box_x, bottom, right - box_x, top - bottom, 7, document.Color.white, 0.70, sheen_end, 0.55, border, 1.0);
+            },
+            .squircle => try content.drawRoundedRectEx(box_x, bottom, right - box_x, top - bottom, 7, null, document.Color.fromHex("#E5E7EB"), 1.0),
+            .classic => try content.drawLine(label_x - 20, top, right, top, document.Color.fromHex(self.data.secondary_color), 0.5),
+            .minimal => try content.drawLine(label_x, top, right, top, document.Color.fromHex("#E5E7EB"), 0.6),
+            .letterhead => try content.drawLine(label_x, top, right, top, primary, 0.4),
+        }
+
+        const title_ink = if (modern) document.Color.fromHex("#111827") else document.Color.fromHex(self.data.secondary_color);
+        const label_ink = if (modern) document.Color.fromHex("#374151") else document.Color.black;
+        const ink = if (modern) document.Color.fromHex("#111827") else document.Color.black;
+
+        var y = first;
+        for (title.lines(), 0..) |line, i| {
+            if (i > 0) y -= title_step;
+            try content.drawText(line, label_x, y, self.font_bold, title_size, title_ink);
+        }
+        if (title.len > 0) y -= after_title;
+        for (ps.rows, 0..) |row, i| {
+            if (i > 0) y -= row_step;
+            const font_id = if (row.bold) self.font_bold else self.font_regular;
+            const font = if (row.bold) bold else reg;
+            try self.drawRightFit(content, amounts[i], amt_right, amount_max_w[i], y, font_id, font, size, ink);
+            for (labels[i].lines(), 0..) |line, k| {
+                if (k > 0) y -= line_step;
+                try content.drawText(line, label_x, y, font_id, size, if (row.bold) ink else label_ink);
+            }
+        }
+        self.current_y = if (modern) last - 17 else last;
     }
 
     // -------------------------------------------------------------------------

@@ -131,6 +131,8 @@ pub fn describeInvoiceError(err: anyerror) ?[]const u8 {
         error.TaxAmountMismatch => "\"tax_amount\" is not the sum of the per-rate tax (omit it to derive it)",
         error.SubtotalMismatch => "\"subtotal\" is not the sum of the item totals (omit it to derive it)",
         error.TotalMismatch => "\"total\" is not subtotal + adjustments + tax_amount - irpf (omit it to derive it)",
+        error.TooManyPaymentSummaryRows => std.fmt.comptimePrint("too many \"payment_summary.rows\" (max {d})", .{invoice.MAX_SUMMARY_ROWS}),
+        error.InvalidPaymentSummary => std.fmt.comptimePrint("\"payment_summary\": \"title\"?: string, \"rows\": 1-{d} x {{\"label\": string, \"amount\": number, \"bold\"?: bool}}", .{invoice.MAX_SUMMARY_ROWS}),
         else => null,
     };
 }
@@ -147,6 +149,34 @@ pub fn parseInvoiceJson(allocator: std.mem.Allocator, json_str: []const u8) !inv
     defer parsed.deinit();
 
     return parseInvoiceFromValue(allocator, parsed.value);
+}
+
+/// Refuse a `payment_summary` that breaks its contract, before anything is
+/// allocated. Absent or null is no summary. Otherwise it is an object with an
+/// optional string (or null) `title` and `rows`, 1 to MAX_SUMMARY_ROWS
+/// objects, each a string `label`, a number `amount` smaller in size than
+/// MAX_TAX_MONEY and an optional boolean (or null) `bold`. More rows is
+/// `TooManyPaymentSummaryRows`; anything else wrong is `InvalidPaymentSummary`.
+fn checkPaymentSummary(obj: std.json.ObjectMap) !void {
+    const v = obj.get("payment_summary") orelse return;
+    if (v == .null) return;
+    if (v != .object) return error.InvalidPaymentSummary;
+    if (v.object.get("title")) |t| {
+        if (t != .string and t != .null) return error.InvalidPaymentSummary;
+    }
+    const rows = v.object.get("rows") orelse return error.InvalidPaymentSummary;
+    if (rows != .array or rows.array.items.len == 0) return error.InvalidPaymentSummary;
+    if (rows.array.items.len > invoice.MAX_SUMMARY_ROWS) return error.TooManyPaymentSummaryRows;
+    for (rows.array.items) |r| {
+        if (r != .object) return error.InvalidPaymentSummary;
+        const label = r.object.get("label") orelse return error.InvalidPaymentSummary;
+        if (label != .string) return error.InvalidPaymentSummary;
+        const amount = getJsonFloat(r.object, "amount") orelse return error.InvalidPaymentSummary;
+        if (!(@abs(amount) < invoice.MAX_TAX_MONEY)) return error.InvalidPaymentSummary;
+        if (r.object.get("bold")) |b| {
+            if (b != .bool and b != .null) return error.InvalidPaymentSummary;
+        }
+    }
 }
 
 /// Parse InvoiceData from parsed JSON value
@@ -188,6 +218,7 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
             }
         }
     }
+    try checkPaymentSummary(obj);
 
     var data = invoice.InvoiceData{};
 
@@ -516,6 +547,26 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     data.payment_method = try dupeJsonString(allocator, obj, "payment_method") orelse try allocator.dupe(u8, "");
     data.paid_stamp = getJsonBool(obj, "paid_stamp");
 
+    // Payment summary, already checked by checkPaymentSummary. Its strings
+    // are always heap-allocated.
+    if (obj.get("payment_summary")) |ps_val| {
+        if (ps_val == .object) {
+            const arr = ps_val.object.get("rows").?.array;
+            const rows = try allocator.alloc(invoice.SummaryRow, arr.items.len);
+            for (arr.items, 0..) |rv, i| {
+                rows[i] = .{
+                    .label = try allocator.dupe(u8, rv.object.get("label").?.string),
+                    .amount = getJsonFloat(rv.object, "amount").?,
+                    .bold = getJsonBool(rv.object, "bold") orelse false,
+                };
+            }
+            data.payment_summary = .{
+                .title = try dupeJsonString(allocator, ps_val.object, "title") orelse try allocator.dupe(u8, ""),
+                .rows = rows,
+            };
+        }
+    }
+
     {
         const bd_obj: ?std.json.ObjectMap = if (obj.get("bank_details")) |bv|
             (if (bv == .object) bv.object else null)
@@ -713,6 +764,11 @@ pub fn freeInvoiceData(allocator: std.mem.Allocator, data: *const invoice.Invoic
 
     for (data.adjustments) |a| allocator.free(a.label);
     if (data.adjustments.len > 0) allocator.free(data.adjustments);
+    if (data.payment_summary) |ps| {
+        allocator.free(ps.title);
+        for (ps.rows) |r| allocator.free(r.label);
+        allocator.free(ps.rows);
+    }
     if (data.due_date_label) |s| allocator.free(s);
     allocator.free(data.subject);
     allocator.free(data.payment_date);
