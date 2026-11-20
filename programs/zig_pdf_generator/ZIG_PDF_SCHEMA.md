@@ -862,7 +862,7 @@ variant; the CLI uses `--presentation <in> <out>`).
 
 #### `Element` (pages[].elements[]) — discriminator `type`
 
-Five element types. Coordinate system: top-left origin in points.
+Seven element types. Coordinate system: top-left origin in points.
 
 ##### `type: "text"`
 
@@ -874,7 +874,7 @@ Five element types. Coordinate system: top-left origin in points.
 | `font_weight` | `enum("normal"\|"bold")`            | No        | `"normal"`     |                                                         |
 | `font_style`  | `enum("normal"\|"italic")`          | No        | `"normal"`     |                                                         |
 | `color`       | hex_color                           | No        | `#000000`      |                                                         |
-| `text_align`  | `enum("left"\|"center"\|"right")`   | No        | `"left"`       |                                                         |
+| `align`       | `enum("left"\|"center"\|"right")`   | No        | `"left"`       |                                                         |
 | `max_width`   | number                              | No        | none           | When set, enables word wrap                             |
 | `line_height` | number                              | No        | `1.4`          | Multiplier of font_size                                 |
 
@@ -918,7 +918,7 @@ A cell may be a plain string (shorthand for `{ content }`) OR an object:
 | Field        | Type                                   | Required? | Fallback        | Notes                                        |
 |--------------|----------------------------------------|-----------|-----------------|----------------------------------------------|
 | `content`    | string                                 | No        | `""`            |                                              |
-| `text_align` | `enum("left"\|"center"\|"right")`      | No        | `"left"`        |                                              |
+| `align`      | `enum("left"\|"center"\|"right")`      | No        | `"left"`        |                                              |
 | `color`      | hex_color                              | No        | table `text_color` |                                           |
 | `bg_color`   | hex_color                              | No        | row bg          | Overrides zebra striping for this cell       |
 
@@ -944,12 +944,119 @@ A cell may be a plain string (shorthand for `{ content }`) OR an object:
 | `corner_radius` | number                                                               | No        | `0`          | Used only for `rounded_rectangle`                                     |
 | `opacity`       | number                                                               | No        | `1.0`        | 0.0–1.0                                                               |
 
+##### `type: "text_field"` and `type: "checkbox"` (fillable form fields)
+
+A box the reader types into, or a checkbox they tick, in any PDF viewer
+(Preview, Acrobat, Edge, Chrome, Firefox). Each one is written as an
+AcroForm field merged with its widget annotation, listed in the catalog's
+`/AcroForm /Fields`, attached to its page's `/Annots` (after any links), and
+given an appearance stream, so the outlined box draws even in a viewer that
+never builds appearances itself. Read the values back with
+`zigpdf_read_form_fields` (see **Reading filled forms** below).
+
+Every entry is type-checked: a value of the wrong JSON type, or an unknown
+`align`, fails the whole document (`InvalidFormFieldElement`) rather than
+being ignored.
+
+| Field              | Type                              | Required? | Fallback                     | Notes                                                                 |
+|--------------------|-----------------------------------|-----------|------------------------------|-----------------------------------------------------------------------|
+| `name`             | string                            | **Yes**   | —                            | The key the value is read back under. Unique in the document; no `.` (PDF joins nested names with it). Missing: `FormFieldNameEmpty`; repeated: `DuplicateFormFieldName` |
+| `x`, `y`           | number                            | No        | `0`, `0`                     | Top-left corner, like every element                                   |
+| `width`, `height`  | number                            | No        | text `120`×`18`, checkbox `12`×`12` | Must be > 0 (`FormFieldRectInvalid`)                           |
+| `value`            | string                            | No        | `""`                         | Text field only: what it opens with (`/V` and `/DV`). Empty is a blank box with no `/V` |
+| `checked`          | bool                              | No        | `false`                      | Checkbox only: opens ticked (`/V /Yes`, else `/V /Off`)               |
+| `font_size`        | number                            | No        | `10`                         | Text field. `0` lets the viewer fit text to the box; the drawn value is then sized to the height (4–12 pt) |
+| `text_color`       | hex_color                         | No        | `#000000`                    | Typed text, and a checkbox's tick                                     |
+| `align`            | `enum("left"\|"center"\|"right")` | No        | `"left"`                     | Text field (`/Q`)                                                     |
+| `multiline`        | bool                              | No        | `false`                      | Text field: accepts several lines; the value wraps inside the box     |
+| `max_length`       | number                            | No        | `0`                          | Text field: maximum characters (`/MaxLen`); `0` is no limit. Whole number 0–1,000,000 |
+| `border_color`     | hex_color (nullable)              | No        | `#666666`                    | Outline (`/MK /BC`). `null`: no outline                               |
+| `border_width`     | number                            | No        | `1`                          | Points                                                                |
+| `background_color` | hex_color (nullable)              | No        | `null`                       | Fill behind the field (`/MK /BG`). `null`: transparent                |
+| `tooltip`          | string                            | No        | `""`                         | Shown on hover and read as the field's accessible name (`/TU`)        |
+| `read_only`        | bool                              | No        | `false`                      | Field flag ReadOnly                                                   |
+| `required`         | bool                              | No        | `false`                      | Field flag Required                                                   |
+
+```json
+{ "page_size": { "width": 595, "height": 842 },
+  "pages": [ { "elements": [
+    { "type": "text", "content": "Circuit 3 Zs (ohms)", "x": 40, "y": 100, "font_size": 10 },
+    { "type": "text_field", "name": "c3_zs", "x": 200, "y": 88, "width": 80, "height": 16,
+      "border_color": "#d32f2f", "background_color": "#fff5f5", "tooltip": "Circuit 3 Zs (ohms)" },
+    { "type": "text", "content": "RCD tested", "x": 40, "y": 150, "font_size": 10 },
+    { "type": "checkbox", "name": "rcd_tested", "x": 200, "y": 139, "width": 14, "height": 14 },
+    { "type": "text_field", "name": "remarks", "x": 200, "y": 215, "width": 300, "height": 60,
+      "multiline": true, "font_size": 9 }
+  ] } ] }
+```
+
+Text is stored as UTF-16BE when it is not ASCII, so `/V` keeps any
+character; the drawn appearance uses Helvetica with WinAnsiEncoding, so a
+character outside WinAnsi (Ł, Cyrillic, CJK, emoji) draws as `?` until the
+viewer redraws the field. Fields work in encrypted documents: names, values
+and appearance streams are encrypted with the rest.
+
+From Zig, `PdfDocument.addFormField(document.FormField{ … })` takes the same
+settings with a PDF-space rectangle (origin bottom-left) and an explicit
+`page` index.
+
 ### UI gap (presentation)
 
 - **No Svelte builder UI exists** for presentation/canvas. Users reach it only via the raw JSON editor panel in ZigPdfView or by programmatic Rust code
 - **No Rust serializer** — there is no `presentation_serializer.rs` that maps `QuoteWithDetails` → presentation JSON. The existing `buildPresentationJson(data)` in `ZigPdfView.svelte` is a client-side remapping and produces only a specific "pitch-deck" shape
 - `default_font_size` / `default_text_color` / `default_background` — accepted but the builder never populates them; elements provide their own values
 - Table rendering support is partial and not fully documented; treat as experimental
+
+---
+
+## Reading filled forms: `zigpdf_read_form_fields`
+
+**Entry points**: `zigpdf_read_form_fields(pdf, pdf_len, out_len)` in the C
+library (`include/zigpdf.h`), `zigpdf.wasm` and `zigpdf_web.wasm`; the CLI
+verb `pdf-gen form-fields <in.pdf>`; `readFormFields` /
+`readFormFieldsJson` from the Zig module (`pdf_form_reader.zig`).
+
+PDF bytes in, one JSON object out, keyed by each field's fully qualified
+name (nested partial names joined with `.`), in document order:
+
+```json
+{"c3_zs":"0.42","c3_r1r2":"0.35","rcd_tested":true,"ir_ok":false,
+ "remarks":"Re-tested after repair.\nAll readings within limits.",
+ "phase":"three","tests":["IR","RCD"]}
+```
+
+| Field type                        | JSON value                                                                  |
+|-----------------------------------|-----------------------------------------------------------------------------|
+| Text (`/FT /Tx`)                  | string: its `/V`. Left out when there is no `/V`; an empty `/V` is `""`     |
+| Checkbox (`/FT /Btn`)             | `true` when `/V` names a state other than `Off`; `false` otherwise, including no `/V` |
+| Radio group (`/Btn`, Radio flag)  | string: the chosen option (through `/Opt` when the states are positions). Left out when none is chosen |
+| Choice (`/FT /Ch`)                | string, or an array for a multi-select list                                 |
+| Push button, signature            | left out                                                                    |
+
+Free with `zigpdf_free`. On failure it returns NULL / 0 and
+`zigpdf_get_error()` names the error: `NotAPdf`, `EncryptedUnsupported`, …
+
+It reads files saved by other software: incremental updates (the newest
+revision of each object wins), cross-reference streams, object streams, a
+damaged xref (rebuilt by scanning), and encryption that opens with an empty
+user password (RC4, AES-128, AES-256). Text comes back as UTF-8 from
+UTF-16BE, UTF-8 (PDF 2.0) or PDFDocEncoding strings. A field missing from
+`/AcroForm /Fields` is still found through its page's widget annotations.
+
+The checkbox rule follows the PDF specification, and matters for macOS
+Preview: Preview (PDFKit) saves a ticked box as `/V (Yes)` (a string) and an
+unticked one by removing `/V`, leaving the widget's `/AS` at its old state.
+`/AS` is therefore never consulted.
+
+**Not supported**: documents that need a real (non-empty) user password;
+XFA forms (only AcroForm is read; an XFA-only form returns `{}`); rich-text
+formatting (a rich-text value is returned as its plain `/V`); a checkbox's
+export value (it is `true`/`false`); the field type of an empty text field
+(it is left out, not listed as blank).
+
+Tests: `src/pdf_form_tests.zig`. Its external anchors are PDFs filled by
+PDFKit, pypdf (incremental update; AES-256) and built by pdf-lib, in
+`tests/fixtures/forms/` with how each was made.
 
 ---
 
@@ -1006,6 +1113,7 @@ Refer to the **clean_quote** tables above for the full field list —
 | Word → letter       | `zigpdf_docx_to_letter`               | `docx_bridge.zig`  | ✗ (CLI / WASM)                               | ✗                                |
 | Word → template     | `zigpdf_docx_to_legend_template`      | `docx_bridge.zig`  | ✗ (CLI / WASM)                               | ✗                                |
 | legend letter → Word| `zigpdf_legend_letter_to_docx`        | `docx_bridge.zig`  | ✗ (CLI / WASM)                               | ✗                                |
+| filled form → JSON  | `zigpdf_read_form_fields`             | `pdf_form_reader.zig` | ✗ (CLI / WASM)                            | ✗                                |
 
 ## Implementation priority for the templateData refactor
 

@@ -1,0 +1,9 @@
+{
+  "c3_zs": "0.51",
+  "c3_r1r2": "0.35",
+  "rcd_tested": true,
+  "ir_ok": false,
+  "electrician": "",
+  "remarks": "Line one of the remarks, long enough that it wraps onto a second line inside the box.\nSecond paragraph.",
+  "p2_note": "Filled by pypdf – £7"
+}

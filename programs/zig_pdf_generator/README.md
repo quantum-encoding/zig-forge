@@ -302,7 +302,7 @@ A freeform multi-page canvas-style engine where elements (text, bulleted lists, 
 * **`pages`** (`array`): Distinct slide page arrays with background and positioning elements:
   * `background_color` (`string`, optional)
   * `elements` (`array`): List of positioning components:
-    * `type` (`string`): `"text"`, `"bullet_list"`, `"table"`, `"image"`, `"shape"`.
+    * `type` (`string`): `"text"`, `"bullet_list"`, `"table"`, `"image"`, `"shape"`, and the fillable form fields `"text_field"` and `"checkbox"` (boxes a reader types into or ticks in any PDF viewer; `pdf-gen form-fields <in.pdf>` / `zigpdf_read_form_fields` read the values back as JSON — see `ZIG_PDF_SCHEMA.md`).
     * `x` / `y` (`number` / float): Top-left coordinates.
     * Elements have custom type-specific attributes (`font_size`, `items`, `columns`, `rows`, `base64`, `shape`, `fill_color`, `stroke_color`, etc.).
 

@@ -237,6 +237,28 @@ uint8_t* zigpdf_extract_mdx_opts(const uint8_t* pdf, size_t pdf_len,
 uint8_t* zigpdf_extract_meta_json(size_t* out_len);
 
 /**
+ * @brief Read the values in a PDF's fillable form (AcroForm) as JSON.
+ *
+ * Returns one JSON object keyed by each field's fully qualified name: a text
+ * field's typed text (string), a checkbox's state (true/false), a radio
+ * group's chosen state (string) or a multi-select's choices (array). A text
+ * field with no value is left out. Reads incremental updates, xref and object
+ * streams, and empty-user-password encryption; a document needing a real
+ * password fails with "EncryptedUnsupported".
+ *
+ * Keeps no result state between calls, unlike the extract family; only the
+ * error message (zigpdf_get_error) is shared.
+ *
+ * @param pdf      Pointer to the input PDF bytes (borrowed)
+ * @param pdf_len  Length of the input PDF
+ * @param out_len  Receives the length of the returned JSON
+ * @return Pointer to UTF-8 JSON bytes, or NULL on error (see zigpdf_get_error)
+ *
+ * @note Caller must free the returned buffer with zigpdf_free()
+ */
+uint8_t* zigpdf_read_form_fields(const uint8_t* pdf, size_t pdf_len, size_t* out_len);
+
+/**
  * @brief Number of image blobs captured by the last extract_images run.
  *
  * Indices 0..count-1 are valid for the accessors below. Note this is the count

@@ -38,6 +38,9 @@
 pub const document = @import("document.zig");
 pub const pdf_extract = @import("pdf_extract.zig");
 pub const extractToMdx = pdf_extract.extractToMdx;
+pub const pdf_form_reader = @import("pdf_form_reader.zig");
+pub const readFormFields = pdf_form_reader.readFormFields;
+pub const readFormFieldsJson = pdf_form_reader.readFormFieldsJson;
 pub const invoice = @import("invoice.zig");
 pub const image = @import("image.zig");
 pub const json = @import("json.zig");
@@ -76,6 +79,7 @@ pub const Color = document.Color;
 pub const Font = document.Font;
 pub const PageSize = document.PageSize;
 pub const Image = document.Image;
+pub const FormField = document.FormField;
 
 pub const InvoiceData = invoice.InvoiceData;
 pub const LineItem = invoice.LineItem;
@@ -601,6 +605,7 @@ test "markdown links render as clickable link annotations" {
 test {
     _ = @import("sample_tests.zig");
     _ = @import("pdf_extract.zig");
+    _ = @import("pdf_form_tests.zig");
     _ = @import("order_email.zig");
     _ = @import("letter.zig");
     _ = @import("legend_letter_tests.zig");

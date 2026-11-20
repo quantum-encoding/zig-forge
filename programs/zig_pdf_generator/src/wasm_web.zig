@@ -9,6 +9,10 @@
 //! the host, so the page instantiates it with an empty import object (no WASI
 //! shim needed).
 //!
+//! It also exports `zigpdf_read_form_fields` (PDF bytes in, JSON of the filled
+//! form fields out), which uses only the extractor's object parser, not its
+//! text pipeline, and so compiles here.
+//!
 //! Built by `zig build wasm-web` → `zig-out/lib/zigpdf_web.wasm`.
 //!
 //! ABI (same as wasm.zig):
@@ -70,6 +74,24 @@ export fn zigpdf_get_error() [*:0]const u8 {
 
 export fn zigpdf_version() [*:0]const u8 {
     return "1.0.0-wasm-web";
+}
+
+// ---- form fields -----------------------------------------------------------
+
+const pdf_form_reader = @import("pdf_form_reader.zig");
+
+/// Read the values in a PDF's fillable form as a JSON object of field name →
+/// typed text / checkbox true-false (see pdf_form_reader.zig). Same ABI as the
+/// generators: PDF bytes in, JSON bytes out (free with zigpdf_free), 0 on
+/// error with zigpdf_get_error() saying why.
+export fn zigpdf_read_form_fields(pdf_ptr: [*]const u8, pdf_len: usize, output_len: *usize) ?[*]u8 {
+    const json = pdf_form_reader.readFormFieldsJson(wasm_allocator, pdf_ptr[0..pdf_len]) catch |err| {
+        var buf: [128]u8 = undefined;
+        setLastError(std.fmt.bufPrint(&buf, "Form field read error: {s}", .{@errorName(err)}) catch "Form field read error");
+        return null;
+    };
+    output_len.* = json.len;
+    return json.ptr;
 }
 
 // ---- generators ------------------------------------------------------------

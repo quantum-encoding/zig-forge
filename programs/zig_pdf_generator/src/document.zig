@@ -1039,6 +1039,62 @@ pub const LinkAnnotation = struct {
 const MAX_ANNOTATIONS = 64;
 const MAX_CUSTOM_META = 4;
 
+/// A fillable AcroForm field: a box a reader types into, or a checkbox they
+/// tick, in any PDF viewer. `PdfDocument.addFormField` records one; `build`
+/// writes it as a merged field + widget annotation on its page, lists it in
+/// the catalog's /AcroForm /Fields, and gives it an appearance stream (/AP /N)
+/// so the box draws even in a viewer that never generates appearances itself.
+pub const FormField = struct {
+    pub const Kind = enum { text, checkbox };
+
+    kind: Kind = .text,
+    /// Partial field name (/T). Unique in the document, non-empty, and free of
+    /// '.', which PDF reserves to join the names of nested fields. A reader
+    /// reports the typed value under this name.
+    name: []const u8,
+    /// Zero-based index of the page the field sits on.
+    page: u32 = 0,
+    /// Rectangle in PDF user space (origin bottom-left), in points.
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    /// Text field: the value it opens with (/V and /DV); empty is a blank box.
+    value: []const u8 = "",
+    /// Checkbox: whether it opens ticked.
+    checked: bool = false,
+    /// Text field: text size in points. 0 lets the viewer fit the text to the
+    /// box (/DA "0 Tf"); the appearance stream then sizes it to the height.
+    font_size: f32 = 10,
+    /// Colour of the typed text, and of a checkbox's tick.
+    text_color: Color = Color.black,
+    /// Text field: horizontal alignment of the text (/Q).
+    text_align: TextAlign = .left,
+    /// Text field: accept several lines (field flag Multiline).
+    multiline: bool = false,
+    /// Text field: maximum number of characters (/MaxLen); 0 is no limit.
+    max_length: u32 = 0,
+    /// Outline colour (/MK /BC); null draws no outline.
+    border_color: ?Color = Color{ .r = 0.4, .g = 0.4, .b = 0.4 },
+    border_width: f32 = 1,
+    /// Fill behind the field (/MK /BG); null leaves the page showing through.
+    background_color: ?Color = null,
+    /// Shown by viewers as the field's tooltip and read as its accessible
+    /// name (/TU). Empty writes none.
+    tooltip: []const u8 = "",
+    read_only: bool = false,
+    required: bool = false,
+};
+
+/// Field flags (/Ff): PDF 32000-1:2008, "Field flags common to all field
+/// types" and "Field flags specific to text fields".
+const FF_READ_ONLY: u32 = 1 << 0;
+const FF_REQUIRED: u32 = 1 << 1;
+const FF_MULTILINE: u32 = 1 << 12;
+
+/// Annotation flag Print (/F 4): the widget prints and is not hidden.
+const ANNOT_FLAG_PRINT: u32 = 4;
+
 /// PDF /Info dictionary metadata
 pub const PdfInfo = struct {
     title: ?[]const u8 = null,
@@ -1100,6 +1156,10 @@ pub const PdfDocument = struct {
     // renderers bump this as they move to each page; single-page callers leave
     // it at 0.
     current_annotation_page: u32 = 0,
+
+    // Fillable form fields, in the order added. Their name, value and tooltip
+    // are copies owned by `allocator`, freed in deinit.
+    form_fields: std.ArrayListUnmanaged(FormField) = .empty,
 
     // PDF metadata (/Info dictionary)
     info: ?PdfInfo = null,
@@ -1223,7 +1283,15 @@ pub const PdfDocument = struct {
             self.allocator.free(obj);
         }
         self.objects.deinit(self.allocator);
+        for (self.form_fields.items) |f| self.freeFormFieldStrings(f);
+        self.form_fields.deinit(self.allocator);
         self.output.deinit(self.allocator);
+    }
+
+    fn freeFormFieldStrings(self: *PdfDocument, f: FormField) void {
+        self.allocator.free(f.name);
+        self.allocator.free(f.value);
+        self.allocator.free(f.tooltip);
     }
 
     pub fn setPageSize(self: *PdfDocument, size: PageSize) void {
@@ -1378,6 +1446,38 @@ pub const PdfDocument = struct {
     }
 
     // -------------------------------------------------------------------------
+    // Form Fields (AcroForm)
+    // -------------------------------------------------------------------------
+
+    /// Record a fillable field. The name, value and tooltip are copied, so the
+    /// caller's buffers need not outlive `build`. The page index is checked in
+    /// `build`, once every page has been added.
+    pub fn addFormField(self: *PdfDocument, field: FormField) !void {
+        if (field.name.len == 0) return error.FormFieldNameEmpty;
+        if (std.mem.indexOfScalar(u8, field.name, '.') != null) return error.FormFieldNameHasPeriod;
+        for ([_][]const u8{ field.name, field.value, field.tooltip }) |s| {
+            if (!std.unicode.utf8ValidateSlice(s)) return error.FormFieldTextNotUtf8;
+        }
+        for (self.form_fields.items) |f| {
+            if (std.mem.eql(u8, f.name, field.name)) return error.DuplicateFormFieldName;
+        }
+        const finite = std.math.isFinite(field.x) and std.math.isFinite(field.y) and
+            std.math.isFinite(field.width) and std.math.isFinite(field.height);
+        if (!finite or field.width <= 0 or field.height <= 0) return error.FormFieldRectInvalid;
+        if (!std.math.isFinite(field.font_size) or field.font_size < 0) return error.FormFieldFontSizeInvalid;
+        if (!std.math.isFinite(field.border_width) or field.border_width < 0) return error.FormFieldBorderInvalid;
+
+        var copy = field;
+        copy.name = try self.allocator.dupe(u8, field.name);
+        errdefer self.allocator.free(copy.name);
+        copy.value = try self.allocator.dupe(u8, field.value);
+        errdefer self.allocator.free(copy.value);
+        copy.tooltip = try self.allocator.dupe(u8, field.tooltip);
+        errdefer self.allocator.free(copy.tooltip);
+        try self.form_fields.append(self.allocator, copy);
+    }
+
+    // -------------------------------------------------------------------------
     // PDF Metadata
     // -------------------------------------------------------------------------
 
@@ -1433,15 +1533,27 @@ pub const PdfDocument = struct {
         try self.output.appendSlice(self.allocator, "%PDF-1.4\n");
         try self.output.appendSlice(self.allocator, "%\xE2\xE3\xCF\xD3\n"); // Binary marker
 
-        // Object 1: Catalog
+        for (self.form_fields.items) |f| {
+            if (f.page >= self.page_count) return error.FormFieldPageOutOfRange;
+        }
+
+        // Object 1: Catalog. Object 2: Pages. A document with form fields
+        // takes object 3 for its /AcroForm dictionary, which is written once
+        // the widgets' object numbers are known.
         const catalog_id = self.next_object_id;
         self.next_object_id += 1;
-        try self.writeObject(catalog_id, "<< /Type /Catalog /Pages 2 0 R >>");
-
-        // Object 2: Pages (placeholder, will update)
         const pages_id = self.next_object_id;
         self.next_object_id += 1;
-        _ = self.output.items.len; // Offset tracked for potential future use
+        var acroform_id: u32 = 0;
+        if (self.form_fields.items.len > 0) {
+            acroform_id = self.next_object_id;
+            self.next_object_id += 1;
+            var cbuf: [96]u8 = undefined;
+            const cat = std.fmt.bufPrint(&cbuf, "<< /Type /Catalog /Pages {d} 0 R /AcroForm {d} 0 R >>", .{ pages_id, acroform_id }) catch return error.BufferTooSmall;
+            try self.writeObject(catalog_id, cat);
+        } else {
+            try self.writeObject(catalog_id, "<< /Type /Catalog /Pages 2 0 R >>");
+        }
 
         // Reserve object IDs for fonts. Standard Type1 fonts take one object
         // (the font dict). Embedded TrueType fonts take three (dict + descriptor
@@ -1639,6 +1751,20 @@ pub const PdfDocument = struct {
         // Calculate annotation object IDs (after pages)
         const first_annot_obj = first_page_obj + @as(u32, @intCast(self.page_count)) * 2;
 
+        // Form objects follow the link annotations: the two /DR fonts (/Helv,
+        // /ZaDb), then for each field its widget and appearance stream(s).
+        const first_form_obj = first_annot_obj + self.annotation_count;
+        const widget_ids = try self.allocator.alloc(u32, self.form_fields.items.len);
+        defer self.allocator.free(widget_ids);
+        var form_obj_end: u32 = first_form_obj;
+        if (self.form_fields.items.len > 0) {
+            form_obj_end += 2;
+            for (self.form_fields.items, 0..) |f, k| {
+                widget_ids[k] = form_obj_end;
+                form_obj_end += formFieldObjectCount(f.kind);
+            }
+        }
+
         // Write Page and Content Stream objects
         for (0..self.page_count) |i| {
             const page_obj_id = first_page_obj + @as(u32, @intCast(i)) * 2;
@@ -1663,11 +1789,11 @@ pub const PdfDocument = struct {
             }
             try resources.appendSlice(self.allocator, " >>");
 
-            // Build annotations array for THIS page — each annotation is
-            // attached to the page it was recorded on (annot.page == i).
+            // Build annotations array for THIS page — each link annotation and
+            // form-field widget is attached to the page it was recorded on.
             var annots_str: std.ArrayListUnmanaged(u8) = .empty;
             defer annots_str.deinit(self.allocator);
-            if (self.annotation_count > 0) {
+            {
                 var opened = false;
                 for (0..self.annotation_count) |a| {
                     if (self.annotations[a].page != i) continue;
@@ -1679,19 +1805,29 @@ pub const PdfDocument = struct {
                     const alen = std.fmt.bufPrint(&abuf, "{d} 0 R ", .{first_annot_obj + @as(u32, @intCast(a))}) catch continue;
                     try annots_str.appendSlice(self.allocator, alen);
                 }
+                for (self.form_fields.items, 0..) |f, k| {
+                    if (f.page != i) continue;
+                    if (!opened) {
+                        try annots_str.appendSlice(self.allocator, " /Annots [ ");
+                        opened = true;
+                    }
+                    var abuf: [32]u8 = undefined;
+                    try annots_str.appendSlice(self.allocator, std.fmt.bufPrint(&abuf, "{d} 0 R ", .{widget_ids[k]}) catch return error.BufferTooSmall);
+                }
                 if (opened) try annots_str.appendSlice(self.allocator, "]");
             }
 
-            // Page object (with optional annotations)
-            var page_buf: [768]u8 = undefined;
-            const page_len = std.fmt.bufPrint(&page_buf, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {d:.3} {d:.3}] /Contents {d} 0 R /Resources {s}{s} >>", .{
+            // Page object (with optional annotations). Allocated, because the
+            // resources and /Annots lists grow with the images and fields.
+            const page_str = try std.fmt.allocPrint(self.allocator, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {d:.3} {d:.3}] /Contents {d} 0 R /Resources {s}{s} >>", .{
                 self.page_size.width,
                 self.page_size.height,
                 content_obj_id,
                 resources.items,
                 annots_str.items,
-            }) catch continue;
-            try self.writeObject(page_obj_id, page_len);
+            });
+            defer self.allocator.free(page_str);
+            try self.writeObject(page_obj_id, page_str);
 
             // Content stream object
             const content_data = self.objects.items[self.page_content_ids[i]];
@@ -1704,8 +1840,12 @@ pub const PdfDocument = struct {
             try self.writeAnnotationObject(first_annot_obj + @as(u32, @intCast(i)), annot);
         }
 
+        if (self.form_fields.items.len > 0) {
+            try self.writeFormObjects(acroform_id, first_form_obj, widget_ids, first_page_obj);
+        }
+
         // Update next_object_id
-        self.next_object_id = first_annot_obj + self.annotation_count;
+        self.next_object_id = form_obj_end;
 
         // Write /Info dictionary (PDF metadata)
         var info_obj_id: u32 = 0;
@@ -2025,7 +2165,352 @@ pub const PdfDocument = struct {
         try self.output.appendSlice(self.allocator, buf.items);
         try self.output.appendSlice(self.allocator, "\nendobj\n");
     }
+
+    // -------------------------------------------------------------------------
+    // Form field objects
+    // -------------------------------------------------------------------------
+
+    /// Write the /DR fonts, every field's widget and appearance streams, and
+    /// the /AcroForm dictionary. Object numbers follow the layout `build`
+    /// reserved: /Helv at `first_obj`, /ZaDb after it, then per field its
+    /// widget (`widget_ids[k]`) followed by its appearance stream(s).
+    fn writeFormObjects(self: *PdfDocument, acroform_id: u32, first_obj: u32, widget_ids: []const u32, first_page_obj: u32) !void {
+        const helv_id = first_obj;
+        const zadb_id = first_obj + 1;
+        try self.writeObject(helv_id, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
+        try self.writeObject(zadb_id, "<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats >>");
+
+        for (self.form_fields.items, widget_ids) |f, widget_id| {
+            const page_obj_id = first_page_obj + f.page * 2;
+            switch (f.kind) {
+                .text => {
+                    const ap_id = widget_id + 1;
+                    try self.writeTextWidget(widget_id, f, page_obj_id, ap_id);
+                    const ap = try textFieldAppearance(self.allocator, f);
+                    defer self.allocator.free(ap);
+                    try self.writeFormXObject(ap_id, f.width, f.height, "Helv", helv_id, ap);
+                },
+                .checkbox => {
+                    const on_id = widget_id + 1;
+                    const off_id = widget_id + 2;
+                    try self.writeCheckboxWidget(widget_id, f, page_obj_id, on_id, off_id);
+                    const on = try checkboxAppearance(self.allocator, f, true);
+                    defer self.allocator.free(on);
+                    try self.writeFormXObject(on_id, f.width, f.height, "ZaDb", zadb_id, on);
+                    const off = try checkboxAppearance(self.allocator, f, false);
+                    defer self.allocator.free(off);
+                    try self.writeFormXObject(off_id, f.width, f.height, "ZaDb", zadb_id, off);
+                },
+            }
+        }
+
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(self.allocator);
+        try buf.appendSlice(self.allocator, "<< /Fields [ ");
+        for (widget_ids) |id| {
+            var nbuf: [24]u8 = undefined;
+            try buf.appendSlice(self.allocator, std.fmt.bufPrint(&nbuf, "{d} 0 R ", .{id}) catch return error.BufferTooSmall);
+        }
+        try buf.appendSlice(self.allocator, "] /DA ");
+        try self.appendStringBytes(&buf, "/Helv 0 Tf 0 g");
+        var tail: [96]u8 = undefined;
+        try buf.appendSlice(self.allocator, std.fmt.bufPrint(&tail, " /DR << /Font << /Helv {d} 0 R /ZaDb {d} 0 R >> >> >>", .{ helv_id, zadb_id }) catch return error.BufferTooSmall);
+        try self.writeObject(acroform_id, buf.items);
+    }
+
+    /// The entries a text field and a checkbox widget share: name, tooltip,
+    /// flags, rectangle, print flag, page, and the /MK and /BS that tell a
+    /// viewer how to redraw the box when it regenerates the appearance.
+    fn appendWidgetCommon(self: *PdfDocument, buf: *std.ArrayListUnmanaged(u8), f: FormField, ff: u32, page_obj_id: u32) !void {
+        try buf.appendSlice(self.allocator, " /T ");
+        try self.appendTextString(buf, f.name);
+        if (f.tooltip.len > 0) {
+            try buf.appendSlice(self.allocator, " /TU ");
+            try self.appendTextString(buf, f.tooltip);
+        }
+        var nbuf: [192]u8 = undefined;
+        try buf.appendSlice(self.allocator, std.fmt.bufPrint(&nbuf, " /Ff {d} /Rect [{d:.2} {d:.2} {d:.2} {d:.2}] /F {d} /P {d} 0 R", .{
+            ff, f.x, f.y, f.x + f.width, f.y + f.height, ANNOT_FLAG_PRINT, page_obj_id,
+        }) catch return error.BufferTooSmall);
+
+        try buf.appendSlice(self.allocator, " /MK <<");
+        if (f.border_color) |c| try appendColorEntry(buf, self.allocator, " /BC ", c);
+        if (f.background_color) |c| try appendColorEntry(buf, self.allocator, " /BG ", c);
+        if (f.kind == .checkbox) {
+            // /CA: the ZapfDingbats character a viewer draws for "on" (4 = ✔).
+            try buf.appendSlice(self.allocator, " /CA ");
+            try self.appendStringBytes(buf, "4");
+        }
+        try buf.appendSlice(self.allocator, " >>");
+        const bw = if (f.border_color != null) f.border_width else 0;
+        try buf.appendSlice(self.allocator, std.fmt.bufPrint(&nbuf, " /BS << /W {d:.2} /S /S >>", .{bw}) catch return error.BufferTooSmall);
+    }
+
+    fn writeTextWidget(self: *PdfDocument, obj_id: u32, f: FormField, page_obj_id: u32, ap_id: u32) !void {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(self.allocator);
+        var ff: u32 = 0;
+        if (f.read_only) ff |= FF_READ_ONLY;
+        if (f.required) ff |= FF_REQUIRED;
+        if (f.multiline) ff |= FF_MULTILINE;
+
+        try buf.appendSlice(self.allocator, "<< /Type /Annot /Subtype /Widget /FT /Tx");
+        try self.appendWidgetCommon(&buf, f, ff, page_obj_id);
+        if (f.value.len > 0) {
+            try buf.appendSlice(self.allocator, " /V ");
+            try self.appendTextString(&buf, f.value);
+            try buf.appendSlice(self.allocator, " /DV ");
+            try self.appendTextString(&buf, f.value);
+        }
+        var nbuf: [128]u8 = undefined;
+        if (f.max_length > 0) {
+            try buf.appendSlice(self.allocator, std.fmt.bufPrint(&nbuf, " /MaxLen {d}", .{f.max_length}) catch return error.BufferTooSmall);
+        }
+        const q: u8 = switch (f.text_align) {
+            .left => 0,
+            .center => 1,
+            .right => 2,
+        };
+        try buf.appendSlice(self.allocator, std.fmt.bufPrint(&nbuf, " /Q {d} /DA ", .{q}) catch return error.BufferTooSmall);
+        const da = std.fmt.bufPrint(&nbuf, "/Helv {d:.2} Tf {d:.3} {d:.3} {d:.3} rg", .{ f.font_size, f.text_color.r, f.text_color.g, f.text_color.b }) catch return error.BufferTooSmall;
+        try self.appendStringBytes(&buf, da);
+        try buf.appendSlice(self.allocator, std.fmt.bufPrint(&nbuf, " /AP << /N {d} 0 R >> >>", .{ap_id}) catch return error.BufferTooSmall);
+        try self.writeObject(obj_id, buf.items);
+    }
+
+    fn writeCheckboxWidget(self: *PdfDocument, obj_id: u32, f: FormField, page_obj_id: u32, on_id: u32, off_id: u32) !void {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(self.allocator);
+        var ff: u32 = 0;
+        if (f.read_only) ff |= FF_READ_ONLY;
+        if (f.required) ff |= FF_REQUIRED;
+
+        // The "on" state is named /Yes, the name Acrobat and most producers use.
+        const state: []const u8 = if (f.checked) "/Yes" else "/Off";
+        try buf.appendSlice(self.allocator, "<< /Type /Annot /Subtype /Widget /FT /Btn");
+        try self.appendWidgetCommon(&buf, f, ff, page_obj_id);
+        var nbuf: [160]u8 = undefined;
+        try buf.appendSlice(self.allocator, std.fmt.bufPrint(&nbuf, " /V {s} /AS {s} /DA ", .{ state, state }) catch return error.BufferTooSmall);
+        const da = std.fmt.bufPrint(&nbuf, "/ZaDb 0 Tf {d:.3} {d:.3} {d:.3} rg", .{ f.text_color.r, f.text_color.g, f.text_color.b }) catch return error.BufferTooSmall;
+        try self.appendStringBytes(&buf, da);
+        try buf.appendSlice(self.allocator, std.fmt.bufPrint(&nbuf, " /AP << /N << /Yes {d} 0 R /Off {d} 0 R >> >> >>", .{ on_id, off_id }) catch return error.BufferTooSmall);
+        try self.writeObject(obj_id, buf.items);
+    }
+
+    /// A form XObject (an appearance stream) of `width` x `height` points with
+    /// one font resource, compressed and encrypted like a page's content.
+    fn writeFormXObject(self: *PdfDocument, obj_id: u32, width: f32, height: f32, font_name: []const u8, font_obj: u32, content: []const u8) !void {
+        try self.markObject(obj_id);
+        var header_buf: [32]u8 = undefined;
+        try self.output.appendSlice(self.allocator, std.fmt.bufPrint(&header_buf, "{d} 0 obj\n", .{obj_id}) catch return error.BufferTooSmall);
+
+        // Same rule as page content: test builds keep streams readable.
+        const is_test = @import("builtin").is_test;
+        const compressed = if (is_test) null else deflateCompress(self.allocator, content) catch null;
+        defer if (compressed) |c| self.allocator.free(c);
+        const enc = try self.encryptBytes(compressed orelse content);
+        defer if (enc.owned) self.allocator.free(@constCast(enc.bytes));
+
+        const filter: []const u8 = if (compressed != null) " /Filter /FlateDecode" else "";
+        const dict = try std.fmt.allocPrint(self.allocator,
+            "<< /Type /XObject /Subtype /Form /BBox [0 0 {d:.2} {d:.2}] /Resources << /Font << /{s} {d} 0 R >> >>{s} /Length {d} >>\n",
+            .{ width, height, font_name, font_obj, filter, enc.bytes.len },
+        );
+        defer self.allocator.free(dict);
+        try self.output.appendSlice(self.allocator, dict);
+        try self.output.appendSlice(self.allocator, "stream\n");
+        try self.output.appendSlice(self.allocator, enc.bytes);
+        try self.output.appendSlice(self.allocator, "\nendstream\nendobj\n");
+    }
+
+    /// Append a PDF text string (/T, /TU, /V, /DV): ASCII as itself (ASCII is
+    /// PDFDocEncoding), anything else as UTF-16BE behind a FE FF byte-order
+    /// mark. `utf8` is valid UTF-8; addFormField refuses anything else.
+    fn appendTextString(self: *PdfDocument, buf: *std.ArrayListUnmanaged(u8), utf8: []const u8) !void {
+        const ascii = for (utf8) |c| {
+            if (c >= 0x80) break false;
+        } else true;
+        if (ascii) return self.appendStringBytes(buf, utf8);
+
+        const utf16le = std.unicode.utf8ToUtf16LeAlloc(self.allocator, utf8) catch |err| switch (err) {
+            error.InvalidUtf8 => return error.FormFieldTextNotUtf8,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        defer self.allocator.free(utf16le);
+        const bytes = try self.allocator.alloc(u8, 2 + 2 * utf16le.len);
+        defer self.allocator.free(bytes);
+        bytes[0] = 0xFE;
+        bytes[1] = 0xFF;
+        for (utf16le, 0..) |unit, k| {
+            std.mem.writeInt(u16, bytes[2 + 2 * k ..][0..2], std.mem.littleToNative(u16, unit), .big);
+        }
+        try self.appendStringBytes(buf, bytes);
+    }
+
+    /// Append raw string bytes as a PDF string: encrypted and hex-encoded when
+    /// the document is encrypted; otherwise a literal `(…)` when every byte is
+    /// ASCII (with the delimiters and control characters escaped), else hex.
+    fn appendStringBytes(self: *PdfDocument, buf: *std.ArrayListUnmanaged(u8), bytes: []const u8) !void {
+        const hex = "0123456789abcdef";
+        if (self.encryption != null) {
+            const e = try self.encryptBytes(bytes);
+            defer if (e.owned) self.allocator.free(@constCast(e.bytes));
+            try buf.append(self.allocator, '<');
+            for (e.bytes) |b| try buf.appendSlice(self.allocator, &[_]u8{ hex[b >> 4], hex[b & 0x0F] });
+            try buf.append(self.allocator, '>');
+            return;
+        }
+        const ascii = for (bytes) |c| {
+            if (c >= 0x80) break false;
+        } else true;
+        if (!ascii) {
+            try buf.append(self.allocator, '<');
+            for (bytes) |b| try buf.appendSlice(self.allocator, &[_]u8{ hex[b >> 4], hex[b & 0x0F] });
+            try buf.append(self.allocator, '>');
+            return;
+        }
+        try buf.append(self.allocator, '(');
+        for (bytes) |c| {
+            switch (c) {
+                '(' => try buf.appendSlice(self.allocator, "\\("),
+                ')' => try buf.appendSlice(self.allocator, "\\)"),
+                '\\' => try buf.appendSlice(self.allocator, "\\\\"),
+                '\n' => try buf.appendSlice(self.allocator, "\\n"),
+                '\r' => try buf.appendSlice(self.allocator, "\\r"),
+                '\t' => try buf.appendSlice(self.allocator, "\\t"),
+                0x08 => try buf.appendSlice(self.allocator, "\\b"),
+                0x0C => try buf.appendSlice(self.allocator, "\\f"),
+                0x00...0x07, 0x0B, 0x0E...0x1F, 0x7F => {
+                    try buf.appendSlice(self.allocator, &[_]u8{ '\\', '0' + (c >> 6), '0' + ((c >> 3) & 7), '0' + (c & 7) });
+                },
+                else => try buf.append(self.allocator, c),
+            }
+        }
+        try buf.append(self.allocator, ')');
+    }
 };
+
+/// Objects one form field takes after its widget: a text field has one
+/// appearance stream, a checkbox one per state (/Yes, /Off).
+fn formFieldObjectCount(kind: FormField.Kind) u32 {
+    return switch (kind) {
+        .text => 2,
+        .checkbox => 3,
+    };
+}
+
+/// ` /Key [r g b]` for an /MK colour entry.
+fn appendColorEntry(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, key: []const u8, c: Color) !void {
+    var nbuf: [64]u8 = undefined;
+    try buf.appendSlice(allocator, key);
+    try buf.appendSlice(allocator, std.fmt.bufPrint(&nbuf, "[{d:.3} {d:.3} {d:.3}]", .{ c.r, c.g, c.b }) catch return error.BufferTooSmall);
+}
+
+/// The outline width a field draws: its border width, or 0 with no border.
+fn fieldBorderWidth(f: FormField) f32 {
+    return if (f.border_color != null) f.border_width else 0;
+}
+
+/// Background fill and inset outline, shared by every field appearance.
+fn drawFieldBox(cs: *ContentStream, f: FormField) !void {
+    if (f.background_color) |bg| try cs.drawRect(0, 0, f.width, f.height, bg, null);
+    const bw = fieldBorderWidth(f);
+    if (f.border_color) |bc| {
+        if (bw > 0) {
+            try cs.saveState();
+            try cs.setStrokeColor(bc);
+            try cs.setLineWidth(bw);
+            try cs.rect(bw / 2, bw / 2, @max(0, f.width - bw), @max(0, f.height - bw));
+            try cs.stroke();
+            try cs.restoreState();
+        }
+    }
+}
+
+/// Text size the appearance draws at: the field's own, or for 0 (auto) one
+/// that fits the box height, kept between 4 and 12 points.
+fn appearanceFontSize(f: FormField) f32 {
+    if (f.font_size > 0) return f.font_size;
+    const pad = fieldBorderWidth(f) + 2;
+    const fit = @max(4, @min(12, (f.height - 2 * pad) * 0.8));
+    return if (f.multiline) @min(fit, 10) else fit;
+}
+
+/// The normal appearance of a text field: its box, then the value inside a
+/// `/Tx BMC … EMC` section (the part a viewer replaces when it redraws the
+/// typed text), clipped to the inside of the outline. Helvetica, WinAnsi: a
+/// character outside WinAnsiEncoding draws as '?', though /V keeps it.
+fn textFieldAppearance(allocator: std.mem.Allocator, f: FormField) ![]u8 {
+    var cs = ContentStream.init(allocator);
+    defer cs.deinit();
+    try drawFieldBox(&cs, f);
+    try cs.buffer.appendSlice(allocator, "/Tx BMC\n");
+    if (f.value.len > 0) {
+        const bw = fieldBorderWidth(f);
+        const pad = bw + 2;
+        const fs = appearanceFontSize(f);
+        const inner_w = @max(0, f.width - 2 * pad);
+        try cs.saveState();
+        try cs.clipRect(bw, bw, @max(0, f.width - 2 * bw), @max(0, f.height - 2 * bw));
+        if (f.multiline) {
+            const line_step = fs * 1.15;
+            var y = f.height - pad - fs * 0.9;
+            var paras = std.mem.splitScalar(u8, f.value, '\n');
+            outer: while (paras.next()) |raw| {
+                const para = std.mem.trimEnd(u8, raw, "\r");
+                var wrapped = try wrapText(allocator, para, .helvetica, fs, inner_w);
+                defer wrapped.deinit();
+                if (wrapped.lines.len == 0) {
+                    y -= line_step;
+                    continue;
+                }
+                for (wrapped.lines) |line| {
+                    if (y < -fs) break :outer;
+                    try cs.drawText(line, alignedX(f, line, fs, pad), y, "Helv", fs, f.text_color);
+                    y -= line_step;
+                }
+            }
+        } else {
+            // One line: any line break in the value shows as a space.
+            const line = try allocator.dupe(u8, f.value);
+            defer allocator.free(line);
+            for (line) |*c| {
+                if (c.* == '\n' or c.* == '\r') c.* = ' ';
+            }
+            const y = (f.height - fs) / 2 + fs * 0.22;
+            try cs.drawText(line, alignedX(f, line, fs, pad), y, "Helv", fs, f.text_color);
+        }
+        try cs.restoreState();
+    }
+    try cs.buffer.appendSlice(allocator, "EMC\n");
+    return allocator.dupe(u8, cs.getContent());
+}
+
+fn alignedX(f: FormField, line: []const u8, fs: f32, pad: f32) f32 {
+    const tw = Font.helvetica.measureText(line, fs);
+    return switch (f.text_align) {
+        .left => pad,
+        .center => (f.width - tw) / 2,
+        .right => f.width - pad - tw,
+    };
+}
+
+/// A checkbox appearance: the box, plus for the "on" state a ZapfDingbats
+/// tick (character '4', glyph a20: advance 756, bbox 35 -15 721 705 in
+/// thousandths of an em) centred in it.
+fn checkboxAppearance(allocator: std.mem.Allocator, f: FormField, on: bool) ![]u8 {
+    var cs = ContentStream.init(allocator);
+    defer cs.deinit();
+    try drawFieldBox(&cs, f);
+    if (on) {
+        const inner = @max(0, @min(f.width, f.height) - 2 * (fieldBorderWidth(f) + 1));
+        const fs = inner / 0.72 * 0.8;
+        const x = (f.width - 0.686 * fs) / 2 - 0.035 * fs;
+        const y = (f.height - 0.72 * fs) / 2 + 0.015 * fs;
+        try cs.drawText("4", x, y, "ZaDb", fs, f.text_color);
+    }
+    return allocator.dupe(u8, cs.getContent());
+}
 
 /// " /SMask N 0 R" for an image with a soft mask, else "".
 fn smaskRef(buf: *[32]u8, smask: ?u32) []const u8 {

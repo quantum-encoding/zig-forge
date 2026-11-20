@@ -227,6 +227,7 @@ export fn zigpdf_version() [*:0]const u8 {
 const presentation = @import("presentation.zig");
 
 const pdf_extract = @import("pdf_extract.zig");
+const pdf_form_reader = @import("pdf_form_reader.zig");
 
 /// Metadata from the most recent extract call, serialized on demand by
 /// zigpdf_extract_meta_json. Holds only static strings — no ownership.
@@ -307,6 +308,25 @@ export fn zigpdf_extract_mdx_opts(
         .source_name = if (source_name) |s| std.mem.span(s) else "",
     };
     return runExtract(pdf_ptr[0..pdf_len], opts, out_len);
+}
+
+/// Read the values in a PDF's fillable form as a JSON object: each field's
+/// fully qualified name maps to its typed text (a string), a checkbox's state
+/// (true/false), a radio group's chosen state (a string) or a multi-select's
+/// choices (an array). A text field nobody filled in is left out. See
+/// pdf_form_reader.zig for what is and is not read.
+///
+/// Returns the JSON bytes (caller frees with zigpdf_free), or NULL on error
+/// (see zigpdf_get_error). Keeps no result state between calls, unlike the
+/// extract family; only the error message is shared.
+export fn zigpdf_read_form_fields(pdf_ptr: [*]const u8, pdf_len: usize, out_len: *usize) ?[*]u8 {
+    const json = pdf_form_reader.readFormFieldsJson(ffi_allocator, pdf_ptr[0..pdf_len]) catch |err| {
+        var buf: [128]u8 = undefined;
+        setLastError(std.fmt.bufPrint(&buf, "Form field read error: {s}", .{@errorName(err)}) catch "Form field read error");
+        return null;
+    };
+    out_len.* = json.len;
+    return json.ptr;
 }
 
 /// Serialize the metadata of the last extraction as JSON. Returns NULL if no

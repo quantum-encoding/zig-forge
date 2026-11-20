@@ -1412,6 +1412,37 @@ Placeholders survive Word splitting them across runs, bolding half of one, and a
 
 Anything that is not a Word document is refused: the call returns NULL and `zigpdf_get_error()` says why, e.g. `DOCX: input is not a DOCX file (no ZIP signature)`.
 
+## Fillable Forms
+
+A presentation page can carry boxes the reader types into and checkboxes they tick, in any PDF viewer, and the filled-in values can be read back as JSON. Full field list: `ZIG_PDF_SCHEMA.md`, `type: "text_field"` and **Reading filled forms**.
+
+```bash
+pdf-gen --presentation review.json review.pdf     # write the form
+pdf-gen form-fields filled.pdf                    # read what was typed
+```
+
+```json
+{ "page_size": { "width": 595, "height": 842 },
+  "pages": [ { "elements": [
+    { "type": "text", "content": "Circuit 3 Zs (ohms)", "x": 40, "y": 100, "font_size": 10 },
+    { "type": "text_field", "name": "c3_zs", "x": 200, "y": 88, "width": 80, "height": 16,
+      "border_color": "#d32f2f", "background_color": "#fff5f5", "tooltip": "Circuit 3 Zs (ohms)" },
+    { "type": "checkbox", "name": "rcd_tested", "x": 200, "y": 139, "width": 14, "height": 14 },
+    { "type": "text_field", "name": "remarks", "x": 200, "y": 215, "width": 300, "height": 60,
+      "multiline": true, "value": "Prefilled text the reader can change" }
+  ] } ] }
+```
+
+- `name` is required, unique in the document, and contains no `.`. It is the key the value comes back under.
+- `x`, `y` is the top-left corner in points, like every presentation element; `width`/`height` default to 120×18 for a text field and 12×12 for a checkbox.
+- Optional: `value`, `checked`, `font_size` (0 = fit to the box), `text_color`, `align`, `multiline`, `max_length`, `border_color` (`null` for none), `border_width`, `background_color`, `tooltip`, `read_only`, `required`.
+
+Reading the filled PDF (`zigpdf_read_form_fields(pdf, len, &out_len)`, also in both WASM modules) returns one object: a text field's typed text, a checkbox's `true`/`false`. A text field nobody filled in is left out.
+
+```json
+{"c3_zs": "0.42", "rcd_tested": true, "remarks": "Re-tested after repair."}
+```
+
 ## AI Prompt Template
 
 ### For Invoices

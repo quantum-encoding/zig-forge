@@ -1,0 +1,14 @@
+{
+  "name": "Ada (Lovelace) \\ ok",
+  "unicode": "Zoë – Łódź €5",
+  "notes": "line1\nline2",
+  "inspection.date": "2026-11-19",
+  "agree": true,
+  "decline": false,
+  "phase": "three",
+  "board": "B",
+  "tests": [
+    "IR",
+    "RCD"
+  ]
+}

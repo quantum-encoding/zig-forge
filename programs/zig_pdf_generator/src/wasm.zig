@@ -126,6 +126,7 @@ export fn zigpdf_version() [*:0]const u8 {
 // =============================================================================
 
 const pdf_extract = @import("pdf_extract.zig");
+const pdf_form_reader = @import("pdf_form_reader.zig");
 var last_meta: pdf_extract.ExtractionMeta = .{};
 
 /// Image blobs from the last extract call made with `extract_images`. Owned
@@ -184,6 +185,19 @@ export fn zigpdf_extract_mdx_opts(
         .source_name = if (source_name_len > 0) source_name_ptr[0..source_name_len] else "",
     };
     return runExtract(pdf_ptr[0..pdf_len], opts, output_len);
+}
+
+/// Read the values in a PDF's fillable form as a JSON object of field name →
+/// typed text / checkbox true-false (see pdf_form_reader.zig). Returns the JSON
+/// bytes (free with wasm_free) or 0 on error (zigpdf_get_error says why).
+export fn zigpdf_read_form_fields(pdf_ptr: [*]const u8, pdf_len: usize, output_len: *usize) ?[*]u8 {
+    const json = pdf_form_reader.readFormFieldsJson(wasm_allocator, pdf_ptr[0..pdf_len]) catch |err| {
+        var buf: [128]u8 = undefined;
+        setLastError(std.fmt.bufPrint(&buf, "Form field read error: {s}", .{@errorName(err)}) catch "Form field read error");
+        return null;
+    };
+    output_len.* = json.len;
+    return json.ptr;
 }
 
 /// Serialize the last extraction's metadata as JSON. Free with wasm_free.

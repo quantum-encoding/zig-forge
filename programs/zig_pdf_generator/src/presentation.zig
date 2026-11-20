@@ -21,7 +21,9 @@
 //!         { "type": "text", "content": "Title", "x": 100, "y": 100, ... },
 //!         { "type": "table", "x": 100, "y": 200, "columns": [...], "rows": [...] },
 //!         { "type": "image", "base64": "...", "x": 500, "y": 100, ... },
-//!         { "type": "shape", "shape": "rectangle", "x": 50, "y": 50, ... }
+//!         { "type": "shape", "shape": "rectangle", "x": 50, "y": 50, ... },
+//!         { "type": "text_field", "name": "ze", "x": 50, "y": 300, "width": 80, "height": 18 },
+//!         { "type": "checkbox", "name": "rcd_ok", "x": 150, "y": 300, "checked": false }
 //!       ]
 //!     }
 //!   ]
@@ -148,12 +150,38 @@ pub const ShapeElement = struct {
     opacity: f32 = 1.0,
 };
 
+/// A fillable form field: a box a reader types into (`text_field`) or ticks
+/// (`checkbox`) in any PDF viewer. `x`, `y` is the top-left corner, like every
+/// other element. See document.FormField for what each entry writes.
+pub const FormFieldElement = struct {
+    name: []const u8 = "",
+    x: f32 = 0,
+    y: f32 = 0,
+    width: f32 = 120,
+    height: f32 = 18,
+    value: []const u8 = "",
+    checked: bool = false,
+    font_size: f32 = 10,
+    text_color: []const u8 = "#000000",
+    text_align: TextAlign = .left,
+    multiline: bool = false,
+    max_length: u32 = 0,
+    border_color: ?[]const u8 = "#666666",
+    border_width: f32 = 1,
+    background_color: ?[]const u8 = null,
+    tooltip: []const u8 = "",
+    read_only: bool = false,
+    required: bool = false,
+};
+
 pub const ElementType = enum {
     text,
     bullet_list,
     table,
     image,
     shape,
+    text_field,
+    checkbox,
 };
 
 pub const Element = union(ElementType) {
@@ -162,6 +190,8 @@ pub const Element = union(ElementType) {
     table: TableElement,
     image: ImageElement,
     shape: ShapeElement,
+    text_field: FormFieldElement,
+    checkbox: FormFieldElement,
 };
 
 pub const Page = struct {
@@ -453,10 +483,43 @@ pub const PresentationRenderer = struct {
                 .table => |table| try self.renderTable(&content, table, font_regular, font_bold),
                 .image => |img| try self.renderImage(&content, img),
                 .shape => |shape| try self.renderShape(&content, shape),
+                .text_field => |f| try self.addFormField(f, .text),
+                .checkbox => |f| try self.addFormField(f, .checkbox),
             }
         }
 
         try self.doc.addPage(&content);
+    }
+
+    /// Record a form field on the page being rendered (it is added to the
+    /// document after its elements, so its index is the current page count).
+    fn addFormField(self: *PresentationRenderer, f: FormFieldElement, kind: document.FormField.Kind) !void {
+        try self.doc.addFormField(.{
+            .kind = kind,
+            .name = f.name,
+            .page = self.doc.page_count,
+            .x = f.x,
+            .y = self.toPdfY(f.y) - f.height,
+            .width = f.width,
+            .height = f.height,
+            .value = f.value,
+            .checked = f.checked,
+            .font_size = f.font_size,
+            .text_color = document.Color.fromHex(f.text_color),
+            .text_align = switch (f.text_align) {
+                .left => .left,
+                .center => .center,
+                .right => .right,
+            },
+            .multiline = f.multiline,
+            .max_length = f.max_length,
+            .border_color = if (f.border_color) |c| document.Color.fromHex(c) else null,
+            .border_width = f.border_width,
+            .background_color = if (f.background_color) |c| document.Color.fromHex(c) else null,
+            .tooltip = f.tooltip,
+            .read_only = f.read_only,
+            .required = f.required,
+        });
     }
 
     fn renderText(
@@ -935,6 +998,10 @@ fn parseElement(allocator: std.mem.Allocator, elem_val: std.json.Value) !?Elemen
         return Element{ .image = try parseImageElement(obj) };
     } else if (std.mem.eql(u8, type_str, "shape")) {
         return Element{ .shape = try parseShapeElement(obj) };
+    } else if (std.mem.eql(u8, type_str, "text_field")) {
+        return Element{ .text_field = try parseFormFieldElement(obj, false) };
+    } else if (std.mem.eql(u8, type_str, "checkbox")) {
+        return Element{ .checkbox = try parseFormFieldElement(obj, true) };
     }
 
     return null;
@@ -1094,6 +1161,84 @@ fn parseShapeElement(obj: std.json.ObjectMap) !ShapeElement {
     }
 
     return shape;
+}
+
+/// A `text_field` or `checkbox` element. Every entry is type-checked: a
+/// wrong-typed value is refused with error.InvalidFormFieldElement rather than
+/// read as something else. A checkbox defaults to a 12-point square.
+fn parseFormFieldElement(obj: std.json.ObjectMap, is_checkbox: bool) !FormFieldElement {
+    var f = FormFieldElement{};
+    if (is_checkbox) {
+        f.width = 12;
+        f.height = 12;
+    }
+    f.name = (try optString(obj, "name")) orelse return error.FormFieldNameEmpty;
+    if (try optNumber(obj, "x")) |v| f.x = v;
+    if (try optNumber(obj, "y")) |v| f.y = v;
+    if (try optNumber(obj, "width")) |v| f.width = v;
+    if (try optNumber(obj, "height")) |v| f.height = v;
+    if (try optString(obj, "value")) |v| f.value = v;
+    if (try optBool(obj, "checked")) |v| f.checked = v;
+    if (try optNumber(obj, "font_size")) |v| f.font_size = v;
+    if (try optString(obj, "text_color")) |v| f.text_color = v;
+    if (try optString(obj, "align")) |a| {
+        if (std.mem.eql(u8, a, "left")) {
+            f.text_align = .left;
+        } else if (std.mem.eql(u8, a, "center")) {
+            f.text_align = .center;
+        } else if (std.mem.eql(u8, a, "right")) {
+            f.text_align = .right;
+        } else return error.InvalidFormFieldElement;
+    }
+    if (try optBool(obj, "multiline")) |v| f.multiline = v;
+    if (try optNumber(obj, "max_length")) |v| {
+        if (v < 0 or v > 1_000_000 or v != @floor(v)) return error.InvalidFormFieldElement;
+        f.max_length = std.math.lossyCast(u32, v);
+    }
+    // An explicit null removes the outline / keeps the background clear.
+    if (obj.get("border_color")) |c| f.border_color = switch (c) {
+        .string => |s| s,
+        .null => null,
+        else => return error.InvalidFormFieldElement,
+    };
+    if (try optNumber(obj, "border_width")) |v| f.border_width = v;
+    if (obj.get("background_color")) |c| f.background_color = switch (c) {
+        .string => |s| s,
+        .null => null,
+        else => return error.InvalidFormFieldElement,
+    };
+    if (try optString(obj, "tooltip")) |v| f.tooltip = v;
+    if (try optBool(obj, "read_only")) |v| f.read_only = v;
+    if (try optBool(obj, "required")) |v| f.required = v;
+    return f;
+}
+
+fn optString(obj: std.json.ObjectMap, key: []const u8) !?[]const u8 {
+    const v = obj.get(key) orelse return null;
+    return switch (v) {
+        .string => |s| s,
+        .null => null,
+        else => error.InvalidFormFieldElement,
+    };
+}
+
+fn optNumber(obj: std.json.ObjectMap, key: []const u8) !?f32 {
+    const v = obj.get(key) orelse return null;
+    return switch (v) {
+        .integer => |i| @floatFromInt(i),
+        .float => |x| std.math.lossyCast(f32, x),
+        .null => null,
+        else => error.InvalidFormFieldElement,
+    };
+}
+
+fn optBool(obj: std.json.ObjectMap, key: []const u8) !?bool {
+    const v = obj.get(key) orelse return null;
+    return switch (v) {
+        .bool => |b| b,
+        .null => null,
+        else => error.InvalidFormFieldElement,
+    };
 }
 
 fn getNumber(val: std.json.Value) f64 {

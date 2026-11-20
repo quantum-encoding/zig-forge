@@ -111,6 +111,15 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "form-fields")) {
+        runFormFields(allocator, args[2..], stdout, stderr) catch |err| {
+            stderr.print("Error: form-fields failed: {s}\n", .{@errorName(err)}) catch {};
+            stderr.flush() catch {};
+            std.process.exit(1);
+        };
+        return;
+    }
+
     if (args.len >= 2 and std.mem.eql(u8, args[1], "extract")) {
         runExtract(allocator, args[2..], stdout, stderr) catch |err| {
             stderr.print("Error: extraction failed: {s}\n", .{@errorName(err)}) catch {};
@@ -320,6 +329,39 @@ pub fn main(init: std.process.Init) !void {
         try stderr.flush();
         std.process.exit(1);
     };
+}
+
+/// `form-fields` verb: print the values in a PDF's fillable form as JSON.
+///
+///   pdf-gen form-fields <in.pdf>
+///   cat in.pdf | pdf-gen form-fields
+fn runFormFields(allocator: std.mem.Allocator, args: []const []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    var input_path: ?[]const u8 = null;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            try stderr.writeAll(
+                \\Usage: pdf-gen form-fields [in.pdf]
+                \\  Prints the PDF's form field values as one JSON object: a text
+                \\  field's typed text, a checkbox's true/false. Text fields with no
+                \\  value are left out. Reads stdin when <in.pdf> is omitted.
+                \\
+            );
+            try stderr.flush();
+            return;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            try stderr.print("Error: unrecognized form-fields flag '{s}'\n", .{arg});
+            try stderr.flush();
+            return error.UnrecognizedFlag;
+        } else if (input_path == null) {
+            input_path = arg;
+        }
+    }
+    const pdf_bytes = try readInputData(allocator, input_path, stderr);
+    defer allocator.free(pdf_bytes);
+    const json = try lib.readFormFieldsJson(allocator, pdf_bytes);
+    defer allocator.free(json);
+    try stdout.print("{s}\n", .{json});
+    try stdout.flush();
 }
 
 /// `extract` verb: read a PDF and emit MDX (the inverse of generation).
