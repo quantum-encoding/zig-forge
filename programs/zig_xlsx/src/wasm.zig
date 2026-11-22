@@ -7,21 +7,25 @@
 //!
 //! Deliberately does NOT import xlsx.zig — that re-exports JsonWriter, which is
 //! bound to libc `*std.c.FILE` and would drag libc into the freestanding graph.
-//! Instead we drive the low-level modules (zip/workbook/sharedStrings/worksheet)
-//! and emit JSON by hand.
+//! convert.zig drives the low-level modules and emits the JSON.
 //!
 //! `xlsx_to_json(ptr,len,*outLen)` → bytes of an .xlsx in, JSON out:
-//!   { "sheets": [ { "name": "Sheet1", "rows": [ ["a","b",null], ... ] } ] }
-//! Each cell is a JSON string (as stored in the sheet) or null for an empty
-//! cell. The host turns rows into a markdown table / line items.
+//!   { "sheets": [ { "name": "Sheet1", "rows": [ ["a","b",null], [], ... ] } ] }
+//! Row i is spreadsheet row i+1 (rows Excel leaves out are empty arrays);
+//! each cell is a JSON string or null for an empty cell, and numbers in a
+//! date or time style are ISO 8601 text. The host turns rows into a markdown
+//! table / line items.
+//!
+//! One instance serves any number of calls: every buffer is released with
+//! wasm_free / xlsx_free by whoever allocated or received it, and the module
+//! never frees the caller's input.
 
 const std = @import("std");
-const zip = @import("zip.zig");
-const workbook_mod = @import("workbook.zig");
-const shared_strings_mod = @import("shared_strings.zig");
-const worksheet_mod = @import("worksheet.zig");
+const convert = @import("convert.zig");
 
-const alloc = std.heap.wasm_allocator;
+// std.heap.wasm_allocator, minus the in-place shrink that leaks a 64 KiB page
+// per call in a reused instance (see wasm_heap.zig).
+const alloc = @import("wasm_heap.zig").allocator;
 
 // ─── Memory management (host-controlled buffers) ───────────────────
 export fn wasm_alloc(size: usize) usize {
@@ -52,138 +56,17 @@ export fn xlsx_get_error(out_len: *usize) ?[*]const u8 {
     return if (last_error_len == 0) null else &last_error;
 }
 
-// ─── JSON emission ─────────────────────────────────────────────────
-fn appendEscaped(list: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
-    try list.append(alloc, '"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try list.appendSlice(alloc, "\\\""),
-            '\\' => try list.appendSlice(alloc, "\\\\"),
-            '\n' => try list.appendSlice(alloc, "\\n"),
-            '\r' => try list.appendSlice(alloc, "\\r"),
-            '\t' => try list.appendSlice(alloc, "\\t"),
-            else => {
-                if (c < 0x20) {
-                    var buf: [6]u8 = undefined;
-                    const hex = std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{c}) catch "";
-                    try list.appendSlice(alloc, hex);
-                } else {
-                    try list.append(alloc, c);
-                }
-            },
-        }
-    }
-    try list.append(alloc, '"');
-}
-
-/// Convert .xlsx bytes → JSON. Returns a heap pointer (free via xlsx_free) and
-/// writes its length to out_len. Returns null + sets the error string on failure.
+/// Convert .xlsx bytes → JSON (shape in convert.zig). Returns a heap pointer
+/// (free via xlsx_free) and writes its length to out_len. Returns null + sets
+/// the error string on failure. The input stays the caller's: free it with
+/// wasm_free(ptr, len) after the call.
 export fn xlsx_to_json(ptr: [*]const u8, len: usize, out_len: *usize) ?[*]u8 {
     out_len.* = 0;
     last_error_len = 0;
-    const data = ptr[0..len];
-
-    var archive = zip.ZipArchive.openFromMemory(alloc, data) catch {
-        setError("not a valid xlsx (zip) file");
+    const json = convert.xlsxToJson(alloc, ptr[0..len]) catch |err| {
+        setError(convert.errorMessage(err));
         return null;
     };
-    defer archive.close();
-
-    const wb_entry = archive.findEntry("xl/workbook.xml") orelse {
-        setError("missing xl/workbook.xml");
-        return null;
-    };
-    const wb_data = archive.extract(wb_entry) catch {
-        setError("failed to read workbook.xml");
-        return null;
-    };
-    defer alloc.free(wb_data);
-
-    const rels_entry = archive.findEntry("xl/_rels/workbook.xml.rels") orelse {
-        setError("missing workbook rels");
-        return null;
-    };
-    const rels_data = archive.extract(rels_entry) catch {
-        setError("failed to read workbook rels");
-        return null;
-    };
-    defer alloc.free(rels_data);
-
-    var workbook = workbook_mod.WorkbookInfo.parse(alloc, wb_data, rels_data) catch {
-        setError("failed to parse workbook");
-        return null;
-    };
-    defer workbook.deinit();
-
-    var shared = blk: {
-        if (archive.findEntry("xl/sharedStrings.xml")) |ss_entry| {
-            const ss_data = archive.extract(ss_entry) catch {
-                setError("failed to read sharedStrings");
-                return null;
-            };
-            defer alloc.free(ss_data);
-            break :blk shared_strings_mod.SharedStrings.parse(alloc, ss_data) catch {
-                setError("failed to parse sharedStrings");
-                return null;
-            };
-        } else {
-            break :blk shared_strings_mod.SharedStrings{ .strings = .empty, .allocator = alloc };
-        }
-    };
-    defer shared.deinit();
-
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    defer out.deinit(alloc);
-    out.appendSlice(alloc, "{\"sheets\":[") catch return oom();
-
-    for (workbook.sheets, 0..) |sheet_info, si| {
-        if (si != 0) out.append(alloc, ',') catch return oom();
-        out.appendSlice(alloc, "{\"name\":") catch return oom();
-        appendEscaped(&out, sheet_info.name) catch return oom();
-        out.appendSlice(alloc, ",\"rows\":[") catch return oom();
-
-        const ws_entry = archive.findEntry(sheet_info.path) orelse {
-            out.append(alloc, ']') catch return oom();
-            out.append(alloc, '}') catch return oom();
-            continue;
-        };
-        const ws_data = archive.extract(ws_entry) catch {
-            out.appendSlice(alloc, "]}") catch return oom();
-            continue;
-        };
-        defer alloc.free(ws_data);
-
-        var sheet = worksheet_mod.parseWorksheet(alloc, ws_data, &shared) catch {
-            out.appendSlice(alloc, "]}") catch return oom();
-            continue;
-        };
-        defer sheet.deinit(alloc);
-
-        for (sheet.rows, 0..) |row, ri| {
-            if (ri != 0) out.append(alloc, ',') catch return oom();
-            out.append(alloc, '[') catch return oom();
-            for (row, 0..) |cell, ci| {
-                if (ci != 0) out.append(alloc, ',') catch return oom();
-                if (cell) |value| {
-                    appendEscaped(&out, value) catch return oom();
-                } else {
-                    out.appendSlice(alloc, "null") catch return oom();
-                }
-            }
-            out.append(alloc, ']') catch return oom();
-        }
-        out.appendSlice(alloc, "]}") catch return oom();
-    }
-    out.appendSlice(alloc, "]}") catch return oom();
-
-    // Copy into an exact-sized buffer the host owns + frees.
-    const result = alloc.alloc(u8, out.items.len) catch return oom();
-    @memcpy(result, out.items);
-    out_len.* = result.len;
-    return result.ptr;
-}
-
-fn oom() ?[*]u8 {
-    setError("out of memory");
-    return null;
+    out_len.* = json.len;
+    return json.ptr;
 }

@@ -36,6 +36,10 @@ pub const Entry = struct {
 pub const ZipArchive = struct {
     entries: []Entry,
     data: []const u8,
+    /// `data` was read from disk by `open` and is freed by `close`. An
+    /// archive from `openFromMemory` borrows the caller's bytes, which must
+    /// outlive it and which the caller frees.
+    owns_data: bool,
     allocator: std.mem.Allocator,
     filenames: [][]const u8, // owned copies of filenames
 
@@ -53,7 +57,9 @@ pub const ZipArchive = struct {
         const data = readFile(allocator, path) orelse return ZipError.ReadFailed;
         errdefer allocator.free(data);
 
-        return openFromMemory(allocator, data);
+        var archive = try openFromMemory(allocator, data);
+        archive.owns_data = true;
+        return archive;
     }
 
     pub fn openFromMemory(allocator: std.mem.Allocator, data: []const u8) ZipError!ZipArchive {
@@ -73,13 +79,13 @@ pub const ZipArchive = struct {
         errdefer allocator.free(entries);
 
         var filenames = allocator.alloc([]const u8, cd_entries) catch return ZipError.OutOfMemory;
+        var i: usize = 0;
         errdefer {
-            for (filenames[0..0]) |f| allocator.free(f);
+            for (filenames[0..i]) |f| allocator.free(f);
             allocator.free(filenames);
         }
 
         var offset: usize = cd_offset;
-        var i: usize = 0;
         while (i < cd_entries) : (i += 1) {
             if (offset + 46 > data.len) return ZipError.CorruptArchive;
             if (readU32(data, offset) != CD_SIGNATURE) return ZipError.CorruptArchive;
@@ -112,6 +118,7 @@ pub const ZipArchive = struct {
         return .{
             .entries = entries,
             .data = data,
+            .owns_data = false,
             .allocator = allocator,
             .filenames = filenames,
         };
@@ -166,7 +173,7 @@ pub const ZipArchive = struct {
         }
         self.allocator.free(self.filenames);
         self.allocator.free(self.entries);
-        self.allocator.free(self.data);
+        if (self.owns_data) self.allocator.free(self.data);
     }
 
     // ========================================================================
@@ -271,4 +278,33 @@ test "readU16 and readU32" {
     const data = [_]u8{ 0x50, 0x4B, 0x03, 0x04 };
     try std.testing.expectEqual(@as(u16, 0x4B50), readU16(&data, 0));
     try std.testing.expectEqual(@as(u32, 0x04034B50), readU32(&data, 0));
+}
+
+test "openFromMemory borrows the caller's buffer: close leaves it to the caller" {
+    // The wasm host allocates the input with wasm_alloc and frees it with
+    // wasm_free after xlsx_to_json returns, so the archive must not free it.
+    const a = std.testing.allocator;
+    const bytes = try @import("test_zip.zig").build(a, &.{.{ .name = "a.txt", .data = "hello" }});
+    defer a.free(bytes);
+
+    var archive = try ZipArchive.openFromMemory(a, bytes);
+    const got = try archive.extract(archive.findEntry("a.txt").?);
+    defer a.free(got);
+    try std.testing.expectEqualStrings("hello", got);
+    archive.close();
+}
+
+test "a central directory that breaks off partway frees the names read so far" {
+    const a = std.testing.allocator;
+    const bytes = try @import("test_zip.zig").build(a, &.{
+        .{ .name = "one.xml", .data = "1" },
+        .{ .name = "two.xml", .data = "2" },
+    });
+    defer a.free(bytes);
+    // Corrupt the second central-directory signature.
+    const eocd = bytes.len - 22;
+    const cd = readU32(bytes, eocd + 16);
+    const second = cd + 46 + "one.xml".len;
+    bytes[second] = 0;
+    try std.testing.expectError(ZipError.CorruptArchive, ZipArchive.openFromMemory(a, bytes));
 }

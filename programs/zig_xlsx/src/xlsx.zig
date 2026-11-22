@@ -14,9 +14,12 @@ pub const xml = @import("xml.zig");
 pub const shared_strings_mod = @import("shared_strings.zig");
 pub const workbook_mod = @import("workbook.zig");
 pub const worksheet_mod = @import("worksheet.zig");
+pub const styles_mod = @import("styles.zig");
+pub const convert = @import("convert.zig");
 pub const JsonWriter = @import("json_writer.zig").JsonWriter;
 
 pub const SharedStrings = shared_strings_mod.SharedStrings;
+pub const Styles = styles_mod.Styles;
 pub const WorkbookInfo = workbook_mod.WorkbookInfo;
 pub const Sheet = worksheet_mod.Sheet;
 pub const ZipArchive = zip.ZipArchive;
@@ -35,6 +38,7 @@ pub const XlsxFile = struct {
     archive: ZipArchive,
     workbook: WorkbookInfo,
     shared_strings: SharedStrings,
+    styles: Styles,
     allocator: std.mem.Allocator,
     // Track extracted buffers for cleanup
     extracted_buffers: std.ArrayListUnmanaged([]u8),
@@ -78,11 +82,21 @@ pub const XlsxFile = struct {
                 .allocator = allocator,
             };
         }
+        errdefer shared_strings.deinit();
+
+        // Cell styles say which numbers are dates (optional).
+        var styles: Styles = .empty;
+        if (archive.findEntry("xl/styles.xml")) |st_entry| {
+            const st_data = archive.extract(st_entry) catch return error.ParseError;
+            defer allocator.free(st_data);
+            styles = Styles.parse(allocator, st_data) catch return error.ParseError;
+        }
 
         return .{
             .archive = archive,
             .workbook = workbook,
             .shared_strings = shared_strings,
+            .styles = styles,
             .allocator = allocator,
             .extracted_buffers = extracted_buffers,
         };
@@ -126,11 +140,14 @@ pub const XlsxFile = struct {
         const ws_data = self.archive.extract(ws_entry) catch return error.ParseError;
         defer allocator.free(ws_data);
 
-        return worksheet_mod.parseWorksheet(allocator, ws_data, &self.shared_strings) catch
-            return error.ParseError;
+        return worksheet_mod.parseWorksheetWith(allocator, ws_data, &self.shared_strings, .{
+            .styles = &self.styles,
+            .date1904 = self.workbook.date1904,
+        }) catch return error.ParseError;
     }
 
     pub fn close(self: *XlsxFile) void {
+        self.styles.deinit();
         self.shared_strings.deinit();
         self.workbook.deinit();
         for (self.extracted_buffers.items) |buf| {
@@ -148,6 +165,8 @@ test {
     _ = @import("shared_strings.zig");
     _ = @import("workbook.zig");
     _ = @import("worksheet.zig");
+    _ = @import("styles.zig");
+    _ = @import("convert.zig");
 }
 
 // ============================================================================

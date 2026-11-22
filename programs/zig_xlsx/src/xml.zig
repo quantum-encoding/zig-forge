@@ -3,9 +3,11 @@
 
 //! Minimal streaming XML parser for XLSX files
 //!
-//! Handles the subset of XML found in xlsx: elements with attributes,
-//! text content, and basic XML entities. Ignores processing instructions,
-//! comments, and CDATA sections.
+//! Handles the subset of XML found in xlsx: elements with attributes, text
+//! content (whitespace-only text included), the predefined entities,
+//! character references and end-of-line handling. Skips processing
+//! instructions, comments and DOCTYPE; CDATA is not supported (Excel does
+//! not write it).
 
 const std = @import("std");
 
@@ -45,9 +47,9 @@ pub const XmlParser = struct {
     }
 
     // Internal result of one scan step. `.skip` means a construct
-    // (comment/PI/DOCTYPE or whitespace-only text) was consumed and the caller
-    // should continue scanning; `.done` means end-of-input. This replaces the
-    // former `return self.next()` recursion so a file with many consecutive
+    // (comment/PI/DOCTYPE) was consumed and the caller should continue
+    // scanning; `.done` means end-of-input. Skipped constructs loop in
+    // `next` rather than recursing, so a file with many consecutive
     // skippable constructs cannot overflow the stack.
     const Step = union(enum) {
         event: Event,
@@ -183,28 +185,25 @@ pub const XmlParser = struct {
 
     fn parseText(self: *XmlParser) Step {
         const start = self.pos;
-        while (self.pos < self.data.len and self.data[self.pos] != '<') {
-            self.pos += 1;
-        }
-        const raw = self.data[start..self.pos];
+        var end = start;
+        while (end < self.data.len and self.data[end] != '<') end += 1;
+        const raw = self.data[start..end];
 
-        // Skip whitespace-only text nodes (inter-element whitespace)
-        var all_ws = true;
-        for (raw) |c| {
-            if (c != ' ' and c != '\t' and c != '\n' and c != '\r') {
-                all_ws = false;
-                break;
-            }
-        }
-        if (all_ws) return .skip;
-
-        // If it contains entities, decode them
-        if (std.mem.indexOf(u8, raw, "&")) |_| {
-            const decoded = decodeEntities(raw, &self.entity_buf);
-            return .{ .event = .{ .text = decoded } };
+        // Whitespace-only text is emitted too: a rich-text run of just " "
+        // (`<t xml:space="preserve"> </t>`) is content. Consumers only
+        // collect text inside the elements they care about, so the
+        // indentation between elements never reaches them.
+        if (std.mem.indexOfAny(u8, raw, "&\r") == null) {
+            self.pos = end;
+            return .{ .event = .{ .text = raw } };
         }
 
-        return .{ .event = .{ .text = raw } };
+        // Entities, character references and CR line ends are decoded into
+        // the fixed buffer. A long text decodes in chunks: the undecoded rest
+        // is the next text event, and consumers concatenate text events.
+        const decoded = decodeText(raw, &self.entity_buf);
+        self.pos = start + decoded.consumed;
+        return .{ .event = .{ .text = decoded.text } };
     }
 
     fn skipWhitespace(self: *XmlParser) void {
@@ -246,44 +245,90 @@ fn stripNamespace(name: []const u8) []const u8 {
     return name;
 }
 
-/// Decode XML entities in-place into the provided buffer
-fn decodeEntities(input: []const u8, buf: []u8) []const u8 {
+pub const Decoded = struct {
+    text: []const u8,
+    /// Bytes of the input the text covers.
+    consumed: usize,
+};
+
+/// Decode character data into `buf`: the five predefined entities, decimal
+/// and hex character references (as UTF-8), and XML end-of-line handling
+/// (a literal CR LF or lone CR reads as LF; a CR from `&#13;` is kept).
+/// An unknown or malformed reference is kept as written. Stops before any
+/// piece that would not fit, so `consumed` may be less than `input.len`;
+/// with a buffer of at least 4 bytes it always makes progress, and with
+/// `buf.len >= input.len` it decodes everything (decoding never grows text).
+pub fn decodeText(input: []const u8, buf: []u8) Decoded {
     var out: usize = 0;
     var i: usize = 0;
-    while (i < input.len and out < buf.len) {
-        if (input[i] == '&') {
-            if (matchEntity(input[i..], "&amp;")) {
-                buf[out] = '&';
-                out += 1;
-                i += 5;
-            } else if (matchEntity(input[i..], "&lt;")) {
-                buf[out] = '<';
-                out += 1;
-                i += 4;
-            } else if (matchEntity(input[i..], "&gt;")) {
-                buf[out] = '>';
-                out += 1;
-                i += 4;
-            } else if (matchEntity(input[i..], "&quot;")) {
-                buf[out] = '"';
-                out += 1;
-                i += 6;
-            } else if (matchEntity(input[i..], "&apos;")) {
-                buf[out] = '\'';
-                out += 1;
-                i += 6;
+    while (i < input.len) {
+        var piece: [4]u8 = undefined;
+        var piece_len: usize = 1;
+        var used: usize = 1;
+        const c = input[i];
+        if (c == '\r') {
+            if (i + 1 < input.len and input[i + 1] == '\n') {
+                i += 1; // the LF that follows is the line end
+                continue;
+            }
+            piece[0] = '\n';
+        } else if (c == '&') {
+            if (decodeReference(input[i..], &piece)) |ref| {
+                piece_len = ref.len;
+                used = ref.used;
             } else {
-                buf[out] = input[i];
-                out += 1;
-                i += 1;
+                piece[0] = '&';
             }
         } else {
-            buf[out] = input[i];
-            out += 1;
-            i += 1;
+            piece[0] = c;
+        }
+        if (out + piece_len > buf.len) break;
+        @memcpy(buf[out .. out + piece_len], piece[0..piece_len]);
+        out += piece_len;
+        i += used;
+    }
+    return .{ .text = buf[0..out], .consumed = i };
+}
+
+/// `raw` (an attribute value or other character data) decoded into a new
+/// allocation owned by the caller.
+pub fn decodeAlloc(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    const buf = try allocator.alloc(u8, raw.len);
+    const decoded = decodeText(raw, buf);
+    std.debug.assert(decoded.consumed == raw.len);
+    if (decoded.text.len == buf.len) return buf;
+    if (allocator.resize(buf, decoded.text.len)) return buf[0..decoded.text.len];
+    defer allocator.free(buf);
+    return allocator.dupe(u8, decoded.text);
+}
+
+const Reference = struct { len: usize, used: usize };
+
+/// The reference at the start of `s` (which begins with '&'), written to
+/// `out` as UTF-8, or null when it is not one this decoder knows.
+fn decodeReference(s: []const u8, out: *[4]u8) ?Reference {
+    const named = [_]struct { []const u8, u8 }{
+        .{ "&amp;", '&' }, .{ "&lt;", '<' }, .{ "&gt;", '>' }, .{ "&quot;", '"' }, .{ "&apos;", '\'' },
+    };
+    for (named) |n| {
+        if (matchEntity(s, n[0])) {
+            out[0] = n[1];
+            return .{ .len = 1, .used = n[0].len };
         }
     }
-    return buf[0..out];
+    if (s.len < 4 or s[1] != '#') return null;
+    const hex = s[2] == 'x' or s[2] == 'X';
+    const digits_start: usize = if (hex) 3 else 2;
+    // At most 6 hex or 7 decimal digits: anything longer is past U+10FFFF.
+    const semi = std.mem.indexOfScalarPos(u8, s[0..@min(s.len, digits_start + 8)], digits_start, ';') orelse return null;
+    if (semi == digits_start) return null;
+    for (s[digits_start..semi]) |d| {
+        const ok = if (hex) std.ascii.isHex(d) else std.ascii.isDigit(d);
+        if (!ok) return null;
+    }
+    const cp = std.fmt.parseInt(u21, s[digits_start..semi], if (hex) 16 else 10) catch return null;
+    const n = std.unicode.utf8Encode(cp, out) catch return null;
+    return .{ .len = n, .used = semi + 1 };
 }
 
 fn matchEntity(data: []const u8, entity: []const u8) bool {
@@ -360,4 +405,41 @@ test "entity decoding" {
     _ = parser.next(); // <t>
     const text = parser.next().?;
     try std.testing.expectEqualStrings("Tom & Jerry <3>", text.text);
+}
+
+test "long text with entities arrives whole, in chunks" {
+    const a = std.testing.allocator;
+    var doc: std.ArrayListUnmanaged(u8) = .empty;
+    defer doc.deinit(a);
+    var want: std.ArrayListUnmanaged(u8) = .empty;
+    defer want.deinit(a);
+    try doc.appendSlice(a, "<t>");
+    for (0..3000) |_| {
+        try doc.appendSlice(a, "a&amp;\r\n");
+        try want.appendSlice(a, "a&\n");
+    }
+    try doc.appendSlice(a, "</t>");
+
+    var parser = XmlParser.init(doc.items);
+    var got: std.ArrayListUnmanaged(u8) = .empty;
+    defer got.deinit(a);
+    var events: usize = 0;
+    while (parser.next()) |ev| switch (ev) {
+        .text => |t| {
+            try got.appendSlice(a, t);
+            events += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqualStrings(want.items, got.items);
+    try std.testing.expect(events > 1);
+}
+
+test "whitespace-only text and character references" {
+    var parser = XmlParser.init("<t> </t><t>&#65;&#x42;&#xZZ;&bogus;</t>");
+    _ = parser.next();
+    try std.testing.expectEqualStrings(" ", parser.next().?.text);
+    _ = parser.next();
+    _ = parser.next();
+    try std.testing.expectEqualStrings("AB&#xZZ;&bogus;", parser.next().?.text);
 }

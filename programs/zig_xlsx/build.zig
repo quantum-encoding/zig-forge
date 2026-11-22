@@ -84,4 +84,11 @@ pub fn build(b: *std.Build) void {
 
     const web_wasm_step = b.step("wasm-web", "Build freestanding WASM module for the browser");
     web_wasm_step.dependOn(&b.addInstallArtifact(web_wasm, .{}).step);
+
+    // The freestanding module under Node, one instance reused for every call
+    // as the browser does: tests/wasm_web.test.mjs, given the module's path.
+    const wasm_test = b.addSystemCommand(&.{ "node", "tests/wasm_web.test.mjs" });
+    wasm_test.addFileArg(web_wasm.getEmittedBin());
+    const wasm_test_step = b.step("wasm-test", "Run the freestanding WASM module's tests under Node (needs node)");
+    wasm_test_step.dependOn(&wasm_test.step);
 }

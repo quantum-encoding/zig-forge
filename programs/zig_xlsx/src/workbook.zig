@@ -17,6 +17,9 @@ pub const SheetInfo = struct {
 
 pub const WorkbookInfo = struct {
     sheets: []SheetInfo,
+    /// `<workbookPr date1904="1"/>`: date serials count days from 1904-01-01
+    /// instead of 1900-01-01.
+    date1904: bool = false,
     allocator: std.mem.Allocator,
     allocated_strings: std.ArrayListUnmanaged([]const u8),
 
@@ -26,6 +29,7 @@ pub const WorkbookInfo = struct {
             .allocator = allocator,
             .allocated_strings = .empty,
         };
+        errdefer self.deinit();
 
         // Parse .rels to build rId → target map
         var rels = std.StringHashMapUnmanaged([]const u8).empty;
@@ -62,7 +66,11 @@ pub const WorkbookInfo = struct {
             while (parser.next()) |event| {
                 switch (event) {
                     .element_start => |e| {
-                        if (std.mem.eql(u8, e.name, "sheet")) {
+                        if (std.mem.eql(u8, e.name, "workbookPr")) {
+                            if (xml.getAttr(e.attrs, "date1904")) |v| {
+                                self.date1904 = std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true");
+                            }
+                        } else if (std.mem.eql(u8, e.name, "sheet")) {
                             const name = xml.getAttr(e.attrs, "name") orelse continue;
                             const rid = xml.getAttr(e.attrs, "id") orelse continue;
 
@@ -81,7 +89,7 @@ pub const WorkbookInfo = struct {
                             };
                             try self.allocated_strings.append(allocator, path);
 
-                            const name_copy = allocator.dupe(u8, name) catch continue;
+                            const name_copy = xml.decodeAlloc(allocator, name) catch continue;
                             try self.allocated_strings.append(allocator, name_copy);
 
                             sheets.append(allocator, .{
@@ -192,4 +200,24 @@ test "workbook empty sheets" {
     defer wb.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), wb.sheets.len);
+}
+
+test "workbook: 1904 date system and entity-decoded sheet names" {
+    const workbook_xml =
+        \\<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        \\<workbookPr date1904="1"/>
+        \\<sheets><sheet name="R&amp;D &quot;Q1&quot;" sheetId="1" r:id="rId1"/></sheets>
+        \\</workbook>
+    ;
+    const rels_xml =
+        \\<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>
+    ;
+    var wb = try WorkbookInfo.parse(std.testing.allocator, workbook_xml, rels_xml);
+    defer wb.deinit();
+    try std.testing.expect(wb.date1904);
+    try std.testing.expectEqualStrings("R&D \"Q1\"", wb.sheets[0].name);
+
+    var wb1900 = try WorkbookInfo.parse(std.testing.allocator, "<workbook><workbookPr date1904=\"0\"/></workbook>", rels_xml);
+    defer wb1900.deinit();
+    try std.testing.expect(!wb1900.date1904);
 }

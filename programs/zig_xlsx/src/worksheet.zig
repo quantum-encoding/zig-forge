@@ -9,12 +9,25 @@
 //!     <c r="A1" t="s"><v>0</v></c>    ← shared string index
 //!     <c r="B1"><v>42.5</v></c>        ← number
 //!     <c r="C1" t="inlineStr"><is><t>Hello</t></is></c>
+//!     <c r="D1" s="2"><v>46259</v></c> ← number in a date style
 //!   </row>
 //! </sheetData>
+//!
+//! Rows and cells are placed by their `r` reference: Excel leaves blank rows
+//! and cells out of the file, so row 5 can follow row 3. A skipped row is an
+//! empty row in `Sheet.rows`, a skipped cell a null. A row with no values
+//! (a styled but empty row) is not kept unless a later row needs it as
+//! padding, so trailing formatted rows add nothing.
 
 const std = @import("std");
 const xml = @import("xml.zig");
-const SharedStrings = @import("shared_strings.zig").SharedStrings;
+const shared_strings_mod = @import("shared_strings.zig");
+const SharedStrings = shared_strings_mod.SharedStrings;
+const styles_mod = @import("styles.zig");
+
+/// Excel's sheet limits: rows 1..1048576, columns A..XFD.
+pub const max_rows: usize = 1_048_576;
+pub const max_columns: usize = 16_384;
 
 pub const Sheet = struct {
     rows: []const []const ?[]const u8,
@@ -35,10 +48,27 @@ pub const Sheet = struct {
     }
 };
 
+pub const Options = struct {
+    /// Cell styles from xl/styles.xml; numbers in a date or time style are
+    /// written as ISO 8601 text. Without styles every number stays as stored.
+    styles: ?*const styles_mod.Styles = null,
+    /// The workbook uses the 1904 date system.
+    date1904: bool = false,
+};
+
 pub fn parseWorksheet(
     allocator: std.mem.Allocator,
     xml_data: []const u8,
     shared_strings: *const SharedStrings,
+) !Sheet {
+    return parseWorksheetWith(allocator, xml_data, shared_strings, .{});
+}
+
+pub fn parseWorksheetWith(
+    allocator: std.mem.Allocator,
+    xml_data: []const u8,
+    shared_strings: *const SharedStrings,
+    options: Options,
 ) !Sheet {
     var rows: std.ArrayListUnmanaged([]const ?[]const u8) = .empty;
     defer rows.deinit(allocator);
@@ -64,16 +94,23 @@ pub fn parseWorksheet(
     var in_value = false;
     var in_inline_str = false;
     var in_inline_t = false;
+    var rph_depth: usize = 0;
+    var t_start: usize = 0;
+
+    // 0-based index of the row being read, and of the row a row without an
+    // `r` attribute would be.
+    var row_index: usize = 0;
+    var next_row_index: usize = 0;
 
     var cell_type: CellType = .number;
     var cell_col: usize = 0;
+    var cell_style: usize = 0;
     var current_cells: std.ArrayListUnmanaged(?[]const u8) = .empty;
     defer current_cells.deinit(allocator);
+    var row_has_value = false;
 
     var value_text: std.ArrayListUnmanaged(u8) = .empty;
     defer value_text.deinit(allocator);
-
-    var max_cols: usize = 0;
 
     while (parser.next()) |event| {
         switch (event) {
@@ -83,14 +120,26 @@ pub fn parseWorksheet(
                 } else if (std.mem.eql(u8, e.name, "row") and in_sheet_data) {
                     in_row = true;
                     current_cells.clearRetainingCapacity();
+                    row_has_value = false;
+                    row_index = next_row_index;
+                    if (xml.getAttr(e.attrs, "r")) |r| {
+                        const n = std.fmt.parseInt(usize, r, 10) catch 0;
+                        if (n >= 1 and n <= max_rows and n - 1 >= next_row_index) row_index = n - 1;
+                    }
+                    next_row_index = row_index + 1;
                 } else if (std.mem.eql(u8, e.name, "c") and in_row) {
                     in_cell = true;
                     value_text.clearRetainingCapacity();
 
-                    // Parse cell reference for column
+                    // A cell without a usable reference follows the previous one.
+                    cell_col = current_cells.items.len;
                     if (xml.getAttr(e.attrs, "r")) |ref| {
-                        cell_col = parseCellColumn(ref);
+                        if (cellColumn(ref)) |col| cell_col = col;
                     }
+                    cell_style = if (xml.getAttr(e.attrs, "s")) |s|
+                        std.fmt.parseInt(usize, s, 10) catch 0
+                    else
+                        0;
 
                     // Parse cell type
                     cell_type = if (xml.getAttr(e.attrs, "t")) |t|
@@ -101,46 +150,51 @@ pub fn parseWorksheet(
                     in_value = true;
                 } else if (std.mem.eql(u8, e.name, "is") and in_cell) {
                     in_inline_str = true;
-                } else if (std.mem.eql(u8, e.name, "t") and in_inline_str) {
+                    rph_depth = 0;
+                } else if (std.mem.eql(u8, e.name, "rPh") and in_inline_str) {
+                    rph_depth += 1;
+                } else if (std.mem.eql(u8, e.name, "t") and in_inline_str and rph_depth == 0) {
                     in_inline_t = true;
+                    t_start = value_text.items.len;
                 }
             },
             .element_end => |name| {
                 if (std.mem.eql(u8, name, "sheetData")) {
                     in_sheet_data = false;
                 } else if (std.mem.eql(u8, name, "row")) {
-                    if (in_row) {
-                        // Commit row
+                    if (in_row and row_has_value) {
+                        // Pad the rows Excel left out, then commit this one.
+                        while (rows.items.len < row_index) try rows.append(allocator, &.{});
                         const row = try allocator.dupe(?[]const u8, current_cells.items);
+                        errdefer allocator.free(row);
                         try allocated_rows.append(allocator, row);
                         try rows.append(allocator, row);
-                        if (current_cells.items.len > max_cols) {
-                            max_cols = current_cells.items.len;
-                        }
                     }
                     in_row = false;
                 } else if (std.mem.eql(u8, name, "c")) {
                     if (in_cell) {
-                        // Resolve cell value
                         const resolved = try resolveCell(
                             allocator,
                             cell_type,
                             value_text.items,
                             shared_strings,
+                            options,
+                            cell_style,
                         );
-
-                        // Fill gaps (sparse columns)
-                        while (current_cells.items.len < cell_col) {
-                            try current_cells.append(allocator, null);
+                        if (resolved.owned) {
+                            errdefer allocator.free(resolved.value.?);
+                            try allocated_strings.append(allocator, resolved.value.?);
                         }
 
-                        if (resolved) |v| {
-                            // Track if we allocated a new string
-                            if (!isSharedStringRef(v, shared_strings)) {
-                                try allocated_strings.append(allocator, v);
+                        // Fill gaps (sparse columns). An empty (styled) cell
+                        // past the last value adds nothing to the row.
+                        if (resolved.value != null or cell_col < current_cells.items.len) {
+                            while (current_cells.items.len <= cell_col) {
+                                try current_cells.append(allocator, null);
                             }
+                            current_cells.items[cell_col] = resolved.value;
                         }
-                        try current_cells.append(allocator, resolved);
+                        if (resolved.value != null) row_has_value = true;
                     }
                     in_cell = false;
                     in_value = false;
@@ -150,7 +204,13 @@ pub fn parseWorksheet(
                     in_value = false;
                 } else if (std.mem.eql(u8, name, "is")) {
                     in_inline_str = false;
+                } else if (std.mem.eql(u8, name, "rPh")) {
+                    if (rph_depth > 0) rph_depth -= 1;
                 } else if (std.mem.eql(u8, name, "t")) {
+                    if (in_inline_t) {
+                        const n = shared_strings_mod.unescapeXstring(value_text.items[t_start..]);
+                        value_text.items.len = t_start + n;
+                    }
                     in_inline_t = false;
                 }
             },
@@ -175,10 +235,11 @@ pub fn parseWorksheet(
 const CellType = enum {
     shared_string, // t="s"
     inline_string, // t="inlineStr"
-    number, // default (no t attr)
+    number, // default (no t attr), t="n"
     boolean, // t="b"
     error_val, // t="e"
     formula_string, // t="str"
+    date_iso, // t="d": an ISO 8601 date stored as text
 };
 
 fn parseCellType(t: []const u8) CellType {
@@ -187,64 +248,91 @@ fn parseCellType(t: []const u8) CellType {
     if (std.mem.eql(u8, t, "b")) return .boolean;
     if (std.mem.eql(u8, t, "e")) return .error_val;
     if (std.mem.eql(u8, t, "str")) return .formula_string;
+    if (std.mem.eql(u8, t, "d")) return .date_iso;
     return .number;
 }
+
+const Resolved = struct {
+    value: ?[]const u8,
+    /// `value` was allocated here and belongs to the Sheet; otherwise it
+    /// points into the shared strings table or static memory.
+    owned: bool = false,
+};
 
 fn resolveCell(
     allocator: std.mem.Allocator,
     cell_type: CellType,
     raw_value: []const u8,
     shared_strings: *const SharedStrings,
-) !?[]const u8 {
-    if (raw_value.len == 0 and cell_type != .inline_string) return null;
+    options: Options,
+    style: usize,
+) !Resolved {
+    if (raw_value.len == 0) return .{ .value = null };
 
     switch (cell_type) {
         .shared_string => {
             // raw_value is an index into shared strings
-            const idx = std.fmt.parseInt(usize, raw_value, 10) catch return null;
-            // Return reference to shared string (not a copy)
-            return shared_strings.get(idx);
-        },
-        .inline_string => {
-            // raw_value is the inline text
-            if (raw_value.len == 0) return null;
-            return try allocator.dupe(u8, raw_value);
+            const idx = std.fmt.parseInt(usize, raw_value, 10) catch return .{ .value = null };
+            return .{ .value = shared_strings.get(idx) };
         },
         .boolean => {
-            return if (std.mem.eql(u8, raw_value, "1")) "true" else "false";
+            return .{ .value = if (std.mem.eql(u8, raw_value, "1")) "true" else "false" };
         },
-        .number, .formula_string => {
-            // Return the raw numeric or formula result string
-            return try allocator.dupe(u8, raw_value);
+        .formula_string => {
+            const v = try allocator.dupe(u8, raw_value);
+            const n = shared_strings_mod.unescapeXstring(v);
+            return .{ .value = try shrink(allocator, v, n), .owned = true };
         },
-        .error_val => {
-            return try allocator.dupe(u8, raw_value);
+        .number => {
+            if (options.styles) |st| {
+                const kind = st.kind(style);
+                if (kind != .none) {
+                    if (std.fmt.parseFloat(f64, raw_value)) |serial| {
+                        var buf: [32]u8 = undefined;
+                        if (styles_mod.formatSerial(&buf, serial, kind, options.date1904)) |iso| {
+                            return .{ .value = try allocator.dupe(u8, iso), .owned = true };
+                        }
+                    } else |_| {}
+                }
+            }
+            return .{ .value = try allocator.dupe(u8, raw_value), .owned = true };
+        },
+        // Inline text is already unescaped; error codes and ISO dates are
+        // kept as stored.
+        .inline_string, .error_val, .date_iso => {
+            return .{ .value = try allocator.dupe(u8, raw_value), .owned = true };
         },
     }
 }
 
-fn isSharedStringRef(value: []const u8, shared_strings: *const SharedStrings) bool {
-    // Check if this pointer belongs to the shared strings table
-    for (shared_strings.strings.items) |ss| {
-        if (value.ptr == ss.ptr) return true;
-    }
-    // Also check static strings
-    if (std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "false")) return true;
-    return false;
+/// `buf` cut to its first `n` bytes as an allocation of exactly that length
+/// (so freeing it later passes the right size). Frees `buf` if it has to copy.
+fn shrink(allocator: std.mem.Allocator, buf: []u8, n: usize) ![]u8 {
+    if (n == buf.len) return buf;
+    if (allocator.resize(buf, n)) return buf[0..n];
+    defer allocator.free(buf);
+    return allocator.dupe(u8, buf[0..n]);
 }
 
-/// Parse column letters from a cell reference like "B3" → 1, "AA1" → 26
-pub fn parseCellColumn(ref: []const u8) usize {
+/// 0-based column of a cell reference ("B3" → 1, "AA1" → 26), or null when
+/// it has no column letters or names a column past XFD.
+pub fn cellColumn(ref: []const u8) ?usize {
     var col: usize = 0;
+    var letters: usize = 0;
     for (ref) |c| {
-        if (c >= 'A' and c <= 'Z') {
-            col = col * 26 + (c - 'A' + 1);
-        } else {
-            break;
-        }
+        if (c < 'A' or c > 'Z') break;
+        letters += 1;
+        if (letters > 3) return null;
+        col = col * 26 + (c - 'A' + 1);
     }
-    if (col > 0) col -= 1; // Convert 1-based to 0-based
-    return col;
+    if (letters == 0 or col > max_columns) return null;
+    return col - 1;
+}
+
+/// Parse column letters from a cell reference like "B3" → 1, "AA1" → 26.
+/// A reference without letters, or past XFD, reads as column 0.
+pub fn parseCellColumn(ref: []const u8) usize {
+    return cellColumn(ref) orelse 0;
 }
 
 test "parseCellColumn" {
@@ -358,4 +446,40 @@ test "column letter conversion AA and beyond" {
     try std.testing.expectEqual(@as(usize, 52), parseCellColumn("BA"));
     try std.testing.expectEqual(@as(usize, 701), parseCellColumn("ZZ"));
     try std.testing.expectEqual(@as(usize, 702), parseCellColumn("AAA"));
+}
+
+test "rows land at their r number: blank rows Excel omits are kept as empty rows" {
+    const xml_data =
+        \\<worksheet><sheetData>
+        \\<row r="1"><c r="A1"><v>1</v></c></row>
+        \\<row r="3"><c r="B3"><v>3</v></c></row>
+        \\<row r="6"><c r="C6" t="inlineStr"><is><t>six</t></is></c></row>
+        \\</sheetData></worksheet>
+    ;
+    var ss = SharedStrings{ .strings = .empty, .allocator = std.testing.allocator };
+    defer ss.deinit();
+    var sheet = try parseWorksheet(std.testing.allocator, xml_data, &ss);
+    defer sheet.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 6), sheet.rows.len);
+    try std.testing.expectEqualStrings("1", sheet.rows[0][0].?);
+    try std.testing.expectEqual(@as(usize, 0), sheet.rows[1].len);
+    try std.testing.expect(sheet.rows[2][0] == null);
+    try std.testing.expectEqualStrings("3", sheet.rows[2][1].?);
+    try std.testing.expectEqual(@as(usize, 0), sheet.rows[3].len);
+    try std.testing.expectEqual(@as(usize, 0), sheet.rows[4].len);
+    try std.testing.expectEqualStrings("six", sheet.rows[5][2].?);
+}
+
+test "inline rich text keeps a run that is only a space, and skips phonetic runs" {
+    const xml_data =
+        \\<worksheet><sheetData><row r="1">
+        \\<c r="A1" t="inlineStr"><is><r><t>Loft Access:</t></r><r><t xml:space="preserve"> </t></r><r><t>Increase</t></r><rPh sb="0" eb="1"><t>X</t></rPh></is></c>
+        \\</row></sheetData></worksheet>
+    ;
+    var ss = SharedStrings{ .strings = .empty, .allocator = std.testing.allocator };
+    defer ss.deinit();
+    var sheet = try parseWorksheet(std.testing.allocator, xml_data, &ss);
+    defer sheet.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("Loft Access: Increase", sheet.rows[0][0].?);
 }
