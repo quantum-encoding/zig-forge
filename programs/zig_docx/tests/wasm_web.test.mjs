@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { inflateRawSync } from 'node:zlib';
+import { crc32, inflateRawSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -162,5 +162,73 @@ test('repeated calls reuse memory instead of growing it', () => {
 	for (let i = 0; i < 5; i++) call('zigdocx_generate_redline', json);
 	const settled = ex.memory.buffer.byteLength;
 	for (let i = 0; i < 200; i++) assert.equal(call('zigdocx_generate_redline', json).error, undefined);
+	assert.equal(ex.memory.buffer.byteLength, settled);
+});
+
+/** A zip of { name: text } entries, each stored uncompressed. */
+function storedZip(files) {
+	const parts = [];
+	const central = [];
+	let offset = 0;
+	for (const [name, text] of Object.entries(files)) {
+		const n = enc.encode(name);
+		const data = enc.encode(text);
+		const head = new DataView(new ArrayBuffer(30));
+		head.setUint32(0, 0x04034b50, true);
+		head.setUint16(4, 20, true);
+		head.setUint32(14, crc32(data), true);
+		head.setUint32(18, data.length, true);
+		head.setUint32(22, data.length, true);
+		head.setUint16(26, n.length, true);
+		const cd = new DataView(new ArrayBuffer(46));
+		cd.setUint32(0, 0x02014b50, true);
+		cd.setUint16(4, 20, true);
+		cd.setUint16(6, 20, true);
+		cd.setUint32(16, crc32(data), true);
+		cd.setUint32(20, data.length, true);
+		cd.setUint32(24, data.length, true);
+		cd.setUint16(28, n.length, true);
+		cd.setUint32(42, offset, true);
+		parts.push(new Uint8Array(head.buffer), n, data);
+		central.push(new Uint8Array(cd.buffer), n);
+		offset += 30 + n.length + data.length;
+	}
+	const cdLen = central.reduce((t, c) => t + c.length, 0);
+	const end = new DataView(new ArrayBuffer(22));
+	end.setUint32(0, 0x06054b50, true);
+	end.setUint16(8, central.length / 2, true);
+	end.setUint16(10, central.length / 2, true);
+	end.setUint32(12, cdLen, true);
+	end.setUint32(16, offset, true);
+	const all = [...parts, ...central, new Uint8Array(end.buffer)];
+	const out = new Uint8Array(all.reduce((t, c) => t + c.length, 0));
+	let p = 0;
+	for (const c of all) {
+		out.set(c, p);
+		p += c.length;
+	}
+	return out;
+}
+
+test('a Word file split into runs mid-word reads back as Markdown without added spaces', () => {
+	const run = (t) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+	const bold = (t) => `<w:r><w:rPr><w:b/></w:rPr><w:t>${t}</w:t></w:r>`;
+	const body =
+		`<w:p>${bold('Reference:')}${run(' ')}${['AB-', '1', '2', '-', 'CD3', '4 5EF'].map(run).join('')}</w:p>` +
+		`<w:p>${bold('Issued:')}${run(' ')}${['03', '/0', '4', '/202', '5'].map(run).join('')}</w:p>`;
+	const bytes = storedZip({
+		'[Content_Types].xml': '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+		'word/document.xml': `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}</w:body></w:document>`,
+	});
+	const first = call('zigdocx_docx_to_md', bytes);
+	assert.equal(first.error, undefined);
+	const md = dec.decode(first.bytes);
+	assert.match(md, /\*\*Reference:\*\* AB-12-CD34 5EF\n/);
+	assert.match(md, /\*\*Issued:\*\* 03\/04\/2025\n/);
+
+	// One instance, many files: the same answer each time, and memory settles.
+	for (let i = 0; i < 5; i++) call('zigdocx_docx_to_md', bytes);
+	const settled = ex.memory.buffer.byteLength;
+	for (let i = 0; i < 200; i++) assert.equal(dec.decode(call('zigdocx_docx_to_md', bytes).bytes), md);
 	assert.equal(ex.memory.buffer.byteLength, settled);
 });

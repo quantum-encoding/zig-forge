@@ -750,3 +750,29 @@ test "text after a link is not pulled into the link" {
     defer result.deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.mdx, "see [the site](https://example.com) for more") != null);
 }
+
+test "a .docx whose text Word split into runs mid-word reads back with no added spaces" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Word splits text at revision-id boundaries, mid-word and mid-number;
+    // the only spaces are the ones in the runs themselves.
+    const document_xml =
+        \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        \\<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+        \\<w:p><w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t>Reference:</w:t></w:r><w:r><w:t xml:space="preserve"> </w:t></w:r><w:r><w:t>AB-</w:t></w:r><w:r><w:t>1</w:t></w:r><w:r><w:t>2</w:t></w:r><w:r><w:t>-</w:t></w:r><w:r><w:t>CD3</w:t></w:r><w:r><w:t>4 5EF</w:t></w:r></w:p>
+        \\<w:p><w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t>Issued:</w:t></w:r><w:r><w:t xml:space="preserve"> </w:t></w:r><w:r><w:t>03</w:t></w:r><w:r><w:t>/0</w:t></w:r><w:r><w:t>4</w:t></w:r><w:r><w:t>/202</w:t></w:r><w:r><w:t>5</w:t></w:r><w:r><w:t xml:space="preserve"> </w:t></w:r></w:p>
+        \\</w:body></w:document>
+    ;
+    var zw = docx.zip_writer.ZipWriter.init(arena);
+    try zw.addFile("[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>");
+    try zw.addFile("word/document.xml", document_xml);
+    const bytes = try zw.finish();
+
+    var archive = try docx.zip.ZipArchive.openFromMemory(arena, bytes);
+    const doc = try docx.parseDocument(arena, &archive);
+    const result = try generateMdx(arena, &doc, .{ .title = "t" });
+    const body = result.mdx[std.mem.indexOf(u8, result.mdx, "---\n\n").? + 5 ..];
+    try std.testing.expectEqualStrings("**Reference:** AB-12-CD34 5EF\n\n**Issued:** 03/04/2025 ", std.mem.trimEnd(u8, body, "\n"));
+}
