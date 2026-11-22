@@ -566,5 +566,6 @@ Every field type across these schemas maps explicitly to a field on the correspo
 To verify your environment, you can run the built-in test suite:
 ```bash
 zig build test
+zig build wasm-test   # zigpdf.wasm + zigpdf_web.wasm under Node: one instance, many documents, flat memory
 ```
 *(Note: Minor pre-existing compression assertions in string-matching unit tests are a known library quirk and do not affect runtime execution of PDF generation).*

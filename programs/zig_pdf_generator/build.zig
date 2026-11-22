@@ -367,7 +367,8 @@ pub fn build(b: *std.Build) void {
     // The WASI build above imports 27 wasi_snapshot_preview1 functions, so a
     // browser must supply a WASI shim. This freestanding target imports NOTHING
     // from the host — instantiate it with an empty import object. The allocator
-    // is std.heap.wasm_allocator (pure wasm pages, no libc). Suits the
+    // is std.heap.wasm_allocator behind src/wasm_heap.zig (pure wasm pages, no
+    // libc). Suits the
     // (ptr,len)->ptr ABI: wasm_alloc a JSON buffer, call
     // zigpdf_generate_presentation, read the PDF bytes from exported memory,
     // zigpdf_free. Same pattern as zig_docx `wasm-web`.
@@ -398,6 +399,14 @@ pub fn build(b: *std.Build) void {
     });
     const web_wasm_step = b.step("wasm-web", "Build freestanding browser WASM module (no WASI shim)");
     web_wasm_step.dependOn(&web_wasm_install.step);
+
+    // Both modules under Node the way a page keeps them: one instance for many
+    // documents (tests/wasm_reuse.test.mjs, given the two modules' paths).
+    const wasm_test = b.addSystemCommand(&.{ "node", "tests/wasm_reuse.test.mjs" });
+    wasm_test.addFileArg(wasm_lib.getEmittedBin());
+    wasm_test.addFileArg(web_wasm.getEmittedBin());
+    const wasm_test_step = b.step("wasm-test", "Run the WASM modules' reuse tests under Node (needs node)");
+    wasm_test_step.dependOn(&wasm_test.step);
 
     // ==========================================================================
     // CLI Tool

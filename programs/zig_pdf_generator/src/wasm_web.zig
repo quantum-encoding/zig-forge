@@ -39,7 +39,9 @@ const order_email = @import("order_email.zig");
 const beacon_solar_report = @import("beacon_solar_report.zig");
 const website_health_report = @import("website_health_report.zig");
 
-const wasm_allocator = std.heap.wasm_allocator;
+// std.heap.wasm_allocator behind a guard against its shrink leak, so an
+// instance the host keeps for many documents stays flat (see wasm_heap.zig).
+const wasm_allocator = @import("wasm_heap.zig").allocator;
 
 // ---- memory management -----------------------------------------------------
 
