@@ -69,6 +69,9 @@ pub const ZipArchive = struct {
         return openFromMemory(allocator, data);
     }
 
+    /// Takes ownership of `data`: close() frees it with `allocator`. A caller
+    /// holding bytes it does not own (a host's buffer) opens a copy, or uses
+    /// an arena allocator and never calls close().
     pub fn openFromMemory(allocator: std.mem.Allocator, data: []const u8) ZipError!ZipArchive {
         if (data.len < 22) return ZipError.NotAZipFile;
 
@@ -265,10 +268,13 @@ pub const ZipArchive = struct {
 
         // Read decompressed data with a hard cap. allocRemaining returns
         // error.StreamTooLong if the limit would be exceeded — we treat that
-        // as DecompressionFailed (the entry is, by policy, a bomb).
+        // as DecompressionFailed (the entry is, by policy, a bomb). Running
+        // out of memory stays OutOfMemory.
         const limit: std.Io.Limit = .limited(cap);
-        return decompressor.reader.allocRemaining(allocator, limit) catch
-            return ZipError.DecompressionFailed;
+        return decompressor.reader.allocRemaining(allocator, limit) catch |err| switch (err) {
+            error.OutOfMemory => return ZipError.OutOfMemory,
+            else => return ZipError.DecompressionFailed,
+        };
     }
 
     fn readFile(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {

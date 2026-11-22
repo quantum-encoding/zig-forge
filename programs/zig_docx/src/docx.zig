@@ -732,6 +732,7 @@ test {
     _ = md_parser;
     _ = word_diff;
     _ = redline;
+    _ = xlsx;
     // Tier-1 external anchors (LibreOffice-authored fixture, CPython-verified
     // CRCs/text, PKWARE APPNOTE + ECMA-376 structural constants).
     _ = @import("tier1_anchors.zig");

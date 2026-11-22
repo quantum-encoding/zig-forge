@@ -29,7 +29,7 @@ No runtime dependencies for DOCX, MDX, XLSX, JSON, and chunking flows. PDF extra
 | **DOCX** | MDX (Markdown + YAML frontmatter) | Images extracted to `images/` folder |
 | **Markdown** | DOCX | Headings, lists, tables, hyperlinks, inline images, optional letterhead, two style presets |
 | **PDF**  | Markdown | Via `pdftotext` (poppler) or `mutool` (mupdf) |
-| **XLSX** | CSV or Markdown table | Auto-resolves shared strings and formulas |
+| **XLSX** | CSV or Markdown table | Shared and inline strings, formula results, dates as ISO 8601, rows at their sheet position |
 | **JSON (Anthropic)** | Per-conversation markdown files | Claude `conversations.json` export |
 | **JSON (Claude Code)** | Per-session markdown files | Claude Code transcript JSONL |
 | **JSON (FRA schema)** | DOCX | Fire Risk Assessment generator with bordered tables and metadata |
@@ -495,7 +495,7 @@ zig-docx notes.md -i
 
 ### XLSX → CSV or Markdown table
 
-Parses Excel files (shared strings + formula results) and outputs CSV by default, or markdown tables with `--markdown`.
+Parses Excel files and outputs CSV by default, or markdown tables with `--markdown`. Sheets come in workbook order with their tab names. Rows and cells sit at their sheet position, so the blank rows Excel leaves out of the file stay blank lines in the CSV (the markdown table leaves them out). Rich-text strings are joined with their spaces, numbers in a date or time style come out as ISO 8601 (`2026-08-25`, `2026-08-25T17:26:00`), booleans as `TRUE`/`FALSE`, and binary float noise past 15 significant digits is rounded off (`0.30000000000000004` → `0.3`). Empty formatted cells add nothing. A sheet wider × taller than 134,217,728 fields is refused (`error.SheetTooLarge`).
 
 ```bash
 # XLSX → CSV (default)
@@ -646,7 +646,8 @@ src/
 ├── rels.zig         — DOCX relationships (rId → media / hyperlink)
 ├── styles.zig       — DOCX style definitions
 │
-├── xlsx.zig         — XLSX parser (SharedStrings + Sheet XML → cells)
+├── xlsx.zig         — XLSX reader (workbook + rels, shared strings, sheet cells → CSV / Markdown)
+├── xlsx_styles.zig  — which cell styles are dates or times (copy of zig_xlsx's styles.zig)
 ├── pdf.zig          — PDF extraction via pdftotext / mutool
 ├── anthropic.zig    — Anthropic Claude conversations.json → per-convo markdown
 ├── claude_code.zig  — Claude Code transcript JSONL → per-session markdown

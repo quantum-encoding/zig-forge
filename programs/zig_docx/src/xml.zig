@@ -377,6 +377,39 @@ fn matchEntity(data: []const u8, entity: []const u8) bool {
     return std.mem.eql(u8, data[0..entity.len], entity);
 }
 
+/// `raw` (attribute or text bytes as they appear in the file) with its entity
+/// and character references decoded, as a new allocation.
+pub fn decodeAlloc(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var buf: [1024]u8 = undefined;
+    var rest = raw;
+    while (rest.len > 0) {
+        const d = decodeEntities(rest, &buf);
+        // The buffer always holds at least one whole unit.
+        std.debug.assert(d.consumed > 0);
+        try out.appendSlice(allocator, d.text);
+        rest = rest[d.consumed..];
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "decodeAlloc decodes named and numeric references, past one buffer" {
+    const a = std.testing.allocator;
+    const got = try decodeAlloc(a, "R&amp;D &lt;b&gt; &#233;&#x20AC; &bogus;");
+    defer a.free(got);
+    try std.testing.expectEqualStrings("R&D <b> \u{e9}\u{20ac} &bogus;", got);
+
+    var long_raw: std.ArrayListUnmanaged(u8) = .empty;
+    defer long_raw.deinit(a);
+    for (0..600) |_| try long_raw.appendSlice(a, "x&amp;");
+    const long = try decodeAlloc(a, long_raw.items);
+    defer a.free(long);
+    try std.testing.expectEqual(@as(usize, 1200), long.len);
+    try std.testing.expectEqualStrings("x&x&", long[0..4]);
+    try std.testing.expectEqualStrings("x&x&", long[1196..]);
+}
+
 /// Helper to get attribute value by name from an event
 pub fn getAttr(attrs: []const Attr, name: []const u8) ?[]const u8 {
     for (attrs) |attr| {
