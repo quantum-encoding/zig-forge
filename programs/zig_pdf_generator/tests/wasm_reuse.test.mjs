@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { crc32, deflateSync } from 'node:zlib';
+import { crc32, deflateRawSync, deflateSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -171,3 +171,113 @@ test('zigpdf.wasm: extraction leaves the host its input buffer (no double free)'
 		wasiEx.wasm_free(b, pdf.length);
 	}
 });
+
+/** A workbook (ZIP, deflated entries, as Excel writes them) whose first sheet
+ *  holds `rows` rows of two inline-string cells, with a blank row after the
+ *  first. */
+function xlsx(rows) {
+	let sheet = '<worksheet><sheetData>';
+	sheet += '<row r="1"><c r="A1" t="inlineStr"><is><t>Item</t></is></c><c r="B1" t="inlineStr"><is><t>Note</t></is></c></row>';
+	for (let r = 3; r < rows + 3; r++) {
+		sheet += `<row r="${r}"><c r="A${r}" t="inlineStr"><is><t>item ${r}</t></is></c><c r="B${r}" t="inlineStr"><is><t>a note long enough to fill the row ${r}</t></is></c></row>`;
+	}
+	sheet += '</sheetData></worksheet>';
+	const files = [
+		['xl/workbook.xml', '<workbook xmlns:r="r"><sheets><sheet name="Items" sheetId="1" r:id="rId1"/></sheets></workbook>'],
+		['xl/_rels/workbook.xml.rels', '<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>'],
+		['xl/worksheets/sheet1.xml', sheet],
+	];
+	const locals = [];
+	const centrals = [];
+	let offset = 0;
+	for (const [name, text] of files) {
+		const nameBuf = Buffer.from(name);
+		const raw = Buffer.from(text);
+		const crc = crc32(raw);
+		const data = deflateRawSync(raw);
+		const local = Buffer.alloc(30);
+		local.writeUInt32LE(0x04034b50, 0);
+		local.writeUInt16LE(20, 4);
+		local.writeUInt16LE(8, 8);
+		local.writeUInt32LE(crc, 14);
+		local.writeUInt32LE(data.length, 18);
+		local.writeUInt32LE(raw.length, 22);
+		local.writeUInt16LE(nameBuf.length, 26);
+		const central = Buffer.alloc(46);
+		central.writeUInt32LE(0x02014b50, 0);
+		central.writeUInt16LE(20, 4);
+		central.writeUInt16LE(20, 6);
+		central.writeUInt16LE(8, 10);
+		central.writeUInt32LE(crc, 16);
+		central.writeUInt32LE(data.length, 20);
+		central.writeUInt32LE(raw.length, 24);
+		central.writeUInt16LE(nameBuf.length, 28);
+		central.writeUInt32LE(offset, 42);
+		locals.push(local, nameBuf, data);
+		centrals.push(central, nameBuf);
+		offset += 30 + nameBuf.length + data.length;
+	}
+	const cd = Buffer.concat(centrals);
+	const eocd = Buffer.alloc(22);
+	eocd.writeUInt32LE(0x06054b50, 0);
+	eocd.writeUInt16LE(files.length, 8);
+	eocd.writeUInt16LE(files.length, 10);
+	eocd.writeUInt32LE(cd.length, 12);
+	eocd.writeUInt32LE(offset, 16);
+	return { bytes: Buffer.concat([...locals, cd, eocd]), sheetXmlLength: Buffer.byteLength(sheet) };
+}
+
+/** zig_docx_xlsx_to_csv through the wasm C ABI (the 12-byte ZigDocxResult is
+ *  returned through a pointer passed first); frees everything it allocated. */
+function xlsxToCsv(ex, bytes, sheet) {
+	const inPtr = ex.wasm_alloc(bytes.length);
+	new Uint8Array(ex.memory.buffer).set(bytes, inPtr);
+	const res = ex.wasm_alloc(12);
+	ex.zig_docx_xlsx_to_csv(res, inPtr, bytes.length, sheet);
+	const view = new DataView(ex.memory.buffer);
+	const data = view.getUint32(res, true);
+	const len = view.getUint32(res + 4, true);
+	const err = view.getUint32(res + 8, true);
+	let out = null;
+	if (data && len) {
+		out = dec.decode(new Uint8Array(ex.memory.buffer, data, len));
+		ex.zig_docx_free(data, len);
+	}
+	if (err) ex.zig_docx_free_string(err);
+	ex.wasm_free(res, 12);
+	ex.wasm_free(inPtr, bytes.length);
+	return out;
+}
+
+// The sheet inflates to about 28,500 bytes. zig_docx's ZIP reader inflates
+// into a list that jumps straight to a 37 KiB capacity (one 64 KiB big page of
+// std.heap.wasm_allocator) and is cut to its length on return, the in-place
+// shrink that loses the page when the allocator is not guarded: 64 KiB per
+// workbook. Excel deflates every part, so any sheet, shared-strings or styles
+// part of roughly 25 to 32 KiB did this.
+const { bytes: book, sheetXmlLength } = xlsx(180);
+
+for (const [name, ex] of [
+	['zigpdf.wasm (WASI)', wasiEx],
+	['zigpdf_web.wasm (freestanding)', webEx],
+]) {
+	test(`${name}: zig_docx_xlsx_to_csv on one instance gives the same CSV every time and keeps memory flat`, () => {
+		const first = xlsxToCsv(ex, book, 0);
+		assert.ok(first, 'zig_docx_xlsx_to_csv failed');
+		assert.ok(sheetXmlLength > 24779 && sheetXmlLength <= 32760, `sheet XML is ${sheetXmlLength} bytes`);
+		assert.ok(first.startsWith('Item,Note\n,\nitem 3,a note long enough to fill the row 3\n'), first.slice(0, 80));
+		assert.ok(first.endsWith('item 182,a note long enough to fill the row 182\n'), first.slice(-80));
+		for (let i = 0; i < 5; i++) assert.equal(xlsxToCsv(ex, book, 0), first);
+		const before = ex.memory.buffer.byteLength;
+		for (let i = 0; i < 60; i++) assert.equal(xlsxToCsv(ex, book, 0), first);
+		const after = ex.memory.buffer.byteLength;
+		assert.equal(after, before, `memory grew ${after - before} bytes over 60 workbooks`);
+		// The host freed each input once; had the module freed it too, the slot
+		// would be on the free list twice and handed out twice.
+		const a = ex.wasm_alloc(book.length);
+		const b = ex.wasm_alloc(book.length);
+		assert.notEqual(a, b);
+		ex.wasm_free(a, book.length);
+		ex.wasm_free(b, book.length);
+	});
+}

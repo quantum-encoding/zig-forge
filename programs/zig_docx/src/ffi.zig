@@ -94,13 +94,15 @@ pub const ZigDocxMarkdownResult = extern struct {
 /// libc malloc where libc is linked (the native, iOS and Android libraries);
 /// WASM linear memory, or whole pages, where it is not — e.g. when a host
 /// library without libc (zig_pdf_generator's WASM builds and its Android
-/// shared library) compiles this file in to re-export the same surface.
-/// Every buffer this file returns is freed through the same allocator by
-/// zig_docx_free*, so the choice never crosses the API.
+/// shared library) compiles this file in to re-export the same surface. On
+/// WASM it is std.heap.wasm_allocator behind wasm_heap.zig, so an instance
+/// the host keeps for many files does not grow. Every buffer this file
+/// returns is freed through the same allocator by zig_docx_free*, so the
+/// choice never crosses the API.
 pub const allocator = if (builtin.link_libc)
     std.heap.c_allocator
 else if (builtin.cpu.arch.isWasm())
-    std.heap.wasm_allocator
+    @import("wasm_heap.zig").allocator
 else
     std.heap.page_allocator;
 

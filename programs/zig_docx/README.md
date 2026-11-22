@@ -648,6 +648,7 @@ src/
 │
 ├── xlsx.zig         — XLSX reader (workbook + rels, shared strings, sheet cells → CSV / Markdown)
 ├── xlsx_styles.zig  — which cell styles are dates or times (copy of zig_xlsx's styles.zig)
+├── wasm_heap.zig    — std.heap.wasm_allocator guarded against its shrink leak (all WASM builds)
 ├── pdf.zig          — PDF extraction via pdftotext / mutool
 ├── anthropic.zig    — Anthropic Claude conversations.json → per-convo markdown
 ├── claude_code.zig  — Claude Code transcript JSONL → per-session markdown

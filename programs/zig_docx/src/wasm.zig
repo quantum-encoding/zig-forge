@@ -57,7 +57,9 @@ const std = @import("std");
 const fra = @import("fra.zig");
 const docx = @import("docx.zig");
 
-const wasm_allocator = std.heap.wasm_allocator;
+// std.heap.wasm_allocator behind a guard against its shrink leak, so an
+// instance the host keeps for many documents stays flat (see wasm_heap.zig).
+const wasm_allocator = @import("wasm_heap.zig").allocator;
 
 // ─── Memory management ─────────────────────────────────────────────
 

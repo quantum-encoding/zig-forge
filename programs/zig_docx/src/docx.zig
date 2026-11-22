@@ -35,6 +35,8 @@ pub const md_parser = @import("md_parser.zig");
 pub const docx_writer = @import("docx_writer.zig");
 pub const zip_writer = @import("zip_writer.zig");
 pub const ffi = @import("ffi.zig");
+/// std.heap.wasm_allocator guarded against its shrink leak; for WASM builds.
+pub const wasm_heap = @import("wasm_heap.zig");
 pub const fra = @import("fra.zig");
 pub const word_diff = @import("word_diff.zig");
 pub const redline = @import("redline.zig");

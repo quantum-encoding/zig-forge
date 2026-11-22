@@ -367,7 +367,7 @@ pub fn build(b: *std.Build) void {
     // The WASI build above imports 27 wasi_snapshot_preview1 functions, so a
     // browser must supply a WASI shim. This freestanding target imports NOTHING
     // from the host — instantiate it with an empty import object. The allocator
-    // is std.heap.wasm_allocator behind src/wasm_heap.zig (pure wasm pages, no
+    // is std.heap.wasm_allocator behind zig_docx/src/wasm_heap.zig (pure wasm pages, no
     // libc). Suits the
     // (ptr,len)->ptr ABI: wasm_alloc a JSON buffer, call
     // zigpdf_generate_presentation, read the PDF bytes from exported memory,

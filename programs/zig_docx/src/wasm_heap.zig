@@ -8,13 +8,17 @@
 //! big pages. Its `resize` lets a one-big-page allocation shrink in place to
 //! a small length, but `free` then files the big page under the small size
 //! class: every such shrink loses a big page, and an instance reused across
-//! calls grows by 64 KiB per occurrence. Here `deflateCompress` hits it: its
-//! output buffer starts at half the input, so an image or alpha mask of 64 to
-//! 128 KiB that compresses below 32 KiB (a typical logo or signature) shrinks
-//! one big page to a small slot on every document.
+//! calls grows by 64 KiB per occurrence. Two paths hit it: the ZIP reader
+//! inflates a part into a list that jumps straight past 32 KiB and is cut to
+//! its length on return (any .xlsx or .docx part of roughly 25 to 32 KiB), and
+//! zig_pdf_generator's `deflateCompress`, whose output buffer starts at half
+//! the input (an image or alpha mask of 64 to 128 KiB that compresses below
+//! 32 KiB, a typical logo or signature).
 //! This wrapper refuses a resize that would move an allocation between the
 //! small and big kinds, so the caller allocates and copies instead; every
-//! other call goes straight to the std allocator. Same code as
+//! other call goes straight to the std allocator. Used by every wasm build of
+//! zig_docx and zig_pdf_generator (which reaches it as
+//! `@import("zig_docx").wasm_heap`). Same code as
 //! programs/zig_xlsx/src/wasm_heap.zig.
 
 const std = @import("std");
