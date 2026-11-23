@@ -1784,6 +1784,12 @@ pub const Session = struct {
                 report.fail(arena, item.path, "is, or holds, a protected location");
                 continue;
             }
+            // One folder reached by two paths (macOS firmlinks, a bind mount)
+            // is not two copies: removing either removes both.
+            if (keptByItself(item)) {
+                report.fail(arena, item.path, "is the same folder as its surviving copy, reached by another path");
+                continue;
+            }
 
             if (use_trash) {
                 // Recoverable, so the UI's selection rules are the safeguard.
@@ -2148,6 +2154,9 @@ pub const Session = struct {
             const file = try self.reader.groupFile(group, f);
             // A survivor reached through a link may be one of the targets.
             if (!realpath.parentIsReal(file.path)) continue;
+            // So may one reached by another path with no link in it (macOS
+            // firmlinks, a bind mount): the same file, which goes with them.
+            if (try self.isATarget(group, targets, file.path)) continue;
             if (stillACopy(file.path, group.size, file.mtime, &group.hash, verify, prehashed)) {
                 has_survivor = true;
                 break;
@@ -2176,6 +2185,15 @@ pub const Session = struct {
                 report.skipped_changed += 1;
             }
         }
+    }
+
+    /// `path` is the same file as one of `group`'s `targets`.
+    fn isATarget(self: *Session, group: *const store.Group, targets: []const u32, path: []const u8) !bool {
+        for (targets) |t| {
+            const target = try self.reader.groupFile(group, t);
+            if (sameEntry(target.path, path)) return true;
+        }
+        return false;
     }
 
     const Target = struct { path: []const u8, size: u64 };
@@ -3073,6 +3091,28 @@ fn treeRemovable(dir_fd: c_int) bool {
         if (!treeRemovable(child)) return false;
     }
     return true;
+}
+
+/// Some keeper of `item` is `item` itself under another spelling.
+fn keptByItself(item: FolderItem) bool {
+    for (item.keepers) |keeper| {
+        if (sameEntry(item.path, keeper)) return true;
+    }
+    return false;
+}
+
+/// `a` and `b` name one entry: the same file or folder on the same volume,
+/// however each is spelled (macOS firmlinks, a bind mount, a hard link).
+/// Neither is followed if it is a link. A filesystem that reports no file
+/// ids proves nothing either way, and answers false.
+fn sameEntry(a: []const u8, b: []const u8) bool {
+    var a_buf: [4096]u8 = undefined;
+    var b_buf: [4096]u8 = undefined;
+    const a_z = pathZ(&a_buf, a) orelse return false;
+    const b_z = pathZ(&b_buf, b) orelse return false;
+    const sa = pstat.lstat(a_z) catch return false;
+    const sb = pstat.lstat(b_z) catch return false;
+    return sa.ino != 0 and sa.dev == sb.dev and sa.ino == sb.ino;
 }
 
 /// True if `path` is, contains, or lies inside anything in `items`. Nothing

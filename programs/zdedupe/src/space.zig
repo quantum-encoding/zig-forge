@@ -235,9 +235,6 @@ pub const ScanConfig = struct {
     monitor: ?*types.Monitor = null,
 };
 
-/// Where macOS keeps the Data volume that `/` reaches through firmlinks.
-const darwin_data_volume = "/System/Volumes/Data";
-
 /// Walk `paths` and write a store holding their folder tree to `out_path`.
 /// Roots that cannot be walked at all are counted in the store's
 /// `failed_paths`.
@@ -277,15 +274,9 @@ pub fn scanToStore(gpa: Allocator, config: ScanConfig, paths: []const []const u8
     const real_excludes = try realpath.allOrGiven(gpa, config.exclude_paths);
     defer realpath.freeAll(gpa, real_excludes);
     for (real_excludes) |p| try exclude_paths.append(gpa, p);
-    if (comptime builtin.os.tag == .macos) {
-        for (roots) |root| {
-            if (!std.mem.eql(u8, root, "/")) continue;
-            if (pstat.stat(darwin_data_volume)) |st| {
-                try fw.allowDevice(st.dev);
-                try exclude_paths.append(gpa, darwin_data_volume);
-            } else |_| {}
-            break;
-        }
+    if (realpath.dataVolumeUnder(roots)) |data| {
+        try fw.allowDevice(data.dev);
+        try exclude_paths.append(gpa, data.path);
     }
     fw.setExcludePaths(exclude_paths.items);
 

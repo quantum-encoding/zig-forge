@@ -271,3 +271,24 @@ test "hostile filenames survive the scratch helper" {
     try scratch.writeFile(name, "payload");
     try std.testing.expect(try scratch.exists(name));
 }
+
+/// `path` spelled under macOS's Data volume mount point, when that names the
+/// same folder: one folder by its two real paths. Null on other systems, and
+/// for a fixture base off the Data volume (`ZDEDUPE_TEST_TMP`). Owned.
+pub fn dataVolumeSpelling(allocator: std.mem.Allocator, path: []const u8) !?[:0]u8 {
+    if (comptime builtin.os.tag != .macos) return null;
+    const mounted = try std.fmt.allocPrintSentinel(allocator, "/System/Volumes/Data{s}", .{path}, 0);
+    errdefer allocator.free(mounted);
+    const given = try allocator.dupeSentinel(u8, path, 0);
+    defer allocator.free(given);
+    const same = blk: {
+        const a = pstat.lstat(mounted.ptr) catch break :blk false;
+        const b = pstat.lstat(given.ptr) catch break :blk false;
+        break :blk a.dev == b.dev and a.ino == b.ino;
+    };
+    if (!same) {
+        allocator.free(mounted);
+        return null;
+    }
+    return mounted;
+}

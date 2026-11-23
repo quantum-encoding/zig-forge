@@ -68,6 +68,12 @@ void zdedupe_free(zdedupe_ctx* ctx);
  * through a link (macOS /tmp, a link to /System) must not escape them. A path
  * that does not resolve fails the scan as before.
  *
+ * macOS: the Data volume has two real paths for everything on it, the
+ * firmlinked one (/Users/...) and one under its mount point
+ * (/System/Volumes/Data/Users/...). A path is taken by its firmlinked
+ * spelling, and a scan of "/" walks the Data volume through the firmlinks
+ * only, so no file is listed twice as a copy of itself.
+ *
  * @param ctx  Context handle
  * @param path Absolute path to add
  * @return 0 on success, -1 on failure
@@ -718,6 +724,12 @@ typedef int (*zdedupe_trash_fn)(void* user, const char* const* paths, size_t cou
  * anything is compared or moved ("is reached through a link ..."), and never
  * vouches as the copy that survives. Results carry real paths, so requests
  * built from them pass.
+ *
+ * One entry by two paths with no link in them (macOS firmlinks, a bind
+ * mount, a hard link) is not two copies. A surviving copy that is the same
+ * file as a target does not survive it; a folder keeper that is the folder
+ * itself fails it with "is the same folder as its surviving copy, reached by
+ * another path", to the Trash as well as for good.
  *
  * Report: { "deleted": N, "freed_bytes": B, "skipped_changed": N,
  *           "failed_count": N, "failed": [["/path","reason"], ...] (<= 20),

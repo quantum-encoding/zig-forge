@@ -12,10 +12,22 @@
 //! Windows (sys_windows.zig), in the core's form (forward slashes, an
 //! upper-case drive letter). A path that does not resolve is kept as given:
 //! the walk then fails on it as it always has.
+//!
+//! macOS gives every folder on the Data volume two real paths. `/` is the
+//! sealed system volume; the Data volume is joined into it by firmlinks
+//! (/Users, /Applications, /private, ...: /usr/share/firmlinks) and is also
+//! mounted whole at /System/Volumes/Data, and `realpath` answers with
+//! whichever spelling it was asked about. A real path here is the firmlinked
+//! one: it is what the user sees, and what protection is written against
+//! (under the mount point all of it would match `/System`). A walk from `/`
+//! leaves the mount point out (`dataVolumeUnder`), or every file on the Data
+//! volume would be listed twice and offered for deletion as its own copy.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const sys = @import("sys.zig");
 const filters = @import("filters.zig");
+const pstat = @import("pstat.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -27,7 +39,43 @@ pub fn of(gpa: Allocator, path: []const u8) Allocator.Error!?[]u8 {
     defer gpa.free(z);
     var buf: [sys.c.PATH_MAX]u8 = undefined;
     const resolved = sys.c.realpath(z.ptr, &buf) orelse return null;
-    return try gpa.dupe(u8, filters.trimSep(std.mem.span(resolved)));
+    const real = filters.trimSep(std.mem.span(resolved));
+    return try gpa.dupe(u8, firmlinked(real) orelse real);
+}
+
+/// Where macOS mounts the Data volume that `/` reaches through firmlinks.
+pub const darwin_data_volume = "/System/Volumes/Data";
+
+/// The part of `real` (a real path under `darwin_data_volume`) that is also
+/// its firmlinked spelling: the same file, reached from `/`. Null when there
+/// is none, and on every other system.
+fn firmlinked(real: []const u8) ?[]const u8 {
+    if (comptime builtin.os.tag != .macos) return null;
+    if (real.len <= darwin_data_volume.len + 1 or
+        !std.mem.startsWith(u8, real, darwin_data_volume) or
+        real[darwin_data_volume.len] != '/') return null;
+    const short = real[darwin_data_volume.len..];
+    var long_buf: [sys.c.PATH_MAX]u8 = undefined;
+    var short_buf: [sys.c.PATH_MAX]u8 = undefined;
+    const long_z = std.fmt.bufPrintSentinel(&long_buf, "{s}", .{real}, 0) catch return null;
+    const short_z = std.fmt.bufPrintSentinel(&short_buf, "{s}", .{short}, 0) catch return null;
+    const a = pstat.lstat(long_z.ptr) catch return null;
+    const b = pstat.lstat(short_z.ptr) catch return null;
+    return if (a.dev == b.dev and a.ino == b.ino) short else null;
+}
+
+/// The Data volume's mount point and device, when `roots` (real paths)
+/// include `/` on macOS. A walk from `/` leaves the mount point out, since
+/// the firmlinks reach every file in it, and a walk kept to one volume lets
+/// the device in, since the firmlinks lead onto it. Null otherwise.
+pub fn dataVolumeUnder(roots: []const []const u8) ?struct { path: []const u8, dev: u64 } {
+    if (comptime builtin.os.tag != .macos) return null;
+    for (roots) |root| {
+        if (!std.mem.eql(u8, root, "/")) continue;
+        const st = pstat.stat(darwin_data_volume) catch return null;
+        return .{ .path = darwin_data_volume, .dev = st.dev };
+    }
+    return null;
 }
 
 /// The real path of `path` when it resolves, else `path` itself; owned.
@@ -129,4 +177,25 @@ test "a path through a link is not its own real path" {
     try testing.expect(parentIsReal(link) and !isReal(link));
     try testing.expect(!isReal("/nonexistent/zdedupe/x"));
     try testing.expect(parentIsReal("/"));
+}
+
+test "a folder under the Data volume's mount point resolves to its firmlinked path (macOS)" {
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var s = try Scratch.init(gpa, "realpath-firmlink");
+    defer s.deinit();
+    try s.makeDir("real");
+    const real = try s.join("real");
+    defer gpa.free(real);
+    const mounted = try std.fmt.allocPrint(gpa, "{s}{s}", .{ darwin_data_volume, real });
+    defer gpa.free(mounted);
+    const got = (try of(gpa, mounted)) orelse return error.SkipZigTest;
+    defer gpa.free(got);
+    // A fixture base off the Data volume has no firmlinked spelling.
+    if (std.mem.eql(u8, got, mounted)) return error.SkipZigTest;
+    try testing.expectEqualStrings(real, got);
+    // The mount point itself is the Data volume's root, not `/`.
+    const root = (try of(gpa, darwin_data_volume)).?;
+    defer gpa.free(root);
+    try testing.expectEqualStrings(darwin_data_volume, root);
 }

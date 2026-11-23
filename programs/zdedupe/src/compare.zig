@@ -210,6 +210,14 @@ pub const FolderComparator = struct {
         fw.disableHardLinkDetection();
         fw.setMonitor(self.config.monitor);
         fw.setThreads(self.config.getThreadCount());
+        // From macOS `/`, the Data volume through its firmlinks only (see
+        // realpath.zig): under its mount point too, it would be indexed twice.
+        var data_volume: [1][]const u8 = undefined;
+        if (realpath.dataVolumeUnder(&.{base_path})) |data| {
+            try fw.allowDevice(data.dev);
+            data_volume[0] = data.path;
+            fw.setExcludePaths(&data_volume);
+        }
         try fw.walk(base_path);
         try fw.finish();
 

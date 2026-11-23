@@ -626,6 +626,43 @@ test "nothing in a group goes if no copy would survive" {
     try testing.expectEqual(@as(i64, 1), int(report, "deleted")); // other.bin is unaffected
 }
 
+test "a copy that is the same file as the ones being deleted does not survive them" {
+    // Scratch.hardLink is POSIX link(2).
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture = try Fixture.init(gpa, "session-same-file", &bulk_tree);
+    defer fixture.deinit();
+
+    // After the scan, all three dup.bin paths become one file: whichever
+    // copy the rule keeps is the file the other two name.
+    for ([_][]const u8{ "a/dup.bin", "c/dup.bin" }) |sub| {
+        const p = try fixture.path(sub);
+        defer gpa.free(p);
+        const p_z = try gpa.dupeSentinel(u8, p, 0);
+        defer gpa.free(p_z);
+        try testing.expectEqual(@as(c_int, 0), sysc.unlink(p_z.ptr));
+        try fixture.tree.hardLink("b/dup.bin", sub);
+    }
+
+    for ([_]bool{ false, true }) |use_trash| {
+        var trash: FakeTrash = .{ .gpa = gpa };
+        defer trash.deinit();
+        var s = try fixture.open(null);
+        defer s.close();
+        const report = try parse(a, if (use_trash)
+            s.delete("{\"rule\":{\"filters\":{\"min_bytes\":1000}}}", true, FakeTrash.callback, &trash)
+        else
+            s.delete("{\"rule\":{\"filters\":{\"min_bytes\":1000}}}", false, null, null));
+        try testing.expectEqual(@as(usize, 3), fixture.remaining(&abc, "dup.bin"));
+        try testing.expectEqual(@as(i64, 0), int(report, "deleted"));
+        try testing.expectEqual(@as(i64, 2), int(report, "skipped_changed"));
+    }
+}
+
 test "ticking every copy by hand still keeps one" {
     const gpa = testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -1716,6 +1753,37 @@ fn linkAsKeeper(kind: LinkKind) !void {
     const r2 = try parse(a, s.deleteFolders(swapped, false, null, null));
     try testing.expectEqual(@as(i64, 0), int(r2, "deleted"));
     try testing.expect(fixture.exists("q/readme.txt") and fixture.exists("p-moved/readme.txt"));
+}
+
+test "a keeper that is the folder being deleted under its other real path vouches for nothing, permanently or to the Trash (macOS)" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture, const s = try openDirs(gpa, "session-folder-firmlink");
+    defer fixture.deinit();
+    defer s.close();
+    const q = try treeJoin(a, &fixture, "q");
+    // q again, through the Data volume's mount point: no link anywhere in it.
+    const q_mounted = try @import("testing_scratch.zig").dataVolumeSpelling(a, q) orelse return error.SkipZigTest;
+    const items = try query(a, "[{{\"path\":{s},\"keepers\":[{s}],\"bytes\":100}}]", .{
+        try jsonString(a, q),
+        try jsonString(a, q_mounted),
+    });
+
+    const permanent = try parse(a, s.deleteFolders(items, false, null, null));
+    try testing.expectEqual(@as(i64, 0), int(permanent, "deleted"));
+    try testing.expectEqual(@as(i64, 1), int(permanent, "failed_count"));
+    try testing.expect(fixture.exists("q/readme.txt"));
+
+    var bin = try Scratch.init(gpa, "session-firmlink-bin");
+    defer bin.deinit();
+    var trash: FakeTrash = .{ .gpa = gpa, .bin = bin.path };
+    defer trash.deinit();
+    const to_trash = try parse(a, s.deleteFolders(items, true, FakeTrash.callback, &trash));
+    try testing.expectEqual(@as(i64, 0), int(to_trash, "deleted"));
+    try testing.expectEqual(@as(usize, 0), trash.calls);
+    try testing.expect(fixture.exists("q/readme.txt"));
 }
 
 test "a folder reached through a linked parent is not deleted, permanently or to the Trash" {

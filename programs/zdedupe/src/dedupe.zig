@@ -156,9 +156,19 @@ pub const DupeFinder = struct {
         const roots = try self.coveringRoots(paths);
         defer realpath.freeAll(self.allocator, roots);
         self.summary.overlapping_roots = paths.len - roots.len;
-        const exclude_paths = try realpath.allOrGiven(self.allocator, self.config.exclude_paths);
-        defer realpath.freeAll(self.allocator, exclude_paths);
-        fw.setExcludePaths(exclude_paths);
+        const real_excludes = try realpath.allOrGiven(self.allocator, self.config.exclude_paths);
+        defer realpath.freeAll(self.allocator, real_excludes);
+        var exclude_paths: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer exclude_paths.deinit(self.allocator);
+        for (real_excludes) |p| try exclude_paths.append(self.allocator, p);
+        // From macOS `/`, the Data volume is walked through its firmlinks
+        // only: walked under its mount point too, each of its files would be
+        // listed twice and offered for deletion as a copy of itself.
+        if (realpath.dataVolumeUnder(roots)) |data| {
+            try fw.allowDevice(data.dev);
+            try exclude_paths.append(self.allocator, data.path);
+        }
+        fw.setExcludePaths(exclude_paths.items);
 
         for (roots) |path| {
             fw.walk(path) catch |err| switch (err) {
@@ -930,6 +940,31 @@ test "a root given through a link is walked by its real path, and so is an exclu
     var finder = DupeFinder.init(allocator, .{ .min_size = 0, .exclude_paths = &.{skip} });
     defer finder.deinit();
     try finder.scan(&.{link});
+    const groups = finder.getGroups();
+    try std.testing.expectEqual(@as(usize, 1), groups.len);
+    try std.testing.expectEqual(@as(usize, 2), groups[0].count());
+    for (groups[0].file_infos.items) |info| {
+        try std.testing.expect(std.mem.startsWith(u8, info.path, real_root));
+        try std.testing.expect(info.path[real_root.len] == '/');
+    }
+}
+
+test "a folder given again under the Data volume's mount point is walked once, by its firmlinked path (macOS)" {
+    const allocator = std.testing.allocator;
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    var scratch = try Scratch.init(allocator, "dedupe-firmlink");
+    defer scratch.deinit();
+    try scratch.makeDir("real");
+    try scratch.writeFile("real/one.txt", "the same bytes");
+    try scratch.writeFile("real/two.txt", "the same bytes");
+    const real_root = try scratch.join("real");
+    defer allocator.free(real_root);
+    const mounted = try @import("testing_scratch.zig").dataVolumeSpelling(allocator, real_root) orelse return error.SkipZigTest;
+    defer allocator.free(mounted);
+
+    var finder = DupeFinder.init(allocator, .{ .min_size = 0 });
+    defer finder.deinit();
+    try finder.scan(&.{ mounted, real_root });
     const groups = finder.getGroups();
     try std.testing.expectEqual(@as(usize, 1), groups.len);
     try std.testing.expectEqual(@as(usize, 2), groups[0].count());
