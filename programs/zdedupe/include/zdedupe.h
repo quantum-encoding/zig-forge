@@ -797,8 +797,12 @@ const char* zdedupe_results_removed_status(zdedupe_results* r);
  * { "index": 0, "digest": "64 hex", "count": 3, "common_parent": "/a",
  *   "file_count": 261, "bytes": 2086912, "reclaimable": 4173824,
  *   "dirs": [{ "path": "/a/proj", "newest_mtime": ms,
- *              "skipped_entries": 0, "locked": false }, ...] }
- * ("locked": the folder is, or holds, a protected location.)
+ *              "skipped_entries": 0, "locked": false,
+ *              "storage_class": 1 }, ...] }
+ * ("locked": the folder is, or holds, a protected location. "storage_class":
+ * members with one number hold one copy of the data between them - APFS
+ * clones or hard links of each other - numbered from 1 in path order; 0 in
+ * stores written before it was recorded, each such member a copy of its own.)
  *
  * "count" is the copies still ALIVE and "reclaimable" is bytes * (copies - 1)
  * over those, where copies that share their blocks count as one: a member
@@ -925,6 +929,38 @@ const char* zdedupe_results_delete_folders(zdedupe_results* r, const char* items
  * a person, not answers for a UI.
  */
 int zdedupe_results_export(zdedupe_results* r, const char* format, const char* path);
+
+/**
+ * The findings as a plain-text report, for a person to read, paste or save
+ * -> DuplicatesReport { "text", "file_name" }. Query (DuplicatesReportQuery),
+ * every field optional; each section is the host's list as it shows it:
+ *   { "groups":   { "sort", "filters", "keep" as for zdedupe_results_groups,
+ *                   "limit": 50 (<= 1000; 0 leaves the section out),
+ *                   "files": 10 (<= 50, per group) },
+ *     "sets":     { "sort", "filters" as for zdedupe_results_identical_sets,
+ *                   "limit": 50 (<= 1000; 0 leaves it out),
+ *                   "dirs": 10 (<= 200 member folders per set) },
+ *     "overlaps": { "filters" as for zdedupe_results_overlaps,
+ *                   "limit": 25 (<= 1000; 0 leaves it out),
+ *                   "only": 5 (<= 100 paths per side from what only it holds) },
+ *     "units": "decimal" | "binary", "utc_offset": seconds east of UTC }
+ * The text opens with the overview's figures (when and what was scanned, the
+ * duplicate files, the folder sections, what could not be read, files only in
+ * iCloud, and how many items were deleted since), then Identical Folders,
+ * Overlapping Folders (both only when the scan found duplicate folders) and
+ * Duplicate Files. Each section says how many findings match, its order and
+ * filters in the apps' words, and lists the first ones in that order by full
+ * path: a set's members with their newest file, which are protected and which
+ * share their storage with an earlier one; an overlap's two sides with what
+ * they share and what only each holds; a group's files with their modified
+ * date, the copy "keep" leaves, protected copies and APFS clones. It is
+ * rendered from the overview, group, set, set-member and overlap answers, so
+ * it states what they state, with the removed overlay applied. Sizes as in
+ * zdedupe_results_space_report. file_name is
+ * "duplicates-<root's name>-<scan date>.txt", or "duplicates-<scan date>.txt"
+ * for "/", "C:\" and several roots. Fails on a disk-space store.
+ */
+const char* zdedupe_results_report(zdedupe_results* r, const char* query_json);
 
 /* === Disk space ===
  *

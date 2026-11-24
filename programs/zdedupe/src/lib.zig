@@ -768,6 +768,12 @@ pub export fn zdedupe_results_export(
     return if (s.exportTo(std.mem.span(format_z), std.mem.span(path_z))) 0 else -1;
 }
 
+pub export fn zdedupe_results_report(r: ?*ZDedupeResults, query_json: ?[*:0]const u8) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const query = query_json orelse return null;
+    return (s.duplicatesReport(std.mem.span(query)) orelse return null).ptr;
+}
+
 // === Utilities ===
 
 // File operations, through the platform's C library (sys.zig on Windows).

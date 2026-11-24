@@ -194,7 +194,7 @@ fn writeFixed(buf: *[size_buf_len]u8, scaled: u128, decimals: u8, trim: bool, un
 }
 
 /// `n` with a comma between each group of three digits.
-fn writeCount(w: *Writer, n: u64) Writer.Error!void {
+pub fn writeCount(w: *Writer, n: u64) Writer.Error!void {
     var digits: [24]u8 = undefined;
     const s = std.fmt.bufPrint(&digits, "{d}", .{n}) catch unreachable;
     for (s, 0..) |c, i| {
@@ -204,7 +204,7 @@ fn writeCount(w: *Writer, n: u64) Writer.Error!void {
 }
 
 /// "1 file", "2,900,330 files".
-fn writeCounted(w: *Writer, n: u64, one: []const u8, many: []const u8) Writer.Error!void {
+pub fn writeCounted(w: *Writer, n: u64, one: []const u8, many: []const u8) Writer.Error!void {
     try writeCount(w, n);
     try w.writeByte(' ');
     try w.writeAll(if (n == 1) one else many);
@@ -222,11 +222,11 @@ fn typeLabel(c: Category) []const u8 {
     };
 }
 
-const Clock = struct { year: u16, month: u8, day: u8, hour: u8, minute: u8 };
+pub const Clock = struct { year: u16, month: u8, day: u8, hour: u8, minute: u8 };
 
 /// Epoch milliseconds in the zone `utc_offset` seconds east of UTC; times
 /// before 1970 read as 1970.
-fn clockOf(millis: i64, utc_offset: i32) Clock {
+pub fn clockOf(millis: i64, utc_offset: i32) Clock {
     const seconds = @divFloor(millis, 1000) + utc_offset;
     const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(@max(seconds, 0)) };
     const year_day = es.getEpochDay().calculateYearDay();
@@ -456,9 +456,18 @@ fn writeList(arena: Allocator, w: *Writer, units: Units, items: []const Node, em
 /// "C:\\") and for the whole of several roots.
 pub fn fileName(arena: Allocator, in: Input) ![]u8 {
     const node = in.children.node;
+    const folder: ?[]const u8 = if (std.mem.eql(u8, node.kind, "all")) null else node.path;
+    return namedFile(arena, "disk-space", folder, in.overview.generated_at, in.query.utc_offset);
+}
+
+/// "<prefix>-<folder's name>-<date>.txt", or "<prefix>-<date>.txt" for no
+/// folder or one with no name ("/", "C:\\"): the name made safe on any file
+/// system, at most 80 bytes, never cut inside a UTF-8 sequence, never
+/// starting with a dot.
+pub fn namedFile(arena: Allocator, prefix: []const u8, folder_path: ?[]const u8, generated_at: i64, utc_offset: i32) ![]u8 {
     var name: []const u8 = "";
-    if (!std.mem.eql(u8, node.kind, "all")) {
-        const trimmed = std.mem.trimEnd(u8, node.path, "/\\");
+    if (folder_path) |path| {
+        const trimmed = std.mem.trimEnd(u8, path, "/\\");
         const cut = std.mem.lastIndexOfAny(u8, trimmed, "/\\");
         name = if (cut) |c| trimmed[c + 1 ..] else trimmed;
         if (name.len == 2 and name[1] == ':') name = "";
@@ -477,11 +486,11 @@ pub fn fileName(arena: Allocator, in: Input) ![]u8 {
     var start: usize = 0;
     while (start < end and safe.items[start] == '.') start += 1;
     const folder = safe.items[start..end];
-    const at = clockOf(in.overview.generated_at, in.query.utc_offset);
+    const at = clockOf(generated_at, utc_offset);
     if (folder.len == 0) {
-        return std.fmt.allocPrint(arena, "disk-space-{d:0>4}-{d:0>2}-{d:0>2}.txt", .{ at.year, at.month, at.day });
+        return std.fmt.allocPrint(arena, "{s}-{d:0>4}-{d:0>2}-{d:0>2}.txt", .{ prefix, at.year, at.month, at.day });
     }
-    return std.fmt.allocPrint(arena, "disk-space-{s}-{d:0>4}-{d:0>2}-{d:0>2}.txt", .{ folder, at.year, at.month, at.day });
+    return std.fmt.allocPrint(arena, "{s}-{s}-{d:0>4}-{d:0>2}-{d:0>2}.txt", .{ prefix, folder, at.year, at.month, at.day });
 }
 
 // --- tests -------------------------------------------------------------------

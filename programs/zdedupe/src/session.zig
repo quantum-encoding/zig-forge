@@ -51,6 +51,7 @@ const keep_mod = @import("keep.zig");
 const protect_mod = @import("protect.zig");
 const space_mod = @import("space.zig");
 const space_report = @import("space_report.zig");
+const duplicates_report = @import("duplicates_report.zig");
 const buildrule = @import("buildrule.zig");
 const realpath = @import("realpath.zig");
 
@@ -138,6 +139,46 @@ const FolderQuery = struct {
     /// Identical sets only; overlaps keep the store's largest-shared-first order.
     sort: SetSort = .reclaim,
 };
+
+/// What a duplicates report lists: each section as the host's list shows it
+/// (order and filters), and how much of it. Every section is in by default.
+const ReportQuery = struct {
+    groups: ReportGroups = .{},
+    sets: ReportSets = .{},
+    overlaps: ReportOverlaps = .{},
+    units: space_report.Units = .binary,
+    /// Seconds east of UTC, for times in the reader's time zone.
+    utc_offset: i32 = 0,
+};
+
+const ReportGroups = struct {
+    sort: GroupSort = .savings,
+    filters: Filters = .{},
+    keep: keep_mod.Spec = .{},
+    /// Groups listed, clamped to `report_max_rows`; 0 leaves the section out.
+    limit: usize = 50,
+    /// Files listed per group, clamped to `group_files_in_row`.
+    files: usize = 10,
+};
+
+const ReportSets = struct {
+    sort: SetSort = .reclaim,
+    filters: Filters = .{},
+    limit: usize = 50,
+    /// Member folders listed per set, clamped to `report_max_members`.
+    dirs: usize = 10,
+};
+
+const ReportOverlaps = struct {
+    filters: Filters = .{},
+    limit: usize = 25,
+    /// Paths listed from what only one side holds, clamped to `max_only_listed`.
+    only: usize = 5,
+};
+
+/// Most findings a report section lists, and most members per set.
+pub const report_max_rows: usize = 1000;
+pub const report_max_members: usize = 200;
 
 /// How identical folder sets are ordered: by what deleting all but one copy
 /// frees (the store's own order), by the size of one copy, or by copies.
@@ -1028,15 +1069,22 @@ pub const Session = struct {
     /// do not change with deletes; the UIs say so beside them.
     pub fn overview(self: *Session) ?[:0]const u8 {
         const arena = self.beginCall();
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        self.writeFullOverview(&json, arena) catch |err| return self.callFailed(err);
+        return self.finishJson(&out);
+    }
 
+    /// The overview with what the folder sections add up to.
+    fn writeFullOverview(self: *Session, json: *std.json.Stringify, arena: Allocator) !void {
         var reclaimable: u64 = 0;
         for (0..self.reader.setCount()) |i| {
-            const set = self.reader.set(i) catch |err| return self.readFailed(err);
+            const set = try self.reader.set(i);
             // Every class from 1 up to the highest is some member's.
             var copies: u64 = 0;
             var top: u32 = 0;
             for (0..set.dir_count) |d| {
-                const dir = self.reader.setDir(&set, d) catch |err| return self.readFailed(err);
+                const dir = try self.reader.setDir(&set, d);
                 if (dir.storage_class == 0) copies += 1;
                 top = @max(top, dir.storage_class);
             }
@@ -1044,15 +1092,11 @@ pub const Session = struct {
         }
         var redundant_pairs: usize = 0;
         for (0..self.reader.overlapCount()) |i| {
-            const pair = self.reader.overlap(i) catch |err| return self.readFailed(err);
+            const pair = try self.reader.overlap(i);
             // Anything but a two-way overlap means one side adds nothing.
             if (pair.relation != @intFromEnum(store.Relation.overlap)) redundant_pairs += 1;
         }
-
-        var out: std.Io.Writer.Allocating = .init(arena);
-        var json: std.json.Stringify = .{ .writer = &out.writer };
-        self.writeOverview(&json, arena, reclaimable, redundant_pairs) catch return self.outOfMemory();
-        return self.finishJson(&out);
+        try self.writeOverview(json, arena, reclaimable, redundant_pairs);
     }
 
     fn writeOverview(
@@ -1459,20 +1503,31 @@ pub const Session = struct {
             self.fail("set query is not valid JSON", .{});
             return null;
         };
-        const matcher = Matcher.init(arena, query.filters) catch return self.outOfMemory();
-        const cursor: Cursor = .{ .session = self, .matcher = &matcher };
-
-        // The store holds sets largest-reclaim-first as scanned; any other
-        // order, or reclaim once a delete has changed what sets free, is sorted.
-        const window = (if (query.sort == .reclaim and self.removed.isEmpty())
-            windowOf(arena, self.reader.setCount(), query, cursor, Cursor.set)
-        else
-            self.sortedSetWindow(arena, query, cursor)) catch |err| return self.callFailed(err);
+        const window = self.setWindow(arena, query) catch |err| return self.callFailed(err);
 
         var out: std.Io.Writer.Allocating = .init(arena);
         var json: std.json.Stringify = .{ .writer = &out.writer };
         self.writeSetPage(&json, arena, window, query) catch |err| return self.callFailed(err);
         return self.finishJson(&out);
+    }
+
+    /// The sets on the page `query` asks for, in its order.
+    fn setWindow(self: *Session, arena: Allocator, query: FolderQuery) !Window {
+        const matcher = try Matcher.init(arena, query.filters);
+        const cursor: Cursor = .{ .session = self, .matcher = &matcher };
+        // The store holds sets largest-reclaim-first as scanned; any other
+        // order, or reclaim once a delete has changed what sets free, is sorted.
+        if (query.sort == .reclaim and self.removed.isEmpty()) {
+            return windowOf(arena, self.reader.setCount(), query, cursor, Cursor.set);
+        }
+        return self.sortedSetWindow(arena, query, cursor);
+    }
+
+    /// The overlap pairs on the page `query` asks for.
+    fn overlapWindow(self: *Session, arena: Allocator, query: FolderQuery) !Window {
+        const matcher = try Matcher.init(arena, query.filters);
+        const cursor: Cursor = .{ .session = self, .matcher = &matcher };
+        return windowOf(arena, self.reader.overlapCount(), query, cursor, Cursor.overlap);
     }
 
     fn writeSetPage(
@@ -1539,6 +1594,8 @@ pub const Session = struct {
             try json.write(dir.skipped_entries);
             try json.objectField("locked");
             try json.write(guard.guardsFolder(dir.path));
+            try json.objectField("storage_class");
+            try json.write(dir.storage_class);
             try json.endObject();
         }
         try json.endArray();
@@ -1567,11 +1624,7 @@ pub const Session = struct {
             self.fail("overlap query is not valid JSON", .{});
             return null;
         };
-        const matcher = Matcher.init(arena, query.filters) catch return self.outOfMemory();
-        const cursor: Cursor = .{ .session = self, .matcher = &matcher };
-
-        const window = windowOf(arena, self.reader.overlapCount(), query, cursor, Cursor.overlap) catch |err|
-            return self.callFailed(err);
+        const window = self.overlapWindow(arena, query) catch |err| return self.callFailed(err);
 
         var out: std.Io.Writer.Allocating = .init(arena);
         var json: std.json.Stringify = .{ .writer = &out.writer };
@@ -2468,6 +2521,159 @@ pub const Session = struct {
             .folders = (try std.json.parseFromSliceLeaky(space_report.Largest, arena, folders_out.written(), opts)).items,
             .files = (try std.json.parseFromSliceLeaky(space_report.Largest, arena, files_out.written(), opts)).items,
         };
+    }
+
+    // --- duplicates report ------------------------------------------------
+
+    /// The findings as plain text for a person -> { text, file_name }.
+    pub fn duplicatesReport(self: *Session, query_json: []const u8) ?[:0]const u8 {
+        const arena = self.beginCall();
+        if (self.space != null) {
+            self.fail("these results are a disk-space scan; use the disk-space report", .{});
+            return null;
+        }
+        const query = std.json.parseFromSliceLeaky(ReportQuery, arena, query_json, .{
+            .ignore_unknown_fields = true,
+        }) catch {
+            self.fail("report query is not valid JSON", .{});
+            return null;
+        };
+        const input = self.reportInput(arena, query) catch |err| return self.callFailed(err);
+        var text: std.Io.Writer.Allocating = .init(arena);
+        duplicates_report.render(&text.writer, input) catch return self.outOfMemory();
+        const file_name = duplicates_report.fileName(arena, input) catch return self.outOfMemory();
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        json.write(.{ .text = text.written(), .file_name = file_name }) catch return self.outOfMemory();
+        return self.finishJson(&out);
+    }
+
+    /// The answers a report is rendered from, read back from the writers
+    /// that produce them for a host, page by page.
+    fn reportInput(self: *Session, arena: Allocator, query: ReportQuery) !duplicates_report.Input {
+        const opts: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        try self.writeFullOverview(&json, arena);
+        const scan = try std.json.parseFromSliceLeaky(duplicates_report.Overview, arena, out.written(), opts);
+
+        var input: duplicates_report.Input = .{
+            .units = query.units,
+            .utc_offset = query.utc_offset,
+            .overview = scan,
+            .removed = self.removed.len(),
+            .groups = null,
+            .sets = null,
+            .overlaps = null,
+        };
+
+        if (query.groups.limit > 0) {
+            const q = query.groups;
+            const want = @min(q.limit, report_max_rows);
+            const order = try self.cachedGroupOrder(q.sort, q.filters);
+            var rows: std.ArrayListUnmanaged(duplicates_report.GroupRow) = .empty;
+            var total: u64 = 0;
+            while (rows.items.len < want) {
+                var page_out: std.Io.Writer.Allocating = .init(arena);
+                json = .{ .writer = &page_out.writer };
+                try self.writeGroupPage(&json, arena, order, .{
+                    .offset = rows.items.len,
+                    .limit = @min(want - rows.items.len, max_page),
+                    .sort = q.sort,
+                    .filters = q.filters,
+                    .keep = q.keep,
+                }, null);
+                const page = try std.json.parseFromSliceLeaky(struct {
+                    rows: []const duplicates_report.GroupRow,
+                    total: u64,
+                }, arena, page_out.written(), opts);
+                total = page.total;
+                try rows.appendSlice(arena, page.rows);
+                if (page.rows.len == 0) break;
+            }
+            input.groups = .{
+                .sort = std.meta.stringToEnum(duplicates_report.GroupSort, @tagName(q.sort)).?,
+                .filters = q.filters,
+                .total = total,
+                .rows = rows.items,
+                .files = @min(q.files, group_files_in_row),
+            };
+        }
+
+        if (query.sets.limit > 0) {
+            const q = query.sets;
+            const want = @min(q.limit, report_max_rows);
+            const members = @min(q.dirs, report_max_members);
+            var rows: std.ArrayListUnmanaged(duplicates_report.SetRow) = .empty;
+            var total: u64 = 0;
+            while (rows.items.len < want) {
+                const window = try self.setWindow(arena, .{
+                    .offset = rows.items.len,
+                    .limit = @min(want - rows.items.len, max_page),
+                    .filters = q.filters,
+                    .sort = q.sort,
+                });
+                var page_out: std.Io.Writer.Allocating = .init(arena);
+                json = .{ .writer = &page_out.writer };
+                try self.writeSetPage(&json, arena, window, .{ .filters = q.filters, .sort = q.sort, .offset = rows.items.len });
+                const page = try std.json.parseFromSliceLeaky(struct {
+                    rows: []duplicates_report.SetRow,
+                    total: u64,
+                }, arena, page_out.written(), opts);
+                total = page.total;
+                // A row carries the first few members; the rest as set_members has them.
+                for (page.rows) |*row| {
+                    if (row.dirs.len >= @min(row.count, members)) continue;
+                    const set = try self.reader.set(@intCast(row.index));
+                    const dirs = try self.aliveDirs(&set);
+                    var dirs_out: std.Io.Writer.Allocating = .init(arena);
+                    json = .{ .writer = &dirs_out.writer };
+                    try writeDirRows(&json, arena, dirs[0..@min(dirs.len, members)], self.protection());
+                    row.dirs = try std.json.parseFromSliceLeaky([]const duplicates_report.Dir, arena, dirs_out.written(), opts);
+                }
+                try rows.appendSlice(arena, page.rows);
+                if (page.rows.len == 0) break;
+            }
+            input.sets = .{
+                .sort = std.meta.stringToEnum(duplicates_report.SetSort, @tagName(q.sort)).?,
+                .filters = q.filters,
+                .total = total,
+                .rows = rows.items,
+                .dirs = members,
+            };
+        }
+
+        if (query.overlaps.limit > 0) {
+            const q = query.overlaps;
+            const want = @min(q.limit, report_max_rows);
+            var rows: std.ArrayListUnmanaged(duplicates_report.OverlapRow) = .empty;
+            var total: u64 = 0;
+            while (rows.items.len < want) {
+                const page_query: FolderQuery = .{
+                    .offset = rows.items.len,
+                    .limit = @min(want - rows.items.len, max_page),
+                    .filters = q.filters,
+                };
+                const window = try self.overlapWindow(arena, page_query);
+                var page_out: std.Io.Writer.Allocating = .init(arena);
+                json = .{ .writer = &page_out.writer };
+                try self.writeOverlapPage(&json, arena, window, page_query);
+                const page = try std.json.parseFromSliceLeaky(struct {
+                    rows: []const duplicates_report.OverlapRow,
+                    total: u64,
+                }, arena, page_out.written(), opts);
+                total = page.total;
+                try rows.appendSlice(arena, page.rows);
+                if (page.rows.len == 0) break;
+            }
+            input.overlaps = .{
+                .filters = q.filters,
+                .total = total,
+                .rows = rows.items,
+                .only = q.only,
+            };
+        }
+        return input;
     }
 
     /// Record this scan in the volume's history under `dir` and describe it.

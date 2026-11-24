@@ -1204,6 +1204,13 @@ test "a set's savings count copies that share their blocks once, and follow a de
     // clone and orig hold one copy between them, copy another.
     try testing.expectEqual(@as(i64, each), int(row, "reclaimable"));
     try testing.expectEqual(@as(i64, each), int(try parse(a, s.overview()), "reclaimable"));
+    // Each member says which earlier one holds its blocks.
+    const classes = field(row, "dirs").array.items;
+    try testing.expectEqual(@as(i64, 1), int(classes[0], "storage_class"));
+    try testing.expectEqual(@as(i64, 2), int(classes[1], "storage_class"));
+    try testing.expectEqual(@as(i64, 1), int(classes[2], "storage_class"));
+    const text = field(try parse(a, s.duplicatesReport("{}")), "text").string;
+    try testing.expect(contains(text, "shares its storage with copy 1"));
 
     // clone, which came first in path order, goes: orig now holds those
     // blocks alone, and orig and copy are two copies of their own.
@@ -1218,6 +1225,49 @@ test "a set's savings count copies that share their blocks once, and follow a de
     const left = field(after, "rows").array.items[0];
     try testing.expectEqual(@as(i64, 2), int(left, "count"));
     try testing.expectEqual(@as(i64, each), int(left, "reclaimable"));
+}
+
+fn contains(haystack: []const u8, needle: []const u8) bool {
+    return std.mem.indexOf(u8, haystack, needle) != null;
+}
+
+test "the duplicates report lists each section as its list shows it" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture, const s = try openDirs(gpa, "session-report");
+    defer fixture.deinit();
+    defer s.close();
+
+    const all = try parse(a, s.duplicatesReport("{}"));
+    const text = field(all, "text").string;
+    try testing.expect(std.mem.startsWith(u8, text, "Duplicates Report\n"));
+    try testing.expect(std.mem.endsWith(u8, text, "\n"));
+    for ([_][]const u8{ "\nIdentical Folders\n", "\nOverlapping Folders\n", "\nDuplicate Files\n" }) |heading| {
+        try testing.expect(contains(text, heading));
+    }
+    try testing.expect(contains(text, "sorted by space to reclaim"));
+    // The first set and group the lists show, by full path.
+    const sets = try parse(a, s.identicalSets("{\"offset\":0,\"limit\":1}"));
+    const first_set = field(sets, "rows").array.items[0];
+    for (field(first_set, "dirs").array.items) |dir| try testing.expect(contains(text, field(dir, "path").string));
+    const groups = try parse(a, s.groups("{\"offset\":0,\"limit\":1}"));
+    const first_group = field(groups, "rows").array.items[0];
+    try testing.expect(contains(text, field(first_group, "files").array.items[0].string));
+    const name = field(all, "file_name").string;
+    try testing.expect(std.mem.startsWith(u8, name, "duplicates-") and std.mem.endsWith(u8, name, ".txt"));
+
+    // A section's order and filters in the list's words; limit 0 leaves one out.
+    const narrowed = try parse(a, s.duplicatesReport(
+        \\{"sets":{"sort":"count","filters":{"min_bytes":1024}},"overlaps":{"limit":0},"groups":{"limit":0}}
+    ));
+    const short = field(narrowed, "text").string;
+    try testing.expect(contains(short, "sorted by copies · 1 KB or more"));
+    try testing.expect(!contains(short, "Overlapping Folders") and !contains(short, "Duplicate Files"));
+
+    // A malformed query fails the call and says why.
+    try testing.expect(s.duplicatesReport("{") == null);
 }
 
 test "the overview counts the folder findings the store carries" {

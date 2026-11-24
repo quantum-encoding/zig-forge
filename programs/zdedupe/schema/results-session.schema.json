@@ -240,12 +240,17 @@
       "description": "One member folder of an identical set.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "newest_mtime", "skipped_entries", "locked"],
+      "required": ["path", "newest_mtime", "skipped_entries", "locked", "storage_class"],
       "properties": {
         "path": { "type": "string", "minLength": 1 },
         "locked": {
           "description": "The folder is, or holds, a protected location: a folder delete refuses it.",
           "type": "boolean"
+        },
+        "storage_class": {
+          "description": "Members with one number hold one copy of the data between them: every file with content in a later one is an APFS clone or hard link of a file in the first of its number, so deleting it frees nothing while another of its number is left. Numbered from 1 in path order; 0 in stores written before it was recorded, each such member a copy of its own.",
+          "type": "integer",
+          "minimum": 0
         },
         "newest_mtime": { "$ref": "#/$defs/EpochMillis" },
         "skipped_entries": {
@@ -914,6 +919,57 @@
       "properties": {
         "text": { "type": "string", "description": "The report, UTF-8, lines ending in \\n, the last one too." },
         "file_name": { "type": "string", "description": "disk-space-<folder>-<scan date>.txt: the folder's name with characters no file system takes replaced by '-'; disk-space-<scan date>.txt for a root with no name (/, C:\\) and for the whole of several roots." }
+      }
+    },
+
+    "DuplicatesReportQuery": {
+      "description": "Query for zdedupe_results_report: the findings as a plain-text report. Each section is the host's list as it shows it, in its order and with its filters. Every field is optional, and every section is in unless its limit is 0.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "groups": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sort": { "$ref": "#/$defs/GroupSort" },
+            "filters": { "$ref": "#/$defs/Filters" },
+            "keep": { "$ref": "#/$defs/KeepSpec" },
+            "limit": { "type": "integer", "minimum": 0, "default": 50, "description": "Groups listed; clamped to 1000. 0 leaves the section out." },
+            "files": { "type": "integer", "minimum": 0, "default": 10, "description": "Files listed per group; clamped to 50." }
+          }
+        },
+        "sets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sort": { "$ref": "#/$defs/SetSort" },
+            "filters": { "$ref": "#/$defs/Filters" },
+            "limit": { "type": "integer", "minimum": 0, "default": 50, "description": "Identical folder sets listed; clamped to 1000. 0 leaves the section out." },
+            "dirs": { "type": "integer", "minimum": 0, "default": 10, "description": "Member folders listed per set; clamped to 200." }
+          }
+        },
+        "overlaps": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "filters": { "$ref": "#/$defs/Filters" },
+            "limit": { "type": "integer", "minimum": 0, "default": 25, "description": "Overlapping pairs listed; clamped to 1000. 0 leaves the section out." },
+            "only": { "type": "integer", "minimum": 0, "default": 5, "description": "Paths listed per side from what only that side holds; clamped to 100." }
+          }
+        },
+        "units": { "enum": ["decimal", "binary"], "default": "binary", "description": "Sizes as the host writes them, as for zdedupe_results_space_report." },
+        "utc_offset": { "type": "integer", "default": 0, "description": "Seconds east of UTC, for times in the reader's time zone." }
+      }
+    },
+
+    "DuplicatesReport": {
+      "description": "Response of zdedupe_results_report.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "file_name"],
+      "properties": {
+        "text": { "type": "string", "description": "The report, UTF-8, lines ending in \\n, the last one too." },
+        "file_name": { "type": "string", "description": "duplicates-<root's name>-<scan date>.txt, the name made safe on any file system; duplicates-<scan date>.txt for a root with no name (/, C:\\) and for several roots." }
       }
     },
 

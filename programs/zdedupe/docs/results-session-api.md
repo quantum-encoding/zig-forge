@@ -277,6 +277,16 @@ Streams every alive group in store order. Shapes as
 JSON `{report_type, generated_at, summary{...}, groups:[{hash,size,count,savings,files:[{path,mtime}]}]}`;
 HTML a table grouped by first row.
 
+The findings as text for a person to read, paste or save:
+
+```c
+const char* zdedupe_results_report(zdedupe_results* r, const char* query_json /* DuplicatesReportQuery */);
+```
+Returns `DuplicatesReport {text, file_name}`: the overview's figures, then
+Identical Folders, Overlapping Folders and Duplicate Files, each the host's list
+in its order and with its filters, the first N by full path. Rendered from the
+same answers the pages give. See the header for what the text holds.
+
 A disk-space store has no groups; its export is one folder as text:
 
 ```c
