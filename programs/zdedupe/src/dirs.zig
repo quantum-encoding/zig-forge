@@ -119,6 +119,11 @@ pub const DirInfo = struct {
     /// links) with an earlier member, whose number it then takes. Deleting a
     /// member frees nothing while another of its number is left.
     storage_class: u32 = 0,
+    /// Bytes of storage this member brings into the set that no member
+    /// before it holds: its files with content whose blocks (clone class or
+    /// inode) no earlier member shares. Their sum over the members is what
+    /// the set takes on disk.
+    own_bytes: u64 = 0,
 };
 
 /// Directories whose subtrees are identical.
@@ -128,9 +133,10 @@ pub const IdenticalSet = struct {
     file_count: u64,
     /// Logical size of each copy in bytes (recursive).
     bytes: u64,
-    /// `bytes * (storage classes - 1)`: copies that share their blocks
-    /// (`DirInfo.storage_class`) count once. Still an upper bound where
-    /// copies share only some of their files.
+    /// What deleting every copy but the one holding most of its own frees:
+    /// the members' `own_bytes` summed, less the largest. Copies that share
+    /// their blocks (APFS clones, hard links), wholly or in part, count them
+    /// once.
     reclaimable: u64,
     /// Sorted by path.
     dirs: []DirInfo,
@@ -632,21 +638,27 @@ const Analyzer = struct {
             const dirs = try self.out.alloc(DirInfo, members.len);
             storage.clearRetainingCapacity();
             var classes: u32 = 0;
+            var own_total: u64 = 0;
+            var own_max: u64 = 0;
             for (members, dirs) |member, *info| {
                 const node = &self.nodes[member];
+                const held = try self.storageClass(node, &storage, &classes);
                 info.* = .{
                     .path = node.path,
                     .newest_mtime = node.newest_mtime,
                     .skipped_entries = node.skipped,
-                    .storage_class = try self.storageClass(node, &storage, &classes),
+                    .storage_class = held.class,
+                    .own_bytes = held.own_bytes,
                 };
+                own_total += held.own_bytes;
+                own_max = @max(own_max, held.own_bytes);
             }
 
             try sets.append(self.out, .{
                 .digest = kv.key_ptr.*,
                 .file_count = first.file_count,
                 .bytes = first.bytes,
-                .reclaimable = first.bytes * (@max(classes, 1) - 1),
+                .reclaimable = own_total - own_max,
                 .dirs = dirs,
             });
         }
@@ -945,11 +957,14 @@ const Analyzer = struct {
         return @as(f64, @floatFromInt(part)) / @as(f64, @floatFromInt(whole));
     }
 
-    /// `node`'s storage class among the members before it (see
-    /// `DirInfo.storage_class`): the lowest class whose blocks its files use
-    /// when `seen` already holds all of them, else the next new class, and
-    /// then its files' blocks join `seen` under it.
-    fn storageClass(self: *const Analyzer, node: *const Node, seen: *std.AutoHashMapUnmanaged(Storage, u32), classes: *u32) !u32 {
+    const Held = struct { class: u32, own_bytes: u64 };
+
+    /// `node`'s storage among the members before it: its class (see
+    /// `DirInfo.storage_class`), the lowest class whose blocks its files use
+    /// when `seen` already holds all of them, else the next new class; and
+    /// the bytes of its files whose blocks `seen` did not hold, which then
+    /// join `seen` under its class.
+    fn storageClass(self: *const Analyzer, node: *const Node, seen: *std.AutoHashMapUnmanaged(Storage, u32), classes: *u32) !Held {
         const files = self.subtreeFiles(node);
         var shared_with: u32 = std.math.maxInt(u32);
         var shares = true;
@@ -963,15 +978,19 @@ const Analyzer = struct {
                 break;
             }
         }
-        if (shares and shared_with != std.math.maxInt(u32)) return shared_with;
+        if (shares and shared_with != std.math.maxInt(u32)) return .{ .class = shared_with, .own_bytes = 0 };
         classes.* += 1;
+        var own: u64 = 0;
         for (files) |index| {
             const entry = &self.files[index];
             if (entry.size == 0) continue;
             const gop = try seen.getOrPut(self.scratch, storageOf(entry.*, index));
-            if (!gop.found_existing) gop.value_ptr.* = classes.*;
+            if (!gop.found_existing) {
+                gop.value_ptr.* = classes.*;
+                own += entry.size;
+            }
         }
-        return classes.*;
+        return .{ .class = classes.*, .own_bytes = own };
     }
 
     /// Every file beneath `node`, as indices into `files`.

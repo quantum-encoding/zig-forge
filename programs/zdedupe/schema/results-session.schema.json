@@ -289,7 +289,7 @@
           "$ref": "#/$defs/ByteCount"
         },
         "reclaimable": {
-          "description": "bytes * (copies - 1) over the alive copies, where copies that share their blocks (APFS clones, hard links) count as one, whichever of them is left. An UPPER BOUND where copies share only some of their files.",
+          "description": "What deleting every alive copy but the one holding most of its own frees. Each copy holds the storage it brings into the set (its files whose blocks no earlier copy shares, APFS clones and hard links), so clones, wholly or in part, count their shared blocks once.",
           "$ref": "#/$defs/ByteCount"
         },
         "dirs": {
@@ -493,7 +493,7 @@
           "minimum": 0
         },
         "reclaimable": {
-          "description": "Sum of bytes * (copies - 1) over identical folder sets as scanned, copies that share their blocks counting as one. An upper bound, as in SetRow.",
+          "description": "What deleting every copy of every identical folder set but its first frees, as scanned: each copy counted as in SetRow, and a copy inside another deleted copy (of another set) counted once, with it.",
           "$ref": "#/$defs/ByteCount"
         }
       }

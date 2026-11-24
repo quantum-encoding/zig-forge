@@ -391,6 +391,7 @@ const AliveDir = struct {
     newest_mtime: i64,
     skipped_entries: u64,
     storage_class: u32,
+    own_bytes: ?u64,
 };
 
 const CachedOrder = struct {
@@ -908,6 +909,7 @@ pub const Session = struct {
                 .newest_mtime = dir.newest_mtime,
                 .skipped_entries = dir.skipped_entries,
                 .storage_class = dir.storage_class,
+                .own_bytes = dir.own_bytes,
             });
         }
         return self.alive_dirs.items;
@@ -917,16 +919,72 @@ pub const Session = struct {
         return size *| (@as(u64, copies) -| 1);
     }
 
-    /// Savings of an identical set: every copy but one, where the copies of
-    /// one storage class (APFS clones, hard links; store.SetDir) hold one
-    /// copy between them, whichever of them is left. A member with no class
-    /// recorded is a copy of its own.
+    /// What deleting every copy of every identical set but its first frees,
+    /// as scanned. A copy holds the storage it brings into its set (or, in
+    /// older stores, its whole size unless an earlier copy of its storage
+    /// class holds it), and a deleted copy inside another deleted copy, of
+    /// another set, is freed with that one and counted once.
+    fn foldersReclaimable(self: *Session, arena: Allocator) !u64 {
+        const Gone = struct { path: []const u8, bytes: u64 };
+        var gone: std.ArrayListUnmanaged(Gone) = .empty;
+        var gone_paths: std.StringHashMapUnmanaged(void) = .empty;
+        for (0..self.reader.setCount()) |i| {
+            const set = try self.reader.set(i);
+            var top: u32 = 0;
+            for (0..set.dir_count) |d| {
+                const dir = try self.reader.setDir(&set, d);
+                if (d > 0) {
+                    const own = dir.own_bytes orelse
+                        if (dir.storage_class == 0 or dir.storage_class > top) set.bytes else 0;
+                    try gone.append(arena, .{ .path = dir.path, .bytes = own });
+                    try gone_paths.put(arena, dir.path, {});
+                }
+                top = @max(top, dir.storage_class);
+            }
+        }
+        var total: u64 = 0;
+        for (gone.items) |item| {
+            var above = filters_mod.parentDir(item.path);
+            const inside_another = while (above) |p| : (above = filters_mod.parentDir(p)) {
+                if (gone_paths.contains(p)) break true;
+            } else false;
+            if (!inside_another) total +|= item.bytes;
+        }
+        return total;
+    }
+
+    /// Savings of an identical set: what deleting every alive copy but the
+    /// one holding most of its own frees. Each copy holds the storage it
+    /// brings into the set (store.Header.set_dir_own), so copies that share
+    /// their blocks, wholly or in part (APFS clones, hard links), count them
+    /// once. A copy that shares all of its blocks with a deleted one now
+    /// holds them alone, and counts them in full. Without those bytes
+    /// (older stores), the copies of one storage class count as one copy,
+    /// and a member with no class recorded as a copy of its own.
     fn setSavings(self: *Session, bytes: u64, dirs: []const AliveDir) !u64 {
         var top: u32 = 0;
-        for (dirs) |dir| top = @max(top, dir.storage_class);
+        var recorded = dirs.len > 0;
+        for (dirs) |dir| {
+            top = @max(top, dir.storage_class);
+            if (dir.own_bytes == null) recorded = false;
+        }
         const seen = &self.storage_classes;
         if (seen.bit_length < @as(usize, top) + 1) try seen.resize(self.gpa, @as(usize, top) + 1, false);
         seen.unsetAll();
+
+        if (recorded) {
+            var total: u64 = 0;
+            var largest: u64 = 0;
+            for (dirs) |dir| {
+                var own = dir.own_bytes.?;
+                if (own == 0 and dir.storage_class != 0 and !seen.isSet(dir.storage_class)) own = bytes;
+                if (dir.storage_class != 0) seen.set(dir.storage_class);
+                total +|= own;
+                largest = @max(largest, own);
+            }
+            return total - largest;
+        }
+
         var copies: usize = 0;
         for (dirs) |dir| {
             if (dir.storage_class == 0) {
@@ -1077,19 +1135,7 @@ pub const Session = struct {
 
     /// The overview with what the folder sections add up to.
     fn writeFullOverview(self: *Session, json: *std.json.Stringify, arena: Allocator) !void {
-        var reclaimable: u64 = 0;
-        for (0..self.reader.setCount()) |i| {
-            const set = try self.reader.set(i);
-            // Every class from 1 up to the highest is some member's.
-            var copies: u64 = 0;
-            var top: u32 = 0;
-            for (0..set.dir_count) |d| {
-                const dir = try self.reader.setDir(&set, d);
-                if (dir.storage_class == 0) copies += 1;
-                top = @max(top, dir.storage_class);
-            }
-            reclaimable +|= liveSavings(set.bytes, copies + top);
-        }
+        const reclaimable = try self.foldersReclaimable(arena);
         var redundant_pairs: usize = 0;
         for (0..self.reader.overlapCount()) |i| {
             const pair = try self.reader.overlap(i);

@@ -961,6 +961,45 @@ test "a folder that is an APFS clone of another takes no space of its own in the
     try std.testing.expectEqual(set.bytes, set.reclaimable);
 }
 
+test "a folder that is an APFS clone of another in part frees only its own files" {
+    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "dedupe-part-clone");
+    defer scratch.deinit();
+
+    // merged/ and stripped/ hold the same two files; stripped/big.so is a
+    // clone of merged/big.so (an Android build's strip step that had nothing
+    // to strip), stripped/small.so a copy of its own.
+    const big: [300 * 1024]u8 = @splat('b');
+    const small: [40 * 1024]u8 = @splat('s');
+    try scratch.makeDir("merged");
+    try scratch.makeDir("stripped");
+    try scratch.writeFile("merged/big.so", &big);
+    try scratch.writeFile("merged/small.so", &small);
+    try scratch.writeFile("stripped/small.so", &small);
+    const from = try scratch.joinZ("merged/big.so");
+    defer allocator.free(from);
+    const to = try scratch.joinZ("stripped/big.so");
+    defer allocator.free(to);
+    if (clonefile(from, to, 0) != 0) return error.SkipZigTest;
+
+    var finder = DupeFinder.init(allocator, .{ .analyze_dirs = true });
+    defer finder.deinit();
+    try finder.scan(&.{scratch.path});
+
+    const analysis = finder.getDirAnalysis().?;
+    try std.testing.expectEqual(@as(usize, 1), analysis.identical_sets.len);
+    const set = analysis.identical_sets[0];
+    try std.testing.expectEqual(@as(u64, big.len + small.len), set.bytes);
+    // merged/ first in path order: it brings both files, stripped/ only its
+    // own copy of the small one. Deleting stripped/ frees just that.
+    try std.testing.expectEqual(@as(u64, big.len + small.len), set.dirs[0].own_bytes);
+    try std.testing.expectEqual(@as(u64, small.len), set.dirs[1].own_bytes);
+    try std.testing.expect(set.dirs[0].storage_class != set.dirs[1].storage_class);
+    try std.testing.expectEqual(@as(u64, small.len), set.reclaimable);
+}
+
 test "a root given through a link is walked by its real path, and so is an exclude" {
     const allocator = std.testing.allocator;
     const Scratch = @import("testing_scratch.zig").Scratch;

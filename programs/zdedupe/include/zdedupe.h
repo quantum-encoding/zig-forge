@@ -543,8 +543,9 @@ const char* zdedupe_results_last_error(const zdedupe_results* r);
  *
  * These counters are the SCAN's and do not change with deletes; say so
  * beside them. "dataless_skipped" counts cloud placeholders (macOS) that
- * were not downloaded and so not compared; a host should say so. "reclaimable" is the sum of bytes * (copies - 1) over
- * identical folder sets, counted as SetRow's is; "redundant_pairs" counts overlap pairs where at
+ * were not downloaded and so not compared; a host should say so. "reclaimable" is what deleting every copy of
+ * every identical folder set but its first would free, each copy counted as in SetRow, and a copy that
+ * lies inside another deleted copy (of another set) counted once, with it; "redundant_pairs" counts overlap pairs where at
  * least one side has nothing unique.
  */
 const char* zdedupe_results_overview(zdedupe_results* r);
@@ -804,13 +805,16 @@ const char* zdedupe_results_removed_status(zdedupe_results* r);
  * clones or hard links of each other - numbered from 1 in path order; 0 in
  * stores written before it was recorded, each such member a copy of its own.)
  *
- * "count" is the copies still ALIVE and "reclaimable" is bytes * (copies - 1)
- * over those, where copies that share their blocks count as one: a member
- * whose every file with content is an APFS clone or hard link of a file in
- * another member takes no space of its own, so deleting it frees nothing
- * while that one is left (Brave's code-signing clones of its app, a Finder
- * duplicate). Still an upper bound where copies share only some files. Stores
- * written before this was recorded count every copy. A set with fewer than two alive
+ * "count" is the copies still ALIVE and "reclaimable" is what deleting all of
+ * them but the one holding most of its own frees. Each copy holds the storage
+ * it brings into the set: its files whose blocks (APFS clones, hard links) no
+ * earlier copy shares. So a copy that is a clone of another frees nothing
+ * (Brave's code-signing clones of its app, a Finder duplicate), and one that
+ * is a clone in part frees only its own files (an Android build's stripped
+ * libraries beside the merged ones). A copy whose blocks were held by a
+ * deleted copy holds them alone and counts them in full. Stores written before
+ * the storage was recorded count a copy in full unless an earlier one of its
+ * storage_class holds it. A set with fewer than two alive
  * copies is not a row. "dirs" carries at most 8 of them, because a set can
  * have hundreds (879 in one real scan); the rest come from
  * zdedupe_results_set_members, keyed by "index". "common_parent" is the

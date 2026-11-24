@@ -118,7 +118,12 @@ pub const Header = extern struct {
     dataless_bytes: u64 = 0,
     /// Candidates whose hashes came from a pure clone instead of a read.
     clone_hash_skips: u64 = 0,
-    _reserved: [5]u64 = @splat(0),
+    /// SET_DIR_OWN: one u64 per SET_DIRS record, in the same order: the bytes
+    /// of storage that member brings into its set (dirs.DirInfo.own_bytes).
+    /// Count 0 in stores written before it was recorded; readers then count
+    /// each member by its storage class alone.
+    set_dir_own: Section = .{},
+    _reserved: [3]u64 = @splat(0),
 };
 
 pub const Group = extern struct {
@@ -415,6 +420,19 @@ fn writeAll(out: *FileWriter, source: Source) WriteError!void {
     if (out.offset - strings_start != strings.next) return error.WriteFailed;
     endSection(out, &header, .strings, strings.next);
 
+    // SET_DIR_OWN, parallel to SET_DIRS.
+    try out.alignTo(8);
+    header.set_dir_own.offset = out.offset;
+    var own_records: u64 = 0;
+    for (identical_sets) |*set| {
+        for (set.dirs) |dir| {
+            try out.write(std.mem.asBytes(&dir.own_bytes));
+            own_records += 1;
+        }
+    }
+    header.set_dir_own.count = own_records;
+    if (own_records == 0) header.set_dir_own.offset = 0;
+
     if (source.space) |tree| header.space = try space.writeBlob(out, tree);
 
     try out.flush();
@@ -588,6 +606,8 @@ pub const DirRef = struct {
     skipped_entries: u64,
     /// See `SetDir.storage_class`; 0 when not recorded.
     storage_class: u32,
+    /// See `Header.set_dir_own`; null when not recorded.
+    own_bytes: ?u64,
 };
 
 /// A read-only view over a mapped store. Holds no allocations: every accessor
@@ -657,6 +677,23 @@ pub const Reader = struct {
                 return reject(why, .a_section_lies_outside_the_file);
             if (offset < expected_size or offset % 8 != 0 or end > bytes.len) {
                 return reject(why, .a_section_lies_outside_the_file);
+            }
+        }
+        if (header.set_dir_own.count > 0) {
+            const offset = std.math.cast(usize, header.set_dir_own.offset) orelse
+                return reject(why, .a_section_lies_outside_the_file);
+            const records = std.math.cast(usize, header.set_dir_own.count) orelse
+                return reject(why, .a_section_lies_outside_the_file);
+            const byte_len = std.math.mul(usize, records, @sizeOf(u64)) catch
+                return reject(why, .a_section_lies_outside_the_file);
+            const end = std.math.add(usize, offset, byte_len) catch
+                return reject(why, .a_section_lies_outside_the_file);
+            if (offset < expected_size or offset % 8 != 0 or end > bytes.len) {
+                return reject(why, .a_section_lies_outside_the_file);
+            }
+            // Not one per member: not this format's section; counted without it.
+            if (header.set_dir_own.count != header.sections[@intFromEnum(SectionId.set_dirs)].count) {
+                header.set_dir_own = .{};
             }
         }
         if (header.space.count > 0) {
@@ -762,11 +799,19 @@ pub const Reader = struct {
         if (i >= s.dir_count) return error.OutOfRange;
         const bytes = try self.record(.set_dirs, @as(usize, @intCast(s.first_dir)) + i);
         const r = std.mem.bytesToValue(SetDir, bytes[0..@sizeOf(SetDir)]);
+        const index = @as(usize, @intCast(s.first_dir)) + i;
+        const own = self.header.set_dir_own;
         return .{
             .path = try self.string(r.path_offset, r.path_len),
             .newest_mtime = r.newest_mtime,
             .skipped_entries = r.skipped_entries,
             .storage_class = r.storage_class,
+            // In bounds: `init` checked the section holds one per SET_DIRS record.
+            .own_bytes = if (own.count == 0) null else std.mem.readInt(
+                u64,
+                self.bytes[@as(usize, @intCast(own.offset)) + index * 8 ..][0..8],
+                .little,
+            ),
         };
     }
 

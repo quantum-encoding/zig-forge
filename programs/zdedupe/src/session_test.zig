@@ -1270,6 +1270,93 @@ test "the duplicates report lists each section as its list shows it" {
     try testing.expect(s.duplicatesReport("{") == null);
 }
 
+test "a set of folders that share some of their blocks counts only what each holds alone (macOS)" {
+    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture = try Fixture.initDirs(gpa, "session-part-clone", &[_]File{
+        .{ .path = "merged/big.so", .byte = 'b', .size = 6000 },
+        .{ .path = "merged/small.so", .byte = 's', .size = 700 },
+        .{ .path = "stripped/small.so", .byte = 's', .size = 700 },
+    });
+    defer fixture.deinit();
+    // stripped/big.so: an APFS clone of merged/big.so.
+    const from = try fixture.tree.joinZ("merged/big.so");
+    defer gpa.free(from);
+    const to = try fixture.tree.joinZ("stripped/big.so");
+    defer gpa.free(to);
+    if (clonefile(from, to, 0) != 0) return error.SkipZigTest;
+    try fixture.scan();
+
+    const s = try fixture.open(null);
+    defer s.close();
+    const row = field(try parse(a, s.identicalSets("{\"offset\":0,\"limit\":50}")), "rows").array.items[0];
+    try testing.expectEqual(@as(i64, 2), int(row, "count"));
+    try testing.expectEqual(@as(i64, 6700), int(row, "bytes"));
+    try testing.expectEqual(@as(i64, 700), int(row, "reclaimable"));
+    try testing.expectEqual(@as(i64, 700), int(try parse(a, s.overview()), "reclaimable"));
+}
+
+test "the folder total counts a copy inside another deleted copy once" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // p and q are identical; p/x, q/x and r/x are a set of their own, since
+    // r is not a copy of p. Deleting q takes q/x with it.
+    var fixture = try Fixture.initDirs(gpa, "session-nested-total", &[_]File{
+        .{ .path = "p/x/a.bin", .byte = 'a', .size = 4000 },
+        .{ .path = "p/y/c.bin", .byte = 'c', .size = 3000 },
+        .{ .path = "q/x/a.bin", .byte = 'a', .size = 4000 },
+        .{ .path = "q/y/c.bin", .byte = 'c', .size = 3000 },
+        .{ .path = "r/x/a.bin", .byte = 'a', .size = 4000 },
+        .{ .path = "r/z/d.bin", .byte = 'd', .size = 500 },
+    });
+    defer fixture.deinit();
+    const s = try fixture.open(null);
+    defer s.close();
+
+    const page = try parse(a, s.identicalSets("{\"offset\":0,\"limit\":50}"));
+    try testing.expectEqual(@as(i64, 2), int(page, "total"));
+    var rows_sum: i64 = 0;
+    for (field(page, "rows").array.items) |row| rows_sum += int(row, "reclaimable");
+    // Each set on its own: p/q frees 7000, the x set 8000.
+    try testing.expectEqual(@as(i64, 7000 + 8000), rows_sum);
+    // Together: q (7000, q/x with it) and r/x (4000).
+    try testing.expectEqual(@as(i64, 7000 + 4000), int(try parse(a, s.overview()), "reclaimable"));
+}
+
+test "a store written before set members recorded their own storage still counts its sets" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture = try Fixture.initDirs(gpa, "session-old-sets", &folder_tree);
+    defer fixture.deinit();
+    // What an older core wrote: no SET_DIR_OWN section in the header.
+    {
+        const fd = sysc.open(fixture.store_path.ptr, .{ .ACCMODE = .WRONLY }, @as(sysc.mode_t, 0));
+        try testing.expect(fd >= 0);
+        defer _ = sysc.close(fd);
+        const zeros: [@sizeOf(store.Section)]u8 = @splat(0);
+        const at: i64 = @offsetOf(store.Header, "set_dir_own");
+        try testing.expectEqual(@as(isize, zeros.len), sysc.pwrite(fd, &zeros, zeros.len, at));
+    }
+    const s = try fixture.open(null);
+    defer s.close();
+    const page = try parse(a, s.identicalSets("{\"offset\":0,\"limit\":50}"));
+    for (field(page, "rows").array.items) |row| {
+        // Plain copies: every one but one is space to reclaim.
+        try testing.expectEqual(int(row, "bytes") * (int(row, "count") - 1), int(row, "reclaimable"));
+    }
+    try testing.expect(int(try parse(a, s.overview()), "reclaimable") > 0);
+}
+
 test "the overview counts the folder findings the store carries" {
     const gpa = testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
