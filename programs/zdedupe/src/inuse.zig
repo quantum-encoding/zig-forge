@@ -147,8 +147,10 @@ const windows = struct {
 
     const Walk = struct { dirs: []const []const u8, files: []const []const u8 };
 
-    /// Every folder (`folder` first) and file under `folder`, junctions and
-    /// links listed as files and not entered. Null when part of it cannot be
+    /// Every folder (`folder` first) and file under `folder`. Junctions and
+    /// links are neither entered nor listed: nothing holds a link, and the
+    /// Restart Manager refuses a session that names a folder (as a junction
+    /// to one is) with ERROR_ACCESS_DENIED. Null when part of it cannot be
     /// read.
     fn walk(arena: Allocator, folder: []const u8) ?Walk {
         var dirs: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -166,7 +168,7 @@ const windows = struct {
                 const full = std.fmt.allocPrint(arena, "{s}/{s}", .{ std.mem.trimEnd(u8, dir_path, "/"), name }) catch return null;
                 if (entry.type == libc.DT_DIR) {
                     dirs.append(arena, full) catch return null;
-                } else {
+                } else if (entry.type == libc.DT_REG) {
                     files.append(arena, full) catch return null;
                 }
             }
@@ -723,6 +725,19 @@ test "Windows: another process with a file open in the folder holds it, by its p
     try testing.expect(answer == .held);
     try testing.expectEqual(@as(i32, @intCast(info.pid)), answer.held.pid);
     try testing.expect(answer.held.command.len > 0);
+}
+
+test "Windows: a link to a folder inside the folder leaves the answer free" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var f = try Fixture.init(a, "inuse-win-link");
+    defer f.deinit();
+
+    // As npm and pnpm link packages on Windows.
+    f.scratch.symLink("../node_modules-old", "node_modules/linked") catch return error.SkipZigTest;
+    try testing.expectEqual(Answer.free, search(a, f.folder, null));
 }
 
 test "Windows: a library loaded from the folder holds it after its file is closed" {
