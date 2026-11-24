@@ -231,6 +231,7 @@ extern "kernel32" fn CreateHardLinkW(link: [*:0]const WCHAR, existing: [*:0]cons
 extern "kernel32" fn CreateSymbolicLinkW(link: [*:0]const WCHAR, target: [*:0]const WCHAR, flags: DWORD) callconv(.winapi) u8;
 extern "kernel32" fn SetEnvironmentVariableW(name: [*:0]const WCHAR, value: ?[*:0]const WCHAR) callconv(.winapi) BOOL;
 extern "kernel32" fn SetFileTime(h: HANDLE, created: ?*const FILETIME, accessed: ?*const FILETIME, written: ?*const FILETIME) callconv(.winapi) BOOL;
+extern "kernel32" fn GetFileTime(h: HANDLE, created: ?*FILETIME, accessed: ?*FILETIME, written: ?*FILETIME) callconv(.winapi) BOOL;
 extern "kernel32" fn DeviceIoControl(h: HANDLE, code: DWORD, in_buf: ?*const anyopaque, in_size: DWORD, out_buf: ?*anyopaque, out_size: DWORD, returned: ?*DWORD, ov: ?*OVERLAPPED) callconv(.winapi) BOOL;
 extern "kernel32" fn GetEnvironmentVariableW(name: [*:0]const WCHAR, buf: ?[*]WCHAR, size: DWORD) callconv(.winapi) DWORD;
 
@@ -793,6 +794,8 @@ const EntryInfo = struct {
     allocated: u64,
     file_id: u64,
     mtime: i64,
+    /// See `StatInfo.ctime_sec`.
+    ctime: i64,
 };
 
 pub const DIR = struct {
@@ -906,6 +909,7 @@ pub fn readdir(dir: *DIR) ?*dirent {
             .allocated = @intCast(@max(rec.AllocationSize, 0)),
             .file_id = @bitCast(rec.FileId),
             .mtime = fileTimeToUnix(rec.LastWriteTime),
+            .ctime = fileTimeToUnix(rec.CreationTime),
         };
         dir.has_entry = true;
         return &dir.entry;
@@ -928,6 +932,11 @@ pub const StatInfo = struct {
     mode: u32,
     size: u64,
     mtime_sec: i64,
+    /// The creation time. Windows keeps no status-change time that holds
+    /// still (setting any time moves its ChangeTime); creation is when the
+    /// file came to be where it is, so a copy, an extraction or a download
+    /// sets it even when it keeps an old modification time.
+    ctime_sec: i64,
     nlink: u32,
     allocated: u64,
     dataless: bool,
@@ -964,12 +973,14 @@ fn statHandle(h: HANDLE) ?StatInfo {
     else
         0;
     const mtime: i64 = @bitCast((@as(u64, info.ftLastWriteTime.dwHighDateTime) << 32) | info.ftLastWriteTime.dwLowDateTime);
+    const created: i64 = @bitCast((@as(u64, info.ftCreationTime.dwHighDateTime) << 32) | info.ftCreationTime.dwLowDateTime);
     return .{
         .dev = info.dwVolumeSerialNumber,
         .ino = (@as(u64, info.nFileIndexHigh) << 32) | info.nFileIndexLow,
         .mode = modeOf(info.dwFileAttributes, tag.ReparseTag),
         .size = (@as(u64, info.nFileSizeHigh) << 32) | info.nFileSizeLow,
         .mtime_sec = fileTimeToUnix(mtime),
+        .ctime_sec = fileTimeToUnix(created),
         .nlink = info.nNumberOfLinks,
         .allocated = allocated,
         .dataless = isDataless(info.dwFileAttributes),
@@ -1017,6 +1028,7 @@ pub fn statAt(dir_fd: c_int, name: [*:0]const u8) ?StatInfo {
                     .mode = modeOf(e.attributes, e.reparse_tag),
                     .size = e.size,
                     .mtime_sec = e.mtime,
+                    .ctime_sec = e.ctime,
                     .nlink = 0,
                     .allocated = e.allocated,
                     .dataless = isDataless(e.attributes),
@@ -1331,10 +1343,14 @@ pub fn unsetenv(name: [*:0]const u8) c_int {
 }
 
 /// Set a file's modification (and access) time, as `utimes` does.
+/// Sets the access and modification times. A modification time earlier than
+/// the creation time moves the creation time back with it, as a file
+/// restored with its old times would be: `ctime_sec` (creation) is part of
+/// what makes a file look recently changed here.
 pub fn utimes(path: [*:0]const u8, times: ?*const [2]timeval) c_int {
     const FILE_WRITE_ATTRIBUTES: DWORD = 0x0100;
     const w = toWide(&wide_buf, std.mem.span(path)) orelse return failWith(.NAMETOOLONG);
-    const h = CreateFileW(w, FILE_WRITE_ATTRIBUTES, FILE_SHARE_ALL, null, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, null);
+    const h = CreateFileW(w, FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, null, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, null);
     if (h == INVALID_HANDLE_VALUE) return failLast();
     defer _ = CloseHandle(h);
     const t = times orelse return 0;
@@ -1346,7 +1362,14 @@ pub fn utimes(path: [*:0]const u8, times: ?*const [2]timeval) c_int {
     }.f;
     const accessed = toFt(t[0]);
     const written = toFt(t[1]);
-    return if (SetFileTime(h, null, &accessed, &written) != 0) 0 else failLast();
+    const ticks = struct {
+        fn f(ft: FILETIME) u64 {
+            return (@as(u64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+        }
+    }.f;
+    var created: FILETIME = undefined;
+    const earlier = GetFileTime(h, &created, null, null) != 0 and ticks(written) < ticks(created);
+    return if (SetFileTime(h, if (earlier) &written else null, &accessed, &written) != 0) 0 else failLast();
 }
 
 pub fn geteuid() c_uint {

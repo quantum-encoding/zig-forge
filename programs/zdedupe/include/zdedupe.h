@@ -1196,6 +1196,14 @@ const char* zdedupe_clean_scan(zdedupe_ctx* ctx, const char* query_json);
  * ("trashed_as" is then null); NULL uses the core's own (NSFileManager on
  * macOS, the freedesktop Trash on Linux, unsupported on Windows). Nothing is
  * ever deleted permanently. Cancel stops before the next folder.
+ *
+ * On Windows "changed" counts each file's creation time with its
+ * modification time (an unpacked file keeps an old modification time but is
+ * created when unpacked), and "in use" asks the Restart Manager about every
+ * file (open, or loaded as a module) and opens every folder in it for
+ * deletion, which Windows refuses while another program has that folder open
+ * as its working folder ("in use by another program, with a folder in it
+ * open", no pid).
  */
 const char* zdedupe_clean_trash(zdedupe_ctx* ctx, const char* items_json,
                                 zdedupe_trash_fn trash_fn, void* user);

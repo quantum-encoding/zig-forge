@@ -832,7 +832,11 @@ fn checkFolder(gpa: Allocator, opts: Options, now: i64, b: *const BuildDir) Chec
 fn inUse(a: Allocator, opts: Options, path: []const u8) !?[]const u8 {
     return switch (opts.holder_fn(a, path)) {
         .free => null,
-        .held => |h| try std.fmt.allocPrint(a, "in use by {d} {s}", .{ h.pid, h.command }),
+        // Pid 0: Windows refused the folder to us without naming who holds it.
+        .held => |h| if (h.pid == 0)
+            try std.fmt.allocPrint(a, "in use by {s}", .{h.command})
+        else
+            try std.fmt.allocPrint(a, "in use by {d} {s}", .{ h.pid, h.command }),
         .unknown => "could not tell whether a running process is using it",
     };
 }
@@ -863,13 +867,12 @@ const Age = struct {
     problem: ?[]const u8 = null,
 };
 
-/// The newest modification or status change of the folder at `path` and of
-/// everything in it, read through descriptors from the folder down (no path
-/// is resolved twice, no link followed). The folder must still be the one
+/// The newest modification or status change (on Windows, creation) of the
+/// folder at `path` and of everything in it, read through descriptors from
+/// the folder down (no path is resolved twice, no link or junction followed). The folder must still be the one
 /// scanned (`dev`, `ino`), and everything in it on its filesystem and
 /// readable; otherwise `problem` says what is wrong.
 fn newestChange(a: Allocator, path: []const u8, dev: u64, ino: u64) Age {
-    if (comptime builtin.os.tag == .windows) return .{ .problem = "the Trash is not supported on this platform" };
     var age: Age = .{};
     const z = a.dupeSentinel(u8, path, 0) catch return .{ .problem = "out of memory" };
     const top_fd = libc.open(z.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(libc.mode_t, 0));
@@ -1603,8 +1606,6 @@ test "clean finds build output by the core's rule, and copies of it by content" 
 }
 
 test "clean --trash moves only old, unprotected build output under a root, rechecked just before" {
-    // --trash and its age check are unsupported on Windows (newestChange).
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -1706,7 +1707,6 @@ const TestHostTrash = struct {
 };
 
 test "clean moves only the chosen build folders, through a host's Trash" {
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -1754,8 +1754,6 @@ test "clean moves only the chosen build folders, through a host's Trash" {
 }
 
 test "clean --trash leaves a folder a running process is using, and says which" {
-    // --trash and its age check are unsupported on Windows (newestChange).
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -1792,7 +1790,8 @@ test "clean --trash leaves a folder a running process is using, and says which" 
 }
 
 test "clean --older: a just-built folder stays, measured by status changes too" {
-    // --trash and its age check are unsupported on Windows (newestChange).
+    // Windows has no status-change time to measure; its creation time stands
+    // in, in the test below.
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1842,6 +1841,67 @@ test "clean --older: a just-built folder stays, measured by status changes too" 
     try testing.expect(find(&report, &f, a, "still/zig-out").?.trash.eligible);
     try testing.expectEqual(@as(usize, 1), report.trash.?.moved.len);
     try testing.expect(!try f.scratch.exists("still/zig-out"));
+}
+
+test "clean --older on Windows: a just-unpacked folder stays, measured by when its files were created" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const sys_windows = @import("sys_windows.zig");
+    const FileTime = extern struct { low: u32, high: u32 };
+    const SetFileTime = struct {
+        extern "kernel32" fn SetFileTime(h: *anyopaque, created: ?*const FileTime, accessed: ?*const FileTime, written: ?*const FileTime) callconv(.winapi) i32;
+    }.SetFileTime;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var f = try Fixture.init(a, "clean-older-win");
+    defer f.deinit();
+
+    const ten_years_ago = realtimeSeconds() - 10 * 365 * std.time.s_per_day;
+    for ([_][]const u8{ "fresh", "still" }) |name| {
+        var buf: [128]u8 = undefined;
+        try f.scratch.makeDir(name);
+        try f.scratch.writeFile(try std.fmt.bufPrint(&buf, "{s}/build.zig", .{name}), "");
+        try f.scratch.makeDir(try std.fmt.bufPrint(&buf, "{s}/zig-out", .{name}));
+        try f.scratch.writeFile(try std.fmt.bufPrint(&buf, "{s}/zig-out/app.exe", .{name}), "built");
+    }
+    // still/: old by every measure (the shim's utimes moves creation back).
+    try f.ageTree(a, "still/zig-out/app.exe", ten_years_ago);
+    try f.ageTree(a, "still/zig-out", ten_years_ago);
+    // fresh/: an unpacker restored the file's old modification time, but it
+    // was created just now.
+    const app = try a.dupeSentinel(u8, f.path(a, "fresh/zig-out/app.exe"), 0);
+    const fd = libc.open(app.ptr, .{ .ACCMODE = .RDWR }, @as(libc.mode_t, 0));
+    try testing.expect(fd >= 0);
+    const ticks: u64 = @intCast(ten_years_ago * 10_000_000 + 116444736000000000);
+    const old: FileTime = .{ .low = @truncate(ticks), .high = @truncate(ticks >> 32) };
+    try testing.expect(SetFileTime(sys_windows.handleOf(fd).?, null, null, &old) != 0);
+    _ = libc.close(fd);
+    try f.ageTree(a, "fresh/zig-out", ten_years_ago);
+
+    var report = try run(testing.allocator, testing.io, .{
+        .roots = &.{f.real},
+        .main_roots = &.{f.path(a, "none")},
+        .guard_fn = Fixture.guard,
+        .guard_ctx = &f,
+        .git_exe = "/nonexistent/zdedupe/git",
+        .trash_fn = fakeTrash,
+        .holder_fn = nothingHolds,
+        .older_s = 3600,
+    }, true);
+    defer report.deinit();
+    const fresh = find(&report, &f, a, "fresh/zig-out").?;
+    try testing.expectEqual(ten_years_ago, fresh.newest_mtime.?);
+    try testing.expect(!fresh.trash.eligible);
+    try testing.expect(fresh.trash.newest_change.? > realtimeSeconds() - 3600);
+    try testing.expect(try f.scratch.exists("fresh/zig-out/app.exe"));
+    try testing.expect(find(&report, &f, a, "still/zig-out").?.trash.eligible);
+    try testing.expect(!try f.scratch.exists("still/zig-out"));
+}
+
+fn nothingHolds(arena: Allocator, path: []const u8) inuse.Answer {
+    _ = arena;
+    _ = path;
+    return .free;
 }
 
 test "clean leaves a build folder it could not read completely" {

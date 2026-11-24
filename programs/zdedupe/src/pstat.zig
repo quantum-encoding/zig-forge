@@ -33,8 +33,9 @@ pub const Stat = struct {
     mtime_sec: i64,
     /// Last status change (content, owner, mode, links, or a timestamp set
     /// by hand), which unlike the modification time no program can set
-    /// back. 0 where the backend does not report it: Windows, and the bulk
-    /// directory listing (dirstream.zig).
+    /// back. On Windows, the creation time instead (see
+    /// `sys_windows.StatInfo.ctime_sec`). 0 where the backend does not report
+    /// it: the bulk directory listing (dirstream.zig).
     ctime_sec: i64 = 0,
     /// Owner's user id; 0 on Windows.
     uid: u32 = 0,
@@ -164,6 +165,7 @@ fn fromWindows(info: anytype) Error!Stat {
         .mode = i.mode,
         .size = i.size,
         .mtime_sec = i.mtime_sec,
+        .ctime_sec = i.ctime_sec,
         .nlink = i.nlink,
         .allocated = i.allocated,
         .dataless = i.dataless,
