@@ -33,6 +33,12 @@ pub const FileEntry = struct {
     /// APFS data-stream id (macOS): files with the same non-zero id are pure
     /// clones, sharing every block. 0 = unknown.
     clone_id: u64 = 0,
+    /// Files holding that data stream anywhere on the volume (0 = unknown).
+    clone_refs: u32 = 0,
+    /// Its blocks are also held by a file this scan did not list (skipped,
+    /// excluded, or outside the roots), so deleting it frees nothing while
+    /// that file exists. Set by `markClonesHeldElsewhere`.
+    clone_elsewhere: bool = false,
     /// Index of an earlier entry this one is a pure clone of; its hashes are
     /// copied from that entry instead of being read again.
     clone_of: ?usize = null,
@@ -57,12 +63,18 @@ pub const FileEntry = struct {
 };
 
 /// File info within a duplicate group
+/// Set in a clone class whose blocks a file outside the scan also holds:
+/// deleting every member here frees nothing, and keeping one costs nothing.
+pub const clone_elsewhere_bit: u32 = 1 << 31;
+
 pub const DuplicateFileInfo = struct {
     path: []const u8,
     mtime: i64, // seconds since epoch
     /// 0, or a number (from 1) shared by the files of this group that are
     /// pure clones of each other: they share their blocks, so deleting one
-    /// of them frees nothing while another remains.
+    /// of them frees nothing while another remains. With
+    /// `clone_elsewhere_bit`, a file outside the scan holds them too, and
+    /// the class may have one member here.
     clone_class: u32 = 0,
 };
 
@@ -80,6 +92,8 @@ pub const DuplicateGroup = struct {
     savings: u64,
     /// `distinctCopies` of `file_infos`, kept as files are added.
     copies: u64,
+    /// Of those, the clone classes held elsewhere too.
+    held_elsewhere: u64 = 0,
     /// The clone classes in `file_infos`, so an added file's class is known
     /// to be new or not without looking at the files before it.
     classes: std.AutoHashMapUnmanaged(u32, void),
@@ -131,7 +145,14 @@ pub const DuplicateGroup = struct {
         self.file_infos.appendAssumeCapacity(.{ .path = path, .mtime = mtime, .clone_class = clone_class });
         const new_copy = clone_class == 0 or !self.classes.getOrPutAssumeCapacity(clone_class).found_existing;
         self.copies += @intFromBool(new_copy);
-        self.savings = self.size *| (self.copies -| 1);
+        self.held_elsewhere += @intFromBool(new_copy and clone_class & clone_elsewhere_bit != 0);
+        self.savings = self.size *| self.freeableCopies();
+    }
+
+    /// Copies a delete can free: all but one, or, when a copy is held
+    /// elsewhere too (keeping it costs nothing), all but those.
+    fn freeableCopies(self: *const DuplicateGroup) u64 {
+        return self.copies -| @max(1, self.held_elsewhere);
     }
 
     /// Copies of the data the group really holds: every file outside a clone
@@ -140,9 +161,12 @@ pub const DuplicateGroup = struct {
         return self.copies;
     }
 
-    /// Files beyond the first of their clone class.
+    /// Files that bring no copy a delete can free beyond the one kept:
+    /// those beyond the first of their clone class, and every class held
+    /// elsewhere past the first. So `count - cloneFiles - 1` copies can be
+    /// freed (`store.Reader.groupSavings`).
     pub fn cloneFiles(self: *const DuplicateGroup) u64 {
-        return @as(u64, self.file_infos.items.len) - self.distinctCopies();
+        return @as(u64, self.file_infos.items.len) -| self.freeableCopies() -| 1;
     }
 
     pub fn count(self: *const DuplicateGroup) usize {
@@ -247,6 +271,8 @@ pub const Config = struct {
     /// copy of another because the file that differs was outside the size
     /// window.
     analyze_dirs: bool = false,
+    /// Most overlapping folder pairs kept, the largest shared size first.
+    max_overlaps: usize = 500,
     /// Optional progress/cancel channel; see `Monitor`. Borrowed, and must
     /// outlive the scan.
     monitor: ?*Monitor = null,

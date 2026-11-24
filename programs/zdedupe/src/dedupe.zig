@@ -198,6 +198,8 @@ pub const DupeFinder = struct {
         // Extra hard links are carried for directory analysis only.
         self.summary.files_scanned = fw.stats.files_found;
 
+        try markClonesHeldElsewhere(self.allocator, self.files.items);
+
         if (self.files.items.len == 0) {
             self.updateProgress(.done, 0, 0, null);
             return;
@@ -252,7 +254,7 @@ pub const DupeFinder = struct {
                 fw.dirs.items,
                 fw.links.items,
                 self.config.hash_algorithm,
-                .{ .skips = self.skips.items },
+                .{ .skips = self.skips.items, .max_overlaps = self.config.max_overlaps },
             );
         }
 
@@ -657,9 +659,12 @@ pub const DupeFinder = struct {
         }.lessThan);
 
         // A clone id shared by two or more files of the group is a clone
-        // class; the group numbers its classes from 1, in file order. Most
-        // groups hold no clone, and clearing the map costs what the largest
-        // group before made it, so it is only touched for a group with one.
+        // class, and so is one whose blocks a file outside the scan also
+        // holds, even with one file here; such a class carries
+        // `types.clone_elsewhere_bit`. The group numbers its classes from 1,
+        // in file order. Most groups hold no clone, and clearing the map
+        // costs what the largest group before made it, so it is only touched
+        // for a group with one.
         const has_clones = for (members) |idx| {
             if (self.files.items[idx].clone_id != 0) break true;
         } else false;
@@ -669,7 +674,8 @@ pub const DupeFinder = struct {
                 const id = self.files.items[idx].clone_id;
                 if (id == 0) continue;
                 const gop = try classes.getOrPut(self.allocator, id);
-                gop.value_ptr.* = if (gop.found_existing) 1 else 0; // 1 = shared
+                // 1 = a class: shared here, or held elsewhere too.
+                gop.value_ptr.* = if (gop.found_existing or self.files.items[idx].clone_elsewhere) 1 else 0;
             }
             var it = classes.valueIterator();
             while (it.next()) |v| v.* = if (v.* == 1) std.math.maxInt(u32) else 0;
@@ -683,7 +689,7 @@ pub const DupeFinder = struct {
             if (has_clones and entry.clone_id != 0) {
                 const slot = classes.getPtr(entry.clone_id).?;
                 if (slot.* == std.math.maxInt(u32)) {
-                    slot.* = next_class;
+                    slot.* = next_class | if (entry.clone_elsewhere) types.clone_elsewhere_bit else 0;
                     next_class += 1;
                 }
                 class = slot.*;
@@ -724,6 +730,27 @@ pub const DupeFinder = struct {
 /// given, leaving out any that another root already covers. Every string is owned;
 /// free with `realpath.freeAll`.
 /// See `DupeFinder.coveringRoots`; shared with the disk-space scan.
+/// Mark the files whose APFS data stream has more holders on the volume than
+/// the scan listed (`FileEntry.clone_elsewhere`): the others are files it
+/// skipped, excluded or never reached, so deleting every listed holder frees
+/// nothing while they exist. The hard links of one inode are one holder.
+pub fn markClonesHeldElsewhere(allocator: std.mem.Allocator, files: []types.FileEntry) !void {
+    const Key = struct { dev: u64, clone_id: u64 };
+    var listed: std.AutoHashMapUnmanaged(Key, u32) = .empty;
+    defer listed.deinit(allocator);
+    for (files) |entry| {
+        if (entry.clone_refs < 2 or entry.clone_id == 0 or entry.link_of != null) continue;
+        const gop = try listed.getOrPut(allocator, .{ .dev = entry.dev, .clone_id = entry.clone_id });
+        gop.value_ptr.* = if (gop.found_existing) gop.value_ptr.* + 1 else 1;
+    }
+    if (listed.count() == 0) return;
+    for (files) |*entry| {
+        if (entry.clone_refs < 2 or entry.clone_id == 0) continue;
+        const holders = listed.get(.{ .dev = entry.dev, .clone_id = entry.clone_id }) orelse continue;
+        entry.clone_elsewhere = entry.clone_refs > holders;
+    }
+}
+
 pub fn coveringRootsOf(allocator: std.mem.Allocator, paths: []const []const u8) ![][]u8 {
     const canonical = try allocator.alloc(?[]u8, paths.len);
     @memset(canonical, null);
@@ -998,6 +1025,99 @@ test "a folder that is an APFS clone of another in part frees only its own files
     try std.testing.expectEqual(@as(u64, small.len), set.dirs[1].own_bytes);
     try std.testing.expect(set.dirs[0].storage_class != set.dirs[1].storage_class);
     try std.testing.expectEqual(@as(u64, small.len), set.reclaimable);
+}
+
+test "a copy whose blocks a file outside the scan also holds frees nothing, as a file or in its folder" {
+    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "dedupe-clone-elsewhere");
+    defer scratch.deinit();
+
+    // work/a and work/b hold the same two files. work/a/big.bin is a clone
+    // of outside/big.bin, which the scan of work/ never lists (as with a
+    // framework Xcode cloned into DerivedData).
+    const big: [300 * 1024]u8 = @splat('b');
+    const small: [40 * 1024]u8 = @splat('s');
+    for ([_][]const u8{ "outside", "work", "work/a", "work/b" }) |dir| try scratch.makeDir(dir);
+    try scratch.writeFile("outside/big.bin", &big);
+    try scratch.writeFile("work/a/small.bin", &small);
+    try scratch.writeFile("work/b/big.bin", &big);
+    try scratch.writeFile("work/b/small.bin", &small);
+    const from = try scratch.joinZ("outside/big.bin");
+    defer allocator.free(from);
+    const to = try scratch.joinZ("work/a/big.bin");
+    defer allocator.free(to);
+    if (clonefile(from, to, 0) != 0) return error.SkipZigTest;
+    const root = try std.fmt.allocPrint(allocator, "{s}/work", .{scratch.path});
+    defer allocator.free(root);
+
+    var finder = DupeFinder.init(allocator, .{ .analyze_dirs = true });
+    defer finder.deinit();
+    try finder.scan(&.{root});
+
+    // The big pair: keeping work/a's clone costs nothing, so deleting
+    // work/b's copy frees its size, and nothing more is there to free.
+    var big_group: ?*const types.DuplicateGroup = null;
+    for (finder.getGroups()) |*g| {
+        if (g.size == big.len) big_group = g;
+    }
+    const group = big_group.?;
+    try std.testing.expectEqual(@as(u64, big.len), group.savings);
+    try std.testing.expectEqual(@as(u64, 0), group.cloneFiles());
+    for (group.file_infos.items) |info| {
+        const in_a = std.mem.indexOf(u8, info.path, "/work/a/") != null;
+        try std.testing.expectEqual(in_a, info.clone_class & types.clone_elsewhere_bit != 0);
+    }
+
+    // As folders: work/a brings only its small file; deleting it frees that.
+    const analysis = finder.getDirAnalysis().?;
+    try std.testing.expectEqual(@as(usize, 1), analysis.identical_sets.len);
+    const set = analysis.identical_sets[0];
+    try std.testing.expect(std.mem.endsWith(u8, set.dirs[0].path, "/work/a"));
+    try std.testing.expectEqual(@as(u64, small.len), set.dirs[0].own_bytes);
+    try std.testing.expectEqual(@as(u64, big.len + small.len), set.dirs[1].own_bytes);
+    try std.testing.expectEqual(@as(u64, small.len), set.reclaimable);
+}
+
+test "an overlap list cut to the largest pairs says so" {
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "dedupe-overlap-cap");
+    defer scratch.deinit();
+
+    // a/ and b/ share three files and each has one of its own; so do c/ and
+    // d/, with other content: two overlapping pairs.
+    for ([_][]const u8{ "a", "b", "c", "d" }) |dir| try scratch.makeDir(dir);
+    for ([_][2][]const u8{ .{ "a", "b" }, .{ "c", "d" } }) |pair| {
+        for (0..3) |i| {
+            var data: [8 * 1024]u8 = @splat(@intCast('0' + i));
+            data[0] = pair[0][0];
+            for (pair) |dir| {
+                const name = try std.fmt.allocPrint(allocator, "{s}/shared{d}.bin", .{ dir, i });
+                defer allocator.free(name);
+                try scratch.writeFile(name, &data);
+            }
+        }
+        for (pair) |dir| {
+            const name = try std.fmt.allocPrint(allocator, "{s}/own.bin", .{dir});
+            defer allocator.free(name);
+            const own: [4 * 1024]u8 = @splat(dir[0]);
+            try scratch.writeFile(name, &own);
+        }
+    }
+
+    var all = DupeFinder.init(allocator, .{ .analyze_dirs = true });
+    defer all.deinit();
+    try all.scan(&.{scratch.path});
+    try std.testing.expectEqual(@as(usize, 2), all.getDirAnalysis().?.overlaps.len);
+    try std.testing.expect(!all.getDirAnalysis().?.overlaps_capped);
+
+    var one = DupeFinder.init(allocator, .{ .analyze_dirs = true, .max_overlaps = 1 });
+    defer one.deinit();
+    try one.scan(&.{scratch.path});
+    try std.testing.expectEqual(@as(usize, 1), one.getDirAnalysis().?.overlaps.len);
+    try std.testing.expect(one.getDirAnalysis().?.overlaps_capped);
 }
 
 test "a root given through a link is walked by its real path, and so is an exclude" {

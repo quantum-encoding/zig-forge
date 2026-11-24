@@ -104,6 +104,7 @@ const ATTR_FILE_ALLOCSIZE: u32 = 0x00000004;
 const ATTR_FILE_DATALENGTH: u32 = 0x00000200;
 // CMNEXT attributes ride in the forkattr field when FSOPT_ATTR_CMN_EXTENDED is set.
 const ATTR_CMNEXT_CLONEID: u32 = 0x00000100;
+const ATTR_CMNEXT_CLONE_REFCNT: u32 = 0x00001000;
 const FSOPT_ATTR_CMN_EXTENDED: u64 = 0x00000020;
 
 // sys/vnode.h `enum vtype`
@@ -119,7 +120,7 @@ const bulk_attrs: AttrList = .{
     .commonattr = ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_ERROR | ATTR_CMN_NAME | ATTR_CMN_DEVID |
         ATTR_CMN_OBJTYPE | ATTR_CMN_MODTIME | ATTR_CMN_FLAGS | ATTR_CMN_FILEID,
     .fileattr = ATTR_FILE_LINKCOUNT | ATTR_FILE_ALLOCSIZE | ATTR_FILE_DATALENGTH,
-    .forkattr = ATTR_CMNEXT_CLONEID,
+    .forkattr = ATTR_CMNEXT_CLONEID | ATTR_CMNEXT_CLONE_REFCNT,
 };
 
 /// sys/mount.h `struct statfs` (the 64-bit-inode layout).
@@ -294,6 +295,7 @@ pub const BulkDirStream = struct {
         st.size = if (size > 0) @intCast(size) else 0;
         // CMNEXT attributes follow the file attributes.
         if (ext & ATTR_CMNEXT_CLONEID != 0) st.clone_id = r.int(u64);
+        if (ext & ATTR_CMNEXT_CLONE_REFCNT != 0) st.clone_refs = r.int(u32);
         return .{ .name = name, .kind = DT_REG, .stat = st };
     }
 };

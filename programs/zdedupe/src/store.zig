@@ -46,6 +46,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("types.zig");
+/// See `GroupFile.clone_class`.
+pub const clone_elsewhere_bit = types.clone_elsewhere_bit;
 const dirs = @import("dirs.zig");
 const space = @import("space.zig");
 const libc = @import("sys.zig").c;
@@ -64,6 +66,8 @@ pub const v1_header_size: usize = 256;
 
 pub const flag_has_directories: u64 = 1 << 0;
 pub const flag_sha256: u64 = 1 << 1;
+/// The overlaps section holds only the largest pairs; more may exist.
+pub const flag_overlaps_capped: u64 = 1 << 2;
 
 pub const SectionId = enum(usize) {
     groups = 0,
@@ -133,9 +137,10 @@ pub const Group = extern struct {
     /// Index of the group's first record in GROUP_FILES.
     first_file: u64,
     file_count: u32,
-    /// Files beyond the first of their clone class (see `GroupFile`): the
-    /// group holds `file_count - clone_files` copies of the data. 0 in
-    /// version 1 stores.
+    /// Files that add no copy a delete can free (see `GroupFile`): those
+    /// beyond the first of their clone class, and each clone class held
+    /// elsewhere too past the first. `file_count - clone_files - 1` copies
+    /// can be freed. 0 in version 1 stores.
     clone_files: u32 = 0,
 };
 
@@ -146,7 +151,9 @@ pub const GroupFile = extern struct {
     path_len: u32,
     /// 0, or the group-local number (from 1) its pure clones share: files of
     /// one class share their blocks (APFS), so deleting one frees nothing
-    /// while another is kept. 0 in version 1 stores.
+    /// while another is kept. With bit 31 (`types.clone_elsewhere_bit`) a
+    /// file the scan did not list holds them too: the class frees nothing,
+    /// and may have one member. 0 in version 1 stores.
     clone_class: u32 = 0,
 };
 
@@ -277,7 +284,8 @@ fn writeAll(out: *FileWriter, source: Source) WriteError!void {
     const summary = source.summary;
     var header: Header = .{
         .flags = (if (source.analysis != null) flag_has_directories else 0) |
-            (if (source.algorithm == .sha256) flag_sha256 else 0),
+            (if (source.algorithm == .sha256) flag_sha256 else 0) |
+            (if (source.analysis) |a| (if (a.overlaps_capped) flag_overlaps_capped else 0) else 0),
         .generated_at = nowSeconds(),
         .files_scanned = summary.files_scanned,
         .bytes_scanned = summary.bytes_scanned,
@@ -742,6 +750,10 @@ pub const Reader = struct {
 
     pub fn isSha256(self: *const Reader) bool {
         return self.header.flags & flag_sha256 != 0;
+    }
+
+    pub fn overlapsCapped(self: *const Reader) bool {
+        return self.header.flags & flag_overlaps_capped != 0;
     }
 
     /// The bytes of record `i` in section `id`.

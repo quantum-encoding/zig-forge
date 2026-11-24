@@ -37,18 +37,23 @@ pub const Overview = struct {
     identical_sets: u64 = 0,
     overlaps: u64 = 0,
     redundant_pairs: u64 = 0,
+    overlaps_capped: bool = false,
     reclaimable: u64 = 0,
+    deletable_savings: u64 = 0,
+    deletable_reclaimable: u64 = 0,
 };
 
 pub const GroupRow = struct {
     count: u64 = 0,
     size: u64 = 0,
     savings: u64 = 0,
+    deletable: u64 = 0,
     files: []const []const u8 = &.{},
     mtimes: []const i64 = &.{},
     keeper: ?[]const u8 = null,
     locked: []const bool = &.{},
     clones: []const u32 = &.{},
+    elsewhere: []const bool = &.{},
 };
 
 pub const Dir = struct {
@@ -64,6 +69,7 @@ pub const SetRow = struct {
     file_count: u64 = 0,
     bytes: u64 = 0,
     reclaimable: u64 = 0,
+    deletable: u64 = 0,
     dirs: []const Dir = &.{},
 };
 
@@ -209,6 +215,19 @@ fn sharedWith(comptime T: type, classes: []const T, i: usize) ?usize {
     return null;
 }
 
+/// "1.02 GB to reclaim", then `how` (" as whole folders" or empty), and
+/// what protected locations keep of `all` beside it: `deletable` is what
+/// deleting the copies that may go frees.
+fn writeReclaim(w: *Writer, deletable: u64, all: u64, how: []const u8, units: Units) Writer.Error!void {
+    var buf: [size_buf_len]u8 = undefined;
+    const kept = all -| deletable;
+    if (deletable == 0 and kept > 0) {
+        return w.print("nothing to reclaim{s} ({s} is kept by protected locations)", .{ how, size(kept, units, &buf) });
+    }
+    try w.print("{s} to reclaim{s}", .{ size(deletable, units, &buf), how });
+    if (kept > 0) try w.print(" ({s} more is kept by protected locations)", .{size(kept, units, &buf)});
+}
+
 fn baseName(path: []const u8) []const u8 {
     const trimmed = std.mem.trimEnd(u8, path, "/\\");
     const cut = std.mem.lastIndexOfAny(u8, trimmed, "/\\") orelse return trimmed;
@@ -241,14 +260,24 @@ pub fn render(w: *Writer, in: Input) !void {
     try writeCounted(w, o.duplicate_files, "duplicate file", "duplicate files");
     try w.writeAll(" in ");
     try writeCounted(w, o.duplicate_groups, "group", "groups");
-    try w.print(", {s} to reclaim\n", .{size(o.space_savings, u, &buf)});
+    try w.writeAll(", ");
+    try writeReclaim(w, o.deletable_savings, o.space_savings, "", u);
+    try w.writeByte('\n');
 
     if (o.has_directories) {
         try writeLabel(w, "Folders:");
         try writeCounted(w, o.identical_sets, "identical folder set", "identical folder sets");
-        try w.print(", {s} to reclaim as whole folders\n", .{size(o.reclaimable, u, &buf)});
+        try w.writeAll(", ");
+        try writeReclaim(w, o.deletable_reclaimable, o.reclaimable, " as whole folders", u);
+        try w.writeByte('\n');
         try w.writeAll(&pad);
-        try writeCounted(w, o.overlaps, "overlapping pair", "overlapping pairs");
+        if (o.overlaps_capped) {
+            try w.writeAll("the ");
+            try writeCount(w, o.overlaps);
+            try w.writeAll(" largest overlapping pairs");
+        } else {
+            try writeCounted(w, o.overlaps, "overlapping pair", "overlapping pairs");
+        }
         try w.writeAll(", ");
         try writeCount(w, o.redundant_pairs);
         try w.writeAll(" where one folder holds all of the other\n");
@@ -303,8 +332,9 @@ fn renderSets(w: *Writer, sets: Sets, in: Input) !void {
         try writeCounted(w, row.count, "copy", "copies");
         try w.writeAll(" · ");
         try writeCounted(w, row.file_count, "file", "files");
-        try w.print(" · {s} each", .{size(row.bytes, u, &buf)});
-        try w.print(" · {s} to reclaim\n", .{size(row.reclaimable, u, &buf)});
+        try w.print(" · {s} each · ", .{size(row.bytes, u, &buf)});
+        try writeReclaim(w, row.deletable, row.reclaimable, "", u);
+        try w.writeByte('\n');
 
         var classes: [256]u32 = undefined;
         const listed = row.dirs[0..@min(row.dirs.len, sets.dirs, classes.len)];
@@ -331,6 +361,11 @@ fn renderOverlaps(w: *Writer, overlaps: Overlaps, in: Input) !void {
     var buf: [size_buf_len]u8 = undefined;
     try w.writeAll("\nOverlapping Folders\n");
     try writeListHead(w, overlaps.total, "pair", "pairs", "shared size", overlaps.filters, u, overlaps.rows.len, true);
+    if (in.overview.overlaps_capped) {
+        try w.writeAll("The scan kept the ");
+        try writeCount(w, in.overview.overlaps);
+        try w.writeAll(" largest pairs; more folders may overlap.\n");
+    }
     for (overlaps.rows, 1..) |row, n| {
         try w.print("\n{d}. ", .{n});
         if (std.mem.eql(u8, row.relation, "same_content")) {
@@ -386,7 +421,9 @@ fn renderGroups(w: *Writer, groups: Groups, in: Input) !void {
     for (groups.rows, 1..) |row, n| {
         try w.print("\n{d}. {s} each · ", .{ n, size(row.size, u, &buf) });
         try writeCounted(w, row.count, "copy", "copies");
-        try w.print(" · {s} to reclaim\n", .{size(row.savings, u, &buf)});
+        try w.writeAll(" · ");
+        try writeReclaim(w, row.deletable, row.savings, "", u);
+        try w.writeByte('\n');
         const listed = row.files[0..@min(row.files.len, groups.files)];
         for (listed, 0..) |path, i| {
             const kept = if (row.keeper) |k| std.mem.eql(u8, k, path) else false;
@@ -395,6 +432,9 @@ fn renderGroups(w: *Writer, groups: Groups, in: Input) !void {
             if (i < row.locked.len and row.locked[i]) try w.writeAll(", protected");
             if (sharedWith(u32, row.clones[0..@min(row.clones.len, listed.len)], i)) |copy| {
                 try w.print(", clone of copy {d}", .{copy});
+            }
+            if (i < row.elsewhere.len and row.elsewhere[i]) {
+                try w.writeAll(", shares its storage with a file outside the scan");
             }
             try w.writeAll(")\n");
         }
@@ -452,6 +492,19 @@ test "a clone names the first listed copy of its class" {
     try testing.expectEqual(@as(?usize, null), sharedWith(u32, &classes, 2));
     try testing.expectEqual(@as(?usize, 2), sharedWith(u32, &classes, 3));
     try testing.expectEqual(@as(?usize, 2), sharedWith(u32, &classes, 4));
+}
+
+test "space to reclaim is what can be deleted, with what protected locations keep beside it" {
+    var out: Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try writeReclaim(&out.writer, 1024, 1024, "", .binary);
+    try out.writer.writeAll("|");
+    try writeReclaim(&out.writer, 1024, 3072, " as whole folders", .binary);
+    try out.writer.writeAll("|");
+    try writeReclaim(&out.writer, 0, 2048, "", .binary);
+    try testing.expectEqualStrings("1.00 KB to reclaim|" ++
+        "1.00 KB to reclaim as whole folders (2.00 KB more is kept by protected locations)|" ++
+        "nothing to reclaim (2.00 KB is kept by protected locations)", out.written());
 }
 
 test "only the overlap list says partial overlaps are hidden" {

@@ -89,13 +89,23 @@ const char* zdedupe_results_overview(zdedupe_results* r);
   "excluded_entries": 0, "overlapping_roots": 0, "failed_paths": 0,
   "dataless_skipped": 0, "dataless_bytes": 0, "clone_hash_skips": 0,
   "has_directories": false, "dirs_analyzed": 0, "dirs_incomplete": 0,
-  "identical_sets": 0, "overlaps": 0, "redundant_pairs": 0, "reclaimable": 0 }
+  "identical_sets": 0, "overlaps": 0, "overlaps_capped": false,
+  "redundant_pairs": 0, "reclaimable": 0,
+  "deletable_savings": 0, "deletable_reclaimable": 0 }
 ```
 Counters are the scan's own; they do not change with deletes (the UIs say
 so beside them). `reclaimable` = what deleting every copy of every identical
 set but its first frees: each copy's own storage (blocks no earlier copy
-shares), a copy inside another deleted copy counted once;
-`redundant_pairs` = overlap pairs where at least one side has nothing unique.
+shares, and no file outside the scan holds too), a copy inside another
+deleted copy counted once;
+`redundant_pairs` = overlap pairs where at least one side has nothing unique;
+`overlaps_capped` = the scan kept only its largest pairs, so say "the N
+largest". `deletable_savings` / `deletable_reclaimable` = the parts of
+`space_savings` / `reclaimable` that deleting the copies that may go frees
+(every group's and set's `deletable`, as scanned, under the protected
+locations set now): headline those as the space to reclaim, and the rest as
+what protected locations keep. Worked out on the first call after open or
+`set_protected` (about 2 s for 1.6 million copies), then reused.
 Roots come from the sidecar, else the deepest directory containing every
 path in the results (`results.rs common_root`).
 
@@ -125,13 +135,20 @@ Query: `{ "offset": 0, "limit": 50, "sort": "savings"|"size"|"count",
 Page: `{ "rows": [GroupRow], "total": N, "offset": 0 }` where
 ```json
 { "hash": "64 hex", "count": 3, "size": 1048576, "savings": 2097152,
-  "files": ["/oldest", "/next", ...], "mtimes": [ms, ms, ...], "bulk": false }
+  "deletable": 1048576,
+  "files": ["/oldest", "/next", ...], "mtimes": [ms, ms, ...],
+  "clones": [0, ...], "elsewhere": [false, ...], "bulk": false }
 ```
 `count`/`savings` are over **alive** copies (removed overlay applied);
 `files` lists at most 50, oldest first (index 0 is the keeper); `bulk` is
-`alive ≥ 2 && rule matches`. Order: `savings` is the store's own order
-until anything has been deleted, then live savings desc; `size` and
-`count` desc; stable, so ties keep largest-savings-first. Groups with fewer
+`alive ≥ 2 && rule matches`. `elsewhere[i]`: the file is an APFS clone of a
+file the scan did not list, which keeps its blocks, so deleting it frees
+nothing and keeping it costs nothing (`savings` is then every other copy).
+`deletable` = the part of `savings` that deleting the copies that may go
+frees, at most: protected copies stay, and so does one unprotected copy.
+Order: `savings` puts the most `deletable` first, so groups nothing can be
+deleted from come last, then the most savings; `size` and `count` desc;
+stable, so ties keep largest-savings-first. Groups with fewer
 than two alive copies are not rows. The order for a (sort, filters, removed
 generation) is computed once and cached (four bytes per matching group).
 
@@ -254,7 +271,7 @@ order.
 ## Folders (stage B)
 
 ```c
-const char* zdedupe_results_identical_sets(zdedupe_results* r, const char* query_json); /* {offset,limit,filters} -> Page<SetRow> */
+const char* zdedupe_results_identical_sets(zdedupe_results* r, const char* query_json); /* {offset,limit,filters} -> Page<SetRow>; SetRow.deletable: what deleting the copies that may go frees (a protected copy vouches for the rest); "reclaim" order: most deletable first */
 const char* zdedupe_results_set_members(zdedupe_results* r, size_t index);             /* every alive member */
 const char* zdedupe_results_overlaps(zdedupe_results* r, const char* query_json);      /* Page<OverlapRow> */
 const char* zdedupe_results_facets(zdedupe_results* r, const char* query_json);        /* {kind,by,filters,limit} -> FacetPage */

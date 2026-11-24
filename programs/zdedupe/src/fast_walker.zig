@@ -79,6 +79,8 @@ pub const FastFileEntry = struct {
     dataless: bool = false,
     /// APFS data-stream id; see `pstat.Stat.clone_id`.
     clone_id: u64 = 0,
+    /// See `pstat.Stat.clone_refs`.
+    clone_refs: u32 = 0,
     /// Index of the entry that stands for this inode, when this entry is an
     /// extra hard link to it. Only ever set in tree-recording mode; otherwise
     /// extra hard links are dropped.
@@ -621,6 +623,7 @@ const Worker = struct {
             .allocated = st.allocated,
             .dataless = st.dataless,
             .clone_id = st.clone_id,
+            .clone_refs = st.clone_refs,
         });
         return true;
     }
@@ -1367,6 +1370,7 @@ pub const FastWalker = struct {
                 .allocated = fast.allocated,
                 .dataless = fast.dataless,
                 .clone_id = fast.clone_id,
+                .clone_refs = fast.clone_refs,
             });
         }
         worker.files.clearAndFree(self.allocator);

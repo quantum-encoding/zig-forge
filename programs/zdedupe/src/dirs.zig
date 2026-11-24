@@ -117,12 +117,15 @@ pub const DirInfo = struct {
     /// Numbered from 1 in path order: a member takes a new number unless
     /// every file in it with content shares its blocks (APFS clones, hard
     /// links) with an earlier member, whose number it then takes. Deleting a
-    /// member frees nothing while another of its number is left.
+    /// member frees nothing while another of its number is left. 0 when
+    /// files outside the scan hold every block it has (APFS clones of
+    /// skipped files): it holds no copy of its own.
     storage_class: u32 = 0,
     /// Bytes of storage this member brings into the set that no member
     /// before it holds: its files with content whose blocks (clone class or
-    /// inode) no earlier member shares. Their sum over the members is what
-    /// the set takes on disk.
+    /// inode) no earlier member shares, and that no file outside the scan
+    /// holds too (`FileEntry.clone_elsewhere`). Their sum over the members
+    /// is what deleting every member would free.
     own_bytes: u64 = 0,
 };
 
@@ -191,6 +194,9 @@ pub const Analysis = struct {
     identical_sets: []IdenticalSet,
     /// Largest shared size first.
     overlaps: []Overlap,
+    /// `overlaps` holds only the largest pairs (`Options.max_overlaps`):
+    /// more folders may overlap.
+    overlaps_capped: bool = false,
 
     pub fn deinit(self: *Analysis) void {
         self.arena.deinit();
@@ -317,6 +323,7 @@ pub fn analyze(
 
     result.identical_sets = try analyzer.findIdenticalSets();
     result.overlaps = try analyzer.findOverlaps();
+    result.overlaps_capped = analyzer.overlaps_capped;
     return result;
 }
 
@@ -352,6 +359,8 @@ const Analyzer = struct {
     seen_b: []u32 = &.{},
     pair_tag: u32 = 0,
     only_scratch: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// Set by `findOverlaps`; see `Analysis.overlaps_capped`.
+    overlaps_capped: bool = false,
 
     const Twins = struct { representative: NodeId, count: u64 };
 
@@ -791,6 +800,9 @@ const Analyzer = struct {
             }
         }.lessThan);
 
+        // Candidates past `examine` were never compared, so either way the
+        // list may leave pairs out.
+        self.overlaps_capped = candidates.items.len > examine or overlaps.items.len > self.options.max_overlaps;
         if (overlaps.items.len > self.options.max_overlaps) {
             overlaps.shrinkRetainingCapacity(self.options.max_overlaps);
         }
@@ -968,9 +980,17 @@ const Analyzer = struct {
         const files = self.subtreeFiles(node);
         var shared_with: u32 = std.math.maxInt(u32);
         var shares = true;
+        var holds_any = false;
+        var held_elsewhere = false;
         for (files) |index| {
             const entry = &self.files[index];
             if (entry.size == 0) continue;
+            // A file outside the scan keeps these blocks whatever goes.
+            if (entry.clone_elsewhere) {
+                held_elsewhere = true;
+                continue;
+            }
+            holds_any = true;
             if (seen.get(storageOf(entry.*, index))) |class| {
                 shared_with = @min(shared_with, class);
             } else {
@@ -979,11 +999,12 @@ const Analyzer = struct {
             }
         }
         if (shares and shared_with != std.math.maxInt(u32)) return .{ .class = shared_with, .own_bytes = 0 };
+        if (!holds_any and held_elsewhere) return .{ .class = 0, .own_bytes = 0 };
         classes.* += 1;
         var own: u64 = 0;
         for (files) |index| {
             const entry = &self.files[index];
-            if (entry.size == 0) continue;
+            if (entry.size == 0 or entry.clone_elsewhere) continue;
             const gop = try seen.getOrPut(self.scratch, storageOf(entry.*, index));
             if (!gop.found_existing) {
                 gop.value_ptr.* = classes.*;

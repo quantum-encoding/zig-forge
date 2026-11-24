@@ -151,7 +151,7 @@
       "description": "One set of identical files. Which copy stays is the query's KeepSpec decision, reported in keeper, locked and targets — not the position in files. A group with fewer than two alive copies is not a row at all.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["hash", "count", "size", "savings", "files", "mtimes", "keeper", "locked", "targets", "clones", "bulk"],
+      "required": ["hash", "count", "size", "savings", "deletable", "files", "mtimes", "keeper", "locked", "targets", "clones", "elsewhere", "bulk"],
       "properties": {
         "hash": { "$ref": "#/$defs/Sha256Hex" },
         "count": {
@@ -164,7 +164,11 @@
           "$ref": "#/$defs/ByteCount"
         },
         "savings": {
-          "description": "What deleting every copy but the keeper reclaims, over the alive copies: size * (distinct copies - 1), where the files of one clone class (see clones) count as a single copy.",
+          "description": "What deleting every copy but one reclaims, over the alive copies: size * (distinct copies - 1), where the files of one clone class (see clones) count as a single copy. A copy whose blocks a file outside the scan also holds (see elsewhere) frees nothing and costs nothing to keep, so with one the group frees every other copy and no more.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "deletable": {
+          "description": "Of savings, what deleting the copies that may go frees, at most: protected copies stay (see locked), and so does one unprotected copy. 0 when nothing can be deleted. The savings order lists groups by this first.",
           "$ref": "#/$defs/ByteCount"
         },
         "files": {
@@ -205,6 +209,13 @@
           "minItems": 2,
           "maxItems": 50,
           "items": { "type": "integer", "minimum": 0 }
+        },
+        "elsewhere": {
+          "description": "Aligned with files: the file is an APFS clone of a file the scan did not list (skipped, excluded or outside the roots), which keeps its blocks, so deleting it frees nothing while that file exists. Always false off APFS.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 50,
+          "items": { "type": "boolean" }
         },
         "bulk": {
           "description": "True when the query carried a bulk rule and this row is covered by it: alive >= 2 and the rule matches. Absent rule means false, never omitted.",
@@ -265,7 +276,7 @@
       "description": "A group of folders whose entire subtrees match — names, file content, symlink targets. Only the top-most folder of each copied tree is listed.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["index", "digest", "count", "common_parent", "file_count", "bytes", "reclaimable", "dirs"],
+      "required": ["index", "digest", "count", "common_parent", "file_count", "bytes", "reclaimable", "deletable", "dirs"],
       "properties": {
         "index": {
           "description": "Handle for zdedupe_results_set_members, the one unpaged call in the API.",
@@ -289,7 +300,11 @@
           "$ref": "#/$defs/ByteCount"
         },
         "reclaimable": {
-          "description": "What deleting every alive copy but the one holding most of its own frees. Each copy holds the storage it brings into the set (its files whose blocks no earlier copy shares, APFS clones and hard links), so clones, wholly or in part, count their shared blocks once.",
+          "description": "What deleting every alive copy but the one holding most of its own frees. Each copy holds the storage it brings into the set (its files whose blocks no earlier copy shares, APFS clones and hard links, and that no file outside the scan holds too), so clones, wholly or in part, count their shared blocks once.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "deletable": {
+          "description": "Of reclaimable, what deleting the copies that may go frees, at most. Protected copies (locked) stay; one vouches for the others as any untouched copy does for a folder delete, so they may all go, except a copy in a protected copy's storage class, which frees nothing. With no protected copy, as reclaimable. The reclaim order lists sets by this first.",
           "$ref": "#/$defs/ByteCount"
         },
         "dirs": {
@@ -428,7 +443,7 @@
       "description": "Response of zdedupe_results_overview: the scan's own counters plus what the folder sections add up to. These counters are the SCAN's and do NOT change as files are deleted — a host must say so beside them rather than let them read as live. Every field is always present; hosts should not treat any as optional.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["roots", "generated_at", "files_scanned", "bytes_scanned", "duplicate_groups", "duplicate_files", "space_savings", "scan_time_ns", "excluded_entries", "overlapping_roots", "failed_paths", "dataless_skipped", "dataless_bytes", "clone_hash_skips", "has_directories", "dirs_analyzed", "dirs_incomplete", "identical_sets", "overlaps", "redundant_pairs", "reclaimable"],
+      "required": ["roots", "generated_at", "files_scanned", "bytes_scanned", "duplicate_groups", "duplicate_files", "space_savings", "scan_time_ns", "excluded_entries", "overlapping_roots", "failed_paths", "dataless_skipped", "dataless_bytes", "clone_hash_skips", "has_directories", "dirs_analyzed", "dirs_incomplete", "identical_sets", "overlaps", "overlaps_capped", "redundant_pairs", "reclaimable", "deletable_savings", "deletable_reclaimable"],
       "properties": {
         "roots": {
           "description": "The folders that were scanned. Empty if not recorded; on reopening, taken from the sidecar or inferred as the deepest directory containing every result.",
@@ -487,6 +502,10 @@
         },
         "identical_sets": { "type": "integer", "minimum": 0 },
         "overlaps": { "type": "integer", "minimum": 0 },
+        "overlaps_capped": {
+          "description": "The scan kept only its largest overlapping pairs (by shared size): more folders may overlap than overlaps counts.",
+          "type": "boolean"
+        },
         "redundant_pairs": {
           "description": "Overlap pairs where at least one side has nothing unique — the ones where deleting that side loses nothing.",
           "type": "integer",
@@ -494,6 +513,14 @@
         },
         "reclaimable": {
           "description": "What deleting every copy of every identical folder set but its first frees, as scanned: each copy counted as in SetRow, and a copy inside another deleted copy (of another set) counted once, with it.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "deletable_savings": {
+          "description": "Of space_savings, what deleting the copies that may go frees: each group's deletable (GroupRow), as scanned, under the protected locations the session has now.",
+          "$ref": "#/$defs/ByteCount"
+        },
+        "deletable_reclaimable": {
+          "description": "Of reclaimable, what deleting the copies that may go frees: protected copies stay and vouch for the rest of their set (see SetRow.deletable), and a set with none keeps its first; a copy inside another deleted copy counted once.",
           "$ref": "#/$defs/ByteCount"
         }
       }

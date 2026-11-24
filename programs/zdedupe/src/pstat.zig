@@ -53,6 +53,9 @@ pub const Stat = struct {
     /// APFS data-stream id, from a bulk directory listing (dirstream.zig);
     /// 0 when unknown. Equal non-zero ids mean pure clones.
     clone_id: u64 = 0,
+    /// How many files hold `clone_id`'s data stream, this one included,
+    /// wherever they are on the volume; 0 when unknown.
+    clone_refs: u32 = 0,
 
     pub const IFMT: u32 = 0o170000;
     pub const IFREG: u32 = 0o100000;

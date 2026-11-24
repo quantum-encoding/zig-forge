@@ -2428,6 +2428,80 @@ test "delete_only_under empties a folder of what exists elsewhere" {
     }
 }
 
+test "what can be deleted comes first and is counted apart from copies in protected locations" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // x: one copy in vault/, one outside. w and z: every copy in vault/.
+    // y: no copy in vault/. As folders: vault/a with work/a, vault/c with
+    // vault/d, plain1 with plain2.
+    var fixture = try Fixture.initDirs(gpa, "session-deletable", &[_]File{
+        .{ .path = "vault/a/x.bin", .byte = 'x', .size = 800 },
+        .{ .path = "work/a/x.bin", .byte = 'x', .size = 800 },
+        .{ .path = "vault/c/w.bin", .byte = 'w', .size = 2000 },
+        .{ .path = "vault/d/w.bin", .byte = 'w', .size = 2000 },
+        .{ .path = "vault/z.bin", .byte = 'z', .size = 500 },
+        .{ .path = "vault/z2.bin", .byte = 'z', .size = 500 },
+        .{ .path = "plain1/y.bin", .byte = 'y', .size = 300 },
+        .{ .path = "plain2/y.bin", .byte = 'y', .size = 300 },
+    });
+    defer fixture.deinit();
+    var s = try fixture.open(null);
+    defer s.close();
+
+    // Nothing protected yet: everything can be deleted.
+    const before = try parse(a, s.overview());
+    try testing.expectEqual(@as(i64, 3600), int(before, "space_savings"));
+    try testing.expectEqual(@as(i64, 3600), int(before, "deletable_savings"));
+    try testing.expectEqual(int(before, "reclaimable"), int(before, "deletable_reclaimable"));
+    try testing.expect(!field(before, "overlaps_capped").bool);
+
+    try testing.expect(s.setProtected(try query(a, "[{s}]", .{try jsonString(a, try treeJoin(a, &fixture, "vault"))})));
+
+    // Files: only y can go, since a vault copy does not make work/'s
+    // expendable. The savings stay what the scan found.
+    const after = try parse(a, s.overview());
+    try testing.expectEqual(@as(i64, 3600), int(after, "space_savings"));
+    try testing.expectEqual(@as(i64, 300), int(after, "deletable_savings"));
+    // Folders: vault/a vouches for work/a (800), plain2 goes (300), and
+    // nothing of vault/c and vault/d.
+    try testing.expectEqual(@as(i64, 3100), int(after, "reclaimable"));
+    try testing.expectEqual(@as(i64, 1100), int(after, "deletable_reclaimable"));
+
+    // What can be deleted first; groups nothing can go from last, largest
+    // savings first among them.
+    const page = try parse(a, s.groups("{\"offset\":0,\"limit\":10}"));
+    try testing.expectEqualSlices(i64, &.{ 300, 2000, 800, 500 }, try rowSizes(a, page));
+    const deletable = [_]i64{ 300, 0, 0, 0 };
+    for (field(page, "rows").array.items, deletable) |row, want| {
+        try testing.expectEqual(want, int(row, "deletable"));
+        for (field(row, "elsewhere").array.items) |flag| try testing.expect(!flag.bool);
+    }
+
+    // Sets: work/a can go whole, plain2 can, vault/c and vault/d cannot.
+    const sets = try parse(a, s.identicalSets("{\"offset\":0,\"limit\":10}"));
+    const rows = field(sets, "rows").array.items;
+    try testing.expectEqual(@as(usize, 3), rows.len);
+    const want_sets = [_][2]i64{ .{ 800, 800 }, .{ 300, 300 }, .{ 0, 2000 } };
+    for (rows, want_sets) |row, want| {
+        try testing.expectEqual(want[0], int(row, "deletable"));
+        try testing.expectEqual(want[1], int(row, "reclaimable"));
+    }
+
+    // The report says the same: the headline, and each list in that order.
+    const text = field(try parse(a, s.duplicatesReport("{}")), "text").string;
+    try testing.expect(contains(text, " to reclaim ("));
+    try testing.expect(contains(text, " more is kept by protected locations)"));
+    try testing.expect(contains(text, " to reclaim as whole folders ("));
+    try testing.expect(contains(text, "nothing to reclaim ("));
+    const files_list = std.mem.indexOf(u8, text, "\nDuplicate Files\n").?;
+    const y = std.mem.indexOfPos(u8, text, files_list, "plain1/y.bin").?;
+    const w = std.mem.indexOfPos(u8, text, files_list, "vault/c/w.bin").?;
+    try testing.expect(y < w);
+}
+
 test "a protected copy is never deleted, by a rule or by hand" {
     const gpa = testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);

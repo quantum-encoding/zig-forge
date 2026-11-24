@@ -539,15 +539,26 @@ const char* zdedupe_results_last_error(const zdedupe_results* r);
  *   "excluded_entries": 0, "overlapping_roots": 0, "failed_paths": 0,
  *   "dataless_skipped": 0, "dataless_bytes": 0, "clone_hash_skips": 0,
  *   "has_directories": false, "dirs_analyzed": 0, "dirs_incomplete": 0,
- *   "identical_sets": 0, "overlaps": 0, "redundant_pairs": 0,
- *   "reclaimable": 0 }
+ *   "identical_sets": 0, "overlaps": 0, "overlaps_capped": false,
+ *   "redundant_pairs": 0, "reclaimable": 0,
+ *   "deletable_savings": 0, "deletable_reclaimable": 0 }
  *
  * These counters are the SCAN's and do not change with deletes; say so
  * beside them. "dataless_skipped" counts cloud placeholders (macOS) that
  * were not downloaded and so not compared; a host should say so. "reclaimable" is what deleting every copy of
  * every identical folder set but its first would free, each copy counted as in SetRow, and a copy that
  * lies inside another deleted copy (of another set) counted once, with it; "redundant_pairs" counts overlap pairs where at
- * least one side has nothing unique.
+ * least one side has nothing unique. "overlaps_capped": the scan kept only
+ * its largest overlapping pairs, so more folders may overlap than "overlaps"
+ * counts; say "the N largest".
+ *
+ * "deletable_savings" and "deletable_reclaimable" are the parts of
+ * "space_savings" and "reclaimable" that deleting the copies that may go
+ * frees: each group's and set's "deletable", as scanned, under the protected
+ * locations set now. Headline these as the space to reclaim and the rest as
+ * what protected locations keep. The first call after open or after
+ * zdedupe_results_set_protected checks every copy against them (about 2 s
+ * for 1.6 million copies); later calls reuse that.
  */
 const char* zdedupe_results_overview(zdedupe_results* r);
 
@@ -563,13 +574,24 @@ const char* zdedupe_results_overview(zdedupe_results* r);
  *
  * Page: { "rows": [GroupRow], "total": N, "offset": 0 }, where a GroupRow is
  * { "hash": "64 hex", "count": 3, "size": 1048576, "savings": 2097152,
+ *   "deletable": 1048576,
  *   "files": ["/oldest", ...], "mtimes": [ms, ...], "keeper": "/path",
  *   "locked": [bool, ...], "targets": [bool, ...], "clones": [0, ...],
- *   "bulk": false }
+ *   "elsewhere": [false, ...], "bulk": false }
  *
  * "clones" runs parallel to "files": 0, or a group-local class number shared
  * by APFS clones (files sharing every block). Deleting a clone frees nothing
  * while a member of its class remains, so "savings" counts a class once.
+ * "elsewhere", parallel too: the file is an APFS clone of a file the scan did
+ * not list (Xcode's DerivedData keeps clones of the frameworks it copies),
+ * which keeps its blocks, so deleting it frees nothing; keeping it costs
+ * nothing, so "savings" is then every other copy.
+ *
+ * "deletable" is the part of "savings" that deleting the copies that may go
+ * frees, at most: protected copies stay, and so does one unprotected copy
+ * (the best one to keep, so a keep rule may free a little less). 0 when
+ * nothing can be deleted; show "savings" beside it as kept by protected
+ * locations.
  *
  * "count" and "savings" are over the copies that are still ALIVE (the
  * removed overlay applied), "files" lists at most 50 of them oldest first,
@@ -594,9 +616,9 @@ const char* zdedupe_results_overview(zdedupe_results* r);
  * oldest copy has that extension. Protected copies are always kept; only
  * under delete_only_under do they stand in for the survivor.
  * A group with fewer than two alive copies is not a row at all. Order:
- * "savings" is the store's own order until something has been deleted and
- * live savings after that; "size" and "count" descending. The sort is
- * stable, so ties keep largest-savings-first.
+ * "savings" puts the most "deletable" first, so groups nothing can be
+ * deleted from come last, then the most savings; "size" and "count"
+ * descending. The sort is stable, so ties keep largest-savings-first.
  */
 const char* zdedupe_results_groups(zdedupe_results* r, const char* query_json);
 
@@ -791,13 +813,14 @@ const char* zdedupe_results_removed_status(zdedupe_results* r);
  *
  * Query: { "offset": 0, "limit": 50, "filters": {...},
  *          "sort": "reclaim"|"size"|"count" } - descending and stable;
- * "reclaim" (the default) is the store's own order until something is
- * deleted, and live after that. "limit" is clamped to 200. For a set,
+ * "reclaim" (the default) puts the most "deletable" first, so sets nothing
+ * can be deleted from come last, then the most "reclaimable", both live. "limit" is clamped to 200. For a set,
  * filters' "min_bytes" is the size of ONE copy.
  *
  * Page: { "rows": [SetRow], "total": N, "offset": 0 }, where a SetRow is
  * { "index": 0, "digest": "64 hex", "count": 3, "common_parent": "/a",
  *   "file_count": 261, "bytes": 2086912, "reclaimable": 4173824,
+ *   "deletable": 4173824,
  *   "dirs": [{ "path": "/a/proj", "newest_mtime": ms,
  *              "skipped_entries": 0, "locked": false,
  *              "storage_class": 1 }, ...] }
@@ -812,8 +835,13 @@ const char* zdedupe_results_removed_status(zdedupe_results* r);
  * earlier copy shares. So a copy that is a clone of another frees nothing
  * (Brave's code-signing clones of its app, a Finder duplicate), and one that
  * is a clone in part frees only its own files (an Android build's stripped
- * libraries beside the merged ones). A copy whose blocks were held by a
- * deleted copy holds them alone and counts them in full. Stores written before
+ * libraries beside the merged ones). A file that is an APFS clone of a file
+ * the scan did not list brings nothing: that file keeps its blocks. A copy
+ * whose blocks were held by a deleted copy holds them alone and counts them
+ * in full. "deletable" is the part of "reclaimable" that deleting the copies
+ * that may go frees: protected copies ("locked") stay, and one vouches for
+ * every other copy, as any untouched copy does for a folder delete, except a
+ * copy in a protected copy's storage_class, which frees nothing. Stores written before
  * the storage was recorded count a copy in full unless an earlier one of its
  * storage_class holds it. A set with fewer than two alive
  * copies is not a row. "dirs" carries at most 8 of them, because a set can

@@ -381,8 +381,13 @@ const AliveFile = struct {
 };
 
 /// Clone class -> whether every member of it seen so far is being deleted.
-/// Lets `distinctCopies` and `freedBytes` read a group once.
+/// Lets `freedBytes` read a group once.
 const CloneTally = std.AutoHashMapUnmanaged(u32, bool);
+
+/// Clone class -> whether a member is protected, and whether one is not.
+/// Lets `mostFreed` read a group once.
+const UnitState = struct { locked: bool = false, unlocked: bool = false };
+const UnitTally = std.AutoHashMapUnmanaged(u32, UnitState);
 
 /// One member folder of an identical set that still exists as far as the
 /// overlay knows. `Matcher.matches` reads the `path` field off these.
@@ -400,8 +405,38 @@ const CachedOrder = struct {
     filters: Filters,
     /// The overlay generation the order was computed under.
     generation: u64,
+    /// `Session.protection_version` it was computed under: the savings order
+    /// puts first what can be deleted.
+    protection: u64,
     /// Four bytes per matching group.
     rows: []u32,
+};
+
+/// What can be deleted from each group (`Session.groupDeletable`), indexed
+/// like the store's groups, under one overlay generation and protection.
+const DeletableCache = struct {
+    generation: u64,
+    protection: u64,
+    /// Owned.
+    values: []u64,
+};
+
+/// Each identical set's `setDeletable` and `setSavings`, indexed like the
+/// store's sets, under one overlay generation and protection.
+const SetKeysCache = struct {
+    generation: u64,
+    protection: u64,
+    /// Owned, like `savings`.
+    deletable: []u64,
+    savings: []u64,
+};
+
+/// The scan's totals of what can be deleted, ignoring later deletes, under
+/// one protection.
+const ScanDeletable = struct {
+    protection: u64,
+    savings: u64,
+    reclaimable: u64,
 };
 
 const DeleteState = struct {
@@ -424,6 +459,16 @@ pub const Session = struct {
     roots: [][]u8,
     removed: removed_mod.Removed,
     order: ?CachedOrder = null,
+    /// Bumped whenever what is protected may have changed (`setProtected`,
+    /// `setHome`), so figures that depend on it are worked out again.
+    protection_version: u64 = 0,
+    deletable_cache: ?DeletableCache = null,
+    set_keys: ?SetKeysCache = null,
+    scan_deletable: ?ScanDeletable = null,
+    /// Reused: which copies of one group are protected.
+    locked_scratch: std.ArrayListUnmanaged(bool) = .empty,
+    /// Storage classes a protected member holds, while one set is summed.
+    locked_classes: std.DynamicBitSetUnmanaged = .{},
     /// Survives an arena reset, because it is read by a later call.
     last_error: ?[:0]u8 = null,
     /// Atomics only: reachable from another thread while a delete runs.
@@ -434,8 +479,10 @@ pub const Session = struct {
     alive_dirs: std.ArrayListUnmanaged(AliveDir) = .empty,
     /// Storage classes already counted, while one set's savings are summed.
     storage_classes: std.DynamicBitSetUnmanaged = .{},
-    /// Reused by `groupSavings` and `freedBytes`.
+    /// Reused by `freedBytes`.
     clone_tally: CloneTally = .empty,
+    /// Reused by `mostFreed`.
+    unit_tally: UnitTally = .empty,
     /// The user's home directory, owned; null when HOME is unset.
     home: ?[]u8 = null,
     /// Protected roots the host added, owned, as the host spelled them.
@@ -543,6 +590,14 @@ pub const Session = struct {
         self.alive_dirs.deinit(gpa);
         self.storage_classes.deinit(gpa);
         self.clone_tally.deinit(gpa);
+        self.unit_tally.deinit(gpa);
+        if (self.deletable_cache) |cache| gpa.free(cache.values);
+        if (self.set_keys) |keys| {
+            gpa.free(keys.deletable);
+            gpa.free(keys.savings);
+        }
+        self.locked_scratch.deinit(gpa);
+        self.locked_classes.deinit(gpa);
         self.plan_members.deinit(gpa);
         self.plan_kept.deinit(gpa);
         self.plan_targets.deinit(gpa);
@@ -743,6 +798,7 @@ pub const Session = struct {
         self.freeUserProtected();
         self.user_protected = owned;
         self.user_protected_match = match_owned;
+        self.protection_version +%= 1;
         return true;
     }
 
@@ -769,6 +825,7 @@ pub const Session = struct {
         };
         if (self.home) |old| self.gpa.free(old);
         self.home = owned;
+        self.protection_version +%= 1;
         return true;
     }
 
@@ -924,22 +981,39 @@ pub const Session = struct {
     /// older stores, its whole size unless an earlier copy of its storage
     /// class holds it), and a deleted copy inside another deleted copy, of
     /// another set, is freed with that one and counted once.
-    fn foldersReclaimable(self: *Session, arena: Allocator) !u64 {
+    ///
+    /// With `guard`, what can be deleted: protected copies stay, and one
+    /// vouches for every other copy of its set (as any untouched copy does
+    /// for a folder delete), which then may all go, but a copy in a
+    /// protected copy's storage class frees nothing. A set with no protected
+    /// copy keeps its first.
+    fn foldersReclaimable(self: *Session, arena: Allocator, guard: ?protect_mod.Protection) !u64 {
         const Gone = struct { path: []const u8, bytes: u64 };
+        const Member = struct { path: []const u8, own: u64, class: u32, locked: bool };
         var gone: std.ArrayListUnmanaged(Gone) = .empty;
         var gone_paths: std.StringHashMapUnmanaged(void) = .empty;
+        var members: std.ArrayListUnmanaged(Member) = .empty;
         for (0..self.reader.setCount()) |i| {
             const set = try self.reader.set(i);
+            members.clearRetainingCapacity();
             var top: u32 = 0;
+            var any_locked = false;
             for (0..set.dir_count) |d| {
                 const dir = try self.reader.setDir(&set, d);
-                if (d > 0) {
-                    const own = dir.own_bytes orelse
-                        if (dir.storage_class == 0 or dir.storage_class > top) set.bytes else 0;
-                    try gone.append(arena, .{ .path = dir.path, .bytes = own });
-                    try gone_paths.put(arena, dir.path, {});
-                }
+                const own = dir.own_bytes orelse
+                    if (dir.storage_class == 0 or dir.storage_class > top) set.bytes else 0;
                 top = @max(top, dir.storage_class);
+                const locked = if (guard) |g| g.guardsFolder(dir.path) else false;
+                any_locked = any_locked or locked;
+                try members.append(arena, .{ .path = dir.path, .own = own, .class = dir.storage_class, .locked = locked });
+            }
+            for (members.items, 0..) |member, d| {
+                if (member.locked or (!any_locked and d == 0)) continue;
+                const held = member.class != 0 and for (members.items) |other| {
+                    if (other.locked and other.class == member.class) break true;
+                } else false;
+                try gone.append(arena, .{ .path = member.path, .bytes = if (held) 0 else member.own });
+                try gone_paths.put(arena, member.path, {});
             }
         }
         var total: u64 = 0;
@@ -998,29 +1072,198 @@ pub const Session = struct {
     }
 
     /// Savings of a file group: every copy of the data but one. Pure clones
-    /// (one `clone_class`) hold a single copy between them.
-    fn groupSavings(gpa: Allocator, tally: *CloneTally, size: u64, alive: []const AliveFile) !u64 {
-        return liveSavings(size, try distinctCopies(gpa, tally, alive));
+    /// (one `clone_class`) hold a single copy between them, and a class
+    /// whose blocks a file outside the scan also holds frees nothing.
+    fn groupSavings(gpa: Allocator, tally: *UnitTally, size: u64, alive: []const AliveFile) !u64 {
+        return mostFreed(gpa, tally, size, alive, null);
     }
 
-    /// Every file outside a clone class, plus one per clone class. One pass:
-    /// a group can hold tens of thousands of clones.
-    fn distinctCopies(gpa: Allocator, tally: *CloneTally, alive: []const AliveFile) !usize {
+    /// What deleting the copies of a group that may go frees, at most. A
+    /// unit, a file outside any clone class or one whole class, is freed when
+    /// none of it is `locked` (protected) and no file outside the scan holds
+    /// its blocks. One unprotected copy always stays: in a unit that cannot
+    /// be freed when there is one, since keeping it costs nothing, else in a
+    /// unit that can. `locked` runs parallel to `alive`; null is nothing
+    /// protected. One pass: a group can hold tens of thousands of clones.
+    fn mostFreed(gpa: Allocator, tally: *UnitTally, size: u64, alive: []const AliveFile, locked: ?[]const bool) !u64 {
         tally.clearRetainingCapacity();
-        var copies: usize = 0;
-        for (alive) |file| {
+        var freeable: u64 = 0;
+        for (alive, 0..) |file, i| {
+            const is_locked = if (locked) |l| l[i] else false;
             if (file.clone_class == 0) {
-                copies += 1;
+                freeable += @intFromBool(!is_locked);
                 continue;
             }
-            copies += @intFromBool(!(try tally.getOrPut(gpa, file.clone_class)).found_existing);
+            const gop = try tally.getOrPut(gpa, file.clone_class);
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            if (is_locked) gop.value_ptr.locked = true else gop.value_ptr.unlocked = true;
         }
-        return copies;
+        var free_keeper = false;
+        var classes = tally.iterator();
+        while (classes.next()) |class| {
+            if (!class.value_ptr.unlocked) continue;
+            const elsewhere = class.key_ptr.* & store.clone_elsewhere_bit != 0;
+            if (class.value_ptr.locked or elsewhere) free_keeper = true else freeable += 1;
+        }
+        return size *| if (free_keeper) freeable else freeable -| 1;
+    }
+
+    /// Which of `alive` are protected, parallel to it. Refills a reused
+    /// buffer: valid until the next call.
+    fn lockedOf(self: *Session, alive: []const AliveFile) ![]const bool {
+        const guard = self.protection();
+        try self.locked_scratch.resize(self.gpa, alive.len);
+        for (alive, self.locked_scratch.items) |file, *slot| slot.* = guard.protects(file.path);
+        return self.locked_scratch.items;
+    }
+
+    /// What deleting the copies of a group that may go frees, at most:
+    /// protected copies stay, and so does one other (`mostFreed`).
+    fn groupDeletable(self: *Session, size: u64, alive: []const AliveFile) !u64 {
+        if (alive.len < 2) return 0;
+        return mostFreed(self.gpa, &self.unit_tally, size, alive, try self.lockedOf(alive));
+    }
+
+    /// `groupDeletable` with the protection a keep plan already worked out.
+    fn plannedDeletable(self: *Session, size: u64, alive: []const AliveFile, members: []const keep_mod.Member) !u64 {
+        if (alive.len < 2) return 0;
+        try self.locked_scratch.resize(self.gpa, members.len);
+        for (members, self.locked_scratch.items) |member, *slot| slot.* = member.protected;
+        return mostFreed(self.gpa, &self.unit_tally, size, alive, self.locked_scratch.items);
+    }
+
+    /// `groupDeletable` of every group under the overlay, indexed like the
+    /// store's groups; worked out once per overlay generation and protection.
+    fn deletables(self: *Session) ![]const u64 {
+        if (self.deletable_cache) |cache| {
+            if (cache.generation == self.removed.generation and cache.protection == self.protection_version) return cache.values;
+        }
+        const values = try self.gpa.alloc(u64, self.reader.groupCount());
+        errdefer self.gpa.free(values);
+        for (values, 0..) |*slot, i| {
+            const group = try self.reader.group(i);
+            slot.* = try self.groupDeletable(group.size, try self.aliveFiles(&group));
+        }
+        if (self.deletable_cache) |cache| self.gpa.free(cache.values);
+        self.deletable_cache = .{ .generation = self.removed.generation, .protection = self.protection_version, .values = values };
+        return values;
+    }
+
+    /// `setDeletable` and `setSavings` of every set under the overlay, for
+    /// the reclaim order; worked out once per overlay generation and
+    /// protection.
+    fn setKeys(self: *Session) !SetKeysCache {
+        if (self.set_keys) |keys| {
+            if (keys.generation == self.removed.generation and keys.protection == self.protection_version) return keys;
+        }
+        const count = self.reader.setCount();
+        const can_go_by_set = try self.gpa.alloc(u64, count);
+        errdefer self.gpa.free(can_go_by_set);
+        const savings = try self.gpa.alloc(u64, count);
+        errdefer self.gpa.free(savings);
+        for (can_go_by_set, savings, 0..) |*can_go, *all, i| {
+            const set = try self.reader.set(i);
+            const alive = try self.aliveDirs(&set);
+            can_go.* = try self.setDeletable(set.bytes, alive);
+            all.* = try self.setSavings(set.bytes, alive);
+        }
+        if (self.set_keys) |old| {
+            self.gpa.free(old.deletable);
+            self.gpa.free(old.savings);
+        }
+        self.set_keys = .{
+            .generation = self.removed.generation,
+            .protection = self.protection_version,
+            .deletable = can_go_by_set,
+            .savings = savings,
+        };
+        return self.set_keys.?;
+    }
+
+    /// Every file of `group` as the scan recorded it, deletes since then
+    /// ignored. Refills the buffer `aliveFiles` uses.
+    fn scannedFiles(self: *Session, group: *const store.Group) ![]const AliveFile {
+        self.alive.clearRetainingCapacity();
+        for (0..group.file_count) |f| {
+            const file = try self.reader.groupFile(group, f);
+            try self.alive.append(self.gpa, .{
+                .index = @intCast(f),
+                .path = file.path,
+                .mtime = file.mtime,
+                .clone_class = file.clone_class,
+            });
+        }
+        return self.alive.items;
+    }
+
+    /// What the scan found that can be deleted, as files and as whole
+    /// folders, deletes since then ignored like the rest of the overview.
+    fn scanDeletable(self: *Session, arena: Allocator) !ScanDeletable {
+        if (self.scan_deletable) |cached| {
+            if (cached.protection == self.protection_version) return cached;
+        }
+        var savings: u64 = 0;
+        for (0..self.reader.groupCount()) |i| {
+            const group = try self.reader.group(i);
+            savings +|= try self.groupDeletable(group.size, try self.scannedFiles(&group));
+        }
+        const result: ScanDeletable = .{
+            .protection = self.protection_version,
+            .savings = savings,
+            .reclaimable = try self.foldersReclaimable(arena, self.protection()),
+        };
+        self.scan_deletable = result;
+        return result;
+    }
+
+    /// What deleting the copies of a set that may go frees, at most. Any
+    /// copy left untouched vouches for a folder, so with a protected copy
+    /// (which always stays) every other copy may go, except one in a
+    /// protected copy's storage class, which frees nothing; without one,
+    /// every copy but the one holding most of its own (`setSavings`).
+    fn setDeletable(self: *Session, bytes: u64, dirs: []const AliveDir) !u64 {
+        const guard = self.protection();
+        try self.locked_scratch.resize(self.gpa, dirs.len);
+        const locked = self.locked_scratch.items;
+        var any_locked = false;
+        var top: u32 = 0;
+        for (dirs, locked) |dir, *slot| {
+            slot.* = guard.guardsFolder(dir.path);
+            any_locked = any_locked or slot.*;
+            top = @max(top, dir.storage_class);
+        }
+        if (!any_locked) return self.setSavings(bytes, dirs);
+        const classes = @as(usize, top) + 1;
+        const held = &self.locked_classes;
+        if (held.bit_length < classes) try held.resize(self.gpa, classes, false);
+        held.unsetAll();
+        for (dirs, locked) |dir, is_locked| {
+            if (is_locked and dir.storage_class != 0) held.set(dir.storage_class);
+        }
+        const seen = &self.storage_classes;
+        if (seen.bit_length < classes) try seen.resize(self.gpa, classes, false);
+        seen.unsetAll();
+        var total: u64 = 0;
+        for (dirs, locked) |dir, is_locked| {
+            const class = dir.storage_class;
+            const first_of_class = class == 0 or !seen.isSet(class);
+            if (class != 0) seen.set(class);
+            // As `setSavings` counts a copy: one that shared all its blocks
+            // with deleted copies now holds them alone; in an older store,
+            // a storage class holds one copy.
+            const own = if (dir.own_bytes) |o|
+                (if (o == 0 and class != 0 and first_of_class) bytes else o)
+            else if (first_of_class) bytes else 0;
+            if (is_locked or (class != 0 and held.isSet(class))) continue;
+            total +|= own;
+        }
+        return total;
     }
 
     /// Bytes deleting the `taken` members of a group frees: `size` for each,
     /// except that a clone class holds one copy of the data - freed once,
-    /// and only when no member of the class is kept.
+    /// and only when no member of the class is kept, and never when a file
+    /// outside the scan holds it too.
     fn freedBytes(gpa: Allocator, tally: *CloneTally, size: u64, alive: []const AliveFile, taken: []const bool) !u64 {
         tally.clearRetainingCapacity();
         var total: u64 = 0;
@@ -1032,11 +1275,25 @@ pub const Session = struct {
             const gop = try tally.getOrPut(gpa, file.clone_class);
             gop.value_ptr.* = take and (!gop.found_existing or gop.value_ptr.*);
         }
-        var classes = tally.valueIterator();
-        while (classes.next()) |all_taken| {
-            if (all_taken.*) total +|= size;
+        var classes = tally.iterator();
+        while (classes.next()) |class| {
+            // A file outside the scan still holds the blocks.
+            if (class.key_ptr.* & store.clone_elsewhere_bit != 0) continue;
+            if (class.value_ptr.*) total +|= size;
         }
         return total;
+    }
+
+    /// `class` without its held-elsewhere bit when another alive copy of
+    /// the group is in it, else 0: the clone class the group's copies share.
+    fn sharedClass(alive: []const AliveFile, class: u32) u32 {
+        if (class == 0) return 0;
+        var members: usize = 0;
+        for (alive) |file| {
+            members += @intFromBool(file.clone_class == class);
+            if (members == 2) return class & ~store.clone_elsewhere_bit;
+        }
+        return 0;
     }
 
     /// What "size" means for an overlap: the content the two folders share.
@@ -1061,9 +1318,10 @@ pub const Session = struct {
         defer scratch.deinit();
         const matcher = try Matcher.init(scratch.allocator(), filters);
 
-        const Row = struct { index: u32, key: u64 };
+        const Row = struct { index: u32, key: u64, then: u64 = 0 };
         var rows: std.ArrayListUnmanaged(Row) = .empty;
         defer rows.deinit(self.gpa);
+        const can_go: []const u64 = if (sort == .savings) try self.deletables() else &.{};
 
         for (0..self.reader.groupCount()) |i| {
             const group = try self.reader.group(i);
@@ -1071,25 +1329,30 @@ pub const Session = struct {
             if (alive.len < 2) continue;
             // A file group's size is the size of one file.
             if (!matcher.matches(group.size, alive)) continue;
-            const key: u64 = switch (sort) {
-                // The store is already in savings order; a delete changes a
-                // group's savings, so once anything is removed the live value
-                // is the key.
-                .savings => if (self.removed.isEmpty()) 0 else try groupSavings(self.gpa, &self.clone_tally, group.size, alive),
-                .size => group.size,
-                .count => alive.len,
-            };
-            try rows.append(self.gpa, .{ .index = @intCast(i), .key = key });
+            try rows.append(self.gpa, switch (sort) {
+                // What can be deleted first, so groups nothing can be deleted
+                // from come last; then all a delete of every copy but one
+                // would free. Until something is deleted the store has it.
+                .savings => .{
+                    .index = @intCast(i),
+                    .key = can_go[i],
+                    .then = if (self.removed.isEmpty())
+                        store.Reader.groupSavings(&group)
+                    else
+                        try groupSavings(self.gpa, &self.unit_tally, group.size, alive),
+                },
+                .size => .{ .index = @intCast(i), .key = group.size },
+                .count => .{ .index = @intCast(i), .key = alive.len },
+            });
         }
 
-        if (sort != .savings or !self.removed.isEmpty()) {
-            // Stable, so ties keep the store's largest-savings-first order.
-            std.mem.sort(Row, rows.items, {}, struct {
-                fn desc(_: void, a: Row, b: Row) bool {
-                    return a.key > b.key;
-                }
-            }.desc);
-        }
+        // Stable, so ties keep the store's largest-savings-first order.
+        std.mem.sort(Row, rows.items, {}, struct {
+            fn desc(_: void, a: Row, b: Row) bool {
+                if (a.key != b.key) return a.key > b.key;
+                return a.then > b.then;
+            }
+        }.desc);
 
         const out = try self.gpa.alloc(u32, rows.items.len);
         for (rows.items, out) |row, *slot| slot.* = row.index;
@@ -1101,6 +1364,7 @@ pub const Session = struct {
         if (self.order) |cached| {
             if (cached.sort == sort and
                 cached.generation == self.removed.generation and
+                cached.protection == self.protection_version and
                 cached.filters.eql(filters))
             {
                 return cached.rows;
@@ -1116,6 +1380,7 @@ pub const Session = struct {
             .sort = sort,
             .filters = owned,
             .generation = self.removed.generation,
+            .protection = self.protection_version,
             .rows = rows,
         };
         return rows;
@@ -1135,14 +1400,15 @@ pub const Session = struct {
 
     /// The overview with what the folder sections add up to.
     fn writeFullOverview(self: *Session, json: *std.json.Stringify, arena: Allocator) !void {
-        const reclaimable = try self.foldersReclaimable(arena);
+        const reclaimable = try self.foldersReclaimable(arena, null);
+        const can_go = try self.scanDeletable(arena);
         var redundant_pairs: usize = 0;
         for (0..self.reader.overlapCount()) |i| {
             const pair = try self.reader.overlap(i);
             // Anything but a two-way overlap means one side adds nothing.
             if (pair.relation != @intFromEnum(store.Relation.overlap)) redundant_pairs += 1;
         }
-        try self.writeOverview(json, arena, reclaimable, redundant_pairs);
+        try self.writeOverview(json, arena, reclaimable, can_go, redundant_pairs);
     }
 
     fn writeOverview(
@@ -1150,6 +1416,7 @@ pub const Session = struct {
         json: *std.json.Stringify,
         arena: Allocator,
         reclaimable: u64,
+        can_go: ScanDeletable,
         redundant_pairs: usize,
     ) !void {
         const header = &self.reader.header;
@@ -1187,10 +1454,18 @@ pub const Session = struct {
         try json.write(self.reader.setCount());
         try json.objectField("overlaps");
         try json.write(self.reader.overlapCount());
+        try json.objectField("overlaps_capped");
+        try json.write(self.reader.overlapsCapped());
         try json.objectField("redundant_pairs");
         try json.write(redundant_pairs);
         try json.objectField("reclaimable");
         try json.write(reclaimable);
+        // Of `space_savings` and `reclaimable`, what deleting the copies that
+        // may go frees: protected copies stay.
+        try json.objectField("deletable_savings");
+        try json.write(can_go.savings);
+        try json.objectField("deletable_reclaimable");
+        try json.write(can_go.reclaimable);
         try json.endObject();
     }
 
@@ -1252,7 +1527,10 @@ pub const Session = struct {
             try json.objectField("size");
             try json.write(group.size);
             try json.objectField("savings");
-            try json.write(try groupSavings(self.gpa, &self.clone_tally, group.size, alive));
+            try json.write(try groupSavings(self.gpa, &self.unit_tally, group.size, alive));
+            // Of that, what deleting the copies that may go frees.
+            try json.objectField("deletable");
+            try json.write(try self.plannedDeletable(group.size, alive, decided.members));
 
             const listed = alive[0..@min(alive.len, group_files_in_row)];
             try json.objectField("files");
@@ -1279,7 +1557,13 @@ pub const Session = struct {
             // others of this group (they share their blocks).
             try json.objectField("clones");
             try json.beginArray();
-            for (listed) |file| try json.write(file.clone_class);
+            for (listed) |file| try json.write(sharedClass(alive, file.clone_class));
+            try json.endArray();
+            // Parallel to `files`: a file the scan did not list holds the
+            // same blocks, so deleting this copy frees nothing.
+            try json.objectField("elsewhere");
+            try json.beginArray();
+            for (listed) |file| try json.write(file.clone_class & store.clone_elsewhere_bit != 0);
             try json.endArray();
             try json.objectField("bulk");
             try json.write(covered);
@@ -1498,21 +1782,25 @@ pub const Session = struct {
     /// The matching sets in `query.sort` order, largest first; ties keep the
     /// store's order. Every matching set is visited, as a sort must.
     fn sortedSetWindow(self: *Session, arena: Allocator, query: FolderQuery, cursor: Cursor) !Window {
-        const Row = struct { index: usize, key: u64 };
+        const Row = struct { index: usize, key: u64, then: u64 = 0 };
         var rows: std.ArrayListUnmanaged(Row) = .empty;
+        const keys: ?SetKeysCache = if (query.sort == .reclaim) try self.setKeys() else null;
         for (0..self.reader.setCount()) |i| {
             if (!try cursor.set(i)) continue;
             const s = try self.reader.set(i);
             const alive = try self.aliveDirs(&s);
-            try rows.append(arena, .{ .index = i, .key = switch (query.sort) {
-                .reclaim => try self.setSavings(s.bytes, alive),
-                .size => s.bytes,
-                .count => alive.len,
-            } });
+            try rows.append(arena, switch (query.sort) {
+                // What can be deleted first, so sets nothing can be deleted
+                // from come last; then all deleting every copy but one frees.
+                .reclaim => .{ .index = i, .key = keys.?.deletable[i], .then = keys.?.savings[i] },
+                .size => .{ .index = i, .key = s.bytes },
+                .count => .{ .index = i, .key = alive.len },
+            });
         }
         std.mem.sort(Row, rows.items, {}, struct {
             fn desc(_: void, a: Row, b: Row) bool {
-                return a.key > b.key;
+                if (a.key != b.key) return a.key > b.key;
+                return a.then > b.then;
             }
         }.desc);
         const limit = @min(query.limit, max_page);
@@ -1561,11 +1849,8 @@ pub const Session = struct {
     fn setWindow(self: *Session, arena: Allocator, query: FolderQuery) !Window {
         const matcher = try Matcher.init(arena, query.filters);
         const cursor: Cursor = .{ .session = self, .matcher = &matcher };
-        // The store holds sets largest-reclaim-first as scanned; any other
-        // order, or reclaim once a delete has changed what sets free, is sorted.
-        if (query.sort == .reclaim and self.removed.isEmpty()) {
-            return windowOf(arena, self.reader.setCount(), query, cursor, Cursor.set);
-        }
+        // Sorted every time: the reclaim order puts first what can be
+        // deleted, which depends on what is protected, not only on the scan.
         return self.sortedSetWindow(arena, query, cursor);
     }
 
@@ -1609,6 +1894,9 @@ pub const Session = struct {
             try json.write(set.bytes);
             try json.objectField("reclaimable");
             try json.write(try self.setSavings(set.bytes, dirs));
+            // Of that, what deleting the copies that may go frees.
+            try json.objectField("deletable");
+            try json.write(try self.setDeletable(set.bytes, dirs));
             try json.objectField("dirs");
             try writeDirRows(json, arena, dirs[0..@min(dirs.len, set_members_in_row)], self.protection());
             try json.endObject();
@@ -1809,7 +2097,7 @@ pub const Session = struct {
                 paths.clearRetainingCapacity();
                 for (alive) |file| try paths.append(arena, file.path);
                 try collectKeys(arena, &keys, paths.items, query.by, matcher, base, roots, .files);
-                try counter.add(arena, try groupSavings(self.gpa, &self.clone_tally, group.size, alive), keys.items);
+                try counter.add(arena, try groupSavings(self.gpa, &self.unit_tally, group.size, alive), keys.items);
             },
             .sets => for (0..self.reader.setCount()) |i| {
                 const set = try self.reader.set(i);
@@ -3026,7 +3314,7 @@ pub const Session = struct {
             const group = try self.reader.group(i);
             const alive = try self.aliveFiles(&group);
             if (alive.len < 2) continue;
-            const savings = try groupSavings(self.gpa, &self.clone_tally, group.size, alive);
+            const savings = try groupSavings(self.gpa, &self.unit_tally, group.size, alive);
 
             var hex: [64]u8 = undefined;
             const hash = hasher.hashToHex(&group.hash, &hex);
@@ -3776,6 +4064,8 @@ test "clones hold one copy: savings and freed bytes count a clone class once, an
     const gpa = std.testing.allocator;
     var tally: CloneTally = .empty;
     defer tally.deinit(gpa);
+    var units: UnitTally = .empty;
+    defer units.deinit(gpa);
     const files = [_]AliveFile{
         .{ .index = 0, .path = "a", .mtime = 0, .clone_class = 1 },
         .{ .index = 1, .path = "b", .mtime = 0, .clone_class = 1 },
@@ -3783,7 +4073,7 @@ test "clones hold one copy: savings and freed bytes count a clone class once, an
         .{ .index = 3, .path = "d", .mtime = 0 },
     };
     // a+b are one copy, c and d one each: three copies, two reclaimable.
-    try std.testing.expectEqual(@as(u64, 200), try Session.groupSavings(gpa, &tally, 100, &files));
+    try std.testing.expectEqual(@as(u64, 200), try Session.groupSavings(gpa, &units, 100, &files));
     // Deleting b alone frees nothing: a still holds its blocks.
     try std.testing.expectEqual(@as(u64, 0), try Session.freedBytes(gpa, &tally, 100, &files, &.{ false, true, false, false }));
     // Deleting a and b frees their one copy; with d, two.
@@ -3791,14 +4081,90 @@ test "clones hold one copy: savings and freed bytes count a clone class once, an
     try std.testing.expectEqual(@as(u64, 200), try Session.freedBytes(gpa, &tally, 100, &files, &.{ true, true, false, true }));
     // Without clones it is size per file, as before.
     const plain = [_]AliveFile{ .{ .index = 0, .path = "x", .mtime = 0 }, .{ .index = 1, .path = "y", .mtime = 0 } };
-    try std.testing.expectEqual(@as(u64, 100), try Session.groupSavings(gpa, &tally, 100, &plain));
+    try std.testing.expectEqual(@as(u64, 100), try Session.groupSavings(gpa, &units, 100, &plain));
     try std.testing.expectEqual(@as(u64, 100), try Session.freedBytes(gpa, &tally, 100, &plain, &.{ false, true }));
+}
+
+test "a clone class held elsewhere frees nothing and costs nothing to keep" {
+    const gpa = std.testing.allocator;
+    var tally: CloneTally = .empty;
+    defer tally.deinit(gpa);
+    var units: UnitTally = .empty;
+    defer units.deinit(gpa);
+    const elsewhere = 1 | store.clone_elsewhere_bit;
+    // One copy is a clone of a file the scan skipped, one is its own: keep
+    // the clone, and deleting the other frees its size.
+    const pair = [_]AliveFile{
+        .{ .index = 0, .path = "a", .mtime = 0, .clone_class = elsewhere },
+        .{ .index = 1, .path = "b", .mtime = 0 },
+    };
+    try std.testing.expectEqual(@as(u64, 100), try Session.groupSavings(gpa, &units, 100, &pair));
+    try std.testing.expectEqual(@as(u64, 0), try Session.freedBytes(gpa, &tally, 100, &pair, &.{ true, false }));
+    try std.testing.expectEqual(@as(u64, 100), try Session.freedBytes(gpa, &tally, 100, &pair, &.{ false, true }));
+    // Both held elsewhere, each by another skipped file: nothing to free.
+    const both = [_]AliveFile{
+        .{ .index = 0, .path = "a", .mtime = 0, .clone_class = elsewhere },
+        .{ .index = 1, .path = "b", .mtime = 0, .clone_class = 2 | store.clone_elsewhere_bit },
+    };
+    try std.testing.expectEqual(@as(u64, 0), try Session.groupSavings(gpa, &units, 100, &both));
+    // Protected copies stay, and one unprotected copy stays besides.
+    const plain = [_]AliveFile{
+        .{ .index = 0, .path = "x", .mtime = 0 },
+        .{ .index = 1, .path = "y", .mtime = 0 },
+        .{ .index = 2, .path = "z", .mtime = 0 },
+    };
+    try std.testing.expectEqual(@as(u64, 100), try Session.mostFreed(gpa, &units, 100, &plain, &.{ true, false, false }));
+    try std.testing.expectEqual(@as(u64, 0), try Session.mostFreed(gpa, &units, 100, &plain, &.{ true, true, false }));
+    try std.testing.expectEqual(@as(u64, 0), try Session.mostFreed(gpa, &units, 100, &plain, &.{ true, true, true }));
+}
+
+test "the most a group frees is the best delete the rules allow, on random groups" {
+    const gpa = std.testing.allocator;
+    var tally: CloneTally = .empty;
+    defer tally.deinit(gpa);
+    var units: UnitTally = .empty;
+    defer units.deinit(gpa);
+    var prng = std.Random.DefaultPrng.init(0x5afe);
+    const random = prng.random();
+    var files: [9]AliveFile = undefined;
+    var locked: [9]bool = undefined;
+    var taken: [9]bool = undefined;
+    for (0..400) |_| {
+        const n = random.intRangeAtMost(usize, 0, files.len);
+        for (files[0..n], locked[0..n], 0..) |*file, *lock, i| {
+            var class: u32 = if (random.boolean()) 0 else random.intRangeAtMost(u32, 1, 4);
+            // Classes 3 and 4 are held elsewhere too.
+            if (class >= 3) class |= store.clone_elsewhere_bit;
+            file.* = .{ .index = @intCast(i), .path = "f", .mtime = 0, .clone_class = class };
+            lock.* = random.intRangeAtMost(u8, 0, 3) == 0;
+        }
+        // Every delete that takes only unprotected copies and leaves one.
+        var best: u64 = 0;
+        var mask: usize = 0;
+        while (mask < (@as(usize, 1) << @intCast(n))) : (mask += 1) {
+            var allowed = true;
+            var stays_unlocked = false;
+            for (taken[0..n], locked[0..n], 0..) |*take, lock, i| {
+                take.* = mask & (@as(usize, 1) << @intCast(i)) != 0;
+                if (take.* and lock) allowed = false;
+                if (!take.* and !lock) stays_unlocked = true;
+            }
+            if (!allowed or !stays_unlocked) continue;
+            best = @max(best, try Session.freedBytes(gpa, &tally, 10, files[0..n], taken[0..n]));
+        }
+        try std.testing.expectEqual(best, try Session.mostFreed(gpa, &units, 10, files[0..n], locked[0..n]));
+        // With nothing protected it is the group's savings.
+        @memset(locked[0..n], false);
+        try std.testing.expectEqual(try Session.mostFreed(gpa, &units, 10, files[0..n], locked[0..n]), try Session.groupSavings(gpa, &units, 10, files[0..n]));
+    }
 }
 
 test "savings and freed bytes agree with a file-by-file count on random groups" {
     const gpa = std.testing.allocator;
     var tally: CloneTally = .empty;
     defer tally.deinit(gpa);
+    var units: UnitTally = .empty;
+    defer units.deinit(gpa);
     var prng = std.Random.DefaultPrng.init(0xc10e);
     const random = prng.random();
     var files: [40]AliveFile = undefined;
@@ -3834,7 +4200,7 @@ test "savings and freed bytes agree with a file-by-file count on random groups" 
             }
             if (first_taken and !kept) freed += 10;
         }
-        try std.testing.expectEqual(10 *| (copies -| 1), try Session.groupSavings(gpa, &tally, 10, group));
+        try std.testing.expectEqual(10 *| (copies -| 1), try Session.groupSavings(gpa, &units, 10, group));
         try std.testing.expectEqual(freed, try Session.freedBytes(gpa, &tally, 10, group, taken[0..n]));
     }
 }
