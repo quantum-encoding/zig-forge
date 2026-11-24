@@ -171,8 +171,9 @@ fn writeDuration(w: *Writer, ns: u64) Writer.Error!void {
 }
 
 /// What narrows a list, after its order, as the apps describe their lists.
-fn writeFilters(w: *Writer, f: Filters, units: Units) Writer.Error!void {
-    if (f.redundant_only) try w.writeAll(" · partial overlaps hidden");
+/// `redundant_only` narrows only the overlap list; every other list ignores it.
+fn writeFilters(w: *Writer, f: Filters, units: Units, overlaps: bool) Writer.Error!void {
+    if (overlaps and f.redundant_only) try w.writeAll(" · partial overlaps hidden");
     if (f.under) |under| try w.print(" · in {s}", .{under});
     if (f.name) |name| try w.print(" · named {s}", .{name});
     if (f.ext) |ext| {
@@ -187,10 +188,10 @@ fn writeFilters(w: *Writer, f: Filters, units: Units) Writer.Error!void {
 }
 
 /// "1,504 sets · sorted by ... · 1 MB or more. The first 50:" and the like.
-fn writeListHead(w: *Writer, total: u64, one: []const u8, many: []const u8, order: ?[]const u8, f: Filters, units: Units, listed: usize) Writer.Error!void {
+fn writeListHead(w: *Writer, total: u64, one: []const u8, many: []const u8, order: ?[]const u8, f: Filters, units: Units, listed: usize, overlaps: bool) Writer.Error!void {
     try writeCounted(w, total, one, many);
     if (order) |o| try w.print(" · sorted by {s}", .{o});
-    try writeFilters(w, f, units);
+    try writeFilters(w, f, units, overlaps);
     if (total == 0) return w.writeAll(". None match.\n");
     if (listed >= total) return w.writeAll(". All of them:\n");
     try w.writeAll(". The first ");
@@ -295,7 +296,7 @@ fn renderSets(w: *Writer, sets: Sets, in: Input) !void {
         .reclaim => "space to reclaim",
         .size => "size of one copy",
         .count => "copies",
-    }, sets.filters, u, sets.rows.len);
+    }, sets.filters, u, sets.rows.len, false);
     for (sets.rows, 1..) |row, n| {
         const first = if (row.dirs.len > 0) row.dirs[0].path else "";
         try w.print("\n{d}. {s}\n   ", .{ n, baseName(first) });
@@ -329,7 +330,7 @@ fn renderOverlaps(w: *Writer, overlaps: Overlaps, in: Input) !void {
     const u = in.units;
     var buf: [size_buf_len]u8 = undefined;
     try w.writeAll("\nOverlapping Folders\n");
-    try writeListHead(w, overlaps.total, "pair", "pairs", "shared size", overlaps.filters, u, overlaps.rows.len);
+    try writeListHead(w, overlaps.total, "pair", "pairs", "shared size", overlaps.filters, u, overlaps.rows.len, true);
     for (overlaps.rows, 1..) |row, n| {
         try w.print("\n{d}. ", .{n});
         if (std.mem.eql(u8, row.relation, "same_content")) {
@@ -381,7 +382,7 @@ fn renderGroups(w: *Writer, groups: Groups, in: Input) !void {
         .savings => "space to reclaim",
         .size => "file size",
         .count => "copies",
-    }, groups.filters, u, groups.rows.len);
+    }, groups.filters, u, groups.rows.len, false);
     for (groups.rows, 1..) |row, n| {
         try w.print("\n{d}. {s} each · ", .{ n, size(row.size, u, &buf) });
         try writeCounted(w, row.count, "copy", "copies");
@@ -451,4 +452,14 @@ test "a clone names the first listed copy of its class" {
     try testing.expectEqual(@as(?usize, null), sharedWith(u32, &classes, 2));
     try testing.expectEqual(@as(?usize, 2), sharedWith(u32, &classes, 3));
     try testing.expectEqual(@as(?usize, 2), sharedWith(u32, &classes, 4));
+}
+
+test "only the overlap list says partial overlaps are hidden" {
+    var out: Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const f: Filters = .{ .redundant_only = true, .min_bytes = 1024 };
+    try writeFilters(&out.writer, f, .binary, false);
+    try out.writer.writeAll("|");
+    try writeFilters(&out.writer, f, .binary, true);
+    try testing.expectEqualStrings(" · 1 KB or more| · partial overlaps hidden · 1 KB or more", out.written());
 }
