@@ -871,11 +871,7 @@ const Analyzer = struct {
     }
 
     fn isAncestor(self: *const Analyzer, ancestor: NodeId, descendant: NodeId) bool {
-        const parent = self.nodes[ancestor].path;
-        const child = self.nodes[descendant].path;
-        return child.len > parent.len + 1 and
-            child[parent.len] == '/' and
-            std.mem.startsWith(u8, child, parent);
+        return isStrictlyInside(self.nodes[descendant].path, self.nodes[ancestor].path);
     }
 
     /// Compare two subtrees by content. Returns null when, measured exactly,
@@ -1046,6 +1042,12 @@ fn orderFrom(a: []const u8, b: []const u8, skip: usize) std.math.Order {
 }
 
 /// Parent directory of `path`, or null for a bare name or the filesystem root.
+/// `child` lies below `parent`, whole path components, a filesystem root
+/// ("/", "C:/") included as a parent.
+fn isStrictlyInside(child: []const u8, parent: []const u8) bool {
+    return child.len > parent.len and @import("filters.zig").isAtOrUnder(child, parent);
+}
+
 fn parentPath(path: []const u8) ?[]const u8 {
     return @import("filters.zig").parentDir(path);
 }
@@ -1097,6 +1099,17 @@ test "insideVcsDir" {
     // A name that merely contains ".git" is an ordinary directory.
     try std.testing.expect(!insideVcsDir("/home/u/proj/.github/workflows"));
     try std.testing.expect(!insideVcsDir("/home/u/my.git.notes"));
+}
+
+test "a folder is inside every folder above it, a root included" {
+    try std.testing.expect(isStrictlyInside("/Users/u/x", "/Users/u"));
+    try std.testing.expect(isStrictlyInside("/Users", "/"));
+    try std.testing.expect(isStrictlyInside("/Users/u/x", "/"));
+    try std.testing.expect(isStrictlyInside("C:/Users/u", "C:/"));
+    try std.testing.expect(!isStrictlyInside("/Users/u", "/Users/u"));
+    try std.testing.expect(!isStrictlyInside("/", "/"));
+    try std.testing.expect(!isStrictlyInside("/Users/ux", "/Users/u"));
+    try std.testing.expect(!isStrictlyInside("/Users", "/Users/u"));
 }
 
 test "baseName" {
