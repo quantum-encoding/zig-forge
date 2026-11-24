@@ -962,6 +962,209 @@
       }
     },
 
+    "CleanQuery": {
+      "description": "Query for zdedupe_clean_scan: the folders to look in for build output.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["roots"],
+      "properties": {
+        "roots": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "main_roots": { "description": "Where main checkouts live, searched for repositories with the same origin; empty is ~/work.", "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "older_s": { "description": "Seconds nothing in a build folder may have changed for it to go to the Trash; at least 600.", "type": "integer", "minimum": 0, "default": 86400 },
+        "threads": { "type": "integer", "minimum": 0, "default": 0 }
+      }
+    },
+
+    "CleanBuildDir": {
+      "description": "One build folder: what it is, whose it is, its size, and what a move would do now.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "rule", "root", "project", "bytes", "logical_bytes", "files", "hardlinked_bytes", "newest_mtime", "complete", "duplicate_set", "trash"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "kind": { "description": "The folder's name.", "type": "string" },
+        "rule": { "enum": ["name", "beside_manifest", "cachedir_tag", "zig_cache", "xcode_derived_data"] },
+        "root": { "type": "string" },
+        "project": { "description": "The nearest folder above it with .git or a manifest, or null.", "type": ["string", "null"] },
+        "bytes": { "description": "Space on disk, each inode once.", "$ref": "#/$defs/ByteCount" },
+        "logical_bytes": { "$ref": "#/$defs/ByteCount" },
+        "files": { "type": "integer", "minimum": 0 },
+        "hardlinked_bytes": { "description": "Bytes of files with other hard links: freed only if every other link goes too.", "$ref": "#/$defs/ByteCount" },
+        "newest_mtime": { "description": "Newest file modification, seconds since the epoch, or null (no files).", "type": ["integer", "null"] },
+        "complete": { "description": "False when something inside could not be read; such a folder never goes.", "type": "boolean" },
+        "duplicate_set": { "description": "Index into duplicate_sets, or null.", "type": ["integer", "null"], "minimum": 0 },
+        "trash": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["eligible", "refusal", "newest_change"],
+          "properties": {
+            "eligible": { "type": "boolean" },
+            "refusal": { "description": "Why it would stay, or null.", "type": ["string", "null"] },
+            "newest_change": { "description": "Newest modification or status change inside, the folder included, seconds since the epoch.", "type": ["integer", "null"] }
+          }
+        }
+      }
+    },
+
+    "CleanProject": {
+      "description": "A project under the roots: a checkout, or the folder owning build output, with where its main code lives.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "root", "markers", "build_dirs", "build_bytes", "verdict", "reasons", "ignored_by", "git"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "root": { "type": "string" },
+        "markers": { "type": "array", "items": { "type": "string" } },
+        "build_dirs": { "type": "integer", "minimum": 0 },
+        "build_bytes": { "$ref": "#/$defs/ByteCount" },
+        "verdict": { "description": "main_has_everything: the main checkout holds all of this copy's work. has_unique_work: it does not (reasons say why). null: git could not tell.", "enum": ["main_has_everything", "has_unique_work", null] },
+        "reasons": { "type": "array", "items": { "type": "string" } },
+        "ignored_by": { "description": "The repository that ignores this folder, if one does.", "type": ["string", "null"] },
+        "git": {
+          "description": "Null when not in a checkout, or when git is not available.",
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["toplevel", "origin", "origin_key", "branch", "head", "linked_worktree", "main_repository", "main_checkouts", "is_main_checkout", "remotes", "uncommitted", "unpushed_commits", "stashes", "head_on_remote", "head_in_main", "unique_branches"],
+          "properties": {
+            "toplevel": { "type": "string" },
+            "origin": { "type": ["string", "null"] },
+            "origin_key": { "type": ["string", "null"] },
+            "branch": { "type": ["string", "null"] },
+            "head": { "type": ["string", "null"] },
+            "linked_worktree": { "type": "boolean" },
+            "main_repository": { "type": ["string", "null"] },
+            "main_checkouts": { "type": "array", "items": { "type": "string" } },
+            "is_main_checkout": { "type": "boolean" },
+            "remotes": { "type": "integer", "minimum": 0 },
+            "uncommitted": { "type": ["integer", "null"], "minimum": 0 },
+            "unpushed_commits": { "type": ["integer", "null"], "minimum": 0 },
+            "stashes": { "type": ["integer", "null"], "minimum": 0 },
+            "head_on_remote": { "type": ["boolean", "null"] },
+            "head_in_main": { "type": ["boolean", "null"] },
+            "unique_branches": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "commits"],
+                "properties": { "name": { "type": "string" }, "commits": { "type": "integer", "minimum": 0 } }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "CleanTrashRun": {
+      "description": "Response of zdedupe_clean_trash (and the report's trash with the CLI's --trash).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["moved", "skipped", "bytes_moved"],
+      "properties": {
+        "moved": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "bytes", "trashed_as"],
+            "properties": {
+              "path": { "type": "string" },
+              "bytes": { "$ref": "#/$defs/ByteCount" },
+              "trashed_as": { "description": "Where it is in the Trash, or null when the host's Trash did not say.", "type": ["string", "null"] }
+            }
+          }
+        },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "bytes", "reason"],
+            "properties": { "path": { "type": "string" }, "bytes": { "$ref": "#/$defs/ByteCount" }, "reason": { "type": "string" } }
+          }
+        },
+        "bytes_moved": { "$ref": "#/$defs/ByteCount" }
+      }
+    },
+
+    "CleanTrashItems": {
+      "description": "Request to zdedupe_clean_trash: build folders of the last scan to move.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paths"],
+      "properties": { "paths": { "type": "array", "items": { "type": "string", "minLength": 1 } } }
+    },
+
+    "CleanReport": {
+      "description": "Response of zdedupe_clean_scan: the CLI's JSON (schema zdedupe-clean/1, programs/zdedupe/README.md).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "generated_at", "older_than_s", "git", "main_roots", "roots", "build_dirs", "duplicate_sets", "projects", "totals", "trash"],
+      "properties": {
+        "schema": { "const": "zdedupe-clean/1" },
+        "generated_at": { "description": "Seconds since the epoch.", "type": "integer" },
+        "older_than_s": { "type": "integer", "minimum": 0 },
+        "git": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["available", "version"],
+          "properties": { "available": { "type": "boolean" }, "version": { "type": ["string", "null"] } }
+        },
+        "main_roots": { "type": "array", "items": { "type": "string" } },
+        "roots": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "given", "error", "build_dirs", "bytes", "files", "unreadable", "left_out"],
+            "properties": {
+              "path": { "type": "string" },
+              "given": { "type": "string" },
+              "error": { "type": ["string", "null"] },
+              "build_dirs": { "type": "integer", "minimum": 0 },
+              "bytes": { "$ref": "#/$defs/ByteCount" },
+              "files": { "type": "integer", "minimum": 0 },
+              "unreadable": { "type": "integer", "minimum": 0 },
+              "left_out": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "build_dirs": { "description": "Largest first.", "type": "array", "items": { "$ref": "#/$defs/CleanBuildDir" } },
+        "duplicate_sets": {
+          "description": "Identical build folders, most reclaimable first.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "copies", "bytes_each", "files_each", "reclaimable", "paths"],
+            "properties": {
+              "kind": { "type": "string" },
+              "copies": { "type": "integer", "minimum": 2 },
+              "bytes_each": { "$ref": "#/$defs/ByteCount" },
+              "files_each": { "type": "integer", "minimum": 0 },
+              "reclaimable": { "$ref": "#/$defs/ByteCount" },
+              "paths": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "projects": { "description": "Most build output first.", "type": "array", "items": { "$ref": "#/$defs/CleanProject" } },
+        "totals": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["build_dirs", "bytes", "files", "duplicate_reclaimable", "eligible", "eligible_bytes"],
+          "properties": {
+            "build_dirs": { "type": "integer", "minimum": 0 },
+            "bytes": { "$ref": "#/$defs/ByteCount" },
+            "files": { "type": "integer", "minimum": 0 },
+            "duplicate_reclaimable": { "$ref": "#/$defs/ByteCount" },
+            "eligible": { "type": "integer", "minimum": 0 },
+            "eligible_bytes": { "$ref": "#/$defs/ByteCount" }
+          }
+        },
+        "trash": { "oneOf": [{ "$ref": "#/$defs/CleanTrashRun" }, { "type": "null" }] }
+      }
+    },
+
     "DuplicatesReport": {
       "description": "Response of zdedupe_results_report.",
       "type": "object",

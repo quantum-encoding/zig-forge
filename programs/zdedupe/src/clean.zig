@@ -165,7 +165,9 @@ pub const Project = struct {
     facts: ?gitinfo.Facts = null,
 };
 
-pub const Moved = struct { path: []const u8, bytes: u64, trashed_as: []const u8 };
+/// `trashed_as` is null when the Trash that moved it did not say where (a
+/// host's own, through `HostTrash`).
+pub const Moved = struct { path: []const u8, bytes: u64, trashed_as: ?[]const u8 };
 pub const Skipped = struct { path: []const u8, bytes: u64, reason: []const u8 };
 
 pub const TrashRun = struct {
@@ -211,6 +213,13 @@ pub const GuardFn = *const fn (ctx: ?*const anyopaque, path: []const u8) bool;
 /// Which running process is using a folder; tests substitute their own.
 pub const HolderFn = *const fn (arena: Allocator, path: []const u8) inuse.Answer;
 
+/// A host's Trash (the callback every session delete takes), used instead of
+/// `trash_fn` when set: a sandboxed app must move items through its own.
+pub const HostTrash = struct {
+    call: session.TrashFn,
+    user: ?*anyopaque,
+};
+
 pub const Options = struct {
     roots: []const []const u8,
     /// Where main checkouts are looked for; empty is `~/work`.
@@ -221,6 +230,9 @@ pub const Options = struct {
     /// Seconds since the epoch ages are measured from; null is now.
     now: ?i64 = null,
     trash_fn: TrashFn = trash_mod.moveToTrash,
+    host_trash: ?HostTrash = null,
+    /// Progress out and cancellation in, as for every scan.
+    monitor: ?*types.Monitor = null,
     guard_fn: GuardFn = protectedByCore,
     guard_ctx: ?*const anyopaque = null,
     holder_fn: HolderFn = inuse.holderOf,
@@ -274,10 +286,11 @@ pub fn scan(gpa: Allocator, io: Io, opts: Options) !Report {
         fw.setExcludeCacheDirs(false);
         fw.setExcludes(&walk_excludes);
         fw.setThreads(opts.threads);
+        fw.setMonitor(opts.monitor);
         for (report.roots) |*root| {
             if (root.err != null) continue;
             fw.walk(root.path) catch |err| switch (err) {
-                error.OutOfMemory => return err,
+                error.OutOfMemory, error.Cancelled => return err,
                 else => root.err = @errorName(err),
             };
         }
@@ -375,6 +388,7 @@ pub fn scan(gpa: Allocator, io: Io, opts: Options) !Report {
             .skip_app_libraries = true,
             .analyze_dirs = true,
             .threads = opts.threads,
+            .monitor = opts.monitor,
         });
         defer finder.deinit();
         const paths = try a.alloc([]const u8, found.items.len);
@@ -483,38 +497,87 @@ pub fn run(gpa: Allocator, io: Io, opts: Options, move: bool) !Report {
 /// again immediately before it goes. Every other build folder is listed as
 /// skipped, with the reason.
 pub fn trashEligible(gpa: Allocator, report: *Report, opts: Options) !void {
-    const a = report.arena.allocator();
-    var moved: std.ArrayListUnmanaged(Moved) = .empty;
-    var skipped: std.ArrayListUnmanaged(Skipped) = .empty;
-    var bytes_moved: u64 = 0;
-    const now = opts.now orelse realtimeSeconds();
-    for (report.build_dirs) |*b| {
-        if (!b.trash.eligible) {
-            try skipped.append(a, .{ .path = b.path, .bytes = b.bytes, .reason = b.trash.refusal orelse "not eligible" });
+    var run_: Mover = .{ .gpa = gpa, .a = report.arena.allocator(), .opts = opts, .now = opts.now orelse realtimeSeconds() };
+    for (report.build_dirs) |*b| try run_.move(b);
+    report.trash = run_.result();
+}
+
+/// Move the build folders of `report` named in `paths` to the Trash, as
+/// `trashEligible` would: each eligible when scanned and checked again just
+/// before it goes. Only those are reported; a path that is not one of the
+/// report's build folders is skipped and left alone.
+pub fn trashSelected(gpa: Allocator, report: *Report, paths: []const []const u8, opts: Options) !void {
+    var run_: Mover = .{ .gpa = gpa, .a = report.arena.allocator(), .opts = opts, .now = opts.now orelse realtimeSeconds() };
+    var by_path: std.StringHashMapUnmanaged(usize) = .empty;
+    defer by_path.deinit(gpa);
+    for (report.build_dirs, 0..) |b, i| try by_path.put(gpa, b.path, i);
+    var done: std.StringHashMapUnmanaged(void) = .empty;
+    defer done.deinit(gpa);
+    for (paths) |path| {
+        if ((try done.getOrPut(gpa, path)).found_existing) continue;
+        const i = by_path.get(path) orelse {
+            try run_.skipped.append(run_.a, .{ .path = try run_.a.dupe(u8, path), .bytes = 0, .reason = "is not a build folder in these results" });
             continue;
-        }
-        if (stillBuildOutput(a, b)) |reason| {
-            try skipped.append(a, .{ .path = b.path, .bytes = b.bytes, .reason = reason });
-            continue;
-        }
-        const again = checkFolder(gpa, opts, now, b);
-        if (!again.eligible) {
-            try skipped.append(a, .{ .path = b.path, .bytes = b.bytes, .reason = again.refusal orelse "not eligible" });
-            continue;
-        }
-        if (try inUse(a, opts, b.path)) |reason| {
-            try skipped.append(a, .{ .path = b.path, .bytes = b.bytes, .reason = reason });
-            continue;
-        }
-        switch (opts.trash_fn(a, b.path, true)) {
+        };
+        try run_.move(&report.build_dirs[i]);
+    }
+    report.trash = run_.result();
+}
+
+/// Where an item went in the Trash (null when unknown), or why it stayed.
+const MoveOutcome = union(enum) { moved: ?[]const u8, failed: []const u8 };
+
+/// One Trash run: what moved, what stayed and why.
+const Mover = struct {
+    gpa: Allocator,
+    a: Allocator,
+    opts: Options,
+    now: i64,
+    moved: std.ArrayListUnmanaged(Moved) = .empty,
+    skipped: std.ArrayListUnmanaged(Skipped) = .empty,
+    bytes_moved: u64 = 0,
+
+    fn skip(self: *Mover, b: *const BuildDir, reason: []const u8) !void {
+        try self.skipped.append(self.a, .{ .path = b.path, .bytes = b.bytes, .reason = reason });
+    }
+
+    fn move(self: *Mover, b: *BuildDir) !void {
+        if (self.opts.monitor) |m| if (m.cancelled()) return self.skip(b, "the move was cancelled");
+        if (!b.trash.eligible) return self.skip(b, b.trash.refusal orelse "not eligible");
+        if (stillBuildOutput(self.a, b)) |reason| return self.skip(b, reason);
+        const again = checkFolder(self.gpa, self.opts, self.now, b);
+        if (!again.eligible) return self.skip(b, again.refusal orelse "not eligible");
+        if (try inUse(self.a, self.opts, b.path)) |reason| return self.skip(b, reason);
+        const outcome: MoveOutcome = if (self.opts.host_trash) |host|
+            hostTrash(self.a, host, b.path)
+        else switch (self.opts.trash_fn(self.a, b.path, true)) {
+            .moved => |where| .{ .moved = where },
+            .failed => |why| .{ .failed = why },
+        };
+        switch (outcome) {
             .moved => |where| {
-                try moved.append(a, .{ .path = b.path, .bytes = b.bytes, .trashed_as = where });
-                bytes_moved += b.bytes;
+                try self.moved.append(self.a, .{ .path = b.path, .bytes = b.bytes, .trashed_as = where });
+                self.bytes_moved += b.bytes;
             },
-            .failed => |why| try skipped.append(a, .{ .path = b.path, .bytes = b.bytes, .reason = why }),
+            .failed => |why| try self.skip(b, why),
         }
     }
-    report.trash = .{ .moved = moved.items, .skipped = skipped.items, .bytes_moved = bytes_moved };
+
+    fn result(self: *const Mover) TrashRun {
+        return .{ .moved = self.moved.items, .skipped = self.skipped.items, .bytes_moved = self.bytes_moved };
+    }
+};
+
+/// Move one folder through the host's Trash.
+fn hostTrash(a: Allocator, host: HostTrash, path: []const u8) MoveOutcome {
+    const z = a.dupeSentinel(u8, path, 0) catch return .{ .failed = "out of memory" };
+    const paths = [_][*:0]const u8{z.ptr};
+    var err_buf: [512]u8 = undefined;
+    err_buf[0] = 0;
+    if (host.call(host.user, &paths, 1, &err_buf, err_buf.len) == 0) return .{ .moved = null };
+    const len = std.mem.indexOfScalar(u8, &err_buf, 0) orelse err_buf.len;
+    if (len == 0) return .{ .failed = "could not be moved to the Trash" };
+    return .{ .failed = a.dupe(u8, err_buf[0..len]) catch "could not be moved to the Trash" };
 }
 
 fn resolveRoots(a: Allocator, given: []const []const u8) ![]Root {
@@ -1114,38 +1177,46 @@ pub fn writeJson(gpa: Allocator, report: *const Report, out: *Io.Writer) !void {
 
     try json.objectField("trash");
     if (report.trash) |t| {
-        try json.beginObject();
-        try json.objectField("moved");
-        try json.beginArray();
-        for (t.moved) |m| {
-            try json.beginObject();
-            try json.objectField("path");
-            try S.path(&json, a, m.path);
-            try S.field(&json, "bytes", m.bytes);
-            try json.objectField("trashed_as");
-            try S.path(&json, a, m.trashed_as);
-            try json.endObject();
-        }
-        try json.endArray();
-        try json.objectField("skipped");
-        try json.beginArray();
-        for (t.skipped) |s| {
-            try json.beginObject();
-            try json.objectField("path");
-            try S.path(&json, a, s.path);
-            try S.field(&json, "bytes", s.bytes);
-            try json.objectField("reason");
-            try S.path(&json, a, s.reason);
-            try json.endObject();
-        }
-        try json.endArray();
-        try S.field(&json, "bytes_moved", t.bytes_moved);
-        try json.endObject();
+        try writeTrashRun(&json, a, t);
     } else {
         try json.write(null);
     }
     try json.endObject();
     try out.writeByte('\n');
+}
+
+/// A Trash run as the report's "trash" object: { moved, skipped, bytes_moved }.
+pub fn writeTrashRun(json: *std.json.Stringify, a: Allocator, t: TrashRun) !void {
+    try json.beginObject();
+    try json.objectField("moved");
+    try json.beginArray();
+    for (t.moved) |m| {
+        try json.beginObject();
+        try json.objectField("path");
+        try json.write(try session.lossy(a, m.path));
+        try json.objectField("bytes");
+        try json.write(m.bytes);
+        try json.objectField("trashed_as");
+        if (m.trashed_as) |where| try json.write(try session.lossy(a, where)) else try json.write(null);
+        try json.endObject();
+    }
+    try json.endArray();
+    try json.objectField("skipped");
+    try json.beginArray();
+    for (t.skipped) |s| {
+        try json.beginObject();
+        try json.objectField("path");
+        try json.write(try session.lossy(a, s.path));
+        try json.objectField("bytes");
+        try json.write(s.bytes);
+        try json.objectField("reason");
+        try json.write(try session.lossy(a, s.reason));
+        try json.endObject();
+    }
+    try json.endArray();
+    try json.objectField("bytes_moved");
+    try json.write(t.bytes_moved);
+    try json.endObject();
 }
 
 /// The readable report: per root, largest first; duplicate sets; projects
@@ -1224,7 +1295,7 @@ pub fn writeText(report: *const Report, out: *Io.Writer) !void {
     try out.writeAll("\n");
     if (report.trash) |t| {
         try out.print("Moved to the Trash: {s} in {d} folder{s}\n", .{ types.formatBytes(t.bytes_moved, &size_buf), t.moved.len, plural(t.moved.len) });
-        for (t.moved) |m| try out.print("  {s:>10}  {s}\n              now {s}\n", .{ types.formatBytes(m.bytes, &size_buf), m.path, m.trashed_as });
+        for (t.moved) |m| try out.print("  {s:>10}  {s}\n              now {s}\n", .{ types.formatBytes(m.bytes, &size_buf), m.path, m.trashed_as orelse "in the Trash" });
         if (t.skipped.len > 0) {
             try out.print("Left in place: {d} folder{s}\n", .{ t.skipped.len, plural(t.skipped.len) });
             for (t.skipped) |s| try out.print("  {s:>10}  {s}\n              {s}\n", .{ types.formatBytes(s.bytes, &size_buf), s.path, s.reason });
@@ -1611,6 +1682,75 @@ fn holdsCopyAOrCannotTell(a: Allocator, path: []const u8) inuse.Answer {
     if (std.mem.endsWith(u8, path, "copy-a/node_modules")) return .{ .held = .{ .pid = 4242, .command = "vite" } };
     if (std.mem.endsWith(u8, path, "tool/scratchpad-cache")) return .unknown;
     return .free;
+}
+
+/// A host's Trash for the tests: renames each item to `.host-trash-<name>`
+/// beside it and counts the calls.
+const TestHostTrash = struct {
+    calls: usize = 0,
+
+    fn call(user: ?*anyopaque, paths: [*]const [*:0]const u8, count: usize, err_out: [*]u8, err_cap: usize) callconv(.c) c_int {
+        _ = err_out;
+        _ = err_cap;
+        const self: *TestHostTrash = @ptrCast(@alignCast(user.?));
+        self.calls += 1;
+        var buf: [4096]u8 = undefined;
+        for (paths[0..count]) |p| {
+            const path = std.mem.span(p);
+            const parent = filters.parentDir(path) orelse return 1;
+            const dest = std.fmt.bufPrintSentinel(&buf, "{s}/.host-trash-{s}", .{ parent, filters.baseName(path) }, 0) catch return 1;
+            if (libc.rename(p, dest.ptr) != 0) return 1;
+        }
+        return 0;
+    }
+};
+
+test "clean moves only the chosen build folders, through a host's Trash" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var f = try Fixture.init(a, "clean-chosen");
+    defer f.deinit();
+    try buildFixture(&f);
+
+    var host: TestHostTrash = .{};
+    const opts: Options = .{
+        .roots = &.{f.real},
+        .main_roots = &.{f.path(a, "no-main-roots")},
+        .guard_fn = Fixture.guard,
+        .guard_ctx = &f,
+        .git_exe = "/nonexistent/zdedupe/git",
+        .host_trash = .{ .call = TestHostTrash.call, .user = &host },
+        .now = realtimeSeconds() + std.time.s_per_day + 60,
+    };
+    var report = try scan(testing.allocator, testing.io, opts);
+    defer report.deinit();
+
+    const chosen = [_][]const u8{
+        f.path(a, "copy-a/node_modules"),
+        f.path(a, "copy-a/node_modules"), // twice: moved once
+        f.path(a, "protected/zig-out"),
+        f.path(a, "copy-a/package.json"), // not build output
+    };
+    try trashSelected(testing.allocator, &report, &chosen, opts);
+    const t = report.trash.?;
+
+    try testing.expectEqual(@as(usize, 1), t.moved.len);
+    try testing.expectEqualStrings(f.path(a, "copy-a/node_modules"), t.moved[0].path);
+    // The host's Trash does not say where; the core does not guess.
+    try testing.expectEqual(@as(?[]const u8, null), t.moved[0].trashed_as);
+    try testing.expectEqual(@as(usize, 1), host.calls);
+    try testing.expect(try f.scratch.exists("copy-a/.host-trash-node_modules/left-pad/index.js"));
+
+    var skipped: std.StringHashMapUnmanaged([]const u8) = .empty;
+    for (t.skipped) |item| try skipped.put(a, item.path, item.reason);
+    try testing.expectEqual(@as(usize, 2), t.skipped.len);
+    try testing.expect(std.mem.indexOf(u8, skipped.get(f.path(a, "protected/zig-out")).?, "protected") != null);
+    try testing.expectEqualStrings("is not a build folder in these results", skipped.get(f.path(a, "copy-a/package.json")).?);
+    // Eligible but not chosen: untouched, and not in the run.
+    try testing.expect(try f.scratch.exists("tool/scratchpad-cache/CACHEDIR.TAG"));
+    try testing.expect(try f.scratch.exists("copy-b/node_modules/left-pad/index.js"));
 }
 
 test "clean --trash leaves a folder a running process is using, and says which" {

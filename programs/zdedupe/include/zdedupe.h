@@ -321,6 +321,7 @@ void zdedupe_cancel(zdedupe_ctx* ctx);
  */
 int zdedupe_run_to_file(zdedupe_ctx* ctx, const char* path);
 
+
 /**
  * Run the scan/compare operation synchronously
  *
@@ -1125,6 +1126,54 @@ const char* zdedupe_results_space_history(zdedupe_results* r, const char* histor
  */
 const char* zdedupe_results_space_trash(zdedupe_results* r, const char* items_json,
                                         zdedupe_trash_fn trash_fn, void* user);
+
+/* === Build output ===
+ *
+ * What `zdedupe clean` does, for a host: find the build output under some
+ * folders (node_modules, target beside Cargo.toml, .build, zig-out,
+ * .zig-cache, DerivedData, __pycache__, any folder with a valid
+ * CACHEDIR.TAG that is not a Python virtual environment, ...: the core's
+ * build-output rule), say whose it is (each folder's project and, where git
+ * answers, whether the main checkout already holds that project's work) and
+ * which of it can go to the Trash. Only build output is ever moved, never a
+ * project, a root or anything else. The answers are the CLI's JSON
+ * (schema zdedupe-clean/1, programs/zdedupe/README.md; $defs/CleanReport).
+ */
+
+/**
+ * Look for build output -> CleanReport. Query (CleanQuery):
+ *   { "roots": ["/a", ...] (required), "main_roots": ["/Users/me/work"] (where main
+ *     checkouts live; default ~/work), "older_s": 86400
+ *     (seconds nothing in a folder may have changed for it to go; at least
+ *     600), "threads": 0 }
+ * Blocks; zdedupe_get_progress and zdedupe_cancel work as for a scan. Every
+ * build folder carries "trash": { "eligible", "refusal", "newest_change" }:
+ * what a move would do now. The report stays in `ctx` for
+ * zdedupe_clean_trash. NULL on failure, with zdedupe_clean_error saying why.
+ * The answer belongs to `ctx` until its next clean call or zdedupe_free.
+ */
+const char* zdedupe_clean_scan(zdedupe_ctx* ctx, const char* query_json);
+
+/**
+ * Move build folders of the last zdedupe_clean_scan on `ctx` to the Trash
+ * -> CleanTrashRun { "moved": [{ path, bytes, trashed_as }], "skipped":
+ * [{ path, bytes, reason }], "bytes_moved" }. Items (CleanTrashItems):
+ *   { "paths": ["/a/app/node_modules", ...] }
+ * Each must be a build folder of that report that was eligible, and is
+ * checked again just before it moves: the same folder (not a link), still
+ * build output by the same rule, nothing in it changed for older_s, not
+ * protected, and no running process using it (when that cannot be told, it
+ * stays). A path that is not one of the report's build folders stays and is
+ * skipped. `trash_fn` is the host's Trash, as for zdedupe_results_delete
+ * ("trashed_as" is then null); NULL uses the core's own (NSFileManager on
+ * macOS, the freedesktop Trash on Linux, unsupported on Windows). Nothing is
+ * ever deleted permanently. Cancel stops before the next folder.
+ */
+const char* zdedupe_clean_trash(zdedupe_ctx* ctx, const char* items_json,
+                                zdedupe_trash_fn trash_fn, void* user);
+
+/** Why the last clean call on `ctx` failed, or NULL. Owned by `ctx`. */
+const char* zdedupe_clean_error(const zdedupe_ctx* ctx);
 
 /* === Utilities === */
 

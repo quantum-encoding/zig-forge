@@ -29,6 +29,7 @@ pub const filters = @import("filters.zig");
 pub const removed = @import("removed.zig");
 pub const session = @import("session.zig");
 pub const space = @import("space.zig");
+pub const clean = @import("clean.zig");
 
 // Re-export commonly used types
 pub const FileEntry = types.FileEntry;
@@ -78,6 +79,12 @@ const InternalContext = struct {
     /// Progress out / cancellation in. Lives in the context so its address is
     /// stable for the whole run and other threads can reach it.
     monitor: types.Monitor,
+    /// The last zdedupe_clean_scan's report, which zdedupe_clean_trash moves
+    /// from, and the answers and error the clean calls hand out (each valid
+    /// until the next clean call on this context, or zdedupe_free).
+    clean_report: ?clean.Report = null,
+    clean_answer: ?[:0]u8 = null,
+    clean_error: ?[:0]u8 = null,
 
     const Mode = enum(c_int) { find_duplicates = 0, compare_folders = 1, disk_space = 2 };
     const alloc = core_alloc;
@@ -107,6 +114,9 @@ const InternalContext = struct {
         self.user_excludes.deinit(alloc);
         for (self.exclude_paths.items) |p| alloc.free(p);
         self.exclude_paths.deinit(alloc);
+        if (self.clean_report) |*r| r.deinit();
+        if (self.clean_answer) |j| alloc.free(j);
+        if (self.clean_error) |e| alloc.free(e);
         // Free the context using libc allocator
         libc_alloc.destroy(self);
     }
@@ -321,6 +331,146 @@ pub export fn zdedupe_cancel(ctx: ?*ZDedupeContext) void {
     const c = ctx orelse return;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     internal.monitor.cancel();
+}
+
+// === Build output (zdedupe clean) ===
+
+/// A zdedupe_clean_scan query.
+const CleanQuery = struct {
+    roots: []const []const u8 = &.{},
+    main_roots: []const []const u8 = &.{},
+    older_s: i64 = clean.default_older_s,
+    threads: u32 = 0,
+};
+
+/// A zdedupe_clean_trash request.
+const CleanTrashItems = struct {
+    paths: []const []const u8 = &.{},
+};
+
+/// The process's environment, so the git the report asks finds its PATH.
+fn hostEnviron() std.process.Environ {
+    if (comptime builtin.os.tag == .windows) return .{ .block = .global };
+    return .{ .block = .{ .slice = std.mem.span(std.c.environ) } };
+}
+
+fn cleanFail(internal: *InternalContext, comptime fmt: []const u8, args: anytype) ?[*:0]const u8 {
+    const alloc = InternalContext.alloc;
+    if (internal.clean_error) |e| alloc.free(e);
+    internal.clean_error = std.fmt.allocPrintSentinel(alloc, fmt, args, 0) catch null;
+    return null;
+}
+
+fn cleanAnswer(internal: *InternalContext, json: *std.Io.Writer.Allocating) ?[*:0]const u8 {
+    const alloc = InternalContext.alloc;
+    if (internal.clean_answer) |j| alloc.free(j);
+    internal.clean_answer = null;
+    const text = json.toOwnedSliceSentinel(0) catch return cleanFail(internal, "out of memory", .{});
+    internal.clean_answer = text;
+    return text.ptr;
+}
+
+pub export fn zdedupe_clean_scan(ctx: ?*ZDedupeContext, query_json: ?[*:0]const u8) ?[*:0]const u8 {
+    const c = ctx orelse return null;
+    const internal: *InternalContext = @ptrCast(@alignCast(c));
+    const alloc = InternalContext.alloc;
+    const text = query_json orelse return cleanFail(internal, "no query was given", .{});
+
+    var parsed = std.json.parseFromSlice(CleanQuery, alloc, std.mem.span(text), .{ .ignore_unknown_fields = true }) catch
+        return cleanFail(internal, "build output query is not valid JSON", .{});
+    defer parsed.deinit();
+    const query = parsed.value;
+    if (query.roots.len == 0) return cleanFail(internal, "no folders were given to look in", .{});
+
+    // The core's path form (Windows: `C:\\x` becomes `C:/x`).
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const roots = arena.alloc([]const u8, query.roots.len) catch return cleanFail(internal, "out of memory", .{});
+    for (query.roots, roots) |given, *slot| slot.* = filters.normalizeOwned(arena, given) catch return cleanFail(internal, "out of memory", .{});
+    const main_roots = arena.alloc([]const u8, query.main_roots.len) catch return cleanFail(internal, "out of memory", .{});
+    for (query.main_roots, main_roots) |given, *slot| slot.* = filters.normalizeOwned(arena, given) catch return cleanFail(internal, "out of memory", .{});
+
+    const monitor = &internal.monitor;
+    const cancel_was_requested = monitor.cancelled();
+    monitor.reset();
+    if (cancel_was_requested) monitor.cancel();
+    defer monitor.cancel_requested.store(false, .release);
+    monitor.enter(.scanning, 0);
+
+    var threaded: std.Io.Threaded = .init(alloc, .{ .environ = hostEnviron() });
+    defer threaded.deinit();
+
+    if (internal.clean_report) |*old| old.deinit();
+    internal.clean_report = null;
+    var found = clean.scan(alloc, threaded.io(), .{
+        .roots = roots,
+        .main_roots = main_roots,
+        .older_s = @max(query.older_s, clean.min_older_s),
+        .threads = query.threads,
+        .monitor = monitor,
+    }) catch |err| {
+        releaseFreedMemory();
+        return switch (err) {
+            error.Cancelled => cleanFail(internal, "the scan was cancelled", .{}),
+            else => cleanFail(internal, "the scan failed: {s}", .{@errorName(err)}),
+        };
+    };
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    clean.writeJson(alloc, &found, &out.writer) catch {
+        found.deinit();
+        return cleanFail(internal, "out of memory", .{});
+    };
+    internal.clean_report = found;
+    monitor.enter(.done, 0);
+    return cleanAnswer(internal, &out);
+}
+
+pub export fn zdedupe_clean_trash(
+    ctx: ?*ZDedupeContext,
+    items_json: ?[*:0]const u8,
+    trash_fn: ?ZDedupeTrashFn,
+    user: ?*anyopaque,
+) ?[*:0]const u8 {
+    const c = ctx orelse return null;
+    const internal: *InternalContext = @ptrCast(@alignCast(c));
+    const alloc = InternalContext.alloc;
+    const text = items_json orelse return cleanFail(internal, "no folders were given to move", .{});
+    const last = if (internal.clean_report) |*r| r else return cleanFail(internal, "there is no build output scan to move from", .{});
+
+    var parsed = std.json.parseFromSlice(CleanTrashItems, alloc, std.mem.span(text), .{ .ignore_unknown_fields = true }) catch
+        return cleanFail(internal, "folder list is not valid JSON", .{});
+    defer parsed.deinit();
+
+    const monitor = &internal.monitor;
+    const cancel_was_requested = monitor.cancelled();
+    monitor.reset();
+    if (cancel_was_requested) monitor.cancel();
+    defer monitor.cancel_requested.store(false, .release);
+
+    clean.trashSelected(alloc, last, parsed.value.paths, .{
+        .roots = &.{},
+        .older_s = last.older_s,
+        .host_trash = if (trash_fn) |call| .{ .call = call, .user = user } else null,
+        .monitor = monitor,
+    }) catch return cleanFail(internal, "out of memory", .{});
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    clean.writeTrashRun(&json, arena_state.allocator(), last.trash.?) catch return cleanFail(internal, "out of memory", .{});
+    monitor.enter(.done, 0);
+    return cleanAnswer(internal, &out);
+}
+
+pub export fn zdedupe_clean_error(ctx: ?*const ZDedupeContext) ?[*:0]const u8 {
+    const c = ctx orelse return null;
+    const internal: *const InternalContext = @ptrCast(@alignCast(c));
+    return if (internal.clean_error) |e| e.ptr else null;
 }
 
 // === Execution ===
@@ -854,4 +1004,49 @@ test "credential excludes are published as the list the engine applies" {
     defer parsed.deinit();
     try std.testing.expectEqual(types.Config.credential_excludes.len, parsed.value.len);
     for (types.Config.credential_excludes, parsed.value) |want, got| try std.testing.expectEqualStrings(want, got);
+}
+
+test "build output through the C API: a scan, a move it refuses for a fresh folder, and errors that say why" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    var scratch = try Scratch.init(testing.allocator, "lib-clean");
+    defer scratch.deinit();
+    try scratch.makeDir("app");
+    try scratch.writeFile("app/package.json", "{\"name\":\"app\"}");
+    try scratch.makeDir("app/node_modules");
+    try scratch.writeFile("app/node_modules/x.js", "module.exports = 1;\n");
+
+    const ctx = zdedupe_init() orelse return error.InitFailed;
+    defer zdedupe_free(ctx);
+
+    // Nothing to move from yet.
+    try testing.expect(zdedupe_clean_trash(ctx, "{\"paths\":[]}", null, null) == null);
+    try testing.expectEqualStrings("there is no build output scan to move from", std.mem.span(zdedupe_clean_error(ctx).?));
+    try testing.expect(zdedupe_clean_scan(ctx, "{") == null);
+    try testing.expectEqualStrings("build output query is not valid JSON", std.mem.span(zdedupe_clean_error(ctx).?));
+    try testing.expect(zdedupe_clean_scan(ctx, "{\"roots\":[]}") == null);
+
+    const query = try std.fmt.allocPrintSentinel(testing.allocator, "{{\"roots\":[\"{s}\"],\"main_roots\":[\"{s}/none\"]}}", .{ scratch.path, scratch.path }, 0);
+    defer testing.allocator.free(query);
+    const answer = std.mem.span(zdedupe_clean_scan(ctx, query.ptr) orelse return error.ScanFailed);
+    const doc = try std.json.parseFromSlice(std.json.Value, testing.allocator, answer, .{});
+    defer doc.deinit();
+    try testing.expectEqualStrings("zdedupe-clean/1", doc.value.object.get("schema").?.string);
+    const dirs_found = doc.value.object.get("build_dirs").?.array.items;
+    try testing.expectEqual(@as(usize, 1), dirs_found.len);
+    const nm = dirs_found[0].object.get("path").?.string;
+    try testing.expect(std.mem.endsWith(u8, nm, "/app/node_modules"));
+
+    // Just written, so it stays; the answer says why.
+    const items = try std.fmt.allocPrintSentinel(testing.allocator, "{{\"paths\":[\"{s}\"]}}", .{nm}, 0);
+    defer testing.allocator.free(items);
+    const moved = std.mem.span(zdedupe_clean_trash(ctx, items.ptr, null, null) orelse return error.TrashFailed);
+    const run = try std.json.parseFromSlice(std.json.Value, testing.allocator, moved, .{});
+    defer run.deinit();
+    try testing.expectEqual(@as(usize, 0), run.value.object.get("moved").?.array.items.len);
+    const skipped = run.value.object.get("skipped").?.array.items;
+    try testing.expectEqual(@as(usize, 1), skipped.len);
+    try testing.expect(std.mem.indexOf(u8, skipped[0].object.get("reason").?.string, "changed too recently") != null);
+    try testing.expect(try scratch.exists("app/node_modules/x.js"));
 }
