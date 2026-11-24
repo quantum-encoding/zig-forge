@@ -113,6 +113,12 @@ pub const DirInfo = struct {
     newest_mtime: i64,
     /// Entries under this directory that were deliberately ignored.
     skipped_entries: u64,
+    /// Members with one number hold one copy of the data between them.
+    /// Numbered from 1 in path order: a member takes a new number unless
+    /// every file in it with content shares its blocks (APFS clones, hard
+    /// links) with an earlier member, whose number it then takes. Deleting a
+    /// member frees nothing while another of its number is left.
+    storage_class: u32 = 0,
 };
 
 /// Directories whose subtrees are identical.
@@ -122,8 +128,9 @@ pub const IdenticalSet = struct {
     file_count: u64,
     /// Logical size of each copy in bytes (recursive).
     bytes: u64,
-    /// `bytes * (copies - 1)`. An upper bound: files that are hard links of
-    /// one another across the copies take no extra space to begin with.
+    /// `bytes * (storage classes - 1)`: copies that share their blocks
+    /// (`DirInfo.storage_class`) count once. Still an upper bound where
+    /// copies share only some of their files.
     reclaimable: u64,
     /// Sorted by path.
     dirs: []DirInfo,
@@ -183,6 +190,17 @@ pub const Analysis = struct {
         self.arena.deinit();
     }
 };
+
+/// Where a file's blocks are: its APFS clone class where the walk saw one
+/// (clones share every block), else its inode (hard links share one), else,
+/// on a filesystem that reports neither, the file alone.
+const Storage = struct { dev: u64, id: u64, kind: enum { clone, inode, file } };
+
+fn storageOf(entry: types.FileEntry, index: u32) Storage {
+    if (entry.clone_id != 0) return .{ .dev = entry.dev, .id = entry.clone_id, .kind = .clone };
+    if (entry.inode != 0) return .{ .dev = entry.dev, .id = entry.inode, .kind = .inode };
+    return .{ .dev = 0, .id = index, .kind = .file };
+}
 
 const Node = struct {
     path: []const u8,
@@ -581,6 +599,9 @@ const Analyzer = struct {
         }
 
         var sets: std.ArrayListUnmanaged(IdenticalSet) = .empty;
+        // The blocks the set's earlier members hold, and the storage class
+        // of the member that brought each in, while one set is built.
+        var storage: std.AutoHashMapUnmanaged(Storage, u32) = .empty;
 
         var iter = by_digest.iterator();
         while (iter.next()) |kv| {
@@ -600,27 +621,32 @@ const Analyzer = struct {
 
             if (self.impliedByParents(members)) continue;
 
+            const nodes = self.nodes;
+            std.sort.heap(NodeId, members, nodes, struct {
+                fn lessThan(all: []const Node, lhs: NodeId, rhs: NodeId) bool {
+                    return std.mem.order(u8, all[lhs].path, all[rhs].path) == .lt;
+                }
+            }.lessThan);
+
             const first = &self.nodes[members[0]];
             const dirs = try self.out.alloc(DirInfo, members.len);
+            storage.clearRetainingCapacity();
+            var classes: u32 = 0;
             for (members, dirs) |member, *info| {
                 const node = &self.nodes[member];
                 info.* = .{
                     .path = node.path,
                     .newest_mtime = node.newest_mtime,
                     .skipped_entries = node.skipped,
+                    .storage_class = try self.storageClass(node, &storage, &classes),
                 };
             }
-            std.sort.heap(DirInfo, dirs, {}, struct {
-                fn lessThan(_: void, lhs: DirInfo, rhs: DirInfo) bool {
-                    return std.mem.order(u8, lhs.path, rhs.path) == .lt;
-                }
-            }.lessThan);
 
             try sets.append(self.out, .{
                 .digest = kv.key_ptr.*,
                 .file_count = first.file_count,
                 .bytes = first.bytes,
-                .reclaimable = first.bytes * (members.len - 1),
+                .reclaimable = first.bytes * (@max(classes, 1) - 1),
                 .dirs = dirs,
             });
         }
@@ -921,6 +947,35 @@ const Analyzer = struct {
     fn share(part: u64, whole: u64) f64 {
         if (whole == 0) return 0;
         return @as(f64, @floatFromInt(part)) / @as(f64, @floatFromInt(whole));
+    }
+
+    /// `node`'s storage class among the members before it (see
+    /// `DirInfo.storage_class`): the lowest class whose blocks its files use
+    /// when `seen` already holds all of them, else the next new class, and
+    /// then its files' blocks join `seen` under it.
+    fn storageClass(self: *const Analyzer, node: *const Node, seen: *std.AutoHashMapUnmanaged(Storage, u32), classes: *u32) !u32 {
+        const files = self.subtreeFiles(node);
+        var shared_with: u32 = std.math.maxInt(u32);
+        var shares = true;
+        for (files) |index| {
+            const entry = &self.files[index];
+            if (entry.size == 0) continue;
+            if (seen.get(storageOf(entry.*, index))) |class| {
+                shared_with = @min(shared_with, class);
+            } else {
+                shares = false;
+                break;
+            }
+        }
+        if (shares and shared_with != std.math.maxInt(u32)) return shared_with;
+        classes.* += 1;
+        for (files) |index| {
+            const entry = &self.files[index];
+            if (entry.size == 0) continue;
+            const gop = try seen.getOrPut(self.scratch, storageOf(entry.*, index));
+            if (!gop.found_existing) gop.value_ptr.* = classes.*;
+        }
+        return classes.*;
     }
 
     /// Every file beneath `node`, as indices into `files`.

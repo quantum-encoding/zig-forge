@@ -349,6 +349,7 @@ const AliveDir = struct {
     path: []const u8,
     newest_mtime: i64,
     skipped_entries: u64,
+    storage_class: u32,
 };
 
 const CachedOrder = struct {
@@ -389,6 +390,8 @@ pub const Session = struct {
     alive: std.ArrayListUnmanaged(AliveFile) = .empty,
     /// The same, for the member folders of an identical set.
     alive_dirs: std.ArrayListUnmanaged(AliveDir) = .empty,
+    /// Storage classes already counted, while one set's savings are summed.
+    storage_classes: std.DynamicBitSetUnmanaged = .{},
     /// Reused by `groupSavings` and `freedBytes`.
     clone_tally: CloneTally = .empty,
     /// The user's home directory, owned; null when HOME is unset.
@@ -496,6 +499,7 @@ pub const Session = struct {
         self.clearOrder();
         self.alive.deinit(gpa);
         self.alive_dirs.deinit(gpa);
+        self.storage_classes.deinit(gpa);
         self.clone_tally.deinit(gpa);
         self.plan_members.deinit(gpa);
         self.plan_kept.deinit(gpa);
@@ -862,6 +866,7 @@ pub const Session = struct {
                 .path = dir.path,
                 .newest_mtime = dir.newest_mtime,
                 .skipped_entries = dir.skipped_entries,
+                .storage_class = dir.storage_class,
             });
         }
         return self.alive_dirs.items;
@@ -869,6 +874,28 @@ pub const Session = struct {
 
     fn liveSavings(size: u64, copies: usize) u64 {
         return size *| (@as(u64, copies) -| 1);
+    }
+
+    /// Savings of an identical set: every copy but one, where the copies of
+    /// one storage class (APFS clones, hard links; store.SetDir) hold one
+    /// copy between them, whichever of them is left. A member with no class
+    /// recorded is a copy of its own.
+    fn setSavings(self: *Session, bytes: u64, dirs: []const AliveDir) !u64 {
+        var top: u32 = 0;
+        for (dirs) |dir| top = @max(top, dir.storage_class);
+        const seen = &self.storage_classes;
+        if (seen.bit_length < @as(usize, top) + 1) try seen.resize(self.gpa, @as(usize, top) + 1, false);
+        seen.unsetAll();
+        var copies: usize = 0;
+        for (dirs) |dir| {
+            if (dir.storage_class == 0) {
+                copies += 1;
+            } else if (!seen.isSet(dir.storage_class)) {
+                seen.set(dir.storage_class);
+                copies += 1;
+            }
+        }
+        return liveSavings(bytes, copies);
     }
 
     /// Savings of a file group: every copy of the data but one. Pure clones
@@ -1005,7 +1032,15 @@ pub const Session = struct {
         var reclaimable: u64 = 0;
         for (0..self.reader.setCount()) |i| {
             const set = self.reader.set(i) catch |err| return self.readFailed(err);
-            reclaimable +|= set.bytes *| (@as(u64, set.dir_count) -| 1);
+            // Every class from 1 up to the highest is some member's.
+            var copies: u64 = 0;
+            var top: u32 = 0;
+            for (0..set.dir_count) |d| {
+                const dir = self.reader.setDir(&set, d) catch |err| return self.readFailed(err);
+                if (dir.storage_class == 0) copies += 1;
+                top = @max(top, dir.storage_class);
+            }
+            reclaimable +|= liveSavings(set.bytes, copies + top);
         }
         var redundant_pairs: usize = 0;
         for (0..self.reader.overlapCount()) |i| {
@@ -1378,11 +1413,11 @@ pub const Session = struct {
         for (0..self.reader.setCount()) |i| {
             if (!try cursor.set(i)) continue;
             const s = try self.reader.set(i);
-            const alive = (try self.aliveDirs(&s)).len;
+            const alive = try self.aliveDirs(&s);
             try rows.append(arena, .{ .index = i, .key = switch (query.sort) {
-                .reclaim => liveSavings(s.bytes, alive),
+                .reclaim => try self.setSavings(s.bytes, alive),
                 .size => s.bytes,
-                .count => alive,
+                .count => alive.len,
             } });
         }
         std.mem.sort(Row, rows.items, {}, struct {
@@ -1472,7 +1507,7 @@ pub const Session = struct {
             try json.objectField("bytes");
             try json.write(set.bytes);
             try json.objectField("reclaimable");
-            try json.write(liveSavings(set.bytes, dirs.len));
+            try json.write(try self.setSavings(set.bytes, dirs));
             try json.objectField("dirs");
             try writeDirRows(json, arena, dirs[0..@min(dirs.len, set_members_in_row)], self.protection());
             try json.endObject();
@@ -1684,7 +1719,7 @@ pub const Session = struct {
                 paths.clearRetainingCapacity();
                 for (dirs) |dir| try paths.append(arena, dir.path);
                 try collectKeys(arena, &keys, paths.items, query.by, matcher, base, roots, .folders);
-                try counter.add(arena, liveSavings(set.bytes, dirs.len), keys.items);
+                try counter.add(arena, try self.setSavings(set.bytes, dirs), keys.items);
             },
             .overlaps => for (0..self.reader.overlapCount()) |i| {
                 const pair = try self.reader.overlap(i);

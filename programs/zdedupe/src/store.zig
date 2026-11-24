@@ -162,7 +162,10 @@ pub const SetDir = extern struct {
     newest_mtime: i64,
     skipped_entries: u64,
     path_len: u32,
-    _pad: u32 = 0,
+    /// Members of a set with one number hold one copy of the data between
+    /// them (dirs.DirInfo.storage_class). 0 in stores written before it was
+    /// recorded: each such member counts as a copy of its own.
+    storage_class: u32 = 0,
 };
 
 pub const Side = extern struct {
@@ -354,6 +357,7 @@ fn writeAll(out: *FileWriter, source: Source) WriteError!void {
                 .path_len = ref.len,
                 .newest_mtime = dir.newest_mtime,
                 .skipped_entries = dir.skipped_entries,
+                .storage_class = dir.storage_class,
             }));
         }
     }
@@ -582,6 +586,8 @@ pub const DirRef = struct {
     newest_mtime: i64,
     /// Entries beneath it the scan deliberately ignored.
     skipped_entries: u64,
+    /// See `SetDir.storage_class`; 0 when not recorded.
+    storage_class: u32,
 };
 
 /// A read-only view over a mapped store. Holds no allocations: every accessor
@@ -760,6 +766,7 @@ pub const Reader = struct {
             .path = try self.string(r.path_offset, r.path_len),
             .newest_mtime = r.newest_mtime,
             .skipped_entries = r.skipped_entries,
+            .storage_class = r.storage_class,
         };
     }
 

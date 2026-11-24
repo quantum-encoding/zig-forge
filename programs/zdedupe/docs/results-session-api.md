@@ -92,7 +92,8 @@ const char* zdedupe_results_overview(zdedupe_results* r);
   "identical_sets": 0, "overlaps": 0, "redundant_pairs": 0, "reclaimable": 0 }
 ```
 Counters are the scan's own; they do not change with deletes (the UIs say
-so beside them). `reclaimable` = Σ bytes·(copies−1) over identical sets;
+so beside them). `reclaimable` = Σ bytes·(copies−1) over identical sets,
+copies that share their blocks (APFS clones, hard links) counting once;
 `redundant_pairs` = overlap pairs where at least one side has nothing unique.
 Roots come from the sidecar, else the deepest directory containing every
 path in the results (`results.rs common_root`).

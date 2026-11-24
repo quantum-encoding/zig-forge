@@ -284,7 +284,7 @@
           "$ref": "#/$defs/ByteCount"
         },
         "reclaimable": {
-          "description": "bytes * (count - 1) over the alive copies. An UPPER BOUND: copies that are hard links of one another take no extra space to begin with.",
+          "description": "bytes * (copies - 1) over the alive copies, where copies that share their blocks (APFS clones, hard links) count as one, whichever of them is left. An UPPER BOUND where copies share only some of their files.",
           "$ref": "#/$defs/ByteCount"
         },
         "dirs": {
@@ -488,7 +488,7 @@
           "minimum": 0
         },
         "reclaimable": {
-          "description": "Sum of bytes * (copies - 1) over identical folder sets. An upper bound, as in SetRow.",
+          "description": "Sum of bytes * (copies - 1) over identical folder sets as scanned, copies that share their blocks counting as one. An upper bound, as in SetRow.",
           "$ref": "#/$defs/ByteCount"
         }
       }

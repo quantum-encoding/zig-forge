@@ -918,6 +918,49 @@ test "APFS clones are read once, share a clone class, and count as one copy" {
     try std.testing.expectEqual(@as(u64, 2), finder.getSummary().full_hash_jobs);
 }
 
+test "a folder that is an APFS clone of another takes no space of its own in their identical set" {
+    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    const allocator = std.testing.allocator;
+    var scratch = try Scratch.init(allocator, "dedupe-clone-dir");
+    defer scratch.deinit();
+
+    const big: [200 * 1024]u8 = @splat('b');
+    const small: [50 * 1024]u8 = @splat('s');
+    for ([_][]const u8{ "orig", "copy" }) |dir| {
+        try scratch.makeDir(dir);
+        const a = try std.fmt.allocPrint(allocator, "{s}/a.bin", .{dir});
+        defer allocator.free(a);
+        const b = try std.fmt.allocPrint(allocator, "{s}/b.bin", .{dir});
+        defer allocator.free(b);
+        try scratch.writeFile(a, &big);
+        try scratch.writeFile(b, &small);
+    }
+    const orig = try scratch.joinZ("orig");
+    defer allocator.free(orig);
+    const clone = try scratch.joinZ("clone");
+    defer allocator.free(clone);
+    // Not APFS (or no clone support): nothing to test here.
+    if (clonefile(orig, clone, 0) != 0) return error.SkipZigTest;
+
+    var finder = DupeFinder.init(allocator, .{ .analyze_dirs = true });
+    defer finder.deinit();
+    try finder.scan(&.{scratch.path});
+
+    const analysis = finder.getDirAnalysis().?;
+    try std.testing.expectEqual(@as(usize, 1), analysis.identical_sets.len);
+    const set = analysis.identical_sets[0];
+    try std.testing.expectEqual(@as(usize, 3), set.dirs.len);
+    try std.testing.expectEqual(@as(u64, big.len + small.len), set.bytes);
+    // Sorted by path: clone, copy, orig. orig shares every block with clone.
+    try std.testing.expect(std.mem.endsWith(u8, set.dirs[0].path, "/clone"));
+    try std.testing.expectEqual(@as(u32, 1), set.dirs[0].storage_class);
+    try std.testing.expectEqual(@as(u32, 2), set.dirs[1].storage_class);
+    try std.testing.expectEqual(@as(u32, 1), set.dirs[2].storage_class);
+    // Three copies in two storage classes: one copy's worth to reclaim.
+    try std.testing.expectEqual(set.bytes, set.reclaimable);
+}
+
 test "a root given through a link is walked by its real path, and so is an exclude" {
     const allocator = std.testing.allocator;
     const Scratch = @import("testing_scratch.zig").Scratch;

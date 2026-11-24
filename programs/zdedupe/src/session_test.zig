@@ -1170,6 +1170,56 @@ fn openDirs(gpa: Allocator, label: []const u8) !struct { Fixture, *Session } {
     return .{ fixture, s };
 }
 
+extern "c" fn clonefile(src: [*:0]const u8, dst: [*:0]const u8, flags: u32) c_int;
+
+test "a set's savings count copies that share their blocks once, and follow a delete of the one holding them (macOS)" {
+    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const each = 4000 + 3000;
+    var fixture = try Fixture.initDirs(gpa, "session-clone-dir", &[_]File{
+        .{ .path = "orig/a.bin", .byte = 'a', .size = 4000 },
+        .{ .path = "orig/b.bin", .byte = 'b', .size = 3000 },
+        .{ .path = "copy/a.bin", .byte = 'a', .size = 4000 },
+        .{ .path = "copy/b.bin", .byte = 'b', .size = 3000 },
+    });
+    defer fixture.deinit();
+    // clone/ is an APFS clone of orig/: the same blocks, two folders.
+    const orig = try fixture.tree.joinZ("orig");
+    defer gpa.free(orig);
+    const clone = try fixture.tree.joinZ("clone");
+    defer gpa.free(clone);
+    if (clonefile(orig, clone, 0) != 0) return error.SkipZigTest;
+    try fixture.scan();
+
+    const s = try fixture.open(null);
+    defer s.close();
+    const page = try parse(a, s.identicalSets("{\"offset\":0,\"limit\":50}"));
+    const row = field(page, "rows").array.items[0];
+    try testing.expectEqual(@as(i64, 3), int(row, "count"));
+    try testing.expectEqual(@as(i64, each), int(row, "bytes"));
+    // clone and orig hold one copy between them, copy another.
+    try testing.expectEqual(@as(i64, each), int(row, "reclaimable"));
+    try testing.expectEqual(@as(i64, each), int(try parse(a, s.overview()), "reclaimable"));
+
+    // clone, which came first in path order, goes: orig now holds those
+    // blocks alone, and orig and copy are two copies of their own.
+    const items = try query(a, "[{{\"path\":{s},\"keepers\":[{s}],\"bytes\":{d}}}]", .{
+        try jsonString(a, try treeJoin(a, &fixture, "clone")),
+        try jsonString(a, try treeJoin(a, &fixture, "orig")),
+        each,
+    });
+    const report = try parse(a, s.deleteFolders(items, false, null, null));
+    try testing.expectEqual(@as(i64, 1), int(report, "deleted"));
+    const after = try parse(a, s.identicalSets("{\"offset\":0,\"limit\":50}"));
+    const left = field(after, "rows").array.items[0];
+    try testing.expectEqual(@as(i64, 2), int(left, "count"));
+    try testing.expectEqual(@as(i64, each), int(left, "reclaimable"));
+}
+
 test "the overview counts the folder findings the store carries" {
     const gpa = testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
