@@ -1195,7 +1195,16 @@ const char* zdedupe_clean_scan(zdedupe_ctx* ctx, const char* query_json);
  * skipped. `trash_fn` is the host's Trash, as for zdedupe_results_delete
  * ("trashed_as" is then null); NULL uses the core's own (NSFileManager on
  * macOS, the freedesktop Trash on Linux, unsupported on Windows). Nothing is
- * ever deleted permanently. Cancel stops before the next folder.
+ * ever deleted permanently. Cancel stops before the next folder; the folders
+ * not reached are skipped with "the move was cancelled".
+ *
+ * Progress (zdedupe_get_progress, from another thread): "total" is the
+ * distinct paths asked for, "done" those looked at so far, moved or not,
+ * "bytes_total" their size and "bytes_done" the bytes moved; the current path
+ * is the folder being checked or moved. "No running process" is read from
+ * every process at once and read again when that reading is 5 seconds old
+ * (a single reading takes a second or more on a busy Mac); the age check runs
+ * on each folder just before it moves.
  *
  * On Windows "changed" counts each file's creation time with its
  * modification time (an unpacked file keeps an old modification time but is

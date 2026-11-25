@@ -17,6 +17,12 @@
 //! A process that holds nothing open under the folder cannot be seen here, as
 //! a script that imported everything at start and closed its files.
 //!
+//! Reading every process takes a second or more on a busy Mac (a thousand
+//! processes and their mapped libraries), so a move of thousands of build
+//! folders asks a `Snapshot`: every path every process holds, read once,
+//! sorted, and asked about each folder by binary search; the mover reads a
+//! new one when it is a few seconds old.
+//!
 //! Windows answers from two sides. A folder in it that another program has
 //! open, as its working folder or to watch it, refuses to be opened for
 //! deletion; Windows reports no process for that, so the answer names none.
@@ -29,6 +35,7 @@ const builtin = @import("builtin");
 const libc = @import("sys.zig").c;
 const filters = @import("filters.zig");
 const dirstream = @import("dirstream.zig");
+const types = @import("types.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -57,6 +64,118 @@ fn search(arena: Allocator, folder: []const u8, skip: ?i32) Answer {
     if (comptime builtin.os.tag == .linux) return linux.search(arena, folder, skip);
     if (comptime builtin.os.tag == .windows) return windows.search(arena, folder, skip);
     return .unknown;
+}
+
+/// A sink for the paths a process holds that answers whether one is at or
+/// under `folder`: the walk stops at the first.
+const FolderSink = struct {
+    folder: []const u8,
+
+    fn take(self: FolderSink, pid: i32, path: []const u8) Allocator.Error!bool {
+        _ = pid;
+        return filters.isAtOrUnder(path, self.folder);
+    }
+};
+
+/// Every path every running process held when it was taken: executables,
+/// working directories, open files and mapped files, sorted by path. On
+/// Windows it holds nothing and each folder is asked of Windows itself
+/// (`windows.search`): the Restart Manager answers about named files only.
+pub const Snapshot = struct {
+    arena: std.heap.ArenaAllocator,
+    entries: []const Entry = &.{},
+    /// The process list could not be read: every answer is `.unknown`.
+    unknown: bool = false,
+    /// Monotonic nanoseconds (`types.nowNs`) when it was taken.
+    taken_ns: u64,
+    skip: ?i32,
+
+    pub const Entry = struct { path: []const u8, pid: i32 };
+
+    /// What every process but this one holds now.
+    pub fn current(gpa: Allocator) Snapshot {
+        return take(gpa, ownPid());
+    }
+
+    /// What every process but `skip` holds now.
+    pub fn take(gpa: Allocator, skip: ?i32) Snapshot {
+        var self: Snapshot = .{ .arena = .init(gpa), .taken_ns = types.nowNs(), .skip = skip };
+        if (comptime builtin.os.tag == .windows) return self;
+        const a = self.arena.allocator();
+        var sink: CollectSink = .{ .arena = a };
+        const read = if (comptime builtin.os.tag.isDarwin())
+            darwin.visitAll(a, skip, &sink)
+        else if (comptime builtin.os.tag == .linux)
+            linux.visitAll(a, skip, &sink)
+        else
+            false;
+        if (!read or sink.failed) {
+            self.unknown = true;
+            return self;
+        }
+        std.mem.sort(Entry, sink.entries.items, {}, struct {
+            fn less(_: void, x: Entry, y: Entry) bool {
+                return std.mem.order(u8, x.path, y.path) == .lt;
+            }
+        }.less);
+        self.entries = sink.entries.items;
+        return self;
+    }
+
+    pub fn deinit(self: *Snapshot) void {
+        self.arena.deinit();
+    }
+
+    /// Nanoseconds since it was taken.
+    pub fn ageNs(self: *const Snapshot) u64 {
+        return types.nowNs() -| self.taken_ns;
+    }
+
+    /// Who held `folder`, a real path, when this was taken. The paths that
+    /// begin with `folder` are one run of the sorted entries; of those, the
+    /// ones at or under it (not `folder-old`) count.
+    pub fn holderOf(self: *const Snapshot, arena: Allocator, folder: []const u8) Answer {
+        if (comptime builtin.os.tag == .windows) return windows.search(arena, folder, self.skip);
+        if (self.unknown) return .unknown;
+        var i = std.sort.lowerBound(Entry, self.entries, folder, struct {
+            fn order(key: []const u8, entry: Entry) std.math.Order {
+                return std.mem.order(u8, key, entry.path);
+            }
+        }.order);
+        while (i < self.entries.len and std.mem.startsWith(u8, self.entries[i].path, folder)) : (i += 1) {
+            const entry = self.entries[i];
+            if (!filters.isAtOrUnder(entry.path, folder)) continue;
+            return .{ .held = .{ .pid = entry.pid, .command = commandOf(arena, entry.pid) } };
+        }
+        return .free;
+    }
+};
+
+/// A sink that keeps every path, once per process for a run of the same path
+/// (a library is mapped as several regions).
+const CollectSink = struct {
+    arena: Allocator,
+    entries: std.ArrayListUnmanaged(Snapshot.Entry) = .empty,
+    last_pid: i32 = -1,
+    last_path: []const u8 = "",
+    failed: bool = false,
+
+    fn take(self: *CollectSink, pid: i32, path: []const u8) Allocator.Error!bool {
+        if (path.len == 0) return false;
+        if (pid == self.last_pid and std.mem.eql(u8, path, self.last_path)) return false;
+        const owned = try self.arena.dupe(u8, path);
+        try self.entries.append(self.arena, .{ .path = owned, .pid = pid });
+        self.last_pid = pid;
+        self.last_path = owned;
+        return false;
+    }
+};
+
+/// The name of process `pid`, or "unknown" when it has gone.
+fn commandOf(arena: Allocator, pid: i32) []const u8 {
+    if (comptime builtin.os.tag.isDarwin()) return darwin.command(arena, pid);
+    if (comptime builtin.os.tag == .linux) return linux.command(arena, pid);
+    return "unknown";
 }
 
 const windows = struct {
@@ -269,38 +388,59 @@ const darwin = struct {
     const region_path = 248;
 
     fn search(arena: Allocator, folder: []const u8, skip: ?i32) Answer {
-        const estimate = proc_listallpids(null, 0);
-        if (estimate <= 0) return .unknown;
-        // Room for processes started since the estimate.
-        const capacity: usize = @as(usize, @intCast(estimate)) + 64;
-        const pids = arena.alloc(c_int, capacity) catch return .unknown;
-        defer arena.free(pids);
-        const count = proc_listallpids(pids.ptr, @intCast(capacity * @sizeOf(c_int)));
-        if (count <= 0) return .unknown;
-
-        for (pids[0..@min(@as(usize, @intCast(count)), capacity)]) |pid| {
+        const pids = listPids(arena) orelse return .unknown;
+        defer arena.free(pids.buffer);
+        for (pids.live) |pid| {
             if (pid <= 0) continue;
             if (skip != null and pid == skip.?) continue;
-            const held = holds(arena, pid, folder) catch return .unknown;
+            const held = visit(arena, pid, FolderSink{ .folder = folder }) catch return .unknown;
             if (held) return .{ .held = .{ .pid = pid, .command = command(arena, pid) } };
         }
         return .free;
     }
 
-    fn holds(arena: Allocator, pid: c_int, folder: []const u8) Allocator.Error!bool {
+    /// Every path of every process but `skip`, to `sink`. False when the
+    /// process list could not be read, or memory ran out.
+    fn visitAll(arena: Allocator, skip: ?i32, sink: anytype) bool {
+        const pids = listPids(arena) orelse return false;
+        for (pids.live) |pid| {
+            if (pid <= 0) continue;
+            if (skip != null and pid == skip.?) continue;
+            _ = visit(arena, pid, sink) catch return false;
+        }
+        return true;
+    }
+
+    const Pids = struct { buffer: []c_int, live: []const c_int };
+
+    fn listPids(arena: Allocator) ?Pids {
+        const estimate = proc_listallpids(null, 0);
+        if (estimate <= 0) return null;
+        // Room for processes started since the estimate.
+        const capacity: usize = @as(usize, @intCast(estimate)) + 64;
+        const pids = arena.alloc(c_int, capacity) catch return null;
+        const count = proc_listallpids(pids.ptr, @intCast(capacity * @sizeOf(c_int)));
+        if (count <= 0) {
+            arena.free(pids);
+            return null;
+        }
+        return .{ .buffer = pids, .live = pids[0..@min(@as(usize, @intCast(count)), capacity)] };
+    }
+
+    /// Each path process `pid` holds, to `sink.take`, until it answers true.
+    fn visit(arena: Allocator, pid: c_int, sink: anytype) Allocator.Error!bool {
         var exe: [4 * path_max]u8 = undefined;
         const exe_len = proc_pidpath(pid, &exe, exe.len);
-        if (exe_len > 0 and filters.isAtOrUnder(exe[0..@intCast(exe_len)], folder)) return true;
+        if (exe_len > 0 and try sink.take(pid, exe[0..@intCast(exe_len)])) return true;
 
         var paths: [vnode_paths_size]u8 align(8) = undefined;
         if (proc_pidinfo(pid, flavor_vnode_paths, 0, &paths, paths.len) == paths.len) {
-            const cwd = cString(paths[vnode_paths_cwd..][0..path_max]);
-            if (filters.isAtOrUnder(cwd, folder)) return true;
+            if (try sink.take(pid, cString(paths[vnode_paths_cwd..][0..path_max]))) return true;
         }
-        return try holdsAnOpenFile(arena, pid, folder) or holdsAMapping(pid, folder);
+        return try visitOpenFiles(arena, pid, sink) or try visitMappings(pid, sink);
     }
 
-    fn holdsAnOpenFile(arena: Allocator, pid: c_int, folder: []const u8) Allocator.Error!bool {
+    fn visitOpenFiles(arena: Allocator, pid: c_int, sink: anytype) Allocator.Error!bool {
         const needed = proc_pidinfo(pid, flavor_list_fds, 0, null, 0);
         if (needed <= 0) return false;
         // Room for descriptors opened since the first call.
@@ -316,17 +456,17 @@ const darwin = struct {
             if (kind != fd_type_vnode) continue;
             var info: [fd_path_size]u8 align(8) = undefined;
             if (proc_pidfdinfo(pid, fd, flavor_fd_vnode_path, &info, info.len) != info.len) continue;
-            if (filters.isAtOrUnder(cString(info[fd_path_path..][0..path_max]), folder)) return true;
+            if (try sink.take(pid, cString(info[fd_path_path..][0..path_max]))) return true;
         }
         return false;
     }
 
     /// Each call answers with the first region at or above `address`.
-    fn holdsAMapping(pid: c_int, folder: []const u8) bool {
+    fn visitMappings(pid: c_int, sink: anytype) Allocator.Error!bool {
         var address: u64 = 0;
         var region: [region_size]u8 align(8) = undefined;
         while (proc_pidinfo(pid, flavor_region_path, address, &region, region.len) == region.len) {
-            if (filters.isAtOrUnder(cString(region[region_path..][0..path_max]), folder)) return true;
+            if (try sink.take(pid, cString(region[region_path..][0..path_max]))) return true;
             const start = std.mem.readInt(u64, region[region_address..][0..8], builtin.cpu.arch.endian());
             const length = std.mem.readInt(u64, region[region_length..][0..8], builtin.cpu.arch.endian());
             const next = start +% length;
@@ -353,28 +493,45 @@ const linux = struct {
             const pid = std.fmt.parseInt(i32, std.mem.span(entry.name), 10) catch continue;
             saw_a_process = true;
             if (skip != null and pid == skip.?) continue;
-            const held = holds(arena, pid, folder) catch return .unknown;
+            const held = visit(arena, pid, FolderSink{ .folder = folder }) catch return .unknown;
             if (held) return .{ .held = .{ .pid = pid, .command = command(arena, pid) } };
         }
         return if (saw_a_process) .free else .unknown;
     }
 
-    fn linkIsUnder(path: [*:0]const u8, folder: []const u8) bool {
-        var target: [4096]u8 = undefined;
-        const n = libc.readlink(path, &target, target.len);
-        return n > 0 and filters.isAtOrUnder(target[0..@intCast(n)], folder);
+    /// Every path of every process but `skip`, to `sink`. False when /proc
+    /// could not be read, or memory ran out.
+    fn visitAll(arena: Allocator, skip: ?i32, sink: anytype) bool {
+        var proc = dirstream.ReaddirStream.open("/proc") orelse return false;
+        defer proc.close();
+        var saw_a_process = false;
+        while (proc.next() catch null) |entry| {
+            const pid = std.fmt.parseInt(i32, std.mem.span(entry.name), 10) catch continue;
+            saw_a_process = true;
+            if (skip != null and pid == skip.?) continue;
+            _ = visit(arena, pid, sink) catch return false;
+        }
+        return saw_a_process;
     }
 
-    fn holds(arena: Allocator, pid: i32, folder: []const u8) Allocator.Error!bool {
+    /// The target of the link at `path` to `sink`; false when it has none.
+    fn takeLink(pid: i32, path: [*:0]const u8, sink: anytype) Allocator.Error!bool {
+        var target: [4096]u8 = undefined;
+        const n = libc.readlink(path, &target, target.len);
+        return n > 0 and try sink.take(pid, target[0..@intCast(n)]);
+    }
+
+    /// Each path process `pid` holds, to `sink.take`, until it answers true.
+    fn visit(arena: Allocator, pid: i32, sink: anytype) Allocator.Error!bool {
         var buf: [64]u8 = undefined;
         for ([_][]const u8{ "exe", "cwd" }) |link| {
             const path = std.fmt.bufPrintSentinel(&buf, "/proc/{d}/{s}", .{ pid, link }, 0) catch continue;
-            if (linkIsUnder(path.ptr, folder)) return true;
+            if (try takeLink(pid, path.ptr, sink)) return true;
         }
-        return holdsAnOpenFile(pid, folder) or try holdsAMapping(arena, pid, folder);
+        return try visitOpenFiles(pid, sink) or try visitMappings(arena, pid, sink);
     }
 
-    fn holdsAnOpenFile(pid: i32, folder: []const u8) bool {
+    fn visitOpenFiles(pid: i32, sink: anytype) Allocator.Error!bool {
         var buf: [64]u8 = undefined;
         const fds = std.fmt.bufPrintSentinel(&buf, "/proc/{d}/fd", .{pid}, 0) catch return false;
         var dir = dirstream.ReaddirStream.open(fds.ptr) orelse return false;
@@ -382,19 +539,19 @@ const linux = struct {
         var link_buf: [96]u8 = undefined;
         while (dir.next() catch null) |entry| {
             const link = std.fmt.bufPrintSentinel(&link_buf, "/proc/{d}/fd/{s}", .{ pid, std.mem.span(entry.name) }, 0) catch continue;
-            if (linkIsUnder(link.ptr, folder)) return true;
+            if (try takeLink(pid, link.ptr, sink)) return true;
         }
         return false;
     }
 
     /// Each line of `maps` ends with the mapped file's path, the first `/` on it.
-    fn holdsAMapping(arena: Allocator, pid: i32, folder: []const u8) Allocator.Error!bool {
+    fn visitMappings(arena: Allocator, pid: i32, sink: anytype) Allocator.Error!bool {
         const maps = try readAll(arena, pid, "maps") orelse return false;
         defer arena.free(maps);
         var lines = std.mem.splitScalar(u8, maps, '\n');
         while (lines.next()) |line| {
             const slash = std.mem.indexOfScalar(u8, line, '/') orelse continue;
-            if (filters.isAtOrUnder(line[slash..], folder)) return true;
+            if (try sink.take(pid, line[slash..])) return true;
         }
         return false;
     }
@@ -594,6 +751,37 @@ test "a running executable under the folder holds it, with another process's pid
     try testing.expect(answer == .held);
     try testing.expectEqual(child, answer.held.pid);
     try testing.expect(std.mem.indexOf(u8, answer.held.command, "esbuild") != null);
+}
+
+test "a snapshot answers as the search does, for many folders from one reading" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var f = try Fixture.init(a, "inuse-snapshot");
+    defer f.deinit();
+    const old = try std.fmt.allocPrint(a, "{s}/node_modules-old", .{f.scratch.path});
+
+    const fd = try f.openFile(a, "node_modules/addon.node");
+    var held = Snapshot.take(testing.allocator, null);
+    defer held.deinit();
+    try testing.expect(!held.unknown);
+    try expectHeldBySelf(held.holderOf(a, f.folder));
+    // Only folders at or under a held path: not one whose name begins the same.
+    try testing.expectEqual(Answer.free, held.holderOf(a, old));
+    _ = libc.close(fd);
+
+    // What was read stays as read; a new snapshot sees the file closed.
+    try expectHeldBySelf(held.holderOf(a, f.folder));
+    var after = Snapshot.take(testing.allocator, null);
+    defer after.deinit();
+    try testing.expectEqual(Answer.free, after.holderOf(a, f.folder));
+    // This process is left out of what `current` reads.
+    const again = try f.openFile(a, "node_modules/addon.node");
+    defer _ = libc.close(again);
+    var others = Snapshot.current(testing.allocator);
+    defer others.deinit();
+    try testing.expectEqual(Answer.free, others.holderOf(a, f.folder));
 }
 
 test "a folder whose name merely begins the same is not held" {

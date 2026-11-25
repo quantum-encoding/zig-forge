@@ -235,7 +235,13 @@ pub const Options = struct {
     monitor: ?*types.Monitor = null,
     guard_fn: GuardFn = protectedByCore,
     guard_ctx: ?*const anyopaque = null,
-    holder_fn: HolderFn = inuse.holderOf,
+    /// Who uses a folder. Null asks an `inuse.Snapshot` of every process,
+    /// read again when older than `snapshot_max_age_ns`: reading them all
+    /// takes a second or more, too long to repeat for each of thousands of
+    /// folders. The age check (`checkFolder`) still runs on each folder
+    /// just before it moves.
+    holder_fn: ?HolderFn = null,
+    snapshot_max_age_ns: u64 = 5 * std.time.ns_per_s,
 };
 
 /// protect.zig, with the real home folder from the user database and the
@@ -287,6 +293,17 @@ pub fn scan(gpa: Allocator, io: Io, opts: Options) !Report {
         fw.setExcludes(&walk_excludes);
         fw.setThreads(opts.threads);
         fw.setMonitor(opts.monitor);
+        // From macOS `/`, the Data volume is walked through its firmlinks
+        // only, as the duplicate scan walks it: under its mount point as well,
+        // every build folder in it was listed a second time.
+        var root_paths: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (report.roots) |root| if (root.err == null) try root_paths.append(a, root.path);
+        if (realpath.dataVolumeUnder(root_paths.items)) |data| {
+            try fw.allowDevice(data.dev);
+            const excluded = try a.alloc([]const u8, 1);
+            excluded[0] = data.path;
+            fw.setExcludePaths(excluded);
+        }
         for (report.roots) |*root| {
             if (root.err != null) continue;
             fw.walk(root.path) catch |err| switch (err) {
@@ -498,6 +515,10 @@ pub fn run(gpa: Allocator, io: Io, opts: Options, move: bool) !Report {
 /// skipped, with the reason.
 pub fn trashEligible(gpa: Allocator, report: *Report, opts: Options) !void {
     var run_: Mover = .{ .gpa = gpa, .a = report.arena.allocator(), .opts = opts, .now = opts.now orelse realtimeSeconds() };
+    defer run_.deinit();
+    var bytes: u64 = 0;
+    for (report.build_dirs) |b| bytes +|= b.bytes;
+    run_.start(report.build_dirs.len, bytes);
     for (report.build_dirs) |*b| try run_.move(b);
     report.trash = run_.result();
 }
@@ -508,15 +529,30 @@ pub fn trashEligible(gpa: Allocator, report: *Report, opts: Options) !void {
 /// report's build folders is skipped and left alone.
 pub fn trashSelected(gpa: Allocator, report: *Report, paths: []const []const u8, opts: Options) !void {
     var run_: Mover = .{ .gpa = gpa, .a = report.arena.allocator(), .opts = opts, .now = opts.now orelse realtimeSeconds() };
+    defer run_.deinit();
     var by_path: std.StringHashMapUnmanaged(usize) = .empty;
     defer by_path.deinit(gpa);
     for (report.build_dirs, 0..) |b, i| try by_path.put(gpa, b.path, i);
     var done: std.StringHashMapUnmanaged(void) = .empty;
     defer done.deinit(gpa);
+    // The folders this run will look at, and their size, for progress.
+    var count: u64 = 0;
+    var bytes: u64 = 0;
+    {
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        defer seen.deinit(gpa);
+        for (paths) |path| {
+            if ((try seen.getOrPut(gpa, path)).found_existing) continue;
+            count += 1;
+            if (by_path.get(path)) |i| bytes +|= report.build_dirs[i].bytes;
+        }
+    }
+    run_.start(count, bytes);
     for (paths) |path| {
         if ((try done.getOrPut(gpa, path)).found_existing) continue;
         const i = by_path.get(path) orelse {
             try run_.skipped.append(run_.a, .{ .path = try run_.a.dupe(u8, path), .bytes = 0, .reason = "is not a build folder in these results" });
+            if (run_.opts.monitor) |m| _ = m.done.fetchAdd(1, .monotonic);
             continue;
         };
         try run_.move(&report.build_dirs[i]);
@@ -536,18 +572,52 @@ const Mover = struct {
     moved: std.ArrayListUnmanaged(Moved) = .empty,
     skipped: std.ArrayListUnmanaged(Skipped) = .empty,
     bytes_moved: u64 = 0,
+    /// See `Options.holder_fn`.
+    snapshot: ?inuse.Snapshot = null,
+
+    fn deinit(self: *Mover) void {
+        if (self.snapshot) |*snap| snap.deinit();
+    }
+
+    /// Progress: `total` folders to look at holding `bytes`; `done` counts
+    /// those looked at, moved or not, and `bytes_done` the bytes moved.
+    fn start(self: *Mover, total: u64, bytes: u64) void {
+        const m = self.opts.monitor orelse return;
+        m.done.store(0, .release);
+        m.total.store(total, .release);
+        m.bytes_done.store(0, .release);
+        m.bytes_total.store(bytes, .release);
+    }
 
     fn skip(self: *Mover, b: *const BuildDir, reason: []const u8) !void {
         try self.skipped.append(self.a, .{ .path = b.path, .bytes = b.bytes, .reason = reason });
     }
 
+    /// Why `path` must stay because of a running process, or null.
+    fn inUse(self: *Mover, path: []const u8) !?[]const u8 {
+        const answer = if (self.opts.holder_fn) |holder| holder(self.a, path) else answer: {
+            const stale = if (self.snapshot) |*snap| snap.ageNs() > self.opts.snapshot_max_age_ns else true;
+            if (stale) {
+                if (self.snapshot) |*old| old.deinit();
+                self.snapshot = inuse.Snapshot.current(self.gpa);
+            }
+            break :answer self.snapshot.?.holderOf(self.a, path);
+        };
+        return describeHolder(self.a, answer);
+    }
+
     fn move(self: *Mover, b: *BuildDir) !void {
+        if (self.opts.monitor) |m| m.begin(0, b.path);
+        defer if (self.opts.monitor) |m| {
+            m.end(0);
+            _ = m.done.fetchAdd(1, .monotonic);
+        };
         if (self.opts.monitor) |m| if (m.cancelled()) return self.skip(b, "the move was cancelled");
         if (!b.trash.eligible) return self.skip(b, b.trash.refusal orelse "not eligible");
         if (stillBuildOutput(self.a, b)) |reason| return self.skip(b, reason);
         const again = checkFolder(self.gpa, self.opts, self.now, b);
         if (!again.eligible) return self.skip(b, again.refusal orelse "not eligible");
-        if (try inUse(self.a, self.opts, b.path)) |reason| return self.skip(b, reason);
+        if (try self.inUse(b.path)) |reason| return self.skip(b, reason);
         const outcome: MoveOutcome = if (self.opts.host_trash) |host|
             hostTrash(self.a, host, b.path)
         else switch (self.opts.trash_fn(self.a, b.path, true)) {
@@ -558,6 +628,7 @@ const Mover = struct {
             .moved => |where| {
                 try self.moved.append(self.a, .{ .path = b.path, .bytes = b.bytes, .trashed_as = where });
                 self.bytes_moved += b.bytes;
+                if (self.opts.monitor) |m| _ = m.bytes_done.fetchAdd(b.bytes, .monotonic);
             },
             .failed => |why| try self.skip(b, why),
         }
@@ -827,10 +898,10 @@ fn checkFolder(gpa: Allocator, opts: Options, now: i64, b: *const BuildDir) Chec
     return check;
 }
 
-/// Why `path` must stay because of a running process, or null when none is
-/// using it. Not being able to tell is a reason to leave it.
-fn inUse(a: Allocator, opts: Options, path: []const u8) !?[]const u8 {
-    return switch (opts.holder_fn(a, path)) {
+/// Why a folder must stay because of a running process, from `answer`, or
+/// null when none is using it. Not being able to tell is a reason to leave it.
+fn describeHolder(a: Allocator, answer: inuse.Answer) !?[]const u8 {
+    return switch (answer) {
         .free => null,
         // Pid 0: Windows refused the folder to us without naming who holds it.
         .held => |h| if (h.pid == 0)
@@ -1715,7 +1786,8 @@ test "clean moves only the chosen build folders, through a host's Trash" {
     try buildFixture(&f);
 
     var host: TestHostTrash = .{};
-    const opts: Options = .{
+    var monitor: types.Monitor = .{};
+    var opts: Options = .{
         .roots = &.{f.real},
         .main_roots = &.{f.path(a, "no-main-roots")},
         .guard_fn = Fixture.guard,
@@ -1726,6 +1798,7 @@ test "clean moves only the chosen build folders, through a host's Trash" {
     };
     var report = try scan(testing.allocator, testing.io, opts);
     defer report.deinit();
+    opts.monitor = &monitor;
 
     const chosen = [_][]const u8{
         f.path(a, "copy-a/node_modules"),
@@ -1738,6 +1811,10 @@ test "clean moves only the chosen build folders, through a host's Trash" {
 
     try testing.expectEqual(@as(usize, 1), t.moved.len);
     try testing.expectEqualStrings(f.path(a, "copy-a/node_modules"), t.moved[0].path);
+    // Progress counted each distinct path once, moved or not, and the bytes moved.
+    try testing.expectEqual(@as(u64, 3), monitor.total.load(.acquire));
+    try testing.expectEqual(@as(u64, 3), monitor.done.load(.acquire));
+    try testing.expectEqual(t.bytes_moved, monitor.bytes_done.load(.acquire));
     // The host's Trash does not say where; the core does not guess.
     try testing.expectEqual(@as(?[]const u8, null), t.moved[0].trashed_as);
     try testing.expectEqual(@as(usize, 1), host.calls);
