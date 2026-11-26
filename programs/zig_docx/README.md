@@ -27,7 +27,7 @@ No runtime dependencies for DOCX, MDX, XLSX, JSON, and chunking flows. PDF extra
 | Input | Output | Notes |
 |---|---|---|
 | **DOCX** | MDX (Markdown + YAML frontmatter) | Images extracted to `images/` folder |
-| **Markdown** | DOCX | Headings, lists, tables, hyperlinks, inline images, optional letterhead, two style presets |
+| **Markdown** | DOCX | Headings, lists, tables with column widths and alignment, block alignment, hyperlinks, inline images, optional letterhead, page settings, four style presets |
 | **PDF**  | Markdown | Via `pdftotext` (poppler) or `mutool` (mupdf) |
 | **XLSX** | CSV or Markdown table | Shared and inline strings, formula results, dates as ISO 8601, rows at their sheet position |
 | **JSON (Anthropic)** | Per-conversation markdown files | Claude `conversations.json` export |
@@ -262,7 +262,14 @@ zig-docx <folder/>              Batch mode (DOCX only)
 | Flag | Description |
 |---|---|
 | `-o`, `--output <path>` | Write output to file or folder |
-| `--style <minutes\|default>` | DOCX style preset: `minutes` (Arial, justified, bold+underline headings) or `default` (Calibri, blue headings). Used by `--to-docx`. |
+| `--style <name>` | `--to-docx` style preset: `default` (Arial 11pt, bold headings, left-aligned), `minutes` (Arial, justified, bold+underline headings), `sheet` (Calibri 10pt, no space between paragraphs) or `letter` (Times New Roman 12pt, justified, 1.15 lines, bold centred headings, A4) |
+| `--paper <a4\|letter>` | `--to-docx` paper size. US Letter unless the style is `letter` |
+| `--landscape`, `--portrait`, `--orientation <o>` | `--to-docx` page orientation |
+| `--margin <length>` | `--to-docx` margin on all four sides: `25mm`, `2.5cm`, `1in`, `72pt`, or a bare number of mm |
+| `--header "..."` | `--to-docx` line of text at the top right of every page (not with a letterhead) |
+| `--footer "..."` | `--to-docx` footer: "Page N of M" at the left, this text at the right |
+| `--page-numbers` | `--to-docx` "Page N of M" footer without footer text |
+| `--lang <en\|es>` | `--to-docx` language of "Page N of M" ("Página N de M"); the `letter` style also marks the text en-GB or es-ES for spelling and hyphenation |
 | `--title "..."` | MDX/DOCX frontmatter title |
 | `--description "..."` | MDX/DOCX frontmatter description |
 | `--author "..."` | MDX/DOCX frontmatter author |
@@ -292,13 +299,14 @@ Converts a markdown file to a DOCX. Frontmatter sets the document metadata; an H
 # Basic
 zig-docx post.md --to-docx -o post.docx
 
-# Letterhead in the markdown frontmatter (rendered as page header)
+# Letterhead image (rendered as page header). The frontmatter must be the
+# first thing in the file, so the letterhead comment goes after it.
 cat > quote.md <<'EOF'
-<!-- letterhead: logo.png -->
 ---
 title: Project Quote
 author: Quantum Encoding Ltd
 ---
+<!-- letterhead: logo.png -->
 
 # Renovation Quote
 
@@ -313,9 +321,69 @@ zig-docx quote.md --to-docx -o quote.docx
 
 # Minutes style (Arial, justified, bold+underline headings)
 zig-docx meeting-notes.md --to-docx --style minutes -o minutes.docx
+
+# Letter style for a formal letter or filing: A4, Spanish page numbers
+zig-docx escrito.md --to-docx --style letter --lang es --page-numbers -o escrito.docx
 ```
 
-The writer supports headings, ordered/unordered lists with nested levels, hyperlinks, inline images, tables with column widths, blockquotes, code blocks (line breaks kept), and inline code. Letterhead images are sized automatically (max 6 inches wide, aspect-ratio preserved).
+The writer supports headings, ordered/unordered lists with nested levels, hyperlinks, inline images, tables with column widths, blockquotes, code blocks (line breaks kept), and inline code. Letterhead images are sized automatically (max 6 inches wide, aspect-ratio preserved). Every failure (an unreadable input, a bad setting, an output that could not be written) exits with status 1.
+
+#### Page settings
+
+Each page flag has a frontmatter key of the same name, so a document can carry its own layout. A flag beats the same key in the frontmatter.
+
+```markdown
+---
+title: Escrito de alegaciones
+style: letter          # default | minutes | sheet | letter
+paper: a4              # a4 | letter (letter style: a4 unless given)
+orientation: portrait  # portrait | landscape
+margin: 25mm           # mm, cm, in, pt; a bare number is mm
+header: Expediente SAN-2026-000000
+footer: Expediente SAN-2026-000000
+page-numbers: true     # the "Page N of M" footer even without footer text
+lang: es               # en | es (es-ES is read as es)
+---
+```
+
+```bash
+zig-docx escrito.md --to-docx -o escrito.docx                 # settings from the frontmatter
+zig-docx escrito.md --to-docx --style default --paper letter  # flags override them
+```
+
+The margins must leave at least an inch of the page for text, or the conversion stops with the reason.
+
+#### Table layout and block alignment
+
+`--to-docx` reads three more pieces of syntax (`ParseOptions.layout` in the library):
+
+| Markdown | In Word |
+|---|---|
+| `\|:---\|:---:\|---:\|` (the separator row) | Each column flush left, centred or flush right. A column with no colon is flush left: cells never take a justified style's justification. |
+| The separator row's cell widths | Each column's share of the text width, in proportion to its separator cell (`\|:--------\|---:\|` gives the first column about three quarters). The table spans the page's text width, whatever the paper and margins. |
+| `{widths=30,70 borders=none}` on the line straight after a table | Relative column widths, one per column (`%` allowed), and/or a table with no lines. A borderless table's text lines up with the body text. |
+| `Text {align=center}` at the end of a paragraph, heading, list item or quote | `left`, `center` (or `centre`), `right` or `justify` |
+
+An attribute list that holds anything else (an unknown attribute, the wrong number of widths) is not applied and stays in the document as typed, so a mistake shows. `[text]{color=red}` is still an inline span: a block attribute needs a space before its `{`, and `\{align=center}` keeps the braces as text.
+
+```markdown
+| Expediente | SAN-2026-000000 |
+|:-----------|:----------------|
+| DNI        | 00000000T       |
+{widths=30,70 borders=none}
+
+# EXPONE
+
+| Concepto           |  Importe |
+|:-------------------|---------:|
+| Sanción propuesta  | 300,00 € |
+
+En Villaejemplo, a 20 de noviembre de 2026. {align=right}
+```
+
+`src/testdata/escrito_sample.md` is a whole filing in this shape (fictional names and numbers).
+
+Through the C ABI and the WASM modules, Markdown is read without this syntax and the page settings in the frontmatter are ignored, so their output is what it always was.
 
 #### Inline marks
 

@@ -49,7 +49,8 @@ pub fn main(init: std.process.Init) !void {
         try args_list.append(allocator, arg);
     }
 
-    const parsed = parseArgs(args_list.items) orelse return;
+    // A bad or missing argument exits 1; --help exits 0 from parseArgs.
+    const parsed = parseArgs(args_list.items) orelse std.process.exit(1);
 
     // Claude Code session export (directory of .jsonl files)
     // Check before folder mode so --claude-code on a directory doesn't fall into .docx scan
@@ -189,13 +190,14 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // ── MD → DOCX conversion ──
+    // Every failure here exits 1, so a script that runs it can tell.
     if (parsed.to_docx) {
-        const md_text = readFileContents(allocator, parsed.file_path) orelse return;
+        const md_text = readFileContents(allocator, parsed.file_path) orelse std.process.exit(1);
         defer allocator.free(md_text);
 
-        var result = docx.md_parser.parseMarkdown(allocator, md_text) catch |err| {
+        var result = docx.md_parser.parseMarkdownWith(allocator, md_text, .{ .layout = true }) catch |err| {
             std.debug.print("Error parsing markdown: {}\n", .{err});
-            return;
+            std.process.exit(1);
         };
         defer result.deinit();
 
@@ -238,34 +240,38 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        const options = docx.docx_writer.DocxWriterOptions{
+        var options = docx.docx_writer.DocxWriterOptions{
             .title = result.frontmatter.title orelse parsed.title orelse "",
             .author = result.frontmatter.author orelse parsed.author orelse "",
             .description = result.frontmatter.description orelse parsed.description orelse "",
             .date = result.frontmatter.date orelse parsed.date orelse "",
             .letterhead = letterhead,
-            .style = parsed.doc_style,
         };
+        // Page settings: a flag beats the same key in the frontmatter.
+        if (result.frontmatter.layout.overlay(parsed.layout).applyTo(&options)) |problem| {
+            std.debug.print("Error: {s}\n", .{problem});
+            std.process.exit(1);
+        }
 
         const docx_bytes = docx.docx_writer.generateDocx(allocator, &result.document, options) catch |err| {
             std.debug.print("Error generating DOCX: {}\n", .{err});
-            return;
+            std.process.exit(1);
         };
         defer allocator.free(docx_bytes);
 
         // Determine output path: explicit -o, or input.md → input.docx
         const out_path = parsed.output_path orelse blk: {
-            if (std.mem.endsWith(u8, parsed.file_path, ".md")) {
-                const stem = parsed.file_path[0 .. parsed.file_path.len - 3];
-                break :blk std.fmt.allocPrint(allocator, "{s}.docx", .{stem}) catch {
-                    std.debug.print("Error: out of memory\n", .{});
-                    return;
-                };
-            }
-            break :blk std.fmt.allocPrint(allocator, "{s}.docx", .{parsed.file_path}) catch return;
+            const stem = if (std.mem.endsWith(u8, parsed.file_path, ".md"))
+                parsed.file_path[0 .. parsed.file_path.len - 3]
+            else
+                parsed.file_path;
+            break :blk std.fmt.allocPrint(allocator, "{s}.docx", .{stem}) catch {
+                std.debug.print("Error: out of memory\n", .{});
+                std.process.exit(1);
+            };
         };
 
-        writeToFile(allocator, out_path, docx_bytes);
+        if (!writeFileChecked(allocator, out_path, docx_bytes)) std.process.exit(1);
         std.debug.print("Generated: {s} ({d} bytes)\n", .{ out_path, docx_bytes.len });
         return;
     }
@@ -670,19 +676,30 @@ fn writeDir(allocator: std.mem.Allocator, path: []const u8) void {
 }
 
 fn writeToFile(allocator: std.mem.Allocator, path: []const u8, data: []const u8) void {
+    _ = writeFileChecked(allocator, path, data);
+}
+
+/// Writes `data` to `path`; false, with the reason printed, when the file
+/// could not be opened or every byte did not reach it.
+fn writeFileChecked(allocator: std.mem.Allocator, path: []const u8, data: []const u8) bool {
     const path_z = allocator.allocSentinel(u8, path.len, 0) catch {
         std.debug.print("Error: out of memory\n", .{});
-        return;
+        return false;
     };
     defer allocator.free(path_z);
     @memcpy(path_z, path);
 
     const f = std.c.fopen(path_z.ptr, "wb") orelse {
         std.debug.print("Error: cannot open '{s}' for writing\n", .{path});
-        return;
+        return false;
     };
-    _ = std.c.fwrite(data.ptr, 1, data.len, f);
-    _ = std.c.fclose(f);
+    const written = std.c.fwrite(data.ptr, 1, data.len, f);
+    const closed = std.c.fclose(f);
+    if (written != data.len or closed != 0) {
+        std.debug.print("Error: could not write all of '{s}'\n", .{path});
+        return false;
+    }
+    return true;
 }
 
 fn writeToStdout(data: []const u8) void {
@@ -902,7 +919,10 @@ const Args = struct {
     // markdown file's directory (absolute paths and `..` traversal rejected,
     // symlink escapes caught via realpath). Opt out only for trusted local use.
     allow_absolute_images: bool = false,
-    doc_style: docx.docx_writer.DocumentStyle = .default, // --style minutes|default
+    // --to-docx page settings: --style, --paper, --landscape/--portrait,
+    // --margin, --header, --footer, --page-numbers, --lang. Checked when
+    // applied, over the same keys from the frontmatter.
+    layout: docx.docx_writer.LayoutSettings = .{},
     only_project: ?[]const u8 = null,
     // Chunker config (only used when --chunk is set)
     chunk_target_words: ?u32 = null,
@@ -919,7 +939,7 @@ fn parseArgs(args: []const []const u8) ?Args {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelp();
-            return null;
+            std.process.exit(0);
         } else if (std.mem.eql(u8, arg, "--list") or std.mem.eql(u8, arg, "-l")) {
             result.list_only = true;
         } else if (std.mem.eql(u8, arg, "--info") or std.mem.eql(u8, arg, "-i")) {
@@ -984,17 +1004,27 @@ fn parseArgs(args: []const []const u8) ?Args {
         } else if (std.mem.eql(u8, arg, "--style")) {
             i += 1;
             if (i >= args.len) {
-                std.debug.print("Error: --style requires a value (minutes, default)\n", .{});
+                std.debug.print("Error: --style requires a value (default, minutes, sheet, letter)\n", .{});
                 return null;
             }
-            if (std.mem.eql(u8, args[i], "minutes")) {
-                result.doc_style = .minutes;
-            } else if (std.mem.eql(u8, args[i], "default")) {
-                result.doc_style = .default;
-            } else {
-                std.debug.print("Error: unknown style '{s}'. Use: minutes, default\n", .{args[i]});
+            if (docx.docx_writer.DocumentStyle.fromName(args[i]) == null) {
+                std.debug.print("Error: unknown style '{s}'. Use: default, minutes, sheet, letter\n", .{args[i]});
                 return null;
             }
+            result.layout.style = args[i];
+        } else if (std.mem.eql(u8, arg, "--landscape")) {
+            result.layout.orientation = "landscape";
+        } else if (std.mem.eql(u8, arg, "--portrait")) {
+            result.layout.orientation = "portrait";
+        } else if (std.mem.eql(u8, arg, "--page-numbers")) {
+            result.layout.page_numbers = "true";
+        } else if (layoutValueFlag(&result.layout, arg)) |slot| {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: {s} requires a value\n", .{arg});
+                return null;
+            }
+            slot.* = args[i];
         } else if (std.mem.eql(u8, arg, "--only-project")) {
             i += 1;
             if (i >= args.len) {
@@ -1069,6 +1099,18 @@ fn parseArgs(args: []const []const u8) ?Args {
     }
 
     return result;
+}
+
+/// The setting a value-taking page flag (`--paper a4`) writes, or null when
+/// `arg` is not one.
+fn layoutValueFlag(layout: *docx.docx_writer.LayoutSettings, arg: []const u8) ?*?[]const u8 {
+    if (std.mem.eql(u8, arg, "--paper")) return &layout.paper;
+    if (std.mem.eql(u8, arg, "--orientation")) return &layout.orientation;
+    if (std.mem.eql(u8, arg, "--margin")) return &layout.margin;
+    if (std.mem.eql(u8, arg, "--header")) return &layout.header;
+    if (std.mem.eql(u8, arg, "--footer")) return &layout.footer;
+    if (std.mem.eql(u8, arg, "--lang")) return &layout.lang;
+    return null;
 }
 
 /// --redline / --compare: write a redline sheet .docx.
@@ -1220,7 +1262,7 @@ fn printHelp() void {
         \\
         \\Conversions:
         \\  DOCX            →  MDX (Markdown + YAML frontmatter, images extracted)
-        \\  Markdown        →  DOCX (with optional letterhead, two style presets)
+        \\  Markdown        →  DOCX (letterhead, page settings, four style presets)
         \\  PDF             →  Markdown (via pdftotext/mutool)
         \\  XLSX            →  CSV or Markdown table
         \\  Anthropic JSON  →  Per-conversation markdown + extracted artifacts
@@ -1252,7 +1294,12 @@ fn printHelp() void {
         \\
         \\Output options:
         \\  -o, --output <path>          Write output to file or folder
-        \\  --style <minutes|default>    DOCX style preset for --to-docx
+        \\  --style <name>               --to-docx style preset:
+        \\                                 default  Arial 11pt, bold headings, left-aligned
+        \\                                 minutes  Arial, justified, bold+underline headings
+        \\                                 sheet    Calibri 10pt, no space between paragraphs
+        \\                                 letter   Times New Roman 12pt, justified, 1.15 lines,
+        \\                                          bold centred headings, A4
         \\  --title "..."                MDX/DOCX frontmatter title
         \\  --description "..."          MDX/DOCX frontmatter description
         \\  --author "..."               MDX/DOCX frontmatter author
@@ -1261,6 +1308,23 @@ fn printHelp() void {
         \\  --marks                      DOCX → MD: keep colours as [text]{color= bg=} and
         \\                               redline runs as {--…--}/{++…++} (Markdown, not MDX)
         \\  --only-project <path>        Claude Code mode: filter to one project dir
+        \\
+        \\Page settings for --to-docx (each also a frontmatter key of the same name,
+        \\e.g. `paper: a4`; a flag beats the frontmatter):
+        \\  --paper <a4|letter>          Paper size (US Letter unless the style is letter)
+        \\  --landscape, --portrait      Orientation (or --orientation <o>; key: orientation:)
+        \\  --margin <length>            All four margins: 25mm, 2.5cm, 1in, 72pt (bare = mm)
+        \\  --header "..."               A line at the top right of every page
+        \\  --footer "..."               Footer: "Page N of M" left, this text right
+        \\  --page-numbers               "Page N of M" footer without text (key: page-numbers: true)
+        \\  --lang <en|es>               Language of "Page N of M" ("Página N de M");
+        \\                               the letter style also spell-checks in it
+        \\
+        \\Markdown layout syntax for --to-docx:
+        \\  |:---|:---:|---:|             Column alignment; widths follow the separator cells
+        \\  {widths=30,70 borders=none}  Line straight after a table: widths and/or no lines
+        \\  Text {align=center}          End of a paragraph, heading, list item or quote:
+        \\                               left, center, right, justify
         \\
         \\Chunker tuning:
         \\  --chunk-target-words <N>     Target words per chunk          (default 6000)
@@ -1276,6 +1340,7 @@ fn printHelp() void {
         \\  # Markdown → DOCX
         \\  zig-docx quote.md --to-docx -o quote.docx
         \\  zig-docx minutes.md --to-docx --style minutes -o minutes.docx
+        \\  zig-docx escrito.md --to-docx --style letter --lang es --page-numbers -o escrito.docx
         \\
         \\  # PDF → chunked RAG-ready markdown
         \\  zig-docx manual.pdf --chunk -o chunks/
