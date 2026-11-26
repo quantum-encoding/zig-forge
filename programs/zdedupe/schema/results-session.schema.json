@@ -1083,7 +1083,7 @@
     },
 
     "CleanTrashRun": {
-      "description": "Response of zdedupe_clean_trash (and the report's trash with the CLI's --trash).",
+      "description": "Response of zdedupe_clean_trash and zdedupe_clean_delete (and the report's trash with the CLI's --trash). For a delete, moved lists the folders deleted for good and bytes_moved the bytes freed.",
       "type": "object",
       "additionalProperties": false,
       "required": ["moved", "skipped", "bytes_moved"],

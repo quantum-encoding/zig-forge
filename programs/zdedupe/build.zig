@@ -151,6 +151,7 @@ pub fn build(b: *std.Build) void {
         "src/protect.zig",
         "src/keep.zig",
         "src/removed.zig",
+        "src/remove.zig",
         "src/session.zig",
         // The results session end to end: the real engine into a real store,
         // then the session over it (see the file header).

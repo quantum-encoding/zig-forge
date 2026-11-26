@@ -54,6 +54,7 @@ const space_report = @import("space_report.zig");
 const duplicates_report = @import("duplicates_report.zig");
 const buildrule = @import("buildrule.zig");
 const realpath = @import("realpath.zig");
+const remove_mod = @import("remove.zig");
 
 const Allocator = std.mem.Allocator;
 const Filters = filters_mod.Filters;
@@ -2259,8 +2260,8 @@ pub const Session = struct {
                     "Use the Trash instead.");
                 continue;
             }
-            if (removeTree(path_z)) |errno| {
-                report.fail(arena, item.path, unlinkReason(errno));
+            if (remove_mod.tree(path_z)) |errno| {
+                report.fail(arena, item.path, remove_mod.reason(errno));
             } else {
                 // The overlay records the caller's spelling, which is the only
                 // one it had; a folder whose real name is not UTF-8 would have
@@ -2665,7 +2666,7 @@ pub const Session = struct {
             } else if (libc.unlink(path_z) == 0) {
                 report.removed(arena, target.path, target.size);
             } else {
-                report.fail(arena, target.path, unlinkReason(libc.errno(@as(c_int, -1))));
+                report.fail(arena, target.path, remove_mod.reason(libc.errno(@as(c_int, -1))));
             }
         }
     }
@@ -3717,67 +3718,6 @@ fn foldersIdentical(gpa: Allocator, a: []const u8, b: []const u8) bool {
     return result.isIdentical();
 }
 
-/// Remove a directory and everything beneath it. Returns the errno that
-/// stopped it, or null on success.
-///
-/// Recursion is by directory descriptor (`openat` with NOFOLLOW, then
-/// `fdopendir`), never by re-resolving a path: the tree is being deleted
-/// precisely because it is a duplicate, and re-walking names would let a
-/// symlink swapped in mid-delete redirect the removal somewhere else. Entries
-/// are removed with `unlinkat`, so a symlink beneath is unlinked rather than
-/// followed.
-fn removeTree(path: [*:0]const u8) ?libc.E {
-    const fd = libc.open(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true }, @as(libc.mode_t, 0));
-    if (fd < 0) return libc.errno(@as(c_int, -1));
-    if (removeChildren(fd)) |errno| {
-        _ = libc.close(fd);
-        return errno;
-    }
-    _ = libc.close(fd);
-    if (libc.rmdir(path) != 0) return libc.errno(@as(c_int, -1));
-    return null;
-}
-
-/// Empty the directory `dir_fd` refers to. Takes ownership of nothing: the
-/// caller still closes `dir_fd`.
-fn removeChildren(dir_fd: c_int) ?libc.E {
-    // fdopendir takes ownership of the fd it is given, so it gets a copy.
-    const dup_fd = libc.dup(dir_fd);
-    if (dup_fd < 0) return libc.errno(@as(c_int, -1));
-    const dir = libc.fdopendir(dup_fd) orelse {
-        _ = libc.close(dup_fd);
-        return libc.errno(@as(c_int, -1));
-    };
-    defer _ = libc.closedir(dir);
-
-    while (libc.readdir(dir)) |entry| {
-        const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
-        const name = std.mem.span(name_ptr);
-        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-
-        const st = pstat.lstatAt(dir_fd, name_ptr) catch return libc.errno(@as(c_int, -1));
-        if (st.isDir()) {
-            const child = libc.openat(dir_fd, name_ptr, .{
-                .ACCMODE = .RDONLY,
-                .DIRECTORY = true,
-                .NOFOLLOW = true,
-            }, @as(libc.mode_t, 0));
-            if (child < 0) return libc.errno(@as(c_int, -1));
-            if (removeChildren(child)) |errno| {
-                _ = libc.close(child);
-                return errno;
-            }
-            _ = libc.close(child);
-            if (libc.unlinkat(dir_fd, name_ptr, @intCast(libc.AT.REMOVEDIR)) != 0) {
-                return libc.errno(@as(c_int, -1));
-            }
-        } else if (libc.unlinkat(dir_fd, name_ptr, 0) != 0) {
-            return libc.errno(@as(c_int, -1));
-        }
-    }
-    return null;
-}
-
 /// A regular file of `size` at `path`, as a copy must be before it is read.
 fn plausibleCopy(path: []const u8, size: u64) bool {
     var buf: [4096]u8 = undefined;
@@ -3823,18 +3763,6 @@ fn trashReason(arena: Allocator, err_buf: *const [512]u8) []const u8 {
     const len = std.mem.indexOfScalar(u8, err_buf, 0) orelse err_buf.len;
     if (len == 0) return "could not be moved to the Trash";
     return arena.dupe(u8, err_buf[0..len]) catch "could not be moved to the Trash";
-}
-
-fn unlinkReason(err: libc.E) []const u8 {
-    return switch (err) {
-        .NOENT => "no longer exists",
-        .ACCES, .PERM => "permission denied",
-        .ISDIR => "is a directory",
-        .ROFS => "is on a read-only filesystem",
-        .BUSY => "is in use",
-        .IO => "an I/O error occurred",
-        else => "could not be deleted",
-    };
 }
 
 /// The store holds seconds; JSON carries epoch milliseconds.

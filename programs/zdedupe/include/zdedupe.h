@@ -1217,6 +1217,18 @@ const char* zdedupe_clean_scan(zdedupe_ctx* ctx, const char* query_json);
 const char* zdedupe_clean_trash(zdedupe_ctx* ctx, const char* items_json,
                                 zdedupe_trash_fn trash_fn, void* user);
 
+/**
+ * zdedupe_clean_trash, but each folder is deleted for good instead of moved
+ * to the Trash: there is no undo. Every check before it is the same, as are
+ * the items, the answer (CleanTrashRun: "moved" lists the folders deleted,
+ * "trashed_as" null, "bytes_moved" the bytes freed), progress and cancel.
+ * The folder is removed through descriptors from the top down, so a link
+ * inside is removed and never followed, and a folder on another volume
+ * inside it is not entered: the delete stops there ("holds another volume,
+ * which is not deleted") and what was already removed stays removed.
+ */
+const char* zdedupe_clean_delete(zdedupe_ctx* ctx, const char* items_json);
+
 /** Why the last clean call on `ctx` failed, or NULL. Owned by `ctx`. */
 const char* zdedupe_clean_error(const zdedupe_ctx* ctx);
 

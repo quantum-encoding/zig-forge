@@ -54,6 +54,7 @@ const session = @import("session.zig");
 const gitinfo = @import("gitinfo.zig");
 const trash_mod = @import("trash.zig");
 const inuse = @import("inuse.zig");
+const remove = @import("remove.zig");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -231,6 +232,9 @@ pub const Options = struct {
     now: ?i64 = null,
     trash_fn: TrashFn = trash_mod.moveToTrash,
     host_trash: ?HostTrash = null,
+    /// Delete each folder for good (remove.zig) instead of moving it to the
+    /// Trash; every check before it is the same.
+    permanently: bool = false,
     /// Progress out and cancellation in, as for every scan.
     monitor: ?*types.Monitor = null,
     guard_fn: GuardFn = protectedByCore,
@@ -618,7 +622,9 @@ const Mover = struct {
         const again = checkFolder(self.gpa, self.opts, self.now, b);
         if (!again.eligible) return self.skip(b, again.refusal orelse "not eligible");
         if (try self.inUse(b.path)) |reason| return self.skip(b, reason);
-        const outcome: MoveOutcome = if (self.opts.host_trash) |host|
+        const outcome: MoveOutcome = if (self.opts.permanently)
+            deleteFolder(self.a, b.path)
+        else if (self.opts.host_trash) |host|
             hostTrash(self.a, host, b.path)
         else switch (self.opts.trash_fn(self.a, b.path, true)) {
             .moved => |where| .{ .moved = where },
@@ -638,6 +644,13 @@ const Mover = struct {
         return .{ .moved = self.moved.items, .skipped = self.skipped.items, .bytes_moved = self.bytes_moved };
     }
 };
+
+/// Delete one folder for good.
+fn deleteFolder(a: Allocator, path: []const u8) MoveOutcome {
+    const z = a.dupeSentinel(u8, path, 0) catch return .{ .failed = "out of memory" };
+    if (remove.tree(z.ptr)) |errno| return .{ .failed = remove.reason(errno) };
+    return .{ .moved = null };
+}
 
 /// Move one folder through the host's Trash.
 fn hostTrash(a: Allocator, host: HostTrash, path: []const u8) MoveOutcome {
@@ -1828,6 +1841,53 @@ test "clean moves only the chosen build folders, through a host's Trash" {
     // Eligible but not chosen: untouched, and not in the run.
     try testing.expect(try f.scratch.exists("tool/scratchpad-cache/CACHEDIR.TAG"));
     try testing.expect(try f.scratch.exists("copy-b/node_modules/left-pad/index.js"));
+}
+
+test "clean deletes the chosen build folders for good, with every check the Trash gets" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var f = try Fixture.init(a, "clean-delete");
+    defer f.deinit();
+    try buildFixture(&f);
+    // A link inside a build folder to something outside it: removed, never followed.
+    try f.scratch.makeDir("outside");
+    try f.scratch.writeFile("outside/keep.txt", "not build output");
+    f.scratch.symLink("../../outside", "copy-a/node_modules/to-outside") catch {};
+
+    var monitor: types.Monitor = .{};
+    var opts: Options = .{
+        .roots = &.{f.real},
+        .main_roots = &.{f.path(a, "no-main-roots")},
+        .guard_fn = Fixture.guard,
+        .guard_ctx = &f,
+        .git_exe = "/nonexistent/zdedupe/git",
+        .now = realtimeSeconds() + std.time.s_per_day + 60,
+    };
+    var report = try scan(testing.allocator, testing.io, opts);
+    defer report.deinit();
+    opts.permanently = true;
+    opts.monitor = &monitor;
+
+    const chosen = [_][]const u8{
+        f.path(a, "copy-a/node_modules"),
+        f.path(a, "protected/zig-out"),
+        f.path(a, "copy-a/package.json"), // not build output
+    };
+    try trashSelected(testing.allocator, &report, &chosen, opts);
+    const t = report.trash.?;
+
+    try testing.expectEqual(@as(usize, 1), t.moved.len);
+    try testing.expectEqualStrings(f.path(a, "copy-a/node_modules"), t.moved[0].path);
+    try testing.expectEqual(@as(?[]const u8, null), t.moved[0].trashed_as);
+    try testing.expect(!try f.scratch.exists("copy-a/node_modules"));
+    // Gone for good: nothing went where the fixture's Trash puts things.
+    try testing.expect(!try f.scratch.exists("copy-a/.fake-trash-node_modules"));
+    try testing.expect(try f.scratch.exists("outside/keep.txt"));
+    try testing.expect(try f.scratch.exists("copy-a/package.json"));
+    try testing.expect(try f.scratch.exists("protected/zig-out"));
+    try testing.expectEqual(@as(usize, 2), t.skipped.len);
+    try testing.expectEqual(t.bytes_moved, monitor.bytes_done.load(.acquire));
 }
 
 test "clean --trash leaves a folder a running process is using, and says which" {

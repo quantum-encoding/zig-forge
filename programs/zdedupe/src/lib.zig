@@ -434,11 +434,24 @@ pub export fn zdedupe_clean_trash(
     trash_fn: ?ZDedupeTrashFn,
     user: ?*anyopaque,
 ) ?[*:0]const u8 {
+    const host: ?clean.HostTrash = if (trash_fn) |call| .{ .call = call, .user = user } else null;
+    return cleanMove(ctx, items_json, host, false);
+}
+
+/// `zdedupe_clean_trash`, deleting each folder for good instead.
+pub export fn zdedupe_clean_delete(ctx: ?*ZDedupeContext, items_json: ?[*:0]const u8) ?[*:0]const u8 {
+    return cleanMove(ctx, items_json, null, true);
+}
+
+/// The build folders of the last clean scan named in `items_json`, each
+/// checked again, moved to the Trash or deleted for good.
+fn cleanMove(ctx: ?*ZDedupeContext, items_json: ?[*:0]const u8, host: ?clean.HostTrash, permanently: bool) ?[*:0]const u8 {
     const c = ctx orelse return null;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     const alloc = InternalContext.alloc;
-    const text = items_json orelse return cleanFail(internal, "no folders were given to move", .{});
-    const last = if (internal.clean_report) |*r| r else return cleanFail(internal, "there is no build output scan to move from", .{});
+    const what = if (permanently) "delete" else "move";
+    const text = items_json orelse return cleanFail(internal, "no folders were given to {s}", .{what});
+    const last = if (internal.clean_report) |*r| r else return cleanFail(internal, "there is no build output scan to {s} from", .{what});
 
     var parsed = std.json.parseFromSlice(CleanTrashItems, alloc, std.mem.span(text), .{ .ignore_unknown_fields = true }) catch
         return cleanFail(internal, "folder list is not valid JSON", .{});
@@ -453,7 +466,8 @@ pub export fn zdedupe_clean_trash(
     clean.trashSelected(alloc, last, parsed.value.paths, .{
         .roots = &.{},
         .older_s = last.older_s,
-        .host_trash = if (trash_fn) |call| .{ .call = call, .user = user } else null,
+        .host_trash = host,
+        .permanently = permanently,
         .monitor = monitor,
     }) catch return cleanFail(internal, "out of memory", .{});
 
@@ -1023,6 +1037,8 @@ test "build output through the C API: a scan, a move it refuses for a fresh fold
     // Nothing to move from yet.
     try testing.expect(zdedupe_clean_trash(ctx, "{\"paths\":[]}", null, null) == null);
     try testing.expectEqualStrings("there is no build output scan to move from", std.mem.span(zdedupe_clean_error(ctx).?));
+    try testing.expect(zdedupe_clean_delete(ctx, "{\"paths\":[]}") == null);
+    try testing.expectEqualStrings("there is no build output scan to delete from", std.mem.span(zdedupe_clean_error(ctx).?));
     try testing.expect(zdedupe_clean_scan(ctx, "{") == null);
     try testing.expectEqualStrings("build output query is not valid JSON", std.mem.span(zdedupe_clean_error(ctx).?));
     try testing.expect(zdedupe_clean_scan(ctx, "{\"roots\":[]}") == null);
@@ -1048,5 +1064,13 @@ test "build output through the C API: a scan, a move it refuses for a fresh fold
     const skipped = run.value.object.get("skipped").?.array.items;
     try testing.expectEqual(@as(usize, 1), skipped.len);
     try testing.expect(std.mem.indexOf(u8, skipped[0].object.get("reason").?.string, "changed too recently") != null);
+    try testing.expect(try scratch.exists("app/node_modules/x.js"));
+
+    // A permanent delete checks the same way, and the folder stays.
+    const deleted = std.mem.span(zdedupe_clean_delete(ctx, items.ptr) orelse return error.DeleteFailed);
+    const gone = try std.json.parseFromSlice(std.json.Value, testing.allocator, deleted, .{});
+    defer gone.deinit();
+    try testing.expectEqual(@as(usize, 0), gone.value.object.get("moved").?.array.items.len);
+    try testing.expect(std.mem.indexOf(u8, gone.value.object.get("skipped").?.array.items[0].object.get("reason").?.string, "changed too recently") != null);
     try testing.expect(try scratch.exists("app/node_modules/x.js"));
 }
