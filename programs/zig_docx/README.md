@@ -408,7 +408,7 @@ Fire doors: {~~No 5~>No 7~~}. The cupboard is kept free ~~free~~ from storage.
 
 ### DOCX → MDX
 
-Converts a Word document to MDX with auto-extracted title from the first `# Heading`, blank lines between paragraphs, and properly rendered lists. Struck-through runs come back as `~~text~~` and highlighted runs as `==text==`; spaces at either end of a run are written outside its marks. With `--marks` (`MdxOptions.marks`), runs in the redline look come back as `{--…--}` / `{++…++}` and any other colour, shading or underline as `[text]{color=#… bg=#… underline}`, so Markdown → DOCX → Markdown keeps them. That output is Markdown for zig_docx and zig_pdf_generator, not valid MDX: `{` opens a JSX expression.
+Converts a Word document to MDX with auto-extracted title from the first `# Heading`, blank lines between paragraphs, and properly rendered lists: an item in a numbered list comes back as `1.`, `2.`… with its real number (read from `word/numbering.xml`: a list's start value, numbering that carries on past a paragraph between items, a sub-list restarting under each new item), a bulleted item as `-`. Struck-through runs come back as `~~text~~` and highlighted runs as `==text==`; spaces at either end of a run are written outside its marks. With `--marks` (`MdxOptions.marks`), runs in the redline look come back as `{--…--}` / `{++…++}` and any other colour, shading or underline as `[text]{color=#… bg=#… underline}`, so Markdown → DOCX → Markdown keeps them. That output is Markdown for zig_docx and zig_pdf_generator, not valid MDX: `{` opens a JSX expression.
 
 ```bash
 # Basic

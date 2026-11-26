@@ -163,7 +163,11 @@ fn writeParagraph(
         while (indent < p.numbering_level) : (indent += 1) {
             try w.print("  ", .{});
         }
-        try w.print("- ", .{});
+        if (p.list_number) |n| {
+            try w.print("{d}. ", .{n});
+        } else {
+            try w.print("- ", .{});
+        }
     } else if (prefix.len > 0) {
         try w.print("{s}", .{prefix});
     }

@@ -37,6 +37,7 @@
 //! attribute list that holds anything else is left as typed.
 
 const std = @import("std");
+const test_alloc = @import("test_alloc.zig");
 const docx = @import("docx.zig");
 const LayoutSettings = @import("docx_writer.zig").LayoutSettings;
 const StyleType = @import("styles.zig").StyleType;
@@ -1536,7 +1537,9 @@ test "the sample filing parses into the shape the CLI renders" {
 test "every allocation failure while parsing is an error, never a leak" {
     const parse = struct {
         fn run(allocator: std.mem.Allocator, md: []const u8, options: ParseOptions) !void {
-            var r = try parseMarkdownWith(allocator, md, options);
+            // Every growth a fresh allocation, so each run counts the same.
+            var no_in_place: test_alloc.NoInPlace = .{ .child = allocator };
+            var r = try parseMarkdownWith(no_in_place.allocator(), md, options);
             r.deinit();
         }
     }.run;

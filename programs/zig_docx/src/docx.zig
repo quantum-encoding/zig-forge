@@ -25,6 +25,7 @@ pub const xml = @import("xml.zig");
 pub const zip = @import("zip.zig");
 pub const rels = @import("rels.zig");
 pub const styles = @import("styles.zig");
+pub const numbering = @import("numbering.zig");
 pub const mdx = @import("mdx.zig");
 pub const xlsx = @import("xlsx.zig");
 pub const pdf = if (is_browser) struct {} else @import("pdf.zig");
@@ -122,6 +123,10 @@ pub const Paragraph = struct {
     is_list_item: bool = false,
     is_ordered: bool = false, // ordered (1. 2. 3.) vs unordered (- * +)
     numbering_level: u8 = 0,
+    /// The item's number in its list when the list is numbered (a read
+    /// document's word/numbering.xml says so); null for a bullet, a list of
+    /// unknown kind, or a paragraph that is not a list item.
+    list_number: ?u32 = null,
     /// Keep on the same page as the next paragraph (a heading row, a title).
     keep_next: bool = false,
     /// Space after the paragraph in twentieths of a point; null keeps the style's.
@@ -285,6 +290,15 @@ pub const Document = struct {
 // Parser State Machine
 // =============================================================================
 
+/// The deepest list level WordprocessingML defines (`w:ilvl` 0–8).
+const max_list_level: u8 = 8;
+
+/// One numbered list's running count at each level.
+const ListCount = struct {
+    num_id: u32,
+    counts: [max_list_level + 1]u32 = @splat(0),
+};
+
 const ParserState = struct {
     allocator: std.mem.Allocator,
     relationships: []const rels.Relationship,
@@ -315,6 +329,12 @@ const ParserState = struct {
     current_style: StyleType = .normal,
     current_is_list: bool = false,
     current_num_level: u8 = 0,
+    /// The paragraph's `w:numId`; null when its numPr names none.
+    current_num_id: ?u32 = null,
+    /// The document's numbering definitions (borrowed for the parse).
+    numbering: numbering.Numbering = .{},
+    /// Each numbered list's running count per level, by numId.
+    list_counts: std.ArrayListUnmanaged(ListCount) = .empty,
 
     // Current run being built
     current_text: std.ArrayListUnmanaged(u8),
@@ -395,14 +415,46 @@ const ParserState = struct {
         self.current_bg = null;
     }
 
+    /// The next number at a level of a numbered list: its start the first
+    /// time, one more after that. A deeper level starts again after it, as
+    /// Word restarts a sub-list under each new item.
+    fn nextListNumber(self: *ParserState, num_id: u32, ilvl: u8, start: u32) !u32 {
+        const lvl = @min(ilvl, max_list_level);
+        const entry = for (self.list_counts.items) |*c| {
+            if (c.num_id == num_id) break c;
+        } else blk: {
+            try self.list_counts.append(self.allocator, .{ .num_id = num_id });
+            break :blk &self.list_counts.items[self.list_counts.items.len - 1];
+        };
+        entry.counts[lvl] = if (entry.counts[lvl] == 0) start else entry.counts[lvl] + 1;
+        for (entry.counts[lvl + 1 ..]) |*deeper| deeper.* = 0;
+        return entry.counts[lvl];
+    }
+
     fn finishParagraph(self: *ParserState) !void {
         try self.finishRun();
+
+        // numId 0 switches numbering off (ECMA-376 Part 1, 17.9.18).
+        const numbered_off = if (self.current_num_id) |id| id == 0 else false;
+        const is_list = self.current_is_list and !numbered_off;
+        var list_number: ?u32 = null;
+        if (is_list) {
+            if (self.current_num_id) |id| {
+                if (self.numbering.level(id, self.current_num_level)) |lvl| {
+                    if (lvl.format == .ordered) {
+                        list_number = try self.nextListNumber(id, self.current_num_level, lvl.start);
+                    }
+                }
+            }
+        }
 
         const para = Paragraph{
             .style = self.current_style,
             .runs = try self.current_runs.toOwnedSlice(self.allocator),
-            .is_list_item = self.current_is_list,
+            .is_list_item = is_list,
+            .is_ordered = list_number != null,
             .numbering_level = self.current_num_level,
+            .list_number = list_number,
         };
 
         if (self.in_table_cell) {
@@ -414,6 +466,7 @@ const ParserState = struct {
         self.current_style = .normal;
         self.current_is_list = false;
         self.current_num_level = 0;
+        self.current_num_id = null;
     }
 
     fn finishCell(self: *ParserState) !void {
@@ -476,6 +529,10 @@ const ParserState = struct {
         } else if (self.in_num_props and std.mem.eql(u8, name, "ilvl")) {
             if (xml.getAttr(es.attrs, "val")) |val| {
                 self.current_num_level = std.fmt.parseInt(u8, val, 10) catch 0;
+            }
+        } else if (self.in_num_props and std.mem.eql(u8, name, "numId")) {
+            if (xml.getAttr(es.attrs, "val")) |val| {
+                self.current_num_id = std.fmt.parseInt(u32, val, 10) catch null;
             }
         } else if (std.mem.eql(u8, name, "hyperlink")) {
             self.in_hyperlink = true;
@@ -596,13 +653,24 @@ pub fn parseDocument(allocator: std.mem.Allocator, archive: *zip.ZipArchive) !Do
         style_map = try styles.parseStyles(allocator, styles_xml);
     }
 
-    // 3. Parse document.xml
+    // 3. Parse numbering (optional): which lists are numbered, and from where.
+    var list_numbering: numbering.Numbering = .{};
+    defer list_numbering.deinit(allocator);
+    if (archive.findEntry("word/numbering.xml")) |entry| {
+        const numbering_xml = try archive.extract(entry);
+        defer allocator.free(numbering_xml);
+        list_numbering = try numbering.parseNumbering(allocator, numbering_xml);
+    }
+
+    // 4. Parse document.xml
     const doc_entry = archive.findEntry("word/document.xml") orelse
         return error.InvalidDocx;
     const doc_xml = try archive.extract(doc_entry);
     defer allocator.free(doc_xml);
 
     var state = ParserState.init(allocator, relationships, style_map);
+    state.numbering = list_numbering;
+    defer state.list_counts.deinit(allocator);
     defer state.current_text.deinit(allocator);
     defer state.current_runs.deinit(allocator);
     defer state.cell_paragraphs.deinit(allocator);
@@ -621,7 +689,7 @@ pub fn parseDocument(allocator: std.mem.Allocator, archive: *zip.ZipArchive) !Do
         }
     }
 
-    // 4. Extract media files
+    // 5. Extract media files
     var media: std.ArrayListUnmanaged(MediaFile) = .empty;
     var media_bytes: usize = 0;
     for (archive.entries) |*entry| {
@@ -712,7 +780,11 @@ pub fn printDocumentInfo(allocator: std.mem.Allocator, doc: *const Document) ![]
                     .list_paragraph => "  - ",
                     else => if (p.is_list_item) "  - " else "  ",
                 };
-                try writer.print("{s}", .{prefix});
+                if (p.list_number) |n| {
+                    try writer.print("  {d}. ", .{n});
+                } else {
+                    try writer.print("{s}", .{prefix});
+                }
 
                 // Print first 80 chars of text
                 var text_len: usize = 0;
@@ -750,6 +822,8 @@ test {
     _ = xml;
     _ = rels;
     _ = styles;
+    _ = numbering;
+    _ = @import("test_alloc.zig");
     _ = mdx;
     // Previously-dark test files: without an explicit reference here their
     // `test` blocks are never collected by `zig build test` (docx.zig is the
@@ -987,6 +1061,78 @@ test "list items with numbering level" {
     try std.testing.expectEqual(@as(u8, 0), p1.numbering_level);
     try std.testing.expect(p2.is_list_item);
     try std.testing.expectEqual(@as(u8, 1), p2.numbering_level);
+}
+
+test "numId: numbered items count on past a paragraph, restart below, and numId 0 is no list" {
+    const allocator = std.testing.allocator;
+    const numbering_xml =
+        \\<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        \\  <w:abstractNum w:abstractNumId="0">
+        \\    <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/></w:lvl>
+        \\    <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/></w:lvl>
+        \\  </w:abstractNum>
+        \\  <w:abstractNum w:abstractNumId="1">
+        \\    <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/></w:lvl>
+        \\  </w:abstractNum>
+        \\  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+        \\  <w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>
+        \\</w:numbering>
+    ;
+    const item = struct {
+        fn p(comptime num_id: []const u8, comptime ilvl: []const u8, comptime text: []const u8) []const u8 {
+            return "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"" ++ ilvl ++ "\"/><w:numId w:val=\"" ++ num_id ++
+                "\"/></w:numPr></w:pPr><w:r><w:t>" ++ text ++ "</w:t></w:r></w:p>";
+        }
+    }.p;
+    const doc_xml = comptime "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>" ++
+        item("1", "0", "One") ++ item("1", "1", "One a") ++ item("1", "1", "One b") ++
+        item("1", "0", "Two") ++ item("1", "1", "Two a") ++
+        "<w:p><w:r><w:t>Between</w:t></w:r></w:p>" ++
+        item("1", "0", "Three") ++ item("2", "0", "Bullet") ++ item("0", "0", "Numbering off") ++
+        "</w:body></w:document>";
+
+    var list_numbering = try numbering.parseNumbering(allocator, numbering_xml);
+    defer list_numbering.deinit(allocator);
+    var state = ParserState.init(allocator, &[_]rels.Relationship{}, &[_]styles.StyleInfo{});
+    state.numbering = list_numbering;
+    defer state.list_counts.deinit(allocator);
+    defer state.current_text.deinit(allocator);
+    defer state.current_runs.deinit(allocator);
+    defer state.cell_paragraphs.deinit(allocator);
+    defer state.row_cells.deinit(allocator);
+    defer state.table_rows.deinit(allocator);
+    var parser = xml.XmlParser.init(doc_xml);
+    while (parser.next()) |event| {
+        switch (event) {
+            .element_start => |es| try state.handleElementStart(es),
+            .element_end => |name| try state.handleElementEnd(name),
+            .text => |text| try state.handleText(text),
+        }
+    }
+    var doc = Document{
+        .elements = try state.elements.toOwnedSlice(allocator),
+        .media = @constCast(&[_]MediaFile{}),
+        .allocator = allocator,
+    };
+    defer doc.deinit();
+
+    const want = [_]struct { list: bool, number: ?u32 }{
+        .{ .list = true, .number = 1 }, // One
+        .{ .list = true, .number = 1 }, // One a
+        .{ .list = true, .number = 2 }, // One b
+        .{ .list = true, .number = 2 }, // Two
+        .{ .list = true, .number = 1 }, // Two a: the sub-list restarts under a new item
+        .{ .list = false, .number = null }, // Between
+        .{ .list = true, .number = 3 }, // Three: the list carries on past the paragraph
+        .{ .list = true, .number = null }, // Bullet
+        .{ .list = false, .number = null }, // numId 0
+    };
+    try std.testing.expectEqual(want.len, doc.elements.len);
+    for (want, doc.elements) |w, e| {
+        try std.testing.expectEqual(w.list, e.paragraph.is_list_item);
+        try std.testing.expectEqual(w.number, e.paragraph.list_number);
+        try std.testing.expectEqual(w.number != null, e.paragraph.is_ordered);
+    }
 }
 
 test "text extraction from generated document" {

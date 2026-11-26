@@ -35,6 +35,16 @@ const md_parser = @import("md_parser.zig");
 /// re-derived from an external reader at the same time.
 const libreoffice_docx = @embedFile("testdata/libreoffice_writer.docx");
 
+/// Numbered and bulleted lists written by LibreOffice Writer (`soffice
+/// --headless --convert-to docx:"MS Word 2007 XML"`) from this HTML, whose
+/// list semantics are the expected output:
+///   <p>Requests</p>
+///   <ol><li>First request</li><li>Second request<ul><li>Nested bullet</li></ul></li><li>Third request</li></ol>
+///   <p>Plain paragraph between lists</p>
+///   <ul><li>Bullet one</li><li>Bullet two</li></ul>
+///   <ol start="4"><li>Fourth item</li><li>Fifth item</li></ol>
+const libreoffice_lists_docx = @embedFile("testdata/libreoffice_lists.docx");
+
 // PKWARE APPNOTE.TXT §4.3 record signatures.
 const APPNOTE_LOCAL_HEADER_SIG: u32 = 0x04034b50;
 const APPNOTE_CENTRAL_DIR_SIG: u32 = 0x02014b50;
@@ -470,4 +480,35 @@ test "media name sanitizer rejects traversal, separators and control bytes" {
     // sanitized side and the lookup side stay in sync.
     try std.testing.expect(docx.mediaNameMatches("media/image1.png", "../../media/image1.png"));
     try std.testing.expect(!docx.mediaNameMatches("media/image1.png", "media/image2.png"));
+}
+
+test "anchor: LibreOffice-authored numbered lists read back as numbered, bullets as bullets" {
+    const allocator = std.testing.allocator;
+    const data = try allocator.dupe(u8, libreoffice_lists_docx);
+    var archive = try zip.ZipArchive.openFromMemory(allocator, data);
+    defer archive.close();
+    var doc = try docx.parseDocument(allocator, &archive);
+    defer doc.deinit();
+    var out = try docx.mdx.generateMdx(allocator, &doc, .{});
+    defer out.deinit();
+
+    // The HTML's own numbering: <ol> counts from 1, <ol start="4"> from 4, <ul> is bulleted.
+    const expected = [_][]const u8{
+        "1. First request",
+        "2. Second request",
+        "  - Nested bullet",
+        "3. Third request",
+        "- Bullet one",
+        "- Bullet two",
+        "4. Fourth item",
+        "5. Fifth item",
+    };
+    var at: usize = 0;
+    for (expected) |line| {
+        const found = std.mem.indexOfPos(u8, out.mdx, at, line) orelse {
+            std.debug.print("missing, in order: \"{s}\"\n--- output ---\n{s}\n", .{ line, out.mdx });
+            return error.TestExpectedEqual;
+        };
+        at = found + line.len;
+    }
 }
