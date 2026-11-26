@@ -385,10 +385,13 @@ pub fn inspect(
         return judged(arena, facts);
     };
     if (!top.ok) {
-        if (std.mem.indexOf(u8, top.err, "not a git repository") == null) {
-            facts.err = firstLine(top.err);
-        } else if (brokenLink(arena, project)) |why| {
+        // A worktree whose repository is gone, read from its .git file:
+        // git words it differently by version ("not a git repository",
+        // later "gitfile does not point to a valid repository").
+        if (brokenLink(arena, project)) |why| {
             facts.err = why;
+        } else if (std.mem.indexOf(u8, top.err, "not a git repository") == null) {
+            facts.err = firstLine(top.err);
         }
         return judged(arena, facts);
     }
