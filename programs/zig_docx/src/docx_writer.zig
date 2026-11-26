@@ -44,9 +44,42 @@ pub const LetterheadImage = struct {
 };
 
 pub const DocumentStyle = enum {
-    default, // Calibri, blue headings, left-aligned
+    default, // Arial 11pt, bold black headings, left-aligned
     minutes, // Arial, black bold+underline headings, justified text
     sheet, // Calibri 10pt, en-GB, no space between paragraphs: tables of short entries
+    letter, // Times New Roman 12pt, justified, 1.15 lines, bold centred headings: letters and filings
+
+    /// The preset a `--style` flag or `style:` key names; null for any other word.
+    pub fn fromName(name: []const u8) ?DocumentStyle {
+        return std.meta.stringToEnum(DocumentStyle, name);
+    }
+};
+
+/// The language of the words the writer adds itself (the footer's "Page N of
+/// M") and, in the letter style, of the text for spelling and hyphenation.
+pub const Language = enum {
+    en,
+    es,
+
+    pub fn fromName(name: []const u8) ?Language {
+        return std.meta.stringToEnum(Language, name);
+    }
+
+    /// The tag the letter style marks text with (`w:lang`).
+    fn tag(self: Language) []const u8 {
+        return switch (self) {
+            .en => "en-GB",
+            .es => "es-ES",
+        };
+    }
+
+    /// "Page", "of": the words around the page number and the page count.
+    fn pageWords(self: Language) struct { page: []const u8, of: []const u8 } {
+        return switch (self) {
+            .en => .{ .page = "Page ", .of = " of " },
+            .es => .{ .page = "Página ", .of = " de " },
+        };
+    }
 };
 
 pub const DocxWriterOptions = struct {
@@ -60,8 +93,12 @@ pub const DocxWriterOptions = struct {
     /// letterhead, which owns the page header.
     page_header: []const u8 = "",
     /// Text at the right of a footer that reads "Page N of M" on every page.
-    /// Empty = no footer.
+    /// Empty = no footer, unless `page_numbers` asks for one.
     page_footer: []const u8 = "",
+    /// The "Page N of M" footer even when `page_footer` is empty.
+    page_numbers: bool = false,
+    /// The language of "Page N of M" and of the letter style's text.
+    language: Language = .en,
     /// A4 paper (210 × 297 mm) instead of the application's default size.
     a4: bool = false,
     /// Turn the page on its side.
@@ -74,6 +111,124 @@ pub const DocxWriterOptions = struct {
     /// When, as an xsd:dateTime; "" leaves the date off.
     revision_date: []const u8 = "",
 };
+
+/// The least width or height the margins may leave for text: one inch.
+const MIN_TEXT_SPAN: u32 = 1440;
+
+/// Page and style settings as words — command-line flags or Markdown
+/// frontmatter keys — before they are checked and become DocxWriterOptions.
+/// Null means not given. The strings are borrowed.
+pub const LayoutSettings = struct {
+    /// default, minutes, sheet or letter.
+    style: ?[]const u8 = null,
+    /// a4 or letter.
+    paper: ?[]const u8 = null,
+    /// portrait or landscape.
+    orientation: ?[]const u8 = null,
+    /// Every page margin: 25mm, 2.5cm, 1in, 72pt, or a bare number of mm.
+    margin: ?[]const u8 = null,
+    /// A line of text at the top right of every page.
+    header: ?[]const u8 = null,
+    /// Text at the right of the "Page N of M" footer.
+    footer: ?[]const u8 = null,
+    /// true or false: the "Page N of M" footer without footer text.
+    page_numbers: ?[]const u8 = null,
+    /// en or es (a region such as es-ES is accepted and ignored).
+    lang: ?[]const u8 = null,
+
+    /// `self` with each setting `over` gives in place of its own.
+    pub fn overlay(self: LayoutSettings, over: LayoutSettings) LayoutSettings {
+        return .{
+            .style = over.style orelse self.style,
+            .paper = over.paper orelse self.paper,
+            .orientation = over.orientation orelse self.orientation,
+            .margin = over.margin orelse self.margin,
+            .header = over.header orelse self.header,
+            .footer = over.footer orelse self.footer,
+            .page_numbers = over.page_numbers orelse self.page_numbers,
+            .lang = over.lang orelse self.lang,
+        };
+    }
+
+    /// Checks each setting and writes it into `opts`. Returns what is wrong
+    /// with the first bad one, or null when every one is good. The letter
+    /// style is on A4 unless a paper size is given.
+    pub fn applyTo(self: LayoutSettings, opts: *DocxWriterOptions) ?[]const u8 {
+        var word: [16]u8 = undefined;
+        if (self.style) |v| opts.style = DocumentStyle.fromName(lowerWord(&word, v)) orelse
+            return "style must be default, minutes, sheet or letter";
+        if (self.paper) |v| {
+            const p = lowerWord(&word, v);
+            if (std.mem.eql(u8, p, "a4")) {
+                opts.a4 = true;
+            } else if (std.mem.eql(u8, p, "letter")) {
+                opts.a4 = false;
+            } else return "paper must be a4 or letter";
+        } else if (opts.style == .letter) opts.a4 = true;
+        if (self.orientation) |v| {
+            const o = lowerWord(&word, v);
+            if (std.mem.eql(u8, o, "landscape")) {
+                opts.landscape = true;
+            } else if (std.mem.eql(u8, o, "portrait")) {
+                opts.landscape = false;
+            } else return "orientation must be portrait or landscape";
+        }
+        if (self.margin) |v| opts.margin = parseLengthTwips(v) orelse
+            return "margin must be a length such as 25mm, 2.5cm, 1in or 72pt";
+        if (self.header) |v| opts.page_header = v;
+        if (self.footer) |v| opts.page_footer = v;
+        if (self.page_numbers) |v| {
+            const b = lowerWord(&word, v);
+            if (std.mem.eql(u8, b, "true") or std.mem.eql(u8, b, "yes")) {
+                opts.page_numbers = true;
+            } else if (std.mem.eql(u8, b, "false") or std.mem.eql(u8, b, "no")) {
+                opts.page_numbers = false;
+            } else return "page-numbers must be true or false";
+        }
+        if (self.lang) |v| {
+            const primary = v[0 .. std.mem.indexOfAny(u8, v, "-_") orelse v.len];
+            opts.language = Language.fromName(lowerWord(&word, primary)) orelse return "lang must be en or es";
+        }
+        const parts = SectionParts{ .a4 = opts.a4, .landscape = opts.landscape, .margin = opts.margin };
+        const margins = 2 * @as(u32, opts.margin orelse 1440);
+        if (parts.textWidth() < MIN_TEXT_SPAN or parts.pageSize().h -| margins < MIN_TEXT_SPAN)
+            return "margin leaves less than 1 inch (25.4 mm) of the page for text";
+        return null;
+    }
+};
+
+/// `s` in lower case in `buf`; a word longer than `buf` is cut short, which
+/// no setting matches.
+fn lowerWord(buf: []u8, s: []const u8) []const u8 {
+    const t = std.mem.trim(u8, s, " \t");
+    return std.ascii.lowerString(buf, t[0..@min(t.len, buf.len)]);
+}
+
+/// A length in twentieths of a point (1440 to the inch): a number followed by
+/// mm, cm, in or pt, or a bare number of millimetres. Null for anything else,
+/// a negative length, or one past what Word stores (65535).
+pub fn parseLengthTwips(s: []const u8) ?u16 {
+    const t = std.mem.trim(u8, s, " \t");
+    var end = t.len;
+    while (end > 0 and std.ascii.isAlphabetic(t[end - 1])) end -= 1;
+    const unit = t[end..];
+    const per_unit: f64 = if (unit.len == 0 or std.ascii.eqlIgnoreCase(unit, "mm"))
+        1440.0 / 25.4
+    else if (std.ascii.eqlIgnoreCase(unit, "cm"))
+        14400.0 / 25.4
+    else if (std.ascii.eqlIgnoreCase(unit, "in"))
+        1440.0
+    else if (std.ascii.eqlIgnoreCase(unit, "pt"))
+        20.0
+    else
+        return null;
+    const number_text = std.mem.trimEnd(u8, t[0..end], " ");
+    if (number_text.len == 0) return null;
+    const number = std.fmt.parseFloat(f64, number_text) catch return null;
+    if (!std.math.isFinite(number) or number < 0) return null;
+    const twips = @round(number * per_unit);
+    return if (twips <= std.math.maxInt(u16)) @intFromFloat(twips) else null;
+}
 
 /// Numbers each tracked change (ids must be unique in a document) and
 /// carries the author and date every one of them is stamped with.
@@ -108,9 +263,10 @@ const SectionParts = struct {
         return if (self.landscape) .{ .w = long, .h = short } else .{ .w = short, .h = long };
     }
 
-    /// The width text runs across: the page less its left and right margins.
+    /// The width text runs across: the page less its left and right margins
+    /// (none when the margins meet).
     fn textWidth(self: SectionParts) u32 {
-        return self.pageSize().w - 2 * @as(u32, self.margin orelse 1440);
+        return self.pageSize().w -| 2 * @as(u32, self.margin orelse 1440);
     }
 };
 
@@ -255,7 +411,7 @@ pub fn generateDocx(
     const parts = SectionParts{
         .image_header = has_header,
         .text_header = !has_header and options.page_header.len > 0,
-        .footer = options.page_footer.len > 0,
+        .footer = options.page_footer.len > 0 or options.page_numbers,
         .a4 = options.a4,
         .landscape = options.landscape,
         .margin = options.margin,
@@ -281,10 +437,13 @@ pub fn generateDocx(
 
     try zip.addFile("word/document.xml", document_xml);
 
+    const letter_styles = if (options.style == .letter) try genLetterStyles(allocator, options.language) else null;
+    defer if (letter_styles) |ls| allocator.free(ls);
     try zip.addFile("word/styles.xml", switch (options.style) {
         .minutes => styles_minutes_xml,
         .default => styles_xml,
         .sheet => styles_sheet_xml,
+        .letter => letter_styles.?,
     });
 
     const doc_rels = try genDocumentRels(allocator, has_lists, &hyperlinks, &images, parts);
@@ -321,7 +480,7 @@ pub fn generateDocx(
         try zip.addFile("word/header1.xml", header_xml);
     }
     if (parts.footer) {
-        const footer_xml = try genPageFooterXml(allocator, options.page_footer, parts.textWidth());
+        const footer_xml = try genPageFooterXml(allocator, options.page_footer, parts.textWidth(), options.language);
         defer allocator.free(footer_xml);
         try zip.addFile("word/footer1.xml", footer_xml);
     }
@@ -469,6 +628,44 @@ const styles_sheet_xml =
     \\    </w:pPr></w:pPrDefault>
     \\  </w:docDefaults>
     \\  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>
+    \\</w:styles>
+;
+
+// Letter style: Times New Roman 12pt, justified, 1.15 line spacing, bold
+// centred black headings that stay with the text after them. Code blocks stay
+// flush left. The text is marked with the document's language (`w:lang`) so
+// Word and LibreOffice spell-check and hyphenate it as that language.
+fn genLetterStyles(allocator: std.mem.Allocator, language: Language) ![]u8 {
+    return std.mem.concat(allocator, u8, &.{ letter_styles_head, language.tag(), letter_styles_tail });
+}
+
+const letter_styles_head =
+    \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    \\<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+    \\  <w:docDefaults>
+    \\    <w:rPrDefault><w:rPr>
+    \\      <w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="Times New Roman" w:cs="Times New Roman"/>
+    \\      <w:sz w:val="24"/><w:szCs w:val="24"/><w:lang w:val="
+;
+const letter_styles_tail =
+    \\"/>
+    \\    </w:rPr></w:rPrDefault>
+    \\    <w:pPrDefault><w:pPr>
+    \\      <w:spacing w:after="160" w:line="276" w:lineRule="auto"/>
+    \\      <w:jc w:val="both"/>
+    \\    </w:pPr></w:pPrDefault>
+    \\  </w:docDefaults>
+    \\  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:keepNext/><w:spacing w:before="360" w:after="240"/><w:jc w:val="center"/></w:pPr><w:rPr><w:b/><w:color w:val="000000"/><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:pPr><w:keepNext/><w:spacing w:before="240" w:after="160"/><w:jc w:val="center"/></w:pPr><w:rPr><w:b/><w:color w:val="000000"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:pPr><w:keepNext/><w:spacing w:before="240" w:after="120"/><w:jc w:val="center"/></w:pPr><w:rPr><w:b/><w:color w:val="000000"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Heading4"><w:name w:val="heading 4"/><w:pPr><w:keepNext/><w:spacing w:before="200" w:after="120"/><w:jc w:val="center"/></w:pPr><w:rPr><w:b/><w:color w:val="000000"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Heading5"><w:name w:val="heading 5"/><w:pPr><w:keepNext/><w:spacing w:before="200" w:after="120"/><w:jc w:val="center"/></w:pPr><w:rPr><w:b/><w:color w:val="000000"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Heading6"><w:name w:val="heading 6"/><w:pPr><w:keepNext/><w:spacing w:before="200" w:after="120"/><w:jc w:val="center"/></w:pPr><w:rPr><w:b/><w:i/><w:color w:val="000000"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:pPr><w:ind w:left="720"/></w:pPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="CodeBlock"><w:name w:val="Code Block"/><w:pPr><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/><w:spacing w:before="80" w:after="80" w:line="240" w:lineRule="auto"/><w:jc w:val="left"/></w:pPr><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New" w:cs="Courier New"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/><w:pPr><w:ind w:left="720" w:right="720"/></w:pPr><w:rPr><w:i/></w:rPr></w:style>
+    \\  <w:style w:type="character" w:styleId="InlineCode"><w:name w:val="Inline Code"/><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New" w:cs="Courier New"/><w:sz w:val="20"/><w:szCs w:val="20"/><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/></w:rPr></w:style>
     \\</w:styles>
 ;
 
@@ -647,7 +844,7 @@ fn genDocumentXml(
     for (doc.elements) |elem| {
         switch (elem) {
             .paragraph => |p| try writeParagraph(allocator, &buf, &p, hyperlinks, images, drawing_id, revisions),
-            .table => |t| try writeTable(allocator, &buf, &t, hyperlinks, images, drawing_id, revisions),
+            .table => |t| try writeTable(allocator, &buf, &t, hyperlinks, images, drawing_id, revisions, parts.textWidth()),
         }
     }
 
@@ -703,7 +900,7 @@ fn writeParagraph(
     }
 
     // Paragraph properties in CT_PPrBase order: pStyle, keepNext, numPr,
-    // pBdr, spacing.
+    // pBdr, spacing, jc.
     try buf.appendSlice(allocator, "<w:p><w:pPr>");
 
     switch (p.style) {
@@ -735,6 +932,12 @@ fn writeParagraph(
     if (p.spacing_after) |after| {
         var tmp: [48]u8 = undefined;
         try buf.appendSlice(allocator, try std.fmt.bufPrint(&tmp, "<w:spacing w:after=\"{d}\"/>", .{after}));
+    }
+
+    if (p.alignment) |a| {
+        try buf.appendSlice(allocator, "<w:jc w:val=\"");
+        try buf.appendSlice(allocator, a.jcValue());
+        try buf.appendSlice(allocator, "\"/>");
     }
 
     try buf.appendSlice(allocator, "</w:pPr>");
@@ -865,11 +1068,17 @@ pub fn writeRunXml(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8
     try buf.appendSlice(allocator, "</w:r>");
 }
 
-/// EMU per inch (914400) and per pixel at 96 DPI (9525) for drawing geometry.
-/// Text width of a portrait A4/Letter page with the default margins, in
-/// twentieths of a point — what a table has to share out between its columns.
+/// The space Word leaves between a cell's left or right edge and its text
+/// when the table does not say (its built-in "Normal Table" style), in
+/// twentieths of a point.
+const WORD_CELL_PADDING: u32 = 108;
+
+/// Text width of a portrait US Letter page with one-inch margins, in
+/// twentieths of a point: what a table with neither widths nor weights
+/// shares out equally between its columns, whatever the page.
 const CONTENT_WIDTH_TWIPS: u16 = 9360;
 
+/// EMU per pixel at 96 DPI (914400 EMU to the inch), for drawing geometry.
 const EMU_PER_PIXEL: u64 = 9525;
 const MAX_IMAGE_WIDTH_EMU: u64 = 5486400; // 6 inches
 const DEFAULT_IMAGE_CX: u64 = 5486400; // 6 inches
@@ -1020,14 +1229,27 @@ fn writeTable(
     images: *ImageCollector,
     drawing_id: *u32,
     revisions: *Revisions,
+    text_width: u32,
 ) !void {
+    // Relative widths become real ones here, where the text width is known.
+    // A table with no lines is wider than the text by its cells' side
+    // padding, and centred, so the text in its outer columns lines up with
+    // the body text instead of sitting a padding's width inside it.
+    var weighted: ?[]u16 = null;
+    defer if (weighted) |w| allocator.free(w);
+    if (t.col_widths.len == 0 and t.col_weights.len > 0) {
+        const overhang: u32 = if (!t.borderless) 0 else if (t.cell_margins) |m| @as(u32, m.left) + m.right else 2 * WORD_CELL_PADDING;
+        weighted = try shareWidth(allocator, t.col_weights, text_width + overhang);
+    }
+    const declared: []const u16 = if (t.col_widths.len > 0) t.col_widths else weighted orelse &[_]u16{};
+
     // Table properties in CT_TblPr order (ECMA-376 Part 1, 17.4.60): tblStyle,
     // tblW, jc, tblBorders, tblLayout, tblCellMar, tblLook.
     try buf.appendSlice(allocator, "<w:tbl><w:tblPr>\n  <w:tblStyle w:val=\"TableGrid\"/>\n");
 
-    if (t.col_widths.len > 0) {
+    if (declared.len > 0) {
         var total: u32 = 0;
-        for (t.col_widths) |w| total += w;
+        for (declared) |w| total += w;
         var tmp: [64]u8 = undefined;
         const s = try std.fmt.bufPrint(&tmp, "  <w:tblW w:w=\"{d}\" w:type=\"dxa\"/>\n", .{total});
         try buf.appendSlice(allocator, s);
@@ -1044,6 +1266,10 @@ fn writeTable(
     for ([_][]const u8{ "top", "left", "bottom", "right", "insideH", "insideV" }) |edge| {
         try buf.appendSlice(allocator, "    <w:");
         try buf.appendSlice(allocator, edge);
+        if (t.borderless) {
+            try buf.appendSlice(allocator, " w:val=\"none\" w:sz=\"0\" w:space=\"0\" w:color=\"auto\"/>\n");
+            continue;
+        }
         try buf.appendSlice(allocator, " w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"");
         try appendXmlEscaped(allocator, buf, border_color);
         try buf.appendSlice(allocator, "\"/>\n");
@@ -1063,9 +1289,10 @@ fn writeTable(
     // A table has to declare its grid. ECMA-376 requires tblGrid, and without
     // it a reader has nothing to lay the columns out against: LibreOffice
     // collapsed the first column to nothing and ran the second off the page.
-    // Builders that know their widths (fra.zig) supply them; markdown tables
-    // do not, so the content width is shared equally.
-    var widths: []const u16 = t.col_widths;
+    // Builders that know their widths (fra.zig) supply them, a table with
+    // relative widths has had them shared out above, and any other table
+    // shares the content width equally.
+    var widths: []const u16 = declared;
     var computed: ?[]u16 = null;
     defer if (computed) |c| allocator.free(c);
     if (widths.len == 0) {
@@ -1140,6 +1367,24 @@ fn writeTable(
     try buf.appendSlice(allocator, "</w:tbl>\n");
 }
 
+/// `text_width` shared out in the proportions of `weights`, the last column
+/// taking the rounding so the columns sum to the whole width. Weights that
+/// are all zero share it equally.
+fn shareWidth(allocator: std.mem.Allocator, weights: []const u16, text_width: u32) ![]u16 {
+    const widths = try allocator.alloc(u16, weights.len);
+    var sum: u64 = 0;
+    for (weights) |w| sum += w;
+    var given: u32 = 0;
+    for (weights, 0..) |w, i| {
+        const share: u64 = if (sum == 0) 1 else w;
+        const whole: u64 = if (sum == 0) weights.len else sum;
+        const width: u32 = if (i + 1 == weights.len) text_width -| given else @intCast(@as(u64, text_width) * share / whole);
+        widths[i] = @intCast(@min(width, std.math.maxInt(u16)));
+        given += width;
+    }
+    return widths;
+}
+
 fn genCoreProps(allocator: std.mem.Allocator, options: DocxWriterOptions) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
@@ -1187,9 +1432,10 @@ fn genTextHeaderXml(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return allocator.dupe(u8, buf.items);
 }
 
-/// A page footer reading "Page N of M" at the left and `text` at the right,
-/// small and grey. N and M are Word fields, so they are right on every page.
-fn genPageFooterXml(allocator: std.mem.Allocator, text: []const u8, text_width: u32) ![]u8 {
+/// A page footer reading "Page N of M" (in `language`) at the left and `text`,
+/// when there is any, at the right, small and grey. N and M are Word fields,
+/// so they are right on every page.
+fn genPageFooterXml(allocator: std.mem.Allocator, text: []const u8, text_width: u32, language: Language) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const rpr = "<w:rPr><w:color w:val=\"808080\"/><w:sz w:val=\"16\"/><w:szCs w:val=\"16\"/></w:rPr>";
@@ -1218,13 +1464,21 @@ fn genPageFooterXml(allocator: std.mem.Allocator, text: []const u8, text_width: 
             try b.appendSlice(a, "<w:fldChar w:fldCharType=\"end\"/></w:r>");
         }
     };
-    try buf.appendSlice(allocator, "<w:r>" ++ rpr ++ "<w:t xml:space=\"preserve\">Page </w:t></w:r>");
+    const words = language.pageWords();
+    try buf.appendSlice(allocator, "<w:r>" ++ rpr ++ "<w:t xml:space=\"preserve\">");
+    try buf.appendSlice(allocator, words.page);
+    try buf.appendSlice(allocator, "</w:t></w:r>");
     try field.write(allocator, &buf, rpr, "PAGE");
-    try buf.appendSlice(allocator, "<w:r>" ++ rpr ++ "<w:t xml:space=\"preserve\"> of </w:t></w:r>");
+    try buf.appendSlice(allocator, "<w:r>" ++ rpr ++ "<w:t xml:space=\"preserve\">");
+    try buf.appendSlice(allocator, words.of);
+    try buf.appendSlice(allocator, "</w:t></w:r>");
     try field.write(allocator, &buf, rpr, "NUMPAGES");
-    try buf.appendSlice(allocator, "<w:r>" ++ rpr ++ "<w:tab/><w:t xml:space=\"preserve\">");
-    try appendXmlEscaped(allocator, &buf, text);
-    try buf.appendSlice(allocator, "</w:t></w:r></w:p></w:ftr>");
+    if (text.len > 0) {
+        try buf.appendSlice(allocator, "<w:r>" ++ rpr ++ "<w:tab/><w:t xml:space=\"preserve\">");
+        try appendXmlEscaped(allocator, &buf, text);
+        try buf.appendSlice(allocator, "</w:t></w:r>");
+    }
+    try buf.appendSlice(allocator, "</w:p></w:ftr>");
     return allocator.dupe(u8, buf.items);
 }
 
@@ -1369,7 +1623,7 @@ test "a markdown table declares a grid so readers can lay it out" {
     var drawing_id: u32 = 1;
     var revisions = Revisions{ .author = "", .date = "" };
 
-    try writeTable(allocator, &buf, &table, &hyperlinks, &images, &drawing_id, &revisions);
+    try writeTable(allocator, &buf, &table, &hyperlinks, &images, &drawing_id, &revisions, CONTENT_WIDTH_TWIPS);
 
     const xml = buf.items;
     try testing.expect(std.mem.indexOf(u8, xml, "<w:tblGrid>") != null);
@@ -1456,7 +1710,7 @@ test "rows repeat or hold together, cells span columns, tracked changes are numb
     defer images.deinit();
     var drawing_id: u32 = 1;
     var revisions = Revisions{ .author = "Ed & Co", .date = "2026-01-02T00:00:00Z" };
-    try writeTable(allocator, &buf, &table, &hyperlinks, &images, &drawing_id, &revisions);
+    try writeTable(allocator, &buf, &table, &hyperlinks, &images, &drawing_id, &revisions, CONTENT_WIDTH_TWIPS);
     const xml = buf.items;
 
     const has = struct {
@@ -1480,7 +1734,7 @@ test "rows repeat or hold together, cells span columns, tracked changes are numb
     buf.clearRetainingCapacity();
     var plain_cells = [_]docx.TableCell{.{ .paragraphs = &body_para }};
     var plain_rows = [_]docx.TableRow{.{ .cells = &plain_cells }};
-    try writeTable(allocator, &buf, &docx.Table{ .rows = &plain_rows }, &hyperlinks, &images, &drawing_id, &revisions);
+    try writeTable(allocator, &buf, &docx.Table{ .rows = &plain_rows }, &hyperlinks, &images, &drawing_id, &revisions, CONTENT_WIDTH_TWIPS);
     try testing.expect(has(buf.items, "<w:tr><w:tc>"));
     try testing.expect(has(buf.items, "w:color=\"auto\"/>\n  </w:tblBorders>\n  <w:tblLook "));
 }
@@ -1512,7 +1766,7 @@ test "table properties are in schema order" {
     defer images.deinit();
     var drawing_id: u32 = 1;
     var revisions = Revisions{ .author = "", .date = "" };
-    try writeTable(allocator, &buf, &table, &hyperlinks, &images, &drawing_id, &revisions);
+    try writeTable(allocator, &buf, &table, &hyperlinks, &images, &drawing_id, &revisions, CONTENT_WIDTH_TWIPS);
 
     // CT_TblPr: each element after the one before it.
     const order = [_][]const u8{ "<w:tblStyle ", "<w:tblW ", "<w:jc ", "<w:tblBorders>", "<w:tblLayout ", "<w:tblCellMar>", "<w:tblLook ", "</w:tblPr>" };
@@ -1524,4 +1778,221 @@ test "table properties are in schema order" {
         };
         at = found + tag.len;
     }
+}
+
+// ── Layout: alignment, column widths, borders, page settings ──────
+
+fn contains(hay: []const u8, needle: []const u8) bool {
+    return std.mem.indexOf(u8, hay, needle) != null;
+}
+
+/// One part of a generated .docx, read back through the ZIP reader (from a
+/// copy, which the archive owns). Caller frees.
+fn docxPart(allocator: std.mem.Allocator, bytes: []const u8, name: []const u8) ![]u8 {
+    const copy = try allocator.dupe(u8, bytes);
+    var archive = @import("zip.zig").ZipArchive.openFromMemory(allocator, copy) catch |err| {
+        allocator.free(copy);
+        return err;
+    };
+    defer archive.close();
+    const entry = archive.findEntry(name) orelse return error.PartMissing;
+    return archive.extract(entry);
+}
+
+/// A table written on its own, as genDocumentXml writes it. Caller frees.
+fn tableXml(allocator: std.mem.Allocator, table: *const docx.Table, text_width: u32) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var hyperlinks = HyperlinkCollector.init(allocator);
+    defer hyperlinks.deinit();
+    var images = ImageCollector.init(allocator);
+    defer images.deinit();
+    var drawing_id: u32 = 1;
+    var revisions = Revisions{ .author = "", .date = "" };
+    try writeTable(allocator, &buf, table, &hyperlinks, &images, &drawing_id, &revisions, text_width);
+    return buf.toOwnedSlice(allocator);
+}
+
+/// Twentieths of a point in `mm` millimetres, to the nearest (25.4 mm and
+/// 1440 to the inch).
+fn mmToTwips(mm: f64) u16 {
+    return std.math.lossyCast(u16, @round(mm / 25.4 * 1440.0));
+}
+
+test "a paragraph's alignment is written as w:jc, after its spacing" {
+    const allocator = testing.allocator;
+    var hyperlinks = HyperlinkCollector.init(allocator);
+    defer hyperlinks.deinit();
+    var images = ImageCollector.init(allocator);
+    defer images.deinit();
+    var drawing_id: u32 = 1;
+    var revisions = Revisions{ .author = "", .date = "" };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    // ST_Jc (ECMA-376 Part 1, 17.18.44) spells justified "both".
+    const cases = [_]struct { a: docx.Alignment, jc: []const u8 }{
+        .{ .a = .left, .jc = "left" },
+        .{ .a = .center, .jc = "center" },
+        .{ .a = .right, .jc = "right" },
+        .{ .a = .justify, .jc = "both" },
+    };
+    for (cases) |c| {
+        buf.clearRetainingCapacity();
+        const p = docx.Paragraph{ .alignment = c.a, .spacing_after = 0 };
+        try writeParagraph(allocator, &buf, &p, &hyperlinks, &images, &drawing_id, &revisions);
+        var want: [96]u8 = undefined;
+        try testing.expectEqualStrings(
+            try std.fmt.bufPrint(&want, "<w:p><w:pPr><w:spacing w:after=\"0\"/><w:jc w:val=\"{s}\"/></w:pPr></w:p>\n", .{c.jc}),
+            buf.items,
+        );
+    }
+    // No alignment, no w:jc: the style decides.
+    buf.clearRetainingCapacity();
+    try writeParagraph(allocator, &buf, &docx.Paragraph{ .style = .heading1 }, &hyperlinks, &images, &drawing_id, &revisions);
+    try testing.expectEqualStrings("<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr></w:p>\n", buf.items);
+}
+
+test "relative column widths share out the page's text width" {
+    const allocator = testing.allocator;
+    var a = [_]docx.Paragraph{.{}};
+    var b = [_]docx.Paragraph{.{}};
+    var cells = [_]docx.TableCell{ .{ .paragraphs = &a }, .{ .paragraphs = &b } };
+    var rows = [_]docx.TableRow{.{ .cells = &cells }};
+
+    // A4 with one-inch margins: 210 mm less two inches.
+    const a4_text: u32 = mmToTwips(210) - 2 * 1440;
+    const xml = try tableXml(allocator, &docx.Table{ .rows = &rows, .col_weights = &.{ 30, 70 }, .fixed_layout = true }, a4_text);
+    defer allocator.free(xml);
+    const first = a4_text * 30 / 100;
+    var tmp: [160]u8 = undefined;
+    try testing.expect(contains(xml, try std.fmt.bufPrint(&tmp, "<w:tblW w:w=\"{d}\" w:type=\"dxa\"/>", .{a4_text})));
+    try testing.expect(contains(xml, try std.fmt.bufPrint(&tmp, "<w:tblGrid><w:gridCol w:w=\"{d}\"/><w:gridCol w:w=\"{d}\"/></w:tblGrid>", .{ first, a4_text - first })));
+    try testing.expect(contains(xml, try std.fmt.bufPrint(&tmp, "<w:tcW w:w=\"{d}\" w:type=\"dxa\"/>", .{first})));
+    try testing.expect(contains(xml, try std.fmt.bufPrint(&tmp, "<w:tcW w:w=\"{d}\" w:type=\"dxa\"/>", .{a4_text - first})));
+    try testing.expect(contains(xml, "<w:tblLayout w:type=\"fixed\"/>"));
+
+    // Explicit widths still win over weights.
+    const fixed = try tableXml(allocator, &docx.Table{ .rows = &rows, .col_widths = &.{ 1000, 2000 }, .col_weights = &.{ 1, 1 } }, a4_text);
+    defer allocator.free(fixed);
+    try testing.expect(contains(fixed, "<w:tblGrid><w:gridCol w:w=\"1000\"/><w:gridCol w:w=\"2000\"/></w:tblGrid>"));
+}
+
+test "a borderless table has no lines and reaches past the text by its cell padding" {
+    const allocator = testing.allocator;
+    var a = [_]docx.Paragraph{.{}};
+    var b = [_]docx.Paragraph{.{}};
+    var cells = [_]docx.TableCell{ .{ .paragraphs = &a }, .{ .paragraphs = &b } };
+    var rows = [_]docx.TableRow{.{ .cells = &cells }};
+    const xml = try tableXml(allocator, &docx.Table{ .rows = &rows, .col_weights = &.{ 1, 1 }, .borderless = true }, 9000);
+    defer allocator.free(xml);
+    for ([_][]const u8{ "top", "left", "bottom", "right", "insideH", "insideV" }) |edge| {
+        var tmp: [96]u8 = undefined;
+        try testing.expect(contains(xml, try std.fmt.bufPrint(&tmp, "<w:{s} w:val=\"none\" w:sz=\"0\" w:space=\"0\" w:color=\"auto\"/>", .{edge})));
+    }
+    try testing.expect(!contains(xml, "w:val=\"single\""));
+    // Word's default padding is 108 at each side; the centred table is that much wider.
+    try testing.expect(contains(xml, "<w:tblW w:w=\"9216\" w:type=\"dxa\"/>"));
+    try testing.expect(contains(xml, "<w:gridCol w:w=\"4608\"/><w:gridCol w:w=\"4608\"/>"));
+}
+
+test "page settings named in words reach the page, the margins and the footer" {
+    const allocator = testing.allocator;
+    var runs = [_]docx.Run{.{ .text = "Body" }};
+    var elements = [_]docx.Element{.{ .paragraph = .{ .runs = &runs } }};
+    const doc = docx.Document{ .elements = &elements, .media = &.{}, .allocator = allocator };
+
+    var opts = DocxWriterOptions{};
+    try testing.expect((LayoutSettings{ .paper = "A4", .margin = "25mm", .page_numbers = "true", .lang = "es-ES" }).applyTo(&opts) == null);
+    const bytes = try generateDocx(allocator, &doc, opts);
+    defer allocator.free(bytes);
+
+    const body = try docxPart(allocator, bytes, "word/document.xml");
+    defer allocator.free(body);
+    var tmp: [160]u8 = undefined;
+    // ISO 216 A4 is 210 × 297 mm.
+    try testing.expect(contains(body, try std.fmt.bufPrint(&tmp, "<w:pgSz w:w=\"{d}\" w:h=\"{d}\"/>", .{ mmToTwips(210), mmToTwips(297) })));
+    const m = mmToTwips(25);
+    try testing.expect(contains(body, try std.fmt.bufPrint(&tmp, "<w:pgMar w:top=\"{d}\" w:right=\"{d}\" w:bottom=\"{d}\" w:left=\"{d}\"", .{ m, m, m, m })));
+    try testing.expect(contains(body, "<w:footerReference w:type=\"default\" r:id=\"rId6\"/>"));
+
+    // Page numbers with no footer text: the words and both fields, no tab.
+    const footer = try docxPart(allocator, bytes, "word/footer1.xml");
+    defer allocator.free(footer);
+    try testing.expect(contains(footer, "<w:t xml:space=\"preserve\">Página </w:t>"));
+    try testing.expect(contains(footer, "<w:t xml:space=\"preserve\"> de </w:t>"));
+    try testing.expect(contains(footer, "<w:instrText xml:space=\"preserve\"> PAGE </w:instrText>"));
+    try testing.expect(contains(footer, "<w:instrText xml:space=\"preserve\"> NUMPAGES </w:instrText>"));
+    try testing.expect(!contains(footer, "<w:tab/>"));
+    try testing.expect(!contains(footer, "Page "));
+
+    // In English, with text at the right.
+    const en = try genPageFooterXml(allocator, "Ref 1", 9026, .en);
+    defer allocator.free(en);
+    try testing.expect(contains(en, "<w:t xml:space=\"preserve\">Page </w:t>"));
+    try testing.expect(contains(en, "<w:t xml:space=\"preserve\"> of </w:t>"));
+    try testing.expect(contains(en, "<w:tab/><w:t xml:space=\"preserve\">Ref 1</w:t>"));
+}
+
+test "the letter style: 12pt justified text at 1.15 lines, bold centred black headings, on A4" {
+    const allocator = testing.allocator;
+    const es = try genLetterStyles(allocator, .es);
+    defer allocator.free(es);
+    try testing.expect(contains(es, "<w:sz w:val=\"24\"/><w:szCs w:val=\"24\"/><w:lang w:val=\"es-ES\"/>"));
+    // 1.15 lines is 276 two-hundred-and-fortieths of a line.
+    try testing.expect(contains(es, "<w:spacing w:after=\"160\" w:line=\"276\" w:lineRule=\"auto\"/>\n      <w:jc w:val=\"both\"/>\n    </w:pPr></w:pPrDefault>"));
+    try testing.expect(contains(es, "w:styleId=\"Heading1\"><w:name w:val=\"heading 1\"/><w:pPr><w:keepNext/><w:spacing w:before=\"360\" w:after=\"240\"/><w:jc w:val=\"center\"/></w:pPr><w:rPr><w:b/><w:color w:val=\"000000\"/>"));
+    const en = try genLetterStyles(allocator, .en);
+    defer allocator.free(en);
+    try testing.expect(contains(en, "<w:lang w:val=\"en-GB\"/>"));
+
+    // A4 unless a paper size is given; a flag over the frontmatter wins.
+    var letter = DocxWriterOptions{};
+    try testing.expect((LayoutSettings{ .style = "letter" }).applyTo(&letter) == null);
+    try testing.expect(letter.style == .letter and letter.a4);
+    var us = DocxWriterOptions{};
+    try testing.expect((LayoutSettings{ .style = "letter", .paper = "letter" }).applyTo(&us) == null);
+    try testing.expect(!us.a4);
+    const frontmatter = LayoutSettings{ .style = "letter", .lang = "es", .margin = "30mm" };
+    var flagged = DocxWriterOptions{};
+    try testing.expect(frontmatter.overlay(.{ .style = "default", .margin = "1in" }).applyTo(&flagged) == null);
+    try testing.expect(flagged.style == .default and !flagged.a4 and flagged.language == .es and flagged.margin.? == 1440);
+
+    // The other presets are untouched by the language.
+    try testing.expect(!contains(styles_xml, "w:lang") and !contains(styles_minutes_xml, "w:lang"));
+}
+
+test "bad page settings say what is wrong" {
+    const cases = [_]struct { s: LayoutSettings, problem: []const u8 }{
+        .{ .s = .{ .style = "fancy" }, .problem = "style must be default, minutes, sheet or letter" },
+        .{ .s = .{ .paper = "a5" }, .problem = "paper must be a4 or letter" },
+        .{ .s = .{ .orientation = "sideways" }, .problem = "orientation must be portrait or landscape" },
+        .{ .s = .{ .margin = "3 furlongs" }, .problem = "margin must be a length such as 25mm, 2.5cm, 1in or 72pt" },
+        .{ .s = .{ .page_numbers = "maybe" }, .problem = "page-numbers must be true or false" },
+        .{ .s = .{ .lang = "fr" }, .problem = "lang must be en or es" },
+        // 2 × 95 mm of a 210 mm A4 page leaves under an inch.
+        .{ .s = .{ .paper = "a4", .margin = "95mm" }, .problem = "margin leaves less than 1 inch (25.4 mm) of the page for text" },
+        // Landscape Letter is 8.5 inches tall: 2 × 3.8 in leaves under one.
+        .{ .s = .{ .orientation = "landscape", .margin = "3.8in" }, .problem = "margin leaves less than 1 inch (25.4 mm) of the page for text" },
+    };
+    for (cases) |c| {
+        var opts = DocxWriterOptions{};
+        try testing.expectEqualStrings(c.problem, c.s.applyTo(&opts) orelse "(accepted)");
+    }
+}
+
+test "lengths in mm, cm, in and pt" {
+    const good = [_]struct { s: []const u8, twips: u16 }{
+        .{ .s = "25mm", .twips = mmToTwips(25) },
+        .{ .s = "2.5cm", .twips = mmToTwips(25) },
+        .{ .s = " 12.7 mm ", .twips = 720 },
+        .{ .s = "20", .twips = mmToTwips(20) },
+        .{ .s = "1in", .twips = 1440 },
+        .{ .s = "0.75IN", .twips = 1080 },
+        .{ .s = "72pt", .twips = 1440 },
+        .{ .s = "0mm", .twips = 0 },
+    };
+    for (good) |g| try testing.expectEqual(@as(?u16, g.twips), parseLengthTwips(g.s));
+    const bad = [_][]const u8{ "", "mm", "-5mm", "5km", "nan", "inf", "1e9mm", "1,5cm", "2 in in" };
+    for (bad) |b| try testing.expectEqual(@as(?u16, null), parseLengthTwips(b));
 }

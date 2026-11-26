@@ -97,6 +97,25 @@ pub const Run = struct {
     image_max_width_emu: ?u64 = null,
 };
 
+/// How a paragraph's lines sit between the margins (`w:jc`): flush left,
+/// centred, flush right, or justified to both margins.
+pub const Alignment = enum {
+    left,
+    center,
+    right,
+    justify,
+
+    /// The ST_Jc value Word writes for it (ECMA-376 Part 1, 17.18.44).
+    pub fn jcValue(self: Alignment) []const u8 {
+        return switch (self) {
+            .left => "left",
+            .center => "center",
+            .right => "right",
+            .justify => "both",
+        };
+    }
+};
+
 pub const Paragraph = struct {
     style: StyleType = .normal,
     runs: []Run = &[_]Run{},
@@ -107,6 +126,8 @@ pub const Paragraph = struct {
     keep_next: bool = false,
     /// Space after the paragraph in twentieths of a point; null keeps the style's.
     spacing_after: ?u16 = null,
+    /// Overrides the style's alignment; null keeps the style's.
+    alignment: ?Alignment = null,
 };
 
 pub const TableCell = struct {
@@ -128,6 +149,12 @@ pub const Table = struct {
     rows: []TableRow = &[_]TableRow{},
     /// Column widths in twentieths of a point (dxa). Empty = auto-width.
     col_widths: []const u16 = &[_]u16{},
+    /// Relative column widths, used when `col_widths` is empty: the page's
+    /// text width is shared out in these proportions ({1, 3} gives the second
+    /// column three quarters). Empty = equal columns.
+    col_weights: []const u16 = &[_]u16{},
+    /// No lines at all: no outer edge and none between cells.
+    borderless: bool = false,
     /// Border colour as hex ("BBBBBB"); null for Word's automatic colour.
     border_color: ?[]const u8 = null,
     /// Columns keep the widths given instead of growing to fit their text.
@@ -218,11 +245,12 @@ pub const Document = struct {
                         self.allocator.free(row.cells);
                     }
                     self.allocator.free(t.rows);
-                    // col_widths is heap-allocated by builders that set it
-                    // (e.g. fra.zig); the DOCX parser leaves it as the empty
-                    // default. Guard on len so freeing the static empty slice
-                    // is a no-op.
+                    // col_widths and col_weights are heap-allocated by builders
+                    // that set them (fra.zig, the Markdown parser's layout
+                    // mode); the DOCX parser leaves both as the empty default.
+                    // Guard on len so freeing the static empty slice is a no-op.
                     if (t.col_widths.len > 0) self.allocator.free(t.col_widths);
+                    if (t.col_weights.len > 0) self.allocator.free(t.col_weights);
                 },
             }
         }
