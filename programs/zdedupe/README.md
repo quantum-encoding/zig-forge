@@ -221,8 +221,9 @@ going away changes `schema`.
 A host does the same through the C API: `zdedupe_clean_scan` returns this
 document (and keeps the report in its context), `zdedupe_clean_trash` moves
 the build folders a person chose from it, through the host's own Trash when
-it passes one, each checked again just before it goes (`include/zdedupe.h`,
-"Build output"; `$defs/CleanReport` in `schema/results-session.schema.json`).
+it passes one, and `zdedupe_clean_delete` deletes them for good instead; each
+is checked again just before it goes (`include/zdedupe.h`, "Build output";
+`$defs/CleanReport` in `schema/results-session.schema.json`).
 
 ## Library / FFI
 
