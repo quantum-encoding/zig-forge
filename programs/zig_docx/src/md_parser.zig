@@ -19,10 +19,26 @@
 //!   > blockquotes
 //!   --- horizontal rules
 //!   | table | syntax |
-//!   --- YAML frontmatter ---
+//!   --- YAML frontmatter ---  (title, author, date, description, and the
+//!       page settings in docx_writer.LayoutSettings: style, paper,
+//!       orientation, margin, header, footer, page-numbers, lang)
+//!   <!-- letterhead: logo.png -->, <!-- pagebreak -->
+//!   :::card … :::  (the lines between in one bordered box)
+//!
+//! With ParseOptions.layout (the CLI's --to-docx turns it on), also:
+//!   |:---|:---:|---:|  column alignment (left, centre, right); a column
+//!                     with neither colon is flush left. Each column's width
+//!                     is in proportion to its separator cell's width.
+//!   {widths=30,70 borders=none}  on the line straight after a table: relative
+//!                     column widths (one per column), and/or no lines at all.
+//!   Text {align=center}  a trailing attribute on a paragraph, heading, list
+//!                     item or quote: left, center (or centre), right, justify.
+//! Table cells are flush left unless their column says otherwise. An
+//! attribute list that holds anything else is left as typed.
 
 const std = @import("std");
 const docx = @import("docx.zig");
+const LayoutSettings = @import("docx_writer.zig").LayoutSettings;
 const StyleType = @import("styles.zig").StyleType;
 const isSafeLinkUrl = @import("mdx.zig").isSafeLinkUrl;
 
@@ -32,6 +48,32 @@ pub const FrontMatter = struct {
     date: ?[]const u8 = null,
     description: ?[]const u8 = null,
     letterhead: ?[]const u8 = null, // <!-- letterhead: logo.png -->
+    /// The page settings the frontmatter names (style, paper, orientation,
+    /// margin, header, footer, page-numbers, lang), as written. Owned.
+    layout: LayoutSettings = .{},
+
+    fn deinit(self: *FrontMatter, allocator: std.mem.Allocator) void {
+        const owned = [_]?[]const u8{
+            self.title,         self.author,             self.date,
+            self.description,   self.letterhead,         self.layout.style,
+            self.layout.paper,  self.layout.orientation, self.layout.margin,
+            self.layout.header, self.layout.footer,      self.layout.page_numbers,
+            self.layout.lang,
+        };
+        for (owned) |field| if (field) |v| allocator.free(v);
+        self.* = .{};
+    }
+};
+
+/// What the parser reads beyond plain Markdown.
+pub const ParseOptions = struct {
+    /// The layout syntax: column alignment and widths from a table's
+    /// separator row, a `{widths=… borders=none}` line straight after a
+    /// table, and a trailing `{align=…}` on a paragraph, heading, list item
+    /// or quote. Table cells are then flush left unless their column says
+    /// otherwise, so a justified style does not stretch them. Off, the
+    /// parser reads Markdown as it always has and every one of these is text.
+    layout: bool = false,
 };
 
 pub const ParseResult = struct {
@@ -43,17 +85,18 @@ pub const ParseResult = struct {
 
     pub fn deinit(self: *ParseResult) void {
         self.document.deinit();
-        if (self.frontmatter.title) |t| self.allocator.free(t);
-        if (self.frontmatter.author) |a| self.allocator.free(a);
-        if (self.frontmatter.date) |d| self.allocator.free(d);
-        if (self.frontmatter.description) |d| self.allocator.free(d);
-        if (self.frontmatter.letterhead) |l| self.allocator.free(l);
+        self.frontmatter.deinit(self.allocator);
         if (self.base_dir) |b| self.allocator.free(b);
     }
 };
 
 /// Parse markdown text into a Document model + optional YAML frontmatter.
 pub fn parseMarkdown(allocator: std.mem.Allocator, markdown: []const u8) !ParseResult {
+    return parseMarkdownWith(allocator, markdown, .{});
+}
+
+/// parseMarkdown, reading the extra syntax `options` turns on.
+pub fn parseMarkdownWith(allocator: std.mem.Allocator, markdown: []const u8, options: ParseOptions) !ParseResult {
     var elements: std.ArrayListUnmanaged(docx.Element) = .empty;
     errdefer {
         for (elements.items) |*e| freeElement(allocator, e);
@@ -61,13 +104,14 @@ pub fn parseMarkdown(allocator: std.mem.Allocator, markdown: []const u8) !ParseR
     }
 
     var frontmatter = FrontMatter{};
+    errdefer frontmatter.deinit(allocator);
     var lines = std.mem.splitScalar(u8, markdown, '\n');
 
     // Check for YAML frontmatter (--- delimited)
     const first_line = lines.peek() orelse "";
     if (std.mem.eql(u8, std.mem.trim(u8, first_line, " \t\r"), "---")) {
         _ = lines.next(); // consume opening ---
-        frontmatter = try parseFrontMatter(allocator, &lines);
+        try parseFrontMatter(allocator, &lines, &frontmatter);
     }
 
     // Block-level parsing
@@ -76,9 +120,8 @@ pub fn parseMarkdown(allocator: std.mem.Allocator, markdown: []const u8) !ParseR
     defer code_lines.deinit(allocator);
 
     var in_table = false;
-    var table_rows: std.ArrayListUnmanaged(docx.TableRow) = .empty;
-    defer table_rows.deinit(allocator);
-    var table_header_seen = false;
+    var table: PendingTable = .{};
+    defer table.deinit(allocator);
 
     while (lines.next()) |raw_line| {
         const line = std.mem.trimEnd(u8, raw_line, "\r");
@@ -87,21 +130,14 @@ pub fn parseMarkdown(allocator: std.mem.Allocator, markdown: []const u8) !ParseR
         if (std.mem.startsWith(u8, std.mem.trimStart(u8, line, " \t"), "```")) {
             if (in_code_block) {
                 // End code block — emit as a single paragraph
-                const code_text = try allocator.dupe(u8, code_lines.items);
-                const runs = try allocator.alloc(docx.Run, 1);
-                runs[0] = .{ .text = code_text };
-                try elements.append(allocator, .{ .paragraph = .{
-                    .style = .code_block,
-                    .runs = runs,
-                } });
+                try appendCodeBlock(allocator, &elements, code_lines.items);
                 code_lines.clearRetainingCapacity();
                 in_code_block = false;
             } else {
                 // Flush any pending table
                 if (in_table) {
-                    try flushTable(allocator, &elements, &table_rows);
+                    try flushTable(allocator, &elements, &table, options);
                     in_table = false;
-                    table_header_seen = false;
                 }
                 in_code_block = true;
             }
@@ -116,22 +152,27 @@ pub fn parseMarkdown(allocator: std.mem.Allocator, markdown: []const u8) !ParseR
 
         // ── Table rows ──
         if (line.len > 0 and line[0] == '|') {
-            if (!in_table) {
-                in_table = true;
-                table_header_seen = false;
-            }
-            // Skip separator rows (| --- | --- |)
+            in_table = true;
+            // Separator rows (| --- | --- |) are not rows; the first one
+            // gives the columns their widths and alignment.
             if (isSeparatorRow(line)) {
-                table_header_seen = true;
+                if (options.layout and !table.separator_seen) try table.readSeparator(allocator, line);
+                table.separator_seen = true;
                 continue;
             }
             const row = try parseTableRow(allocator, line);
-            try table_rows.append(allocator, row);
+            table.rows.append(allocator, row) catch |err| {
+                freeRow(allocator, row);
+                return err;
+            };
             continue;
         } else if (in_table) {
-            try flushTable(allocator, &elements, &table_rows);
+            // A `{widths=… borders=none}` line straight after the table is
+            // part of it; any other line ends the table and is read as usual.
+            const attrs_line = options.layout and try table.readAttrs(allocator, std.mem.trim(u8, line, " \t"));
+            try flushTable(allocator, &elements, &table, options);
             in_table = false;
-            table_header_seen = false;
+            if (attrs_line) continue;
         }
 
         // ── Blank line ──
@@ -146,15 +187,16 @@ pub fn parseMarkdown(allocator: std.mem.Allocator, markdown: []const u8) !ParseR
             if (std.mem.startsWith(u8, comment, "letterhead:")) {
                 const path = std.mem.trim(u8, comment["letterhead:".len..], " \t");
                 if (path.len > 0) {
+                    const owned = try allocator.dupe(u8, path);
                     if (frontmatter.letterhead) |old| allocator.free(old);
-                    frontmatter.letterhead = try allocator.dupe(u8, path);
+                    frontmatter.letterhead = owned;
                 }
             } else if (std.mem.eql(u8, comment, "pagebreak")) {
                 // <!-- pagebreak --> on its own line → a hard Word page break.
-                try elements.append(allocator, .{ .paragraph = .{
+                try appendParagraph(allocator, &elements, .{
                     .style = .page_break,
                     .runs = &[_]docx.Run{},
-                } });
+                });
             }
             continue; // consume comment, don't emit as paragraph
         }
@@ -166,13 +208,7 @@ pub fn parseMarkdown(allocator: std.mem.Allocator, markdown: []const u8) !ParseR
         if (std.mem.eql(u8, trimmed, ":::card")) {
             var cell_paras: std.ArrayListUnmanaged(docx.Paragraph) = .empty;
             errdefer {
-                for (cell_paras.items) |cp| {
-                    for (cp.runs) |r| {
-                        if (r.text.len > 0) allocator.free(r.text);
-                        if (r.hyperlink_url) |u| allocator.free(u);
-                    }
-                    if (cp.runs.len > 0) allocator.free(cp.runs);
-                }
+                for (cell_paras.items) |cp| freeRunList(allocator, cp.runs);
                 cell_paras.deinit(allocator);
             }
             while (lines.next()) |inner_raw| {
@@ -180,46 +216,68 @@ pub fn parseMarkdown(allocator: std.mem.Allocator, markdown: []const u8) !ParseR
                 const inner_trimmed = std.mem.trim(u8, inner_line, " \t");
                 if (std.mem.eql(u8, inner_trimmed, ":::")) break; // end of card
                 const runs = try parseInlineFormatting(allocator, inner_trimmed);
-                try cell_paras.append(allocator, .{ .style = .normal, .runs = runs });
+                // In layout mode the box is a table cell like any other:
+                // flush left, whatever the body's alignment.
+                cell_paras.append(allocator, .{
+                    .style = .normal,
+                    .runs = runs,
+                    .alignment = if (options.layout) .left else null,
+                }) catch |err| {
+                    freeRunList(allocator, runs);
+                    return err;
+                };
             }
+            // In layout mode the box spans the page's text width, whatever
+            // the paper and margins.
+            const weights: []u16 = if (options.layout) try allocator.dupe(u16, &.{1}) else &.{};
+            errdefer if (weights.len > 0) allocator.free(weights);
             const paras = try cell_paras.toOwnedSlice(allocator);
+            errdefer {
+                for (paras) |cp| freeRunList(allocator, cp.runs);
+                allocator.free(paras);
+            }
             const cells = try allocator.alloc(docx.TableCell, 1);
+            errdefer allocator.free(cells);
             cells[0] = .{ .paragraphs = paras };
             const rows = try allocator.alloc(docx.TableRow, 1);
+            errdefer allocator.free(rows);
             rows[0] = .{ .cells = cells };
-            try elements.append(allocator, .{ .table = .{ .rows = rows } });
+            try elements.append(allocator, .{ .table = .{ .rows = rows, .col_weights = weights } });
             continue;
         }
 
         // ── Horizontal rule ──
         if (isHorizontalRule(trimmed)) {
-            try elements.append(allocator, .{ .paragraph = .{
+            try appendParagraph(allocator, &elements, .{
                 .style = .horizontal_rule,
                 .runs = &[_]docx.Run{},
-            } });
+            });
             continue;
         }
 
         // ── Heading ──
         if (line.len > 0 and line[0] == '#') {
             if (parseHeading(line)) |h| {
-                const runs = try parseInlineFormatting(allocator, h.text);
-                try elements.append(allocator, .{ .paragraph = .{
+                const block = blockText(h.text, options);
+                const runs = try parseInlineFormatting(allocator, block.text);
+                try appendParagraph(allocator, &elements, .{
                     .style = h.style,
                     .runs = runs,
-                } });
+                    .alignment = block.alignment,
+                });
                 continue;
             }
         }
 
         // ── Blockquote ──
         if (std.mem.startsWith(u8, trimmed, "> ")) {
-            const quote_text = trimmed[2..];
-            const runs = try parseInlineFormatting(allocator, quote_text);
-            try elements.append(allocator, .{ .paragraph = .{
+            const block = blockText(trimmed[2..], options);
+            const runs = try parseInlineFormatting(allocator, block.text);
+            try appendParagraph(allocator, &elements, .{
                 .style = .blockquote,
                 .runs = runs,
-            } });
+                .alignment = block.alignment,
+            });
             continue;
         }
         if (std.mem.eql(u8, trimmed, ">")) {
@@ -228,51 +286,47 @@ pub fn parseMarkdown(allocator: std.mem.Allocator, markdown: []const u8) !ParseR
 
         // ── Unordered list ──
         if (parseUnorderedListItem(line)) |item| {
-            const runs = try parseInlineFormatting(allocator, item.text);
-            try elements.append(allocator, .{ .paragraph = .{
+            const block = blockText(item.text, options);
+            const runs = try parseInlineFormatting(allocator, block.text);
+            try appendParagraph(allocator, &elements, .{
                 .style = .list_paragraph,
                 .runs = runs,
                 .is_list_item = true,
                 .is_ordered = false,
                 .numbering_level = item.level,
-            } });
+                .alignment = block.alignment,
+            });
             continue;
         }
 
         // ── Ordered list ──
         if (parseOrderedListItem(line)) |item| {
-            const runs = try parseInlineFormatting(allocator, item.text);
-            try elements.append(allocator, .{ .paragraph = .{
+            const block = blockText(item.text, options);
+            const runs = try parseInlineFormatting(allocator, block.text);
+            try appendParagraph(allocator, &elements, .{
                 .style = .list_paragraph,
                 .runs = runs,
                 .is_list_item = true,
                 .is_ordered = true,
                 .numbering_level = item.level,
-            } });
+                .alignment = block.alignment,
+            });
             continue;
         }
 
         // ── Normal paragraph ──
-        const runs = try parseInlineFormatting(allocator, trimmed);
-        try elements.append(allocator, .{ .paragraph = .{
+        const block = blockText(trimmed, options);
+        const runs = try parseInlineFormatting(allocator, block.text);
+        try appendParagraph(allocator, &elements, .{
             .style = .normal,
             .runs = runs,
-        } });
+            .alignment = block.alignment,
+        });
     }
 
     // Flush any trailing code block or table
-    if (in_code_block and code_lines.items.len > 0) {
-        const code_text = try allocator.dupe(u8, code_lines.items);
-        const runs = try allocator.alloc(docx.Run, 1);
-        runs[0] = .{ .text = code_text };
-        try elements.append(allocator, .{ .paragraph = .{
-            .style = .code_block,
-            .runs = runs,
-        } });
-    }
-    if (in_table and table_rows.items.len > 0) {
-        try flushTable(allocator, &elements, &table_rows);
-    }
+    if (in_code_block and code_lines.items.len > 0) try appendCodeBlock(allocator, &elements, code_lines.items);
+    if (in_table) try flushTable(allocator, &elements, &table, options);
 
     return ParseResult{
         .document = .{
@@ -371,7 +425,13 @@ fn isSeparatorRow(line: []const u8) bool {
 
 fn parseTableRow(allocator: std.mem.Allocator, line: []const u8) !docx.TableRow {
     var cells: std.ArrayListUnmanaged(docx.TableCell) = .empty;
-    errdefer cells.deinit(allocator);
+    errdefer {
+        for (cells.items) |cell| {
+            for (cell.paragraphs) |cp| freeRunList(allocator, cp.runs);
+            allocator.free(cell.paragraphs);
+        }
+        cells.deinit(allocator);
+    }
 
     // Split by | and trim, skipping leading/trailing empty segments
     var iter = std.mem.splitScalar(u8, line, '|');
@@ -380,23 +440,240 @@ fn parseTableRow(allocator: std.mem.Allocator, line: []const u8) !docx.TableRow 
         if (cell_text.len == 0 and (cells.items.len == 0 or iter.peek() == null)) continue;
 
         const runs = try parseInlineFormatting(allocator, cell_text);
-        const paras = try allocator.alloc(docx.Paragraph, 1);
+        const paras = allocator.alloc(docx.Paragraph, 1) catch |err| {
+            freeRunList(allocator, runs);
+            return err;
+        };
         paras[0] = .{ .style = .normal, .runs = runs };
-        try cells.append(allocator, .{ .paragraphs = paras });
+        cells.append(allocator, .{ .paragraphs = paras }) catch |err| {
+            freeRunList(allocator, runs);
+            allocator.free(paras);
+            return err;
+        };
     }
 
     return .{ .cells = try cells.toOwnedSlice(allocator) };
 }
 
+/// A pipe table being read, row by row, and what its separator row and
+/// attribute line say about its columns.
+const PendingTable = struct {
+    rows: std.ArrayListUnmanaged(docx.TableRow) = .empty,
+    separator_seen: bool = false,
+    /// Each separator cell's width in characters, colons included.
+    sep_widths: std.ArrayListUnmanaged(u16) = .empty,
+    /// Each separator cell's alignment: `:--` left, `--:` right, `:-:` centre.
+    sep_aligns: std.ArrayListUnmanaged(?docx.Alignment) = .empty,
+    /// From `{widths=…}`: one relative width per column.
+    attr_widths: std.ArrayListUnmanaged(u16) = .empty,
+    /// From `{borders=none}`.
+    borderless: bool = false,
+
+    /// Frees the rows still held (only on an error path; a flushed table
+    /// owns its rows) and the lists.
+    fn deinit(self: *PendingTable, allocator: std.mem.Allocator) void {
+        for (self.rows.items) |row| freeRow(allocator, row);
+        self.rows.deinit(allocator);
+        self.sep_widths.deinit(allocator);
+        self.sep_aligns.deinit(allocator);
+        self.attr_widths.deinit(allocator);
+    }
+
+    /// Ready for the next table, keeping the lists' memory.
+    fn reset(self: *PendingTable) void {
+        self.rows.clearRetainingCapacity();
+        self.sep_widths.clearRetainingCapacity();
+        self.sep_aligns.clearRetainingCapacity();
+        self.attr_widths.clearRetainingCapacity();
+        self.separator_seen = false;
+        self.borderless = false;
+    }
+
+    /// The most cells any row has.
+    fn columns(self: *const PendingTable) usize {
+        var n: usize = 0;
+        for (self.rows.items) |row| n = @max(n, row.cells.len);
+        return n;
+    }
+
+    /// Each cell of a separator row (`|:---|:---:|---:|`): its width as
+    /// drawn and its alignment.
+    fn readSeparator(self: *PendingTable, allocator: std.mem.Allocator, line: []const u8) !void {
+        var iter = std.mem.splitScalar(u8, line, '|');
+        var first = true;
+        while (iter.next()) |segment| {
+            const cell = std.mem.trim(u8, segment, " \t");
+            // The empty pieces outside the leading and trailing pipes.
+            const outside = cell.len == 0 and (first or iter.peek() == null);
+            first = false;
+            if (outside) continue;
+            const left = cell.len > 0 and cell[0] == ':';
+            const right = cell.len > 0 and cell[cell.len - 1] == ':';
+            try self.sep_widths.append(allocator, @intCast(@max(1, @min(cell.len, std.math.maxInt(u16)))));
+            try self.sep_aligns.append(allocator, if (left and right and cell.len > 1)
+                .center
+            else if (left)
+                .left
+            else if (right)
+                .right
+            else
+                null);
+        }
+    }
+
+    /// When `trimmed` is a table attribute list, `{widths=30,70 borders=none}`
+    /// (either attribute or both), records it and returns true. Anything else
+    /// — another attribute, a width that is not a whole number above zero, or
+    /// a count of widths that is not the table's column count — leaves the
+    /// table as it was and returns false, so the line is read as text.
+    fn readAttrs(self: *PendingTable, allocator: std.mem.Allocator, trimmed: []const u8) !bool {
+        if (trimmed.len < 2 or trimmed[0] != '{' or trimmed[trimmed.len - 1] != '}') return false;
+        var widths: std.ArrayListUnmanaged(u16) = .empty;
+        defer widths.deinit(allocator);
+        var borderless = false;
+        var any = false;
+        var it = std.mem.tokenizeAny(u8, trimmed[1 .. trimmed.len - 1], " \t");
+        while (it.next()) |tok| {
+            if (std.mem.eql(u8, tok, "borders=none")) {
+                borderless = true;
+            } else if (std.mem.startsWith(u8, tok, "widths=")) {
+                widths.clearRetainingCapacity();
+                var values = std.mem.splitScalar(u8, tok["widths=".len..], ',');
+                while (values.next()) |raw| {
+                    const v = if (std.mem.endsWith(u8, raw, "%")) raw[0 .. raw.len - 1] else raw;
+                    const w = std.fmt.parseInt(u16, v, 10) catch return false;
+                    if (w == 0) return false;
+                    try widths.append(allocator, w);
+                }
+                if (widths.items.len != self.columns()) return false;
+            } else return false;
+            any = true;
+        }
+        if (!any) return false;
+        self.borderless = borderless;
+        self.attr_widths.clearRetainingCapacity();
+        try self.attr_widths.appendSlice(allocator, widths.items);
+        return true;
+    }
+};
+
+/// Appends `p`, whose runs `elements` then owns; frees them if it cannot.
+fn appendParagraph(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), p: docx.Paragraph) !void {
+    elements.append(allocator, .{ .paragraph = p }) catch |err| {
+        freeRunList(allocator, p.runs);
+        return err;
+    };
+}
+
+/// Appends a code block: its lines as the one run of a CodeBlock paragraph.
+fn appendCodeBlock(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), code: []const u8) !void {
+    const text = try allocator.dupe(u8, code);
+    const runs = allocator.alloc(docx.Run, 1) catch |err| {
+        allocator.free(text);
+        return err;
+    };
+    runs[0] = .{ .text = text };
+    try appendParagraph(allocator, elements, .{ .style = .code_block, .runs = runs });
+}
+
+fn freeRow(allocator: std.mem.Allocator, row: docx.TableRow) void {
+    for (row.cells) |cell| {
+        for (cell.paragraphs) |cp| freeRunList(allocator, cp.runs);
+        allocator.free(cell.paragraphs);
+    }
+    allocator.free(row.cells);
+}
+
+fn freeRunList(allocator: std.mem.Allocator, runs: []docx.Run) void {
+    for (runs) |r| {
+        if (r.text.len > 0) allocator.free(r.text);
+        if (r.hyperlink_url) |u| allocator.free(u);
+        if (r.image_rel_id) |u| allocator.free(u);
+    }
+    if (runs.len > 0) allocator.free(runs);
+}
+
+/// Moves the pending table into `elements` and readies `pending` for the
+/// next one. In layout mode the table takes its column widths from the
+/// attribute line or else the separator row, and each cell takes its
+/// column's alignment, flush left when the column has none. On an error the
+/// rows not yet moved stay in `pending`, whose deinit frees them.
 fn flushTable(
     allocator: std.mem.Allocator,
     elements: *std.ArrayListUnmanaged(docx.Element),
-    table_rows: *std.ArrayListUnmanaged(docx.TableRow),
+    pending: *PendingTable,
+    options: ParseOptions,
 ) !void {
-    if (table_rows.items.len == 0) return;
+    if (pending.rows.items.len == 0) return pending.reset();
+
+    var weights: []u16 = &.{};
+    errdefer if (weights.len > 0) allocator.free(weights);
+    if (options.layout) {
+        for (pending.rows.items) |row| {
+            for (row.cells, 0..) |cell, col| {
+                const a: ?docx.Alignment = if (col < pending.sep_aligns.items.len) pending.sep_aligns.items[col] else null;
+                for (cell.paragraphs) |*p| p.alignment = a orelse .left;
+            }
+        }
+        const cols = pending.columns();
+        if (cols > 0) {
+            weights = try allocator.alloc(u16, cols);
+            if (pending.attr_widths.items.len == cols) {
+                @memcpy(weights, pending.attr_widths.items);
+            } else {
+                // Columns the separator row does not reach get its average.
+                const drawn = pending.sep_widths.items[0..@min(cols, pending.sep_widths.items.len)];
+                var sum: usize = 0;
+                for (drawn) |w| sum += w;
+                const fill: u16 = if (drawn.len == 0) 1 else @intCast(@max(1, sum / drawn.len));
+                @memset(weights, fill);
+                @memcpy(weights[0..drawn.len], drawn);
+            }
+        }
+    }
+
+    const rows = try pending.rows.toOwnedSlice(allocator);
+    errdefer {
+        for (rows) |row| freeRow(allocator, row);
+        allocator.free(rows);
+    }
     try elements.append(allocator, .{ .table = .{
-        .rows = try table_rows.toOwnedSlice(allocator),
+        .rows = rows,
+        .col_weights = weights,
+        .fixed_layout = weights.len > 0,
+        .borderless = options.layout and pending.borderless,
     } });
+    pending.reset();
+}
+
+// ── Block attributes ────────────────────────────────────────────
+
+/// A block's text and the alignment a trailing `{align=…}` gave it.
+const BlockText = struct { text: []const u8, alignment: ?docx.Alignment = null };
+
+/// `text` without a trailing ` {align=…}` and the alignment it names, in
+/// layout mode. The attribute list must come after a space and hold only
+/// `align=left|center|centre|right|justify`; anything else (`[x]{color=red}`,
+/// `\{align=center}`, `{==see==}`) is left in the text for the inline parser.
+fn blockText(text: []const u8, options: ParseOptions) BlockText {
+    const none: BlockText = .{ .text = text };
+    if (!options.layout) return none;
+    if (text.len == 0 or text[text.len - 1] != '}') return none;
+    const open = std.mem.lastIndexOfScalar(u8, text, '{') orelse return none;
+    if (open == 0 or (text[open - 1] != ' ' and text[open - 1] != '\t')) return none;
+    var alignment: ?docx.Alignment = null;
+    var it = std.mem.tokenizeAny(u8, text[open + 1 .. text.len - 1], " \t");
+    while (it.next()) |tok| {
+        if (!std.mem.startsWith(u8, tok, "align=")) return none;
+        alignment = parseAlignment(tok["align=".len..]) orelse return none;
+    }
+    if (alignment == null) return none;
+    return .{ .text = std.mem.trimEnd(u8, text[0..open], " \t"), .alignment = alignment };
+}
+
+fn parseAlignment(s: []const u8) ?docx.Alignment {
+    if (std.mem.eql(u8, s, "centre")) return .center;
+    return std.meta.stringToEnum(docx.Alignment, s);
 }
 
 // ── Inline formatting parser ────────────────────────────────────
@@ -584,6 +861,7 @@ const InlineParser = struct {
         }
         var run = style;
         run.text = try self.allocator.dupe(u8, text);
+        errdefer self.allocator.free(run.text);
         try self.runs.append(self.allocator, run);
     }
 
@@ -616,6 +894,7 @@ const InlineParser = struct {
                     var code = style;
                     code.is_code = true;
                     code.text = try self.allocator.dupe(u8, text[i + 1 .. end]);
+                    errdefer self.allocator.free(code.text);
                     try self.runs.append(self.allocator, code);
                     i = end + 1;
                     plain_start = i;
@@ -788,8 +1067,42 @@ fn joinable(r: docx.Run) bool {
 
 // ── YAML frontmatter parser ─────────────────────────────────────
 
-fn parseFrontMatter(allocator: std.mem.Allocator, lines: *std.mem.SplitIterator(u8, .scalar)) !FrontMatter {
-    var fm = FrontMatter{};
+/// The frontmatter keys parseFrontMatter keeps, and where each goes.
+const FrontMatterKey = enum {
+    title,
+    author,
+    date,
+    description,
+    style,
+    paper,
+    orientation,
+    margin,
+    header,
+    footer,
+    @"page-numbers",
+    lang,
+
+    fn field(self: FrontMatterKey, fm: *FrontMatter) *?[]const u8 {
+        return switch (self) {
+            .title => &fm.title,
+            .author => &fm.author,
+            .date => &fm.date,
+            .description => &fm.description,
+            .style => &fm.layout.style,
+            .paper => &fm.layout.paper,
+            .orientation => &fm.layout.orientation,
+            .margin => &fm.layout.margin,
+            .header => &fm.layout.header,
+            .footer => &fm.layout.footer,
+            .@"page-numbers" => &fm.layout.page_numbers,
+            .lang => &fm.layout.lang,
+        };
+    }
+};
+
+/// Reads `key: value` lines up to the closing `---` into `fm`. A key given
+/// twice keeps its last value; keys it does not know are skipped.
+fn parseFrontMatter(allocator: std.mem.Allocator, lines: *std.mem.SplitIterator(u8, .scalar), fm: *FrontMatter) !void {
     while (lines.next()) |raw_line| {
         const line = std.mem.trim(u8, raw_line, " \t\r");
         if (std.mem.eql(u8, line, "---")) break; // end of frontmatter
@@ -801,46 +1114,24 @@ fn parseFrontMatter(allocator: std.mem.Allocator, lines: *std.mem.SplitIterator(
             if (value.len >= 2 and (value[0] == '"' or value[0] == '\'')) {
                 if (value[value.len - 1] == value[0]) value = value[1 .. value.len - 1];
             }
-            if (std.mem.eql(u8, key, "title")) {
-                fm.title = try allocator.dupe(u8, value);
-            } else if (std.mem.eql(u8, key, "author")) {
-                fm.author = try allocator.dupe(u8, value);
-            } else if (std.mem.eql(u8, key, "date")) {
-                fm.date = try allocator.dupe(u8, value);
-            } else if (std.mem.eql(u8, key, "description")) {
-                fm.description = try allocator.dupe(u8, value);
-            }
+            const known = std.meta.stringToEnum(FrontMatterKey, key) orelse continue;
+            const slot = known.field(fm);
+            const owned = try allocator.dupe(u8, value);
+            if (slot.*) |old| allocator.free(old);
+            slot.* = owned;
         }
     }
-    return fm;
 }
 
 // ── Element cleanup ─────────────────────────────────────────────
 
 fn freeElement(allocator: std.mem.Allocator, elem: *docx.Element) void {
     switch (elem.*) {
-        .paragraph => |p| {
-            for (p.runs) |r| {
-                if (r.text.len > 0) allocator.free(r.text);
-                if (r.hyperlink_url) |u| allocator.free(u);
-            }
-            if (p.runs.len > 0) allocator.free(p.runs);
-        },
+        .paragraph => |p| freeRunList(allocator, p.runs),
         .table => |t| {
-            for (t.rows) |row| {
-                for (row.cells) |cell| {
-                    for (cell.paragraphs) |cp| {
-                        for (cp.runs) |r| {
-                            if (r.text.len > 0) allocator.free(r.text);
-                            if (r.hyperlink_url) |u| allocator.free(u);
-                        }
-                        if (cp.runs.len > 0) allocator.free(cp.runs);
-                    }
-                    allocator.free(cell.paragraphs);
-                }
-                allocator.free(row.cells);
-            }
+            for (t.rows) |row| freeRow(allocator, row);
             allocator.free(t.rows);
+            if (t.col_weights.len > 0) allocator.free(t.col_weights);
         },
     }
 }
@@ -977,4 +1268,308 @@ test "deep nesting stops at the depth limit instead of recursing" {
     const runs = try parseInlineFormatting(testing.allocator, buf[0..n]);
     defer freeRuns(runs);
     try testing.expect(runs.len > 0);
+}
+
+// ── Layout syntax ──────────────────────────────────────────────────
+
+fn parseLayout(md: []const u8) !ParseResult {
+    return parseMarkdownWith(testing.allocator, md, .{ .layout = true });
+}
+
+fn cellAlignment(t: docx.Table, row: usize, col: usize) ?docx.Alignment {
+    return t.rows[row].cells[col].paragraphs[0].alignment;
+}
+
+fn paragraphText(p: docx.Paragraph) []const u8 {
+    return if (p.runs.len == 1) p.runs[0].text else "(several runs)";
+}
+
+test "layout: the separator row gives each column its alignment and its width" {
+    var r = try parseLayout(
+        \\| Left | Centre | Right | Plain |
+        \\|:-----|:------:|------:| --- |
+        \\| a | b | c | d |
+    );
+    defer r.deinit();
+    const t = r.document.elements[0].table;
+    // Each separator cell's width as drawn, colons included.
+    try testing.expectEqualSlices(u16, &.{ 6, 8, 7, 3 }, t.col_weights);
+    try testing.expect(t.fixed_layout and !t.borderless);
+    for (0..2) |row| {
+        try testing.expectEqual(docx.Alignment.left, cellAlignment(t, row, 0));
+        try testing.expectEqual(docx.Alignment.center, cellAlignment(t, row, 1));
+        try testing.expectEqual(docx.Alignment.right, cellAlignment(t, row, 2));
+        // No colon: flush left, never the body's justification.
+        try testing.expectEqual(docx.Alignment.left, cellAlignment(t, row, 3));
+    }
+}
+
+test "layout: columns the separator row does not reach take its average width" {
+    var r = try parseLayout(
+        \\| a | b | c |
+        \\|----|--------|
+        \\| 1 | 2 | 3 |
+    );
+    defer r.deinit();
+    try testing.expectEqualSlices(u16, &.{ 4, 8, 6 }, r.document.elements[0].table.col_weights);
+}
+
+test "layout: an attribute line after a table sets its widths and takes its lines away" {
+    var r = try parseLayout(
+        \\| Expediente | SAN-1 |
+        \\|---|---|
+        \\| DNI | 00000000T |
+        \\{widths=30,70 borders=none}
+        \\After.
+    );
+    defer r.deinit();
+    const els = r.document.elements;
+    try testing.expectEqual(@as(usize, 2), els.len);
+    try testing.expectEqualSlices(u16, &.{ 30, 70 }, els[0].table.col_weights);
+    try testing.expect(els[0].table.borderless);
+    try testing.expectEqualStrings("After.", paragraphText(els[1].paragraph));
+
+    // Either attribute alone, and widths written as percentages.
+    var widths_only = try parseLayout("| a | b |\n|---|---|\n{widths=25%,75%}");
+    defer widths_only.deinit();
+    try testing.expectEqualSlices(u16, &.{ 25, 75 }, widths_only.document.elements[0].table.col_weights);
+    try testing.expect(!widths_only.document.elements[0].table.borderless);
+    var lines_only = try parseLayout("| a | b |\n|--|------|\n{borders=none}");
+    defer lines_only.deinit();
+    try testing.expectEqualSlices(u16, &.{ 2, 6 }, lines_only.document.elements[0].table.col_weights);
+    try testing.expect(lines_only.document.elements[0].table.borderless);
+}
+
+test "layout: an attribute line that does not fit the table is kept as text" {
+    const lines = [_][]const u8{
+        "{widths=30,60,10}", // three widths for two columns
+        "{widths=0,100}",
+        "{widths=a,b}",
+        "{borders=dotted}",
+        "{widths=30,70 colour=red}",
+        "{}",
+    };
+    for (lines) |line| {
+        var buf: [128]u8 = undefined;
+        const md = try std.fmt.bufPrint(&buf, "| a | b |\n|---|---|\n{s}", .{line});
+        var r = try parseLayout(md);
+        defer r.deinit();
+        const els = r.document.elements;
+        try testing.expectEqual(@as(usize, 2), els.len);
+        try testing.expectEqualSlices(u16, &.{ 3, 3 }, els[0].table.col_weights);
+        try testing.expect(!els[0].table.borderless);
+        try testing.expectEqualStrings(line, paragraphText(els[1].paragraph));
+    }
+}
+
+test "layout: a trailing {align=...} aligns a paragraph, heading, list item or quote" {
+    var r = try parseLayout(
+        \\# EXPONE {align=center}
+        \\Body text. {align=justify}
+        \\Fdo.: Nombre {align=right}
+        \\1. First request {align=centre}
+        \\- A point {align=right}
+        \\> Quoted {align=left}
+        \\No attribute here.
+    );
+    defer r.deinit();
+    const els = r.document.elements;
+    const want = [_]struct { text: []const u8, alignment: ?docx.Alignment, style: StyleType }{
+        .{ .text = "EXPONE", .alignment = .center, .style = .heading1 },
+        .{ .text = "Body text.", .alignment = .justify, .style = .normal },
+        .{ .text = "Fdo.: Nombre", .alignment = .right, .style = .normal },
+        .{ .text = "First request", .alignment = .center, .style = .list_paragraph },
+        .{ .text = "A point", .alignment = .right, .style = .list_paragraph },
+        .{ .text = "Quoted", .alignment = .left, .style = .blockquote },
+        .{ .text = "No attribute here.", .alignment = null, .style = .normal },
+    };
+    try testing.expectEqual(want.len, els.len);
+    for (want, els) |w, e| {
+        try testing.expectEqualStrings(w.text, paragraphText(e.paragraph));
+        try testing.expectEqual(w.alignment, e.paragraph.alignment);
+        try testing.expectEqual(w.style, e.paragraph.style);
+    }
+}
+
+test "layout: inline spans and marks still parse beside a block attribute" {
+    // A span at the end of a line is a span, not a block attribute.
+    var span = try parseLayout("Read [this]{color=red}");
+    defer span.deinit();
+    const sp = span.document.elements[0].paragraph;
+    try testing.expect(sp.alignment == null);
+    try testing.expectEqual(@as(usize, 2), sp.runs.len);
+    try testing.expectEqualStrings("this", sp.runs[1].text);
+    try testing.expectEqualStrings("B91C1C", &sp.runs[1].fg.?);
+
+    // Both together: the block attribute comes off, the span stays.
+    var both = try parseLayout("[Aviso]{color=red bg=lightred} importante {align=center}");
+    defer both.deinit();
+    const bp = both.document.elements[0].paragraph;
+    try testing.expectEqual(docx.Alignment.center, bp.alignment.?);
+    try testing.expectEqualStrings("Aviso", bp.runs[0].text);
+    try testing.expectEqualStrings("FEE2E2", &bp.runs[0].bg.?);
+    try testing.expectEqualStrings(" importante", bp.runs[1].text);
+
+    // CriticMarkup at the end of a line is still CriticMarkup.
+    var critic = try parseLayout("Mark {==see==}");
+    defer critic.deinit();
+    const cp = critic.document.elements[0].paragraph;
+    try testing.expect(cp.alignment == null and cp.runs[1].highlight);
+
+    // Anything that is not a block attribute after a space is kept as typed.
+    const as_typed = [_]struct { md: []const u8, text: []const u8 }{
+        .{ .md = "Note {color=red}", .text = "Note {color=red}" },
+        .{ .md = "Keep \\{align=center}", .text = "Keep {align=center}" },
+        .{ .md = "{align=center}", .text = "{align=center}" },
+        .{ .md = "Mid {align=center} line", .text = "Mid {align=center} line" },
+        .{ .md = "Odd {align=middle}", .text = "Odd {align=middle}" },
+        .{ .md = "Glued{align=center}", .text = "Glued{align=center}" },
+    };
+    for (as_typed) |c| {
+        var r = try parseLayout(c.md);
+        defer r.deinit();
+        const p = r.document.elements[0].paragraph;
+        try testing.expect(p.alignment == null);
+        try testing.expectEqualStrings(c.text, paragraphText(p));
+    }
+}
+
+test "without layout the layout syntax is text, and tables are as they always were" {
+    const md =
+        \\# EXPONE {align=center}
+        \\| a | b |
+        \\|:--|--:|
+        \\| 1 | 2 |
+        \\{widths=30,70 borders=none}
+        \\:::card
+        \\Boxed
+        \\:::
+    ;
+    var r = try parseMarkdown(testing.allocator, md);
+    defer r.deinit();
+    const els = r.document.elements;
+    try testing.expectEqual(@as(usize, 4), els.len);
+    try testing.expectEqualStrings("EXPONE {align=center}", paragraphText(els[0].paragraph));
+    try testing.expect(els[0].paragraph.alignment == null);
+    const t = els[1].table;
+    try testing.expectEqual(@as(usize, 0), t.col_weights.len);
+    try testing.expect(!t.fixed_layout and !t.borderless);
+    try testing.expect(cellAlignment(t, 0, 0) == null and cellAlignment(t, 1, 1) == null);
+    try testing.expectEqualStrings("{widths=30,70 borders=none}", paragraphText(els[2].paragraph));
+    try testing.expectEqual(@as(usize, 0), els[3].table.col_weights.len);
+    try testing.expect(cellAlignment(els[3].table, 0, 0) == null);
+}
+
+test "layout: a card spans the text width and its lines are flush left" {
+    var r = try parseLayout(":::card\n**Name**\nAddress\n:::");
+    defer r.deinit();
+    const t = r.document.elements[0].table;
+    try testing.expectEqualSlices(u16, &.{1}, t.col_weights);
+    for (t.rows[0].cells[0].paragraphs) |p| try testing.expectEqual(docx.Alignment.left, p.alignment.?);
+}
+
+test "frontmatter page settings are kept as written; a repeated key keeps its last value" {
+    var r = try parseMarkdown(testing.allocator,
+        \\---
+        \\title: First
+        \\title: "Second"
+        \\style: letter
+        \\paper: a4
+        \\orientation: landscape
+        \\margin: 25mm
+        \\header: Expediente: 1
+        \\footer: Pie
+        \\page-numbers: true
+        \\lang: es
+        \\unknown: skipped
+        \\---
+        \\Body
+    );
+    defer r.deinit();
+    const fm = r.frontmatter;
+    try testing.expectEqualStrings("Second", fm.title.?);
+    try testing.expectEqualStrings("letter", fm.layout.style.?);
+    try testing.expectEqualStrings("a4", fm.layout.paper.?);
+    try testing.expectEqualStrings("landscape", fm.layout.orientation.?);
+    try testing.expectEqualStrings("25mm", fm.layout.margin.?);
+    try testing.expectEqualStrings("Expediente: 1", fm.layout.header.?);
+    try testing.expectEqualStrings("Pie", fm.layout.footer.?);
+    try testing.expectEqualStrings("true", fm.layout.page_numbers.?);
+    try testing.expectEqualStrings("es", fm.layout.lang.?);
+}
+
+test "the sample filing parses into the shape the CLI renders" {
+    var r = try parseLayout(@embedFile("testdata/escrito_sample.md"));
+    defer r.deinit();
+    try testing.expectEqualStrings("letter", r.frontmatter.layout.style.?);
+    try testing.expectEqualStrings("es", r.frontmatter.layout.lang.?);
+
+    var tables: [2]docx.Table = undefined;
+    var n_tables: usize = 0;
+    var expone: ?docx.Paragraph = null;
+    var last: ?docx.Paragraph = null;
+    for (r.document.elements) |e| switch (e) {
+        .table => |t| {
+            tables[n_tables] = t;
+            n_tables += 1;
+        },
+        .paragraph => |p| {
+            if (p.style == .heading1 and std.mem.eql(u8, paragraphText(p), "EXPONE")) expone = p;
+            last = p;
+        },
+    };
+    try testing.expectEqual(@as(usize, 2), n_tables);
+    // The case details: no lines, a narrow label column.
+    try testing.expect(tables[0].borderless);
+    try testing.expectEqualSlices(u16, &.{ 30, 70 }, tables[0].col_weights);
+    // The amounts: a wide left column and a narrow right-aligned one.
+    try testing.expect(!tables[1].borderless);
+    try testing.expect(tables[1].col_weights[0] > 3 * tables[1].col_weights[1]);
+    try testing.expectEqual(docx.Alignment.left, cellAlignment(tables[1], 1, 0));
+    try testing.expectEqual(docx.Alignment.right, cellAlignment(tables[1], 1, 1));
+    // The headings carry no attribute: the letter style centres them.
+    try testing.expect(expone.?.alignment == null);
+    try testing.expectEqual(docx.Alignment.right, last.?.alignment.?);
+    try testing.expectEqualStrings("Fdo.: Persona Ficticia Ejemplo", paragraphText(last.?));
+}
+
+test "every allocation failure while parsing is an error, never a leak" {
+    const parse = struct {
+        fn run(allocator: std.mem.Allocator, md: []const u8, options: ParseOptions) !void {
+            var r = try parseMarkdownWith(allocator, md, options);
+            r.deinit();
+        }
+    }.run;
+    const everything =
+        \\---
+        \\title: T
+        \\---
+        \\<!-- letterhead: a.png -->
+        \\<!-- letterhead: b.png -->
+        \\# Head `code` [link](https://example.com) ![pic](p.png) {align=center}
+        \\> quote **bold** {align=right}
+        \\- item
+        \\1. item
+        \\---
+        \\<!-- pagebreak -->
+        \\```
+        \\fenced
+        \\```
+        \\:::card
+        \\**Name** [x]{color=red}
+        \\Line
+        \\:::
+        \\| a | `b` |
+        \\|:--|--:|
+        \\| [l](https://example.com) | ![i](i.png) |
+        \\{widths=1,2 borders=none}
+        \\```
+        \\never closed
+    ;
+    const docs = [_][]const u8{ @embedFile("testdata/escrito_sample.md"), everything };
+    for (docs) |md| {
+        for ([_]bool{ true, false }) |layout| {
+            try testing.checkAllAllocationFailures(testing.allocator, parse, .{ md, ParseOptions{ .layout = layout } });
+        }
+    }
 }
