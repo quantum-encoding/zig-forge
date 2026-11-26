@@ -142,8 +142,23 @@ pub const BuildDir = struct {
     newest_mtime: ?i64 = null,
     complete: bool = true,
     duplicate_set: ?usize = null,
+    /// Found only by its CACHEDIR.TAG, and not a Cargo build folder (which
+    /// keeps `.rustc_info.json` beside the tag): more likely a cache of
+    /// downloads than build output, such as Hugging Face models or the
+    /// Cargo, Gradle and uv package caches. Listed, but moved by
+    /// `trashEligible` only with `Options.caches`, and picked by no Select
+    /// rule in the apps.
+    cache: bool = false,
     trash: Check = .{},
 };
+
+/// Whether the folder at `path` holds a Cargo build: Cargo writes
+/// `.rustc_info.json` into every target folder, and never into its registry.
+fn cargoBuild(a: Allocator, path: []const u8) bool {
+    const info = std.fmt.allocPrintSentinel(a, "{s}/.rustc_info.json", .{path}, 0) catch return false;
+    const st = pstat.lstat(info.ptr) catch return false;
+    return st.isFile();
+}
 
 pub const DuplicateSet = struct {
     /// The members' name, or `mixed`.
@@ -235,6 +250,9 @@ pub const Options = struct {
     /// Delete each folder for good (remove.zig) instead of moving it to the
     /// Trash; every check before it is the same.
     permanently: bool = false,
+    /// `trashEligible` moves caches (`BuildDir.cache`) too; named folders
+    /// (`trashSelected`) move whatever they are.
+    caches: bool = false,
     /// Progress out and cancellation in, as for every scan.
     monitor: ?*types.Monitor = null,
     guard_fn: GuardFn = protectedByCore,
@@ -523,7 +541,14 @@ pub fn trashEligible(gpa: Allocator, report: *Report, opts: Options) !void {
     var bytes: u64 = 0;
     for (report.build_dirs) |b| bytes +|= b.bytes;
     run_.start(report.build_dirs.len, bytes);
-    for (report.build_dirs) |*b| try run_.move(b);
+    for (report.build_dirs) |*b| {
+        if (b.cache and !opts.caches) {
+            try run_.skip(b, "is a cache of downloads, not build output (--caches moves it)");
+            if (opts.monitor) |m| _ = m.done.fetchAdd(1, .monotonic);
+            continue;
+        }
+        try run_.move(b);
+    }
     report.trash = run_.result();
 }
 
@@ -760,6 +785,7 @@ fn keepOutermost(a: Allocator, roots: []const Root, candidates: []Candidate) !st
             .root = root,
             .dev = st.dev,
             .ino = st.ino,
+            .cache = c.rule == .cachedir_tag and !cargoBuild(a, c.path),
         });
         last = c.path;
     }
@@ -1143,6 +1169,7 @@ pub fn writeJson(gpa: Allocator, report: *const Report, out: *Io.Writer) !void {
         try S.field(&json, "newest_mtime", b.newest_mtime);
         try S.field(&json, "complete", b.complete);
         try S.field(&json, "duplicate_set", b.duplicate_set);
+        try S.field(&json, "cache", b.cache);
         try json.objectField("trash");
         try json.beginObject();
         try S.field(&json, "eligible", b.trash.eligible);
@@ -1359,6 +1386,7 @@ pub fn writeText(report: *const Report, out: *Io.Writer) !void {
                 .xcode_derived_data => try out.writeAll("  [Xcode derived data]"),
             }
             if (b.duplicate_set) |d| try out.print("  [copy, set {d}]", .{d + 1});
+            if (b.cache) try out.writeAll("  [cache: --trash leaves it]");
             if (!b.complete) try out.writeAll("  [partly unreadable]");
             try out.writeAll("\n");
         }
@@ -1595,14 +1623,21 @@ fn buildFixture(f: *Fixture) !void {
     try s.makeDir("photos");
     try s.makeDir("photos/target");
     try s.writeFile("photos/target/shot.jpg", "jpeg");
-    // A tagged cache folder by any name; a file merely named CACHEDIR.TAG is not a tag.
+    // Tagged folders by any name: Cargo builds (`.rustc_info.json` beside the
+    // tag) are build output, a tag alone is a cache of downloads. A file
+    // merely named CACHEDIR.TAG is not a tag.
     try s.makeDir("tool");
     try s.makeDir("tool/scratchpad-cache");
     try s.writeFile("tool/scratchpad-cache/CACHEDIR.TAG", fast_walker.cache_dir_signature ++ "\n");
+    try s.writeFile("tool/scratchpad-cache/.rustc_info.json", "{}");
     try s.writeFile("tool/scratchpad-cache/blob", "cached");
     try s.makeDir("tool/swapped-cache");
     try s.writeFile("tool/swapped-cache/CACHEDIR.TAG", fast_walker.cache_dir_signature ++ "\n");
+    try s.writeFile("tool/swapped-cache/.rustc_info.json", "{}");
     try s.writeFile("tool/swapped-cache/blob", "cached too");
+    try s.makeDir("tool/model-cache");
+    try s.writeFile("tool/model-cache/CACHEDIR.TAG", fast_walker.cache_dir_signature ++ "\n# created by huggingface_hub.\n");
+    try s.writeFile("tool/model-cache/model.safetensors", "weights");
     try s.makeDir("tool/notes");
     try s.writeFile("tool/notes/CACHEDIR.TAG", "");
     try s.writeFile("tool/notes/todo.txt", "keep me");
@@ -1648,10 +1683,15 @@ test "clean finds build output by the core's rule, and copies of it by content" 
     try testing.expect(find(&report, &f, a, "photos/target") == null);
     const tagged = find(&report, &f, a, "tool/scratchpad-cache").?;
     try testing.expectEqual(Rule.cachedir_tag, tagged.rule);
+    try testing.expect(!tagged.cache);
+    const models = find(&report, &f, a, "tool/model-cache").?;
+    try testing.expectEqual(Rule.cachedir_tag, models.rule);
+    try testing.expect(models.cache);
+    try testing.expect(!target.cache);
     try testing.expect(find(&report, &f, a, "tool/notes") == null);
     try testing.expect(find(&report, &f, a, "linked/node_modules") == null);
     try testing.expect(find(&report, &f, a, "protected/zig-out") != null);
-    try testing.expectEqual(@as(usize, 7), report.build_dirs.len);
+    try testing.expectEqual(@as(usize, 8), report.build_dirs.len);
 
     // Measured: the nested node_modules counts toward its outer folder.
     const nm = find(&report, &f, a, "copy-a/node_modules").?;
@@ -1686,7 +1726,7 @@ test "clean finds build output by the core's rule, and copies of it by content" 
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json.writer.buffered(), .{});
     defer parsed.deinit();
     try testing.expectEqualStrings(schema_version, parsed.value.object.get("schema").?.string);
-    try testing.expectEqual(@as(usize, 7), parsed.value.object.get("build_dirs").?.array.items.len);
+    try testing.expectEqual(@as(usize, 8), parsed.value.object.get("build_dirs").?.array.items.len);
 }
 
 test "clean --trash moves only old, unprotected build output under a root, rechecked just before" {
@@ -1752,6 +1792,9 @@ test "clean --trash moves only old, unprotected build output under a root, reche
     try testing.expect(std.mem.indexOf(u8, skipped.get(f.path(a, "rusty/target")).?, "manifest") != null);
     try testing.expect(std.mem.indexOf(u8, skipped.get(f.path(a, "copy-c/node_modules")).?, "recently") != null);
     try testing.expect(std.mem.indexOf(u8, skipped.get(f.path(a, "tool/swapped-cache")).?, "replaced") != null);
+    // A cache stays unless asked for.
+    try testing.expect(std.mem.indexOf(u8, skipped.get(f.path(a, "tool/model-cache")).?, "cache") != null);
+    try testing.expect(try f.scratch.exists("tool/model-cache/model.safetensors"));
     try testing.expect(try f.scratch.exists("tool/swapped-cache/CACHEDIR.TAG"));
     try testing.expect(try f.scratch.exists("tool/swapped-away/blob"));
     // Never a store, never a link, never anything that is not build output.

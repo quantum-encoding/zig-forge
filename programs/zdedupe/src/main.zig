@@ -415,6 +415,7 @@ fn runClean(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !voi
     defer main_roots.deinit(allocator);
     var json = false;
     var move = false;
+    var caches = false;
     var older: i64 = clean.default_older_s;
     var threads: u32 = 0;
 
@@ -428,6 +429,8 @@ fn runClean(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !voi
             json = true;
         } else if (std.mem.eql(u8, arg, "--trash")) {
             move = true;
+        } else if (std.mem.eql(u8, arg, "--caches")) {
+            caches = true;
         } else if (std.mem.eql(u8, arg, "--older")) {
             i += 1;
             if (i >= args.len) fatal("Missing argument for --older");
@@ -459,6 +462,7 @@ fn runClean(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !voi
         .main_roots = main_roots.items,
         .older_s = older,
         .threads = threads,
+        .caches = caches,
     }, move);
     defer result.deinit();
 
@@ -514,7 +518,10 @@ fn printCleanHelp() void {
         \\                     completely, and nothing in them modified or changed
         \\                     for AGE. Each is checked again just before it moves,
         \\                     and stays if a running process is using it.
-        \\                     Never deletes anything permanently.
+        \\                     Never deletes anything permanently. Caches (a folder
+        \\                     found only by its CACHEDIR.TAG that is not a Cargo
+        \\                     build: model and package downloads) stay.
+        \\  --caches           With --trash, move caches too.
         \\  --older AGE        30m, 24h, 3d, 2w (default 24h, at least 10m)
         \\  --main-roots DIR   Where main checkouts live, searched 4 levels deep for
         \\                     repos with the same origin (repeatable, or DIR:DIR;

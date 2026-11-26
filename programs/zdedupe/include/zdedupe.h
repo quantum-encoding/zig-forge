@@ -1176,7 +1176,10 @@ const char* zdedupe_results_space_trash(zdedupe_results* r, const char* items_js
  *     600), "threads": 0 }
  * Blocks; zdedupe_get_progress and zdedupe_cancel work as for a scan. Every
  * build folder carries "trash": { "eligible", "refusal", "newest_change" }:
- * what a move would do now. The report stays in `ctx` for
+ * what a move would do now, and "cache": found only by its CACHEDIR.TAG and
+ * not a Cargo build folder, so more likely downloads (models, package
+ * caches) than build output; a host lists those apart and never picks them
+ * by a rule. The report stays in `ctx` for
  * zdedupe_clean_trash. NULL on failure, with zdedupe_clean_error saying why.
  * The answer belongs to `ctx` until its next clean call or zdedupe_free.
  */

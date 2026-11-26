@@ -1006,7 +1006,7 @@
       "description": "One build folder: what it is, whose it is, its size, and what a move would do now.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "kind", "rule", "root", "project", "bytes", "logical_bytes", "files", "hardlinked_bytes", "newest_mtime", "complete", "duplicate_set", "trash"],
+      "required": ["path", "kind", "rule", "root", "project", "bytes", "logical_bytes", "files", "hardlinked_bytes", "newest_mtime", "complete", "duplicate_set", "cache", "trash"],
       "properties": {
         "path": { "type": "string", "minLength": 1 },
         "kind": { "description": "The folder's name.", "type": "string" },
@@ -1020,6 +1020,10 @@
         "newest_mtime": { "description": "Newest file modification, seconds since the epoch, or null (no files).", "type": ["integer", "null"] },
         "complete": { "description": "False when something inside could not be read; such a folder never goes.", "type": "boolean" },
         "duplicate_set": { "description": "Index into duplicate_sets, or null.", "type": ["integer", "null"], "minimum": 0 },
+        "cache": {
+          "description": "Found only by its CACHEDIR.TAG and not a Cargo build folder (no .rustc_info.json beside the tag): more likely a cache of downloads than build output, such as Hugging Face models or the Cargo, Gradle and uv package caches. Listed and can be chosen, but picked by no Select rule, and the CLI's --trash leaves it unless --caches.",
+          "type": "boolean"
+        },
         "trash": {
           "type": "object",
           "additionalProperties": false,
